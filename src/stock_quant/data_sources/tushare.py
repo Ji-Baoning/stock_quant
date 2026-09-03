@@ -9,9 +9,11 @@ import pandas as pd
 
 from stock_quant.config import SourceConfig
 from stock_quant.data_sources.base import (
+    AuthenticationError,
     ContractError,
     DataRequest,
     FetchResult,
+    _utc_timestamp,
     request_key,
     request_metadata,
     translate_supplier_error,
@@ -26,11 +28,16 @@ class TushareSource:
 
     def __init__(self, config: SourceConfig, client: Any | None = None) -> None:
         self.config = config
-        self._token = os.environ["TUSHARE_TOKEN"]
+        token = os.environ["TUSHARE_TOKEN"]
         if client is None:
             import tushare as ts
 
-            client = ts.pro_api(self._token)
+            try:
+                client = ts.pro_api(token)
+            except Exception:
+                raise AuthenticationError(
+                    "Tushare client initialization failed"
+                ) from None
             self._sdk_version = getattr(ts, "__version__", "unknown")
         else:
             self._sdk_version = getattr(client, "__version__", "unknown")
@@ -43,6 +50,9 @@ class TushareSource:
             )
         if len(request.symbols) != 1:
             raise ValueError("Tushare daily requests require exactly one symbol")
+        if request.params.get("adjustment", "unadjusted") != "unadjusted":
+            raise ValueError("Tushare daily data is available only unadjusted")
+        request_timestamp = _utc_timestamp()
         try:
             frame = self._client.daily(
                 ts_code=request.symbols[0],
@@ -54,13 +64,20 @@ class TushareSource:
             if translated is error:
                 raise
             raise translated from error
+        response_timestamp = _utc_timestamp()
         self._validate(frame, request)
         return FetchResult(
             source=self.name,
             endpoint=request.endpoint,
             request_key=request_key(request),
             frame=frame,
-            metadata=request_metadata(request, "tushare.pro.daily", self._sdk_version),
+            metadata=request_metadata(
+                request,
+                "tushare.pro.daily",
+                self._sdk_version,
+                request_timestamp=request_timestamp,
+                response_timestamp=response_timestamp,
+            ),
         )
 
     @staticmethod

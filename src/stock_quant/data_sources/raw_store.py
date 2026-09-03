@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from stock_quant.data_sources.base import FetchResult
 
 
@@ -39,14 +41,17 @@ class RawStore:
         try:
             result.frame.to_parquet(data_path, index=True)
             file_sha256 = _sha256_file(data_path)
+            response_sha256 = _response_sha256(result.frame)
             snapshot_path = destination_parent / file_sha256
-            manifest = _manifest_for(result, file_sha256)
-            (temporary / "manifest.json").write_text(
-                json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-            )
             if snapshot_path.exists():
                 shutil.rmtree(temporary)
+                manifest = json.loads((snapshot_path / "manifest.json").read_text())
             else:
+                manifest = _manifest_for(result, response_sha256, file_sha256)
+                (temporary / "manifest.json").write_text(
+                    json.dumps(manifest, sort_keys=True, indent=2) + "\n",
+                    encoding="utf-8",
+                )
                 os.replace(temporary, snapshot_path)
         except Exception:
             if temporary.exists():
@@ -55,7 +60,9 @@ class RawStore:
         return RawSnapshot(path=snapshot_path, sha256=file_sha256, manifest=manifest)
 
 
-def _manifest_for(result: FetchResult, file_sha256: str) -> dict[str, Any]:
+def _manifest_for(
+    result: FetchResult, response_sha256: str, file_sha256: str
+) -> dict[str, Any]:
     metadata = _redact(result.metadata)
     request_parameters = metadata.get("request_parameters", {})
     if isinstance(request_parameters, str):
@@ -75,7 +82,7 @@ def _manifest_for(result: FetchResult, file_sha256: str) -> dict[str, Any]:
         "sdk_version": metadata.get("sdk_version", "unknown"),
         "row_count": len(result.frame),
         "schema": {column: str(dtype) for column, dtype in result.frame.dtypes.items()},
-        "response_sha256": file_sha256,
+        "response_sha256": response_sha256,
         "file_sha256": file_sha256,
         "redacted": True,
         "metadata": metadata,
@@ -114,4 +121,17 @@ def _sha256_file(path: Path) -> str:
     with path.open("rb") as file:
         for block in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(block)
+    return digest.hexdigest()
+
+
+def _response_sha256(frame: pd.DataFrame) -> str:
+    """Hash supplier-native frame content independently from its Parquet encoding."""
+    digest = hashlib.sha256()
+    descriptor = {
+        "columns": [str(column) for column in frame.columns],
+        "dtypes": [str(dtype) for dtype in frame.dtypes],
+        "index_name": str(frame.index.name),
+    }
+    digest.update(json.dumps(descriptor, ensure_ascii=False, sort_keys=True).encode())
+    digest.update(pd.util.hash_pandas_object(frame, index=True).values.tobytes())
     return digest.hexdigest()

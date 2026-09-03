@@ -1,5 +1,6 @@
 """Offline recorded-response tests for supplier-specific raw contracts."""
 
+import sys
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+import stock_quant.data_sources.tushare as tushare_adapter
 from stock_quant.config import SourceConfig
 from stock_quant.data_sources.akshare import AkShareSource
 from stock_quant.data_sources.baostock import BaoStockSource
@@ -32,8 +34,10 @@ def _request(endpoint: str, symbol: str) -> DataRequest:
 class TushareClient:
     def __init__(self, frame: pd.DataFrame | Exception) -> None:
         self.frame = frame
+        self.calls = 0
 
     def daily(self, **_: str) -> pd.DataFrame:
+        self.calls += 1
         if isinstance(self.frame, Exception):
             raise self.frame
         return self.frame
@@ -98,6 +102,56 @@ def test_tushare_returns_recorded_native_columns_without_token_logging(
 
     assert result.frame.columns.tolist() == ["ts_code", "trade_date", "open", "close"]
     assert "real-token" not in caplog.text
+
+
+def test_tushare_rejects_adjusted_daily_request_without_calling_supplier(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A raw daily endpoint cannot claim a forward-adjusted response."""
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    client = TushareClient(pd.read_csv(FIXTURES / "tushare_daily.csv"))
+    request = _request("daily", "000001.SZ")
+    request.params["adjustment"] = "forward"
+
+    with pytest.raises(ValueError, match="unadjusted"):
+        TushareSource(SourceConfig(), client).fetch(request)
+    assert client.calls == 0
+
+
+def test_tushare_records_distinct_request_and_response_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Audit metadata must measure the supplier call rather than fabricate it."""
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    timestamps = iter(("2026-09-03T10:00:00+00:00", "2026-09-03T10:00:02+00:00"))
+    monkeypatch.setattr(
+        tushare_adapter, "_utc_timestamp", lambda: next(timestamps), raising=False
+    )
+
+    result = TushareSource(
+        SourceConfig(), TushareClient(pd.read_csv(FIXTURES / "tushare_daily.csv"))
+    ).fetch(_request("daily", "000001.SZ"))
+
+    assert result.metadata["request_timestamp"] == "2026-09-03T10:00:00+00:00"
+    assert result.metadata["response_timestamp"] == "2026-09-03T10:00:02+00:00"
+
+
+def test_tushare_constructor_redacts_token_when_sdk_initialization_fails(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An SDK setup error must not retain or expose the caller's credential."""
+    token = "super-secret-token"
+    monkeypatch.setenv("TUSHARE_TOKEN", token)
+
+    def pro_api(_: str) -> None:
+        raise RuntimeError(f"SDK rejected {token}")
+
+    monkeypatch.setitem(sys.modules, "tushare", SimpleNamespace(pro_api=pro_api))
+
+    with pytest.raises(AuthenticationError) as raised:
+        TushareSource(SourceConfig())
+    assert token not in str(raised.value)
+    assert raised.value.__cause__ is None
 
 
 def test_akshare_and_baostock_return_recorded_native_columns():
@@ -236,6 +290,24 @@ def test_adapters_map_symbol_mismatch_to_contract_error(
 
     with pytest.raises(ContractError):
         source.fetch(_request(endpoint, symbol))
+
+
+def test_tushare_rejects_response_contaminated_with_an_unrequested_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A requested symbol plus unrelated rows is not a valid raw response."""
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    frame = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "000002.SZ"],
+            "trade_date": ["20200101", "20200101"],
+        }
+    )
+
+    with pytest.raises(ContractError, match="each requested symbol"):
+        TushareSource(SourceConfig(), TushareClient(frame)).fetch(
+            _request("daily", "000001.SZ")
+        )
 
 
 @pytest.mark.parametrize(

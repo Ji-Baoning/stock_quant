@@ -10,6 +10,7 @@ from stock_quant.config import SourceConfig
 from stock_quant.data_sources.base import (
     DataRequest,
     FetchResult,
+    _utc_timestamp,
     request_key,
     request_metadata,
     translate_supplier_error,
@@ -61,6 +62,7 @@ class AkShareSource:
         if len(request.symbols) != 1:
             raise ValueError("AKShare requests require exactly one symbol")
         handler, supplier_endpoint, date_required = handlers[request.endpoint]
+        request_timestamp = _utc_timestamp()
         try:
             frame = handler(request)
         except Exception as error:
@@ -68,6 +70,7 @@ class AkShareSource:
             if translated is error:
                 raise
             raise translated from error
+        response_timestamp = _utc_timestamp()
         validate_supplier_frame(
             frame,
             request,
@@ -80,7 +83,13 @@ class AkShareSource:
             endpoint=request.endpoint,
             request_key=request_key(request),
             frame=frame,
-            metadata=request_metadata(request, supplier_endpoint, self._sdk_version),
+            metadata=request_metadata(
+                request,
+                supplier_endpoint,
+                self._sdk_version,
+                request_timestamp=request_timestamp,
+                response_timestamp=response_timestamp,
+            ),
         )
 
     def _index_history(self, request: DataRequest) -> pd.DataFrame:

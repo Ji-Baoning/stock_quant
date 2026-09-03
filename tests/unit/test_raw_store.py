@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 
 from stock_quant.data_sources.base import FetchResult
@@ -59,3 +61,46 @@ def test_raw_store_writes_a_redacted_audit_manifest(tmp_path):
     assert manifest["redacted"] is True
     assert manifest["request_parameters"]["token"] == "[REDACTED]"
     assert "secret-value" not in (snapshot.path / "manifest.json").read_text()
+
+
+def test_raw_store_records_independent_response_and_file_hashes(tmp_path):
+    """The supplier response digest must not be a second name for the file digest."""
+    snapshot = RawStore(tmp_path).save(
+        FetchResult(
+            source="akshare",
+            endpoint="index_history",
+            request_key="hashes",
+            frame=pd.DataFrame({"日期": ["2020-01-01"], "收盘": [4010.0]}),
+            metadata={},
+        )
+    )
+
+    assert snapshot.manifest["response_sha256"] != snapshot.manifest["file_sha256"]
+
+
+def test_raw_store_reuses_the_manifest_persisted_with_an_identical_snapshot(tmp_path):
+    """A duplicate save must report the immutable manifest that is actually on disk."""
+    store = RawStore(tmp_path)
+    first = store.save(
+        FetchResult(
+            source="tushare",
+            endpoint="daily",
+            request_key="same-content",
+            frame=pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]}),
+            metadata={"request_timestamp": "2026-09-03T10:00:00+00:00"},
+        )
+    )
+    second = store.save(
+        FetchResult(
+            source="tushare",
+            endpoint="daily",
+            request_key="same-content",
+            frame=pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]}),
+            metadata={"request_timestamp": "2026-09-03T10:00:01+00:00"},
+        )
+    )
+
+    on_disk = json.loads((second.path / "manifest.json").read_text())
+    assert second.path == first.path
+    assert second.manifest == on_disk
+    assert second.manifest["request_timestamp"] == "2026-09-03T10:00:00+00:00"

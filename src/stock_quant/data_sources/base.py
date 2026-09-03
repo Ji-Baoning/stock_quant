@@ -86,10 +86,14 @@ def request_key(request: DataRequest) -> str:
 
 
 def request_metadata(
-    request: DataRequest, supplier_endpoint: str, sdk_version: str
+    request: DataRequest,
+    supplier_endpoint: str,
+    sdk_version: str,
+    *,
+    request_timestamp: str | None = None,
+    response_timestamp: str | None = None,
 ) -> dict[str, str]:
     """Build audit metadata while keeping tokens out of supplier results."""
-    now = _utc_timestamp()
     parameters = {
         "symbols": list(request.symbols),
         "start_date": request.start_date.isoformat(),
@@ -98,8 +102,8 @@ def request_metadata(
     }
     return {
         "request_parameters": json.dumps(parameters, sort_keys=True),
-        "request_timestamp": now,
-        "response_timestamp": now,
+        "request_timestamp": request_timestamp or _utc_timestamp(),
+        "response_timestamp": response_timestamp or _utc_timestamp(),
         "supplier_endpoint": supplier_endpoint,
         "sdk_version": sdk_version,
     }
@@ -150,7 +154,7 @@ def validate_supplier_frame(
             _comparison_symbol(value) for value in frame[symbol_column].dropna()
         }
         requested_symbols = {_comparison_symbol(symbol) for symbol in request.symbols}
-        if not requested_symbols.issubset(returned_symbols):
+        if requested_symbols != returned_symbols:
             raise ContractError(
                 "supplier response does not contain each requested symbol"
             )
@@ -176,6 +180,8 @@ def validate_supplier_frame(
 
 def translate_supplier_error(error: Exception, *, baostock: bool = False) -> Exception:
     """Map known supplier failures while preserving permanent programming errors."""
+    if isinstance(error, (TypeError, ValueError)):
+        return error
     if isinstance(
         error,
         (

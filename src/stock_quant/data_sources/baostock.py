@@ -11,6 +11,7 @@ from stock_quant.data_sources.base import (
     ContractError,
     DataRequest,
     FetchResult,
+    _utc_timestamp,
     request_key,
     request_metadata,
     translate_supplier_error,
@@ -46,6 +47,7 @@ class BaoStockSource:
             raise ValueError("adjustment must be unadjusted, forward, or backward")
 
         logged_in = False
+        request_timestamp = _utc_timestamp()
         try:
             login = self._client.login()
             logged_in = True
@@ -69,6 +71,7 @@ class BaoStockSource:
             if logged_in:
                 self._client.logout()
 
+        response_timestamp = _utc_timestamp()
         validate_supplier_frame(
             frame,
             request,
@@ -81,7 +84,11 @@ class BaoStockSource:
             request_key=request_key(request),
             frame=frame,
             metadata=request_metadata(
-                request, "baostock.query_history_k_data_plus", self._sdk_version
+                request,
+                "baostock.query_history_k_data_plus",
+                self._sdk_version,
+                request_timestamp=request_timestamp,
+                response_timestamp=response_timestamp,
             ),
         )
 

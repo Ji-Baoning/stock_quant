@@ -10,6 +10,7 @@ from stock_quant.data_sources.base import (
     RateLimitError,
     RetryPolicy,
     fetch_with_retry,
+    translate_supplier_error,
 )
 
 
@@ -71,3 +72,17 @@ def test_retry_policy_refuses_limits_beyond_the_supplier_contract():
         RetryPolicy(max_attempts=4)
     with pytest.raises(ValueError):
         RetryPolicy(maximum_wait_seconds=31)
+
+
+def test_type_and_parameter_errors_escape_without_retry(fake_source, data_request):
+    """Message text must not turn caller mistakes into retryable source failures."""
+    type_error = TypeError("connection argument has the wrong type")
+    parameter_error = ValueError("rate limit parameter is invalid")
+
+    assert translate_supplier_error(type_error) is type_error
+    assert translate_supplier_error(parameter_error) is parameter_error
+
+    fake_source.failures = [parameter_error]
+    with pytest.raises(ValueError, match="rate limit parameter"):
+        fetch_with_retry(fake_source, data_request, RetryPolicy(max_attempts=3))
+    assert fake_source.calls == 1
