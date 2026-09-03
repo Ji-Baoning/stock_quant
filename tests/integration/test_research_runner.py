@@ -19,6 +19,7 @@ name on at most one order side per execution day.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -95,28 +96,47 @@ def _bars(
     sessions: list[date],
     *,
     index_close: tuple[float, float],
+    limit_locked_symbols: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    """One deterministic daily_bar frame for all instruments over ``sessions``."""
+    """One deterministic daily_bar frame for all instruments over ``sessions``.
+
+    ``limit_locked_symbols`` names equities whose bar on every Monday (the
+    weekly execution day) opens at half the prior session's close, far below
+    the main-board lower price limit.  Such names stay ranked by the factor
+    (their signal-day closes are untouched) but every Monday *sell* of them is
+    price-limit-blocked by the engine -- a rejection, not a hard error.
+    """
     n = len(sessions)
     frames: list[pd.DataFrame] = []
     for symbol, growth in EQUITY_GROWTH:
         closes = [_BASE_PRICE * math.exp(growth * (index - (n - 1)))
                   for index in range(n)]
-        frames.append(_instrument_frame(sessions, symbol, closes))
+        if symbol in limit_locked_symbols:
+            opens = list(closes)
+            for index in range(1, n):
+                if sessions[index].weekday() == 0:  # Monday == execution day
+                    opens[index] = 0.5 * closes[index - 1]
+            frames.append(_instrument_frame(sessions, symbol, closes, opens))
+        else:
+            frames.append(_instrument_frame(sessions, symbol, closes))
     for symbol, level in zip(_BENCHMARK_SYMBOLS, index_close):
         frames.append(_instrument_frame(sessions, symbol, [level] * n))
     return pd.concat(frames, ignore_index=True)[DAILY_COLUMNS]
 
 
 def _instrument_frame(
-    sessions: list[date], symbol: str, closes: list[float]
+    sessions: list[date],
+    symbol: str,
+    closes: list[float],
+    opens: list[float] | None = None,
 ) -> pd.DataFrame:
     n = len(sessions)
+    opens = closes if opens is None else opens
     return pd.DataFrame(
         {
             "trade_date": pd.to_datetime(sessions),
             "symbol": symbol,
-            "open": closes,
+            "open": opens,
             "high": closes,
             "low": closes,
             "close": closes,
@@ -176,12 +196,18 @@ def _trading_calendar() -> pd.DataFrame:
 
 
 def _publish_synthetic_dataset(
-    project_root: Path, *, index_close: tuple[float, float] = (4000.0, 2000.0)
+    project_root: Path,
+    *,
+    index_close: tuple[float, float] = (4000.0, 2000.0),
+    limit_locked_symbols: tuple[str, ...] = (),
 ) -> str:
     """Publish the synthetic market under ``project_root``; return its version."""
     tables = {
-        "daily_bar": _bars(_weekdays(_BARS_START, _BARS_END),
-                           index_close=index_close),
+        "daily_bar": _bars(
+            _weekdays(_BARS_START, _BARS_END),
+            index_close=index_close,
+            limit_locked_symbols=limit_locked_symbols,
+        ),
         "security_master": _security_master(),
         "corporate_action": _corporate_action(),
         "trading_calendar": _trading_calendar(),
@@ -332,3 +358,26 @@ def test_rerun_reuses_same_experiment_and_skips_factor(tmp_path):
     assert second.path == first.path
     assert fresh_runner.latest_run_manifest().status == "COMPLETED"
     assert set(p.name for p in second.path.iterdir()) == REQUIRED_ARTIFACTS
+
+
+def test_published_metrics_record_unreachable_orders(tmp_path):
+    # 601318.SH stays ranked in the weekly top-10 (its signal-day closes are
+    # untouched) but its Monday execution-day bar opens below the lower price
+    # limit, so every weekly trim-sell of it is price-limit-blocked -- a
+    # scheduled sell the plan can never reach.  Rejections are not published
+    # artifacts, so the engineering gate must see them in metrics.json.
+    symbol = "601318.SH"
+    project_root = tmp_path / "project"
+    _publish_synthetic_dataset(project_root, limit_locked_symbols=(symbol,))
+    runner = ResearchRunner(project_root, config_root=_REPO_ROOT)
+    experiment = runner.run(_SPEC)
+    assert experiment.manifest.status in ("ACCEPTED", "REJECTED")
+    metrics = json.loads(
+        (experiment.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    scenarios = metrics["scenarios"]
+    assert isinstance(scenarios, dict) and scenarios
+    for summary in scenarios.values():
+        assert int(summary["n_rejections"]) > 0
+        assert summary["rejections_by_reason"]
+        assert summary["plan_diverged"] is True

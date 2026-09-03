@@ -178,16 +178,41 @@ def _factor_provider_default() -> Mapping[str, Factor]:
 
 
 class _DefaultAnalytics:
-    """Per-scenario summary over the completed backtest ledgers."""
+    """Per-scenario summary over the completed backtest ledgers.
+
+    Besides the equity/fill summary each scenario records how many planned
+    orders the engine rejected and why (``n_rejections``,
+    ``rejections_by_reason``, ``rejected_quantity``) plus a
+    ``plan_diverged`` flag when any planned order did not reach its full
+    requested quantity -- a partial buy or a rejected order -- so a run whose
+    schedule contained an unreachable order is self-auditing from
+    ``metrics.json`` even though rejected orders are not published artifacts.
+    """
 
     def compute(self, metrics_input: AnalyticsInput) -> dict[str, object]:
         scenarios: dict[str, object] = {}
+        # The planned order schedule is shared by every cost scenario: each
+        # order_id's requested quantity is the divergence yardstick below.
+        planned = pd.read_parquet(
+            metrics_input.run_dir / "orders.parquet",
+            columns=["order_id", "quantity"],
+        )
+        planned_quantity = {
+            str(row["order_id"]): int(row["quantity"])
+            for row in planned.to_dict("records")
+        }
         for scenario in metrics_input.scenarios:
             directory = metrics_input.run_dir / "backtest" / scenario
             equity = pd.read_parquet(directory / "daily_equity.parquet")
             fills = pd.read_parquet(directory / "fills.parquet")
+            rejections = pd.read_parquet(directory / "rejections.parquet")
             start = float(equity["total_equity"].iloc[0])
             end = float(equity["total_equity"].iloc[-1])
+            n_rejections = int(len(rejections))
+            filled_quantity = {
+                str(row["order_id"]): int(row["quantity"])
+                for row in fills[["order_id", "quantity"]].to_dict("records")
+            }
             scenarios[scenario] = {
                 "periods": int(len(equity)),
                 "start_date": _date_text(equity["trade_date"].iloc[0]),
@@ -203,6 +228,22 @@ class _DefaultAnalytics:
                 "stamp_tax": _round2(float(fills["stamp_tax"].sum()))
                 if len(fills)
                 else 0.0,
+                "n_rejections": n_rejections,
+                "rejected_quantity": int(rejections["rejected_quantity"].sum())
+                if n_rejections
+                else 0,
+                "rejections_by_reason": {
+                    str(reason): int(count)
+                    for reason, count in (
+                        rejections["reason"].value_counts().items()
+                        if n_rejections
+                        else []
+                    )
+                },
+                "plan_diverged": any(
+                    filled_quantity.get(order_id, 0) != quantity
+                    for order_id, quantity in planned_quantity.items()
+                ),
             }
         return {"scenarios": scenarios}
 
@@ -302,7 +343,6 @@ class ResearchRunner:
         report: object | None = None,
         evaluator: object | None = None,
         stage_observer=None,
-        logger: StructuredLogger | None = None,
         secrets: Sequence[object] = (),
     ) -> None:
         self._project_root = Path(project_root)
@@ -314,7 +354,10 @@ class ResearchRunner:
         self._evaluator = _evaluator_callable(evaluator)
         self._observer = stage_observer
         self._secrets = tuple(secrets)
-        self._logger = logger or StructuredLogger(terminal=False, secrets=secrets)
+        # ``self._logger`` is the per-run file-backed logger created in
+        # ``_begin`` (it must write under ``data/runs/<run_id>/``); there is no
+        # injectable logger parameter because it would silently be discarded.
+        self._logger: StructuredLogger | None = None
 
         self._project_config = load_project_config(self._config_root)
         self._rule_book = TradingRuleBook.from_yaml(
@@ -385,19 +428,30 @@ class ResearchRunner:
         return read_run_manifest(self._run_dir)
 
     def partial_experiment_exists(self) -> bool:
-        """True when an experiment directory was created without a full publish.
+        """True when the current run's publish staging never reached an experiment.
 
-        A failed run must never leave a half-formed experiment directory, so
-        this is normally ``False`` until a publish completes.
+        A failed run must never leave a half-formed experiment directory: on a
+        successful publish the ``data/runs/<run_id>/publish/`` staging is
+        renamed into ``data/experiments/<id>`` (an identical-id re-publish
+        leaves the staging in place but the experiment already exists).  A
+        publish that was interrupted between staging and the registry rename
+        leaves ``publish/`` behind with no matching published experiment -- the
+        only state this reports as a partial publication.  Other experiment
+        directories in the project are irrelevant.
         """
-        experiments_root = self._project_root / "data" / "experiments"
-        if not experiments_root.is_dir():
+        if self._run_dir is None:
             return False
-        return any(
-            entry.is_dir()
-            for entry in experiments_root.iterdir()
-            if entry.name != "registry.parquet"
-        )
+        publish_dir = self._run_dir / "publish"
+        if not publish_dir.is_dir():
+            return False
+        manifest_path = publish_dir / "experiment_manifest.json"
+        if not manifest_path.is_file():
+            return True
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        experiment_id = raw.get("experiment_id")
+        if not isinstance(experiment_id, str) or not experiment_id:
+            return True
+        return not (self._registry.experiments_root / experiment_id).is_dir()
 
     @property
     def run_id(self) -> str | None:
@@ -611,15 +665,34 @@ class ResearchRunner:
         metrics = json.loads(
             (self._run_dir / "metrics.json").read_text(encoding="utf-8")
         )
-        evaluation = metrics.get("evaluation", {})
-        default_status = ExperimentEvaluation.ACCEPTED.value
+        evaluation = metrics.get("evaluation")
+        status = evaluation.get("status") if isinstance(evaluation, Mapping) \
+            else None
+        reason = evaluation.get("reason") if isinstance(evaluation, Mapping) \
+            else None
+        accepted = ExperimentEvaluation.ACCEPTED.value
+        rejected = ExperimentEvaluation.REJECTED.value
+        # No silent ACCEPTED default: the manifest is written only from an
+        # explicit evaluator decision, so a run can never be stamped accepted
+        # just because an evaluator failed to record one.
+        if status not in (accepted, rejected):
+            raise ValueError(
+                f"cannot publish run {self._run_id}: metrics.json records no "
+                "explicit evaluator decision; an ACCEPTED or REJECTED status "
+                "is required before the experiment manifest is written"
+            )
+        if status == rejected and not (isinstance(reason, str) and reason.strip()):
+            raise ValueError(
+                f"cannot publish run {self._run_id}: a REJECTED experiment "
+                "requires an explicit reason in metrics.json evaluation"
+            )
         manifest = {
             "experiment_id": state.experiment_id,
-            "status": str(evaluation.get("status", default_status)),
+            "status": status,
             "dataset_version": frozen.dataset_version,
             "universe_version": frozen.universe_version,
             "code_commit": frozen.code_commit,
-            "evaluation_reason": evaluation.get("reason"),
+            "evaluation_reason": reason,
             "artifacts": artifacts,
         }
         (publish_dir / "experiment_manifest.json").write_text(
@@ -798,6 +871,10 @@ class ResearchRunner:
         rule = frozen.portfolio_rule
         builder = TopNEqualWeight(top_n=rule.top_n, lot_size=rule.lot_size)
         factor_frame = pd.read_parquet(self._run_dir / "factor_results.parquet")
+        # The factor frame is written from python-``date`` objects; a parquet
+        # round-trip can surface the date column as datetime64, which compares
+        # unequal to the plain ``date`` signals below, so normalise it back.
+        factor_frame["trade_date"] = factor_frame["trade_date"].map(_as_date)
         prices = self._signal_price_frame(frozen)
         price_map: dict[date, pd.DataFrame] = {
             day: frame for day, frame in prices.groupby("trade_date")
@@ -808,7 +885,6 @@ class ResearchRunner:
         target_rows: list[dict] = []
         signal_rows: list[dict] = []
         order_rows: list[dict] = []
-        order_days: list[OrderDay] = []
         previous_book: dict[str, int] = {}
         order_seq = 0
 
@@ -869,11 +945,6 @@ class ResearchRunner:
                     "symbol": symbol,
                     "quantity": quantity,
                 })
-            order_days.append(OrderDay(
-                trade_date=execution_date,
-                sells=tuple(sells),
-                buys=tuple(buys_list),
-            ))
             planned_notional = sum(
                 float(row["signal_price"]) * int(row["target_quantity"])
                 for row in target.frame.to_dict("records")
@@ -899,7 +970,6 @@ class ResearchRunner:
         signal_frame.to_parquet(self._run_dir / "signals.parquet", index=False)
         order_frame = pd.DataFrame(order_rows)
         order_frame.to_parquet(self._run_dir / "orders.parquet", index=False)
-        self._schedule = tuple(order_days)
         return {
             name: _sha256_file(self._run_dir / name)
             for name in ("signals.parquet", "target_positions.parquet",

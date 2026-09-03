@@ -27,14 +27,42 @@ from typing import Iterable, TextIO
 #: Replacement emitted wherever a secret or sensitive value would appear.
 REDACTED = "[REDACTED]"
 
+#: One unquoted sensitive value: a run of characters terminated by whitespace
+#: or a delimiter that commonly closes a value (comma / semicolon / colon in
+#: key-value logs, ampersand in a query string, and JSON closers / quotes).
+_UNQUOTED_VALUE = r"[^\s,;:&}" + chr(34) + r"'\]\)]+"
+_QUOTED_VALUE = r'"[^"\r\n]*"' + "|" + r"'[^'\r\n]*'"
+
+#: ``Authorization: <scheme> <credential>`` headers.  The value may carry a
+#: scheme word (``Bearer``/``Basic``/``Digest``) before the credential, so the
+#: whole scheme+credential is masked together -- never just the scheme word
+#: with the credential leaking past the first space.
+_SENSITIVE_HEADER = re.compile(
+    r"(?i)(?<![A-Za-z0-9])"
+    r"(?P<key>authorization|proxy-authorization)"
+    r"\s*[:=]\s*"
+    r"(?P<value>"
+    r"(?:bearer|basic|digest)\s+" + _UNQUOTED_VALUE
+    + r"|" + _QUOTED_VALUE
+    + r"|" + _UNQUOTED_VALUE
+    + r")"
+)
+
+#: Sensitive key/value pairs (``token=``, ``"api_key":``, ``Authorization:``).
+#: The lookbehind only bars a preceding alphanumeric so ``_``-joined composite
+#: keys (``access_token``, ``auth_token``, ``refresh_token``) are still caught,
+#: and the composite alternation covers connector, underscore and camelCase
+#: shapes of ``access/auth/refresh/bearer/...`` + ``token/key/secret/...`` so
+#: ``apiKey``, ``bearerToken`` and friends are never left verbatim.
 _SENSITIVE_KEY = re.compile(
-    r"""(?ix)
-    (?<![A-Za-z0-9_])
-    (?P<key>token|auth(?:orization)?|api[_-]?key|password|passwd|
-              secret|credential|access[_-]?key|private[_-]?key)
-    \b"?\s*[=:]\s*
-    (?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;:}"'\]\)]+)
-    """
+    r"(?i)(?<![A-Za-z0-9])"
+    r"(?P<key>"
+    r"(?:access|auth|refresh|bearer|client|session|user|api|id|app|private)"
+    r"[_-]?(?:token|key|secret|password|passwd)"
+    r"|token|auth(?:orization)?|password|passwd|secret|credential"
+    r"|api[_-]?key|access[_-]?key|private[_-]?key"
+    r")\b\"?\s*[=:]\s*"
+    r"(?P<value>" + _QUOTED_VALUE + r"|" + _UNQUOTED_VALUE + r")"
 )
 
 #: Severity names ``StructuredLogger`` understands; anything else is passed
@@ -45,18 +73,23 @@ _SEVERITIES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 def redact_text(text: object, secrets: Iterable[object] = ()) -> str:
     """Return ``text`` with configured secret values and sensitive values masked.
 
-    Literal secret values are removed verbatim wherever they appear; the values
-    of recognised sensitive keys (``token``, ``authorization``, ``api_key`` and
-    friends) are masked by key/value pattern so unconfigured tokens are still
-    removed from ``token=...`` / ``"token": ...`` / ``token: ...`` shapes.
+    The values of recognised sensitive keys (``token``, ``authorization``,
+    ``api_key``, ``access_token`` and friends, in ``token=...`` / ``"token":
+    ...`` / ``Authorization: <scheme> <credential>`` shapes) are masked by
+    key/value pattern first, so unconfigured tokens never survive in a log
+    line; then any configured secret *literal* is removed verbatim wherever it
+    remains.  Masking patterns before literals keeps an already-replaced
+    ``[REDACTED]`` marker from being chewed on again by the value pattern.
     Non-string inputs are stringified first.
     """
     masked = str(text)
+    masked = _SENSITIVE_HEADER.sub(_mask_sensitive_value, masked)
+    masked = _SENSITIVE_KEY.sub(_mask_sensitive_value, masked)
     for secret in secrets:
         if secret is None or str(secret) == "":
             continue
         masked = masked.replace(str(secret), REDACTED)
-    return _SENSITIVE_KEY.sub(_mask_sensitive_value, masked)
+    return masked
 
 
 def _mask_sensitive_value(match: "re.Match[str]") -> str:

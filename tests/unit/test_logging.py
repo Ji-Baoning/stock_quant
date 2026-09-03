@@ -91,6 +91,41 @@ def test_redact_text_removes_configured_secret_inside_auth_header():
     assert REDACTED in masked
 
 
+def test_redact_text_masks_bearer_header_without_configured_secret():
+    # A ``Authorization: <scheme> <credential>`` header must mask the whole
+    # value including the scheme, never just the word ``Bearer`` with the
+    # credential leaking past the first space.
+    masked = redact_text("Authorization: Bearer k_9f8e7d6c5b4a rest")
+    assert "k_9f8e7d6c5b4a" not in masked
+    assert "Bearer" not in masked
+    assert REDACTED in masked
+    assert "Authorization" in masked
+
+
+def test_redact_text_masks_underscore_token_query_without_configured_secret():
+    # ``access_token``/``auth_token``/``refresh_token`` keys must be masked even
+    # with no configured literal and no secret-literal backstop.
+    masked = redact_text("auth failed ?access_token=k_9f8e7d6c5b4a&symbol=600000.SH")
+    assert "k_9f8e7d6c5b4a" not in masked
+    assert "symbol=600000.SH" in masked  # the query delimiter stops the value
+    assert REDACTED in masked
+    assert redact_text("auth_token=abc123def") == f"auth_token{REDACTED}"
+    assert redact_text("refresh_token=abc123def") == f"refresh_token{REDACTED}"
+
+
+def test_redact_text_masks_camel_case_key_without_configured_secret():
+    # camelCase ``apiKey`` / ``bearerToken``-style keys must be masked even with
+    # no configured literal backstop.
+    masked = redact_text("apiKey=k_9f8e7d6c5b4a retry")
+    assert "k_9f8e7d6c5b4a" not in masked
+    assert "apiKey" in masked
+    assert REDACTED in masked
+    masked = redact_text("bearerToken=k_9f8e7d6c5b4a")
+    assert "k_9f8e7d6c5b4a" not in masked
+    assert "bearerToken" in masked
+    assert REDACTED in masked
+
+
 def test_redact_text_leaves_ordinary_values_untouched():
     text = "symbol=600519.SH commission=0.0003 factor=momentum_60d"
     assert redact_text(text) == text
