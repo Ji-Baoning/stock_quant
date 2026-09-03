@@ -1,0 +1,127 @@
+"""Canonical column contracts and PyArrow schemas for standardized data.
+
+The standardized data model converts supplier-native raw frames (Task 2) into
+timezone-free, source-labelled, unit-normalized tables. ``DAILY_COLUMNS`` fixes
+the exact output column order of ``normalize_daily``; the PyArrow schemas below
+are the persistence contracts that later tasks validate and publish against.
+"""
+
+from __future__ import annotations
+
+import pyarrow as pa
+
+DAILY_COLUMNS = [
+    "trade_date",
+    "symbol",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+    "adjustment",
+    "source",
+    "ingested_at",
+]
+
+# Cleaning-audit columns: source, security, date, rule, action and the raw
+# values that were removed or changed. Kept deliberately narrow: deterministic
+# transforms are traceable through their constants, whereas information-losing
+# events (for example collapsing identical duplicate rows) must be recorded.
+AUDIT_COLUMNS = [
+    "source",
+    "symbol",
+    "trade_date",
+    "rule",
+    "action",
+    "old_value",
+    "new_value",
+    "ingested_at",
+]
+
+# Corporate actions follow the design-spec corporate_action contract.
+CORPORATE_ACTION_COLUMNS = [
+    "symbol",
+    "announcement_date",
+    "record_date",
+    "ex_date",
+    "cash_dividend_per_share",
+    "bonus_share_ratio",
+    "capitalization_ratio",
+    "rights_issue_ratio",
+    "rights_issue_price",
+    "source",
+    "status",
+]
+
+# Security master lists the point-in-time identifier attributes per instrument.
+SECURITY_MASTER_COLUMNS = [
+    "symbol",
+    "name",
+    "exchange",
+    "board",
+    "list_date",
+    "delist_date",
+]
+
+# Trading calendar marks which calendar dates are confirmed open days.
+TRADING_CALENDAR_COLUMNS = [
+    "calendar_date",
+    "is_trading_day",
+]
+
+
+def _daily_fields() -> list[pa.Field]:
+    return [
+        pa.field("trade_date", pa.date32()),
+        pa.field("symbol", pa.string()),
+        pa.field("open", pa.float64()),
+        pa.field("high", pa.float64()),
+        pa.field("low", pa.float64()),
+        pa.field("close", pa.float64()),
+        pa.field("volume", pa.int64()),
+        pa.field("amount", pa.float64()),
+        pa.field("adjustment", pa.string()),
+        pa.field("source", pa.string()),
+        pa.field("ingested_at", pa.timestamp("us", tz="UTC")),
+    ]
+
+
+def _corporate_action_fields() -> list[pa.Field]:
+    return [
+        pa.field("symbol", pa.string()),
+        pa.field("announcement_date", pa.date32()),
+        pa.field("record_date", pa.date32()),
+        pa.field("ex_date", pa.date32()),
+        pa.field("cash_dividend_per_share", pa.float64()),
+        pa.field("bonus_share_ratio", pa.float64()),
+        pa.field("capitalization_ratio", pa.float64()),
+        pa.field("rights_issue_ratio", pa.float64()),
+        pa.field("rights_issue_price", pa.float64()),
+        pa.field("source", pa.string()),
+        pa.field("status", pa.string()),
+    ]
+
+
+def _security_master_fields() -> list[pa.Field]:
+    return [
+        pa.field("symbol", pa.string()),
+        pa.field("name", pa.string()),
+        pa.field("exchange", pa.string()),
+        pa.field("board", pa.string()),
+        pa.field("list_date", pa.date32()),
+        pa.field("delist_date", pa.date32()),
+    ]
+
+
+def _trading_calendar_fields() -> list[pa.Field]:
+    return [
+        pa.field("calendar_date", pa.date32()),
+        pa.field("is_trading_day", pa.bool_()),
+    ]
+
+
+DAILY_SCHEMA = pa.schema(_daily_fields())
+CORPORATE_ACTION_SCHEMA = pa.schema(_corporate_action_fields())
+SECURITY_MASTER_SCHEMA = pa.schema(_security_master_fields())
+TRADING_CALENDAR_SCHEMA = pa.schema(_trading_calendar_fields())
