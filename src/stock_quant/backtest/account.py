@@ -21,6 +21,7 @@ from stock_quant.backtest.models import (
     BUY,
     SELL,
     CashLedgerEntry,
+    CorporateActionLedgerEntry,
     Fill,
     FillLedgerEntry,
     Order,
@@ -57,11 +58,26 @@ class InsufficientSellableQuantity(AccountError):
         self.available = available
 
 
+class DuplicateCorporateActionError(AccountError):
+    """A corporate action with an already-applied ``action_id`` was recorded."""
+
+    def __init__(self, action_id: str) -> None:
+        super().__init__(f"corporate action {action_id!r} is already booked")
+        self.action_id = action_id
+
+
 class Account:
-    """A cash ledger with T+1 whole-lot holdings.
+    """A cash ledger with T+1 whole-lot holdings and corporate-action events.
 
     ``calendar`` is required only to stamp the next trading day as a buy lot's
     ``available_date``; sellability itself is decided from the stamped dates.
+
+    Cash and holdings are mutated by ``apply_fill`` (an exchange trade) and by
+    the two corporate-action primitives ``credit_cash`` and
+    ``increase_position`` (Task 10: a cash dividend and a bonus/capitalization
+    share credit booked on an ex-date before the open).  Every such event is
+    appended to an action ledger so ``state()`` stays a byte-identical function
+    of the applied event log and re-running the same log reproduces the account.
     """
 
     def __init__(
@@ -81,6 +97,7 @@ class Account:
         self._order_entries: list[OrderLedgerEntry] = []
         self._fill_entries: list[FillLedgerEntry] = []
         self._position_entries: list[PositionLedgerEntry] = []
+        self._action_entries: list[CorporateActionLedgerEntry] = []
         self._seen_fill_ids: set[str] = set()
         self._append_cash("initial", cash, cash, "initial cash")
 
@@ -116,6 +133,10 @@ class Account:
     def position_ledger(self) -> tuple[PositionLedgerEntry, ...]:
         return tuple(self._position_entries)
 
+    @property
+    def action_ledger(self) -> tuple[CorporateActionLedgerEntry, ...]:
+        return tuple(self._action_entries)
+
     def sellable_quantity(self, symbol: str, trade_date) -> int:
         """Shares of ``symbol`` whose lots are T+1 available on ``trade_date``."""
         return sum(
@@ -137,6 +158,7 @@ class Account:
             self.fill_ledger,
             self.cash_ledger,
             self.position_ledger,
+            self.action_ledger,
         )
 
     # ------------------------------------------------------------------ #
@@ -152,6 +174,74 @@ class Account:
         self._order_entries.append(
             OrderLedgerEntry(seq=len(self._order_entries), order=order)
         )
+
+    # ------------------------------------------------------------------ #
+    # Corporate-action transitions (Task 10)
+    # ------------------------------------------------------------------ #
+
+    def credit_cash(self, amount: object, *, note: str = "") -> None:
+        """Credit pre-tax cash (e.g. a cash dividend) without an exchange fill."""
+        cash = as_decimal(amount)
+        if cash <= 0:
+            raise ValueError(f"credit amount must be positive: {cash}")
+        balance = self._cash + cash
+        self._cash = balance
+        self._append_cash("credit", cash, balance, note or "cash credit")
+
+    def increase_position(
+        self,
+        symbol: str,
+        shares: int,
+        *,
+        buy_date: object,
+        fill_id: str,
+        note: str = "",
+    ) -> None:
+        """Open a zero-cost lot of ``shares`` (a bonus/capitalization credit).
+
+        The lot is stamped with the same T+1 ``available_date`` rule as a buy on
+        ``buy_date`` (the action's ex-date); ``fill_id`` records the corporate
+        action that created the shares so the position ledger stays auditable.
+        """
+        if isinstance(shares, bool) or not isinstance(shares, int) or shares <= 0:
+            raise ValueError(f"shares must be a positive integer, got {shares!r}")
+        if not symbol or not fill_id:
+            raise ValueError("symbol and fill_id must be non-empty")
+        available = self._available_after(buy_date)
+        lot = PositionLot(
+            symbol=symbol,
+            buy_date=buy_date,
+            quantity=shares,
+            cost_basis=Decimal("0"),
+            available_date=available,
+        )
+        self._lots.append(lot)
+        self._position_entries.append(
+            PositionLedgerEntry(
+                seq=len(self._position_entries),
+                kind="OPEN",
+                symbol=symbol,
+                buy_date=lot.buy_date,
+                quantity=shares,
+                cost_basis=Decimal("0"),
+                available_date=available,
+                fill_id=fill_id,
+            )
+        )
+
+    def record_corporate_action(self, entry: CorporateActionLedgerEntry) -> None:
+        """Append one booked corporate action; refuses a duplicate ``action_id``."""
+        if not isinstance(entry, CorporateActionLedgerEntry):
+            raise TypeError(
+                "record_corporate_action expects a CorporateActionLedgerEntry, "
+                f"got {type(entry).__name__}"
+            )
+        if any(
+            existing.action_id == entry.action_id
+            for existing in self._action_entries
+        ):
+            raise DuplicateCorporateActionError(entry.action_id)
+        self._action_entries.append(entry)
 
     def apply_fill(self, fill: Fill) -> None:
         """Apply one fill to cash and holdings, guarding every invariant."""
@@ -268,13 +358,17 @@ class Account:
     # ------------------------------------------------------------------ #
 
     def _next_available_date(self, fill: Fill) -> object:
+        return self._available_after(fill.trade_date)
+
+    def _available_after(self, day: object) -> object:
+        """The first open day after ``day``, or ``None`` past the calendar end."""
         if self._calendar is None:
             raise AccountError(
                 "buying requires a trading calendar so the new lot can be stamped "
                 "with its T+1 available_date"
             )
         try:
-            return self._calendar.next_trading_day(fill.trade_date)
+            return self._calendar.next_trading_day(day)
         except CalendarBoundaryError:
             return None
 

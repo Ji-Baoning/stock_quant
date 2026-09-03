@@ -197,6 +197,12 @@ class PositionLot:
     commission).  ``available_date`` is the next open day after ``buy_date``;
     ``None`` means no later open day is known in the trading calendar, so the
     lot is never sellable within the simulated window.
+
+    ``quantity`` may be any positive whole share count: buys always open
+    whole 100-share lots, but corporate actions (bonus/capitalization share
+    credits, Task 10) can add odd-lot residuals to a holding, so a lot is not
+    required to remain a board-lot multiple.  ``Order`` and ``Fill`` quantities
+    are still validated as whole lots by ``require_lot_quantity``.
     """
 
     symbol: str
@@ -206,7 +212,10 @@ class PositionLot:
     available_date: date | None
 
     def __post_init__(self) -> None:
-        require_lot_quantity(self.quantity, name="quantity")
+        if isinstance(self.quantity, bool) or not isinstance(self.quantity, int):
+            raise TypeError(f"quantity must be an int, got {self.quantity!r}")
+        if self.quantity <= 0:
+            raise ValueError(f"quantity must be positive, got {self.quantity}")
         if not self.symbol:
             raise ValueError("symbol must be non-empty")
         if self.cost_basis < 0:
@@ -333,3 +342,42 @@ class PositionLedgerEntry:
             )
         if not self.symbol:
             raise ValueError("symbol must be non-empty")
+
+
+@dataclass(frozen=True)
+class CorporateActionLedgerEntry:
+    """One booked implemented corporate action (Task 10).
+
+    Recorded once per unique ``action_id`` when a corporate action is applied
+    to an account that holds the name on the action's ``ex_date``; re-applying
+    the same ``action_id`` is refused as a no-op.  ``cash_credited`` is the
+    pre-tax cash dividend and ``shares_added`` the bonus/capitalization share
+    increase booked on ``ex_date``.
+    """
+
+    seq: int
+    action_id: str
+    symbol: str
+    ex_date: date
+    record_date: date | None
+    cash_credited: Decimal
+    shares_added: int
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.action_id or not self.symbol:
+            raise ValueError("action_id and symbol must be non-empty")
+        if not isinstance(self.ex_date, date):
+            raise TypeError(f"ex_date must be a date, got {self.ex_date!r}")
+        if self.cash_credited < 0:
+            raise ValueError(
+                f"cash_credited must be non-negative: {self.cash_credited}"
+            )
+        if isinstance(self.shares_added, bool) or not isinstance(
+            self.shares_added, int
+        ):
+            raise TypeError(f"shares_added must be an int, got {self.shares_added!r}")
+        if self.shares_added < 0:
+            raise ValueError(
+                f"shares_added must be non-negative: {self.shares_added}"
+            )
