@@ -12,8 +12,11 @@ synthetic project and never printing a token or a raw supplier response:
 - ``backtest momentum_60d`` -- the same pipeline in a **debug** registry whose
   experiments root is ``data/runs/debug``, so a scratch run never advances the
   formal experiments index.
-- ``report build`` -- renders the richer self-contained experiment report HTML
-  from a published experiment's committed artifacts under ``data/reports``.
+- ``report build`` -- renders the display reports under ``data/reports`` from
+  committed artifacts only: the richer self-contained experiment report HTML for
+  the selected (default latest) published experiment *and* the data-quality HTML
+  for the pinned ``CURRENT`` dataset version (rebuilt from the persisted
+  ``quality_report.json``; nothing is recomputed).
 
 The metrics every research-style run records include, per cost scenario, both
 the auditable engineering summary (periods, rejections, ``plan_diverged``) and
@@ -32,16 +35,22 @@ from pathlib import Path
 import pandas as pd
 import typer
 
-from stock_quant.analytics.performance import compute_metrics
+from stock_quant.analytics.performance import PerformanceMetrics, compute_metrics
 from stock_quant.config import load_project_config
 from stock_quant.data_model.dataset import DatasetReader
 from stock_quant.data_pipeline import DataPipeline, DataUpdateRequest
 from stock_quant.data_quality.gates import evaluate_publication
-from stock_quant.data_quality.models import QualityReport
+from stock_quant.data_quality.models import (
+    QualityIssue,
+    QualityReport,
+    Severity,
+)
 from stock_quant.reporting.html import (
     ExperimentReportInput,
     ExperimentScenario,
+    QualityReportInput,
     render_experiment_report,
+    render_quality_report,
 )
 from stock_quant.research.models import ResearchRunFailed
 from stock_quant.research.registry import ExperimentRegistry, PublishedExperiment
@@ -148,10 +157,16 @@ def data_update(
         raise typer.Exit(code=1) from None
     typer.echo(f"run_id={result.run_id}")
     typer.echo(f"resolved_end_date={result.resolved_end_date or ''}")
+    typer.echo(f"resolved_end_is_fallback={str(result.resolved_end_is_fallback).lower()}")
     typer.echo(_report_summary(result.quality_report))
     for status in result.source_status:
         state = "ok" if status.ok else "not_ok"
         typer.echo(f"source {status.source}: {state}")
+    if result.resolved_end_is_fallback:
+        typer.echo(
+            "note: coverage was incomplete for the latest date; end date walked "
+            "back to the last confirmed complete trading day"
+        )
     if result.dataset_ref is not None:
         typer.echo(f"dataset_version={result.dataset_ref.version}")
         typer.echo("PASS")
@@ -180,9 +195,13 @@ def data_validate(
     typer.echo(f"version={version}")
     typer.echo(_report_summary(report))
     decision = evaluate_publication(report)
-    if decision.passed:
+    fatal = any(item.severity is Severity.FATAL for item in report.issues)
+    if decision.passed and not fatal:
         typer.echo("PASS")
         return
+    if fatal:
+        _echo_failure("quality report contains a FATAL issue")
+        raise typer.Exit(code=1)
     _echo_failure("quality gate did not pass")
     raise typer.Exit(code=1)
 
@@ -244,22 +263,38 @@ def report_build(
     ),
     root: Path = typer.Option(".", "--root", help="Project root."),
 ) -> None:
-    """Render the richer experiment report from one published experiment."""
+    """Render the experiment and current data-quality display reports.
+
+    Rebuilds the richer self-contained experiment report for the selected
+    (default latest) published experiment *and* the data-quality report for the
+    pinned ``CURRENT`` dataset version, from committed artifacts only, into
+    ``data/reports``.  The quality HTML is reconstructed from the persisted
+    ``quality_report.json`` / version manifest -- nothing is recomputed.
+    """
     project_root = Path(root)
     experiment_id = experiment or _latest_experiment_id(project_root)
     if experiment_id is None:
         _echo_failure("no published experiment found under data/experiments")
         raise typer.Exit(code=1)
     try:
+        from stock_quant.data_model.dataset import DatasetPublisher
+
+        dataset_version = DatasetPublisher(project_root).current().version
         run_input = _experiment_report_input(project_root, experiment_id)
         destination = out or (
             project_root / "data" / "reports" / f"{experiment_id}.html"
         )
         render_experiment_report(run_input, destination)
+        quality_input = _quality_report_input(project_root, dataset_version)
+        quality_destination = (
+            project_root / "data" / "reports" / f"quality-{dataset_version}.html"
+        )
+        render_quality_report(quality_input, quality_destination)
     except Exception as error:  # noqa: BLE001 - surface cleanly to the operator
         _echo_failure(str(error))
         raise typer.Exit(code=1) from None
     typer.echo(f"report={destination}")
+    typer.echo(f"quality_report={quality_destination}")
 
 
 def _latest_experiment_id(project_root: Path) -> str | None:
@@ -293,18 +328,29 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
     scenario_names = tuple(str(item) for item in spec.get("cost_scenarios", ()))
     benchmark_symbols = tuple(str(item) for item in meta.get("benchmark_symbols", ()))
     run_dir = project_root / "data" / "runs" / run_id
+    committed_scenarios = metrics.get("scenarios", {})
 
     benchmark = _benchmark_closes(project_root, dataset_version, benchmark_symbols)
     scenarios: list[ExperimentScenario] = []
     for name in scenario_names:
         scenario_dir = run_dir / "backtest" / name
         if not scenario_dir.is_dir():
-            continue
+            raise FileNotFoundError(
+                f"experiment {experiment_id} backtest workspace was pruned or "
+                f"never completed: expected {scenario_dir} (scenario {name!r}); "
+                f"data/runs/{run_id} must be retained to rebuild the display "
+                "report from committed ledgers"
+            )
         equity = pd.read_parquet(scenario_dir / "daily_equity.parquet")
         fills = pd.read_parquet(scenario_dir / "fills.parquet")
         rejections = pd.read_parquet(scenario_dir / "rejections.parquet")
         action_ledger = pd.read_parquet(scenario_dir / "action_ledger.parquet")
-        metrics_out = compute_metrics(equity, fills, benchmark)
+        committed = (committed_scenarios.get(name) or {}).get("performance")
+        metrics_out = (
+            _performance_from_dict(committed)
+            if committed
+            else compute_metrics(equity, fills, benchmark)
+        )
         scenarios.append(
             ExperimentScenario(
                 name=name,
@@ -352,6 +398,56 @@ def _benchmark_closes(
     if selected.empty:
         return empty
     return selected[["symbol", "trade_date", "close"]].reset_index(drop=True)
+
+
+def _performance_from_dict(mapping: dict) -> PerformanceMetrics:
+    """Rebuild a :class:`PerformanceMetrics` from a committed ``to_dict()``."""
+    values = dict(mapping)
+    values["start_date"] = date.fromisoformat(str(values["start_date"]))
+    values["end_date"] = date.fromisoformat(str(values["end_date"]))
+    return PerformanceMetrics(**values)
+
+
+def _quality_report_input(
+    project_root: Path, dataset_version: str
+) -> QualityReportInput:
+    """Reconstruct the quality HTML input from the persisted report only.
+
+    The per-version ``quality_report.json`` records the full issue list of the
+    publish-time :class:`QualityReport`; the neutral publication-gate decision
+    is re-derived from those issues.  Nothing here re-runs the schema/value
+    checks or touches supplier data.
+    """
+    version_dir = project_root / "data" / "standardized" / dataset_version
+    quality_file = version_dir / "quality_report.json"
+    if not quality_file.is_file():
+        raise FileNotFoundError(
+            f"dataset version {dataset_version} holds no quality_report.json "
+            f"under {version_dir}"
+        )
+    payload = json.loads(quality_file.read_text(encoding="utf-8"))
+    issues = tuple(_issue_from_dict(item) for item in payload.get("issues", ()))
+    report = QualityReport(issues=issues)
+    decision = evaluate_publication(report)
+    return QualityReportInput(
+        report=report,
+        dataset_version=dataset_version,
+        gate_passed=decision.passed,
+        gate_reasons=decision.reasons,
+    )
+
+
+def _issue_from_dict(item: dict) -> QualityIssue:
+    """One persisted issue row back to a :class:`QualityIssue`."""
+    raw_date = item.get("trade_date")
+    return QualityIssue(
+        severity=Severity(str(item["severity"])),
+        code=str(item["code"]),
+        table=str(item["table"]),
+        symbol=item.get("symbol"),
+        trade_date=date.fromisoformat(raw_date) if raw_date else None,
+        details=dict(item.get("details") or {}),
+    )
 
 
 # --------------------------------------------------------------------------- #

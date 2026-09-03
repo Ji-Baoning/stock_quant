@@ -1,6 +1,7 @@
 """Typed, secret-free project configuration loading."""
 
 from datetime import date
+from datetime import time as dt_time
 from pathlib import Path
 
 import yaml
@@ -43,6 +44,14 @@ class ProjectConfig(BaseModel):
     benchmark_symbols: list[str]
     sources: dict[str, SourceConfig] = Field(default_factory=dict)
     costs: CostConfig = Field(default_factory=CostConfig)
+    publication_time: dt_time = Field(
+        default=dt_time(15, 0),
+        description=(
+            "Wall-clock boundary before which a same-day bar set is not "
+            "treated as a complete trading day by end-date discovery (design "
+            "spec §14)."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_dates(self) -> "ProjectConfig":

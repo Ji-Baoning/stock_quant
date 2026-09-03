@@ -8,6 +8,11 @@ Step 2.  ``run_offline_fixture`` and its parser come from ``test_end_to_end``;
 
 from __future__ import annotations
 
+import json
+import shutil
+
+import pytest
+from conftest import build_fixture_project  # noqa: E402
 from test_end_to_end import run_offline_fixture  # noqa: E402  (after app import)
 
 from stock_quant.cli import app  # noqa: F401  (gates Step 2 collection)
@@ -117,3 +122,72 @@ def test_research_command_is_the_only_publisher_of_formal_experiments(
     manifest_path = outcome.path / "experiment_manifest.json"
     assert manifest_path.is_file()
     assert outcome.path.is_dir()
+
+
+@pytest.fixture(scope="module")
+def quality_report_project(tmp_path_factory):
+    """One fresh project with one completed experiment for report-build tests.
+
+    Module-scoped so the two report tests share a single (expensive) research
+    run; the second test prunes the run's backtest workspace, so it must come
+    after the first test in this module and nothing else may reuse the project.
+    """
+    project = build_fixture_project(tmp_path_factory.mktemp("quality_report"))
+    outcome = run_offline_fixture(project.root)
+    return project, outcome
+
+
+def test_report_build_renders_quality_html_with_markers_and_no_external_refs(
+    cli_runner, quality_report_project, monkeypatch
+):
+    """``report build`` also emits the data-quality HTML for the pinned version."""
+    project, outcome = quality_report_project
+    monkeypatch.setenv("TUSHARE_TOKEN", "report-secret-token")
+    result = cli_runner.invoke(
+        app,
+        ["report", "build", "--root", str(project.root)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "FAILED" not in result.stdout
+    assert "report=" in result.stdout
+    assert "quality_report=" in result.stdout
+
+    quality_path = (
+        project.root / "data" / "reports" / f"quality-{project.version}.html"
+    )
+    assert quality_path.is_file(), f"{quality_path} was not written"
+    html = quality_path.read_text(encoding="utf-8")
+    assert "数据质量报告" in html
+    assert project.version in html
+    assert "门禁决定：PASS" in html
+    assert "来源与版本状态" in html
+    # self-contained: no external fetches, and no secret value leaks in.
+    assert "src=\"http" not in html
+    assert "href=\"http" not in html
+    assert "report-secret-token" not in html
+
+    experiment_path = (
+        project.root / "data" / "reports" / f"{outcome.experiment_id}.html"
+    )
+    assert experiment_path.is_file()
+
+
+def test_report_build_fails_when_backtest_workspace_pruned(
+    cli_runner, quality_report_project
+):
+    """A pruned run workspace must fail loudly, not render an empty report."""
+    project, outcome = quality_report_project
+    metrics = json.loads(
+        (outcome.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    run_id = metrics["meta"]["run_id"]
+    scenario_dir = project.root / "data" / "runs" / run_id / "backtest" / "zero_cost"
+    assert scenario_dir.is_dir()
+    shutil.rmtree(scenario_dir)
+    result = cli_runner.invoke(
+        app,
+        ["report", "build", "--root", str(project.root)],
+    )
+    assert result.exit_code != 0
+    assert "FAILED" in result.stdout
+    assert "backtest workspace was pruned" in result.stdout

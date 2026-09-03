@@ -20,15 +20,22 @@ import yaml
 from conftest import build_fixture_project  # noqa: E402
 
 from stock_quant.data_model.calendar import TradingCalendar
+from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+from stock_quant.data_model.universe import Universe
 from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
     CODE_OPTIONAL_SOURCE_FAILURE,
     CODE_SOURCE_FETCH_FAILED,
+    CODE_UNIVERSE_MASTER_MISMATCH,
     DataPipeline,
     DataUpdateRequest,
     SourceCoverage,
     resolve_latest_complete_date,
 )
-from stock_quant.data_quality.models import CODE_NONPOSITIVE_PRICE, Severity
+from stock_quant.data_quality.models import (
+    CODE_NONPOSITIVE_PRICE,
+    QualityReport,
+    Severity,
+)
 from stock_quant.data_sources.base import (
     AuthenticationError,
     DataRequest,
@@ -249,6 +256,55 @@ def test_resolver_returns_none_without_required_coverage(monkeypatch):
     )
 
 
+def test_resolver_uses_previous_open_day_when_today_is_a_weekend(monkeypatch):
+    """A non-trading today never waits for the publication-time gate."""
+    calendar = _november_calendar()
+    latest = calendar.open_days[-1]  # 2021-11-30 (Tuesday)
+    coverage = SourceCoverage(
+        stock_primary=latest,
+        benchmarks={"000300.SH": latest, "000905.SH": latest},
+        validation={"akshare": latest},
+    )
+    # Saturday 2021-12-04, well before the 15:00 gate.
+    _freeze_now(monkeypatch, "2021-12-04T09:00:00")
+    assert (
+        resolve_latest_complete_date(coverage, calendar, _dt.time(15, 0))
+        == latest
+    )
+
+
+def test_resolver_walks_back_from_a_non_trading_weekend_today(monkeypatch):
+    """A lagging required series still walks back over a weekend today."""
+    calendar = _november_calendar()
+    stock_latest = calendar.open_days[-2]
+    coverage = SourceCoverage(
+        stock_primary=stock_latest,
+        benchmarks={
+            "000300.SH": calendar.open_days[-1],
+            "000905.SH": calendar.open_days[-1],
+        },
+        validation={"akshare": calendar.open_days[-1]},
+    )
+    _freeze_now(monkeypatch, "2021-12-04T09:00:00")
+    assert (
+        resolve_latest_complete_date(coverage, calendar, _dt.time(15, 0))
+        == stock_latest
+    )
+
+
+def test_resolver_returns_none_for_an_empty_calendar():
+    calendar = TradingCalendar.from_open_days(())
+    coverage = SourceCoverage(
+        stock_primary=None,
+        benchmarks={},
+        validation={},
+    )
+    assert (
+        resolve_latest_complete_date(coverage, calendar, _dt.time(15, 0))
+        is None
+    )
+
+
 # --------------------------------------------------------------------------- #
 # DataPipeline.update / validate over a fresh synthetic project
 # --------------------------------------------------------------------------- #
@@ -329,3 +385,119 @@ def test_validate_returns_clean_report_over_current_dataset(project):
     report = pipeline.validate()
     assert report.by_severity()[Severity.ERROR.value] == 0
     assert report.by_severity()[Severity.FATAL.value] == 0
+
+
+def _rewrite_mismatched_universe(root) -> None:
+    """Drop two pinned symbols and add one never-listed synthetic symbol.
+
+    The rewritten ``configs/universe.yml`` disagrees with the fixture's
+    ``security_master`` on both sides: the dropped symbols appear only in the
+    master and the synthetic symbol appears only in the universe.
+    """
+    path = root / "configs" / "universe.yml"
+    universe = Universe.from_yaml(path)
+    entries = [entry.model_dump(mode="json") for entry in universe.entries]
+    clone = dict(entries[-1])
+    clone["symbol"] = "688999.SH"
+    clone["name_at_selection"] = "合成新增样本"
+    document = {
+        "selected_as_of": entries[0]["selected_as_of"],
+        "entries": entries[:-2] + [clone],
+    }
+    path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+
+def test_validate_surfaces_universe_master_mismatch_as_fatal(project):
+    _rewrite_mismatched_universe(project.root)
+    pipeline = DataPipeline(project.root)
+    report = pipeline.validate()
+    assert report.by_code()[CODE_UNIVERSE_MASTER_MISMATCH] == 1
+    issue = next(
+        item
+        for item in report.issues
+        if item.code == CODE_UNIVERSE_MASTER_MISMATCH
+    )
+    assert issue.severity is Severity.FATAL
+    assert issue.table == "security_master"
+    assert issue.details["universe_symbol_count"] == 29
+    assert issue.details["security_master_symbol_count"] == 30
+    assert issue.details["missing_from_security_master"] == ["688999.SH"]
+    assert issue.details["extra_in_security_master"] == [
+        "688506.SH",
+        "688981.SH",
+    ]
+
+
+def test_update_blocks_publication_when_universe_mismatches_master(project):
+    _rewrite_mismatched_universe(project.root)
+    pipeline = DataPipeline(project.root, sources=_all_stubs())
+    result = pipeline.update(_request())
+    assert result.dataset_ref is None
+    assert result.quality_report.by_code()[CODE_UNIVERSE_MASTER_MISMATCH] == 1
+
+
+def test_discovery_passes_configured_publication_time_to_resolver(
+    project, monkeypatch
+):
+    """The configured ``publication_time`` -- not a hard-coded 15:00 -- governs."""
+    config_path = project.root / "configs" / "project.yml"
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["publication_time"] = "23:59"
+    config_path.write_text(
+        yaml.safe_dump(payload), encoding="utf-8"
+    )
+
+    captured: dict = {}
+
+    def fake_resolve(status, calendar, publication_time):
+        captured["publication_time"] = publication_time
+        return date(2021, 11, 30)
+
+    monkeypatch.setattr(
+        "stock_quant.data_pipeline.resolve_latest_complete_date", fake_resolve
+    )
+    pipeline = DataPipeline(project.root, sources=_all_stubs())
+    result = pipeline.update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=None)
+    )
+    assert captured["publication_time"] == _dt.time(23, 59)
+    assert result.dataset_ref is not None
+    assert result.resolved_end_date == date(2021, 11, 30)
+
+
+def _republish_with_benchmark_trim(root, symbol, cutoff) -> None:
+    """Re-publish CURRENT with one benchmark symbol trimmed to ``<= cutoff``."""
+    reader = DatasetReader(root)
+    version = DatasetPublisher(root).current().version
+    with reader.open(version) as context:
+        daily = context.read("daily_bar")
+        master = context.read("security_master")
+        ca = context.read("corporate_action")
+        calendar = context.read("trading_calendar")
+    keep = ~(
+        (daily["symbol"] == symbol)
+        & (daily["trade_date"] > pd.Timestamp(cutoff))
+    )
+    trimmed = daily.loc[keep].reset_index(drop=True)
+    DatasetPublisher(root).publish(
+        {
+            "daily_bar": trimmed,
+            "security_master": master,
+            "corporate_action": ca,
+            "trading_calendar": calendar,
+        },
+        QualityReport(),
+    )
+
+
+def test_discovery_reports_fallback_when_a_benchmark_series_lags(project, monkeypatch):
+    """A lagging required benchmark walks the end date back and flags it."""
+    _freeze_now(monkeypatch, "2022-01-07T16:00:00")
+    _republish_with_benchmark_trim(project.root, "000300.SH", date(2022, 1, 5))
+    pipeline = DataPipeline(project.root, sources=_all_stubs())
+    result = pipeline.update(
+        DataUpdateRequest(start_date=date(2021, 11, 1), end_date=None)
+    )
+    assert result.dataset_ref is not None
+    assert result.resolved_end_date == date(2022, 1, 5)
+    assert result.resolved_end_is_fallback is True

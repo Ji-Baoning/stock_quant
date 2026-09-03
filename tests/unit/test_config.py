@@ -1,9 +1,31 @@
+from datetime import time as dt_time
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from stock_quant.config import ProjectConfig, load_project_config
+
+
+def test_project_config_publication_time_defaults_to_1500():
+    config = ProjectConfig(
+        start_date="2020-01-01",
+        end_date="2021-12-31",
+        initial_cash=100000,
+        benchmark_symbols=["000300.SH", "000905.SH"],
+    )
+    assert config.publication_time == dt_time(15, 0)
+
+
+def test_project_config_parses_configured_publication_time():
+    config = ProjectConfig(
+        start_date="2020-01-01",
+        end_date="2021-12-31",
+        initial_cash=100000,
+        benchmark_symbols=["000300.SH"],
+        publication_time="18:30",
+    )
+    assert config.publication_time == dt_time(18, 30)
 
 
 def test_project_config_rejects_end_before_start():
