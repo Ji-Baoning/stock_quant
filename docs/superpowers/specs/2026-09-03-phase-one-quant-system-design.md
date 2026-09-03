@@ -1,7 +1,7 @@
 # A股量化项目第一阶段设计规格
 
 日期：2026-09-03  
-状态：已完成对话评审，待用户审阅书面规格
+状态：用户已于2026-09-03确认，进入实施计划阶段
 
 ## 1. 背景与定位
 
@@ -83,12 +83,14 @@ stock/
 │   ├── project.yml
 │   ├── universe.yml
 │   ├── costs.yml
+│   ├── trading_rules.yml
 │   ├── sources.yml
 │   └── experiments/
 │       └── momentum_60d.yml
 ├── src/stock_quant/
 │   ├── config.py
 │   ├── cli.py
+│   ├── data_pipeline.py
 │   ├── data_sources/
 │   │   ├── base.py
 │   │   ├── tushare.py
@@ -161,6 +163,7 @@ stock/
 - `project.yml`：日期范围、数据路径、两个基准、运行参数。
 - `universe.yml`：30只固定样本及选入原因。
 - `costs.yml`：按生效日期维护佣金、税费、滑点和整手规则。
+- `trading_rules.yml`：按市场、板块、证券状态和生效日期维护涨跌幅及新股规则。
 - `sources.yml`：数据源开关、超时、重试和限流，不包含Token。
 - `experiments/*.yml`：研究假设、固定输入版本、因子、组合、成本和评价策略；不包含运行时密钥。
 
@@ -577,6 +580,7 @@ cash_ledger.parquet
 corporate_action_ledger.parquet
 daily_equity.parquet
 metrics.json
+report.html
 ```
 
 实验清单和运行清单记录Git提交、Python与依赖版本、数据哈希、因子名称与版本、成本情景、随机种子、父实验ID及可选的`agent_id`。没有Git版本时明确记录`unversioned`。

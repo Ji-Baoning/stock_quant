@@ -283,7 +283,7 @@ volume, amount, source, ingested_at
 - 数据处理：获取、原始校验、清洗、标准化、跨源比较和质量门禁为独立步骤；未经门禁的数据不进入回测。
 - 版本管理：正式规格写入后初始化Git；真实密钥、市场数据和运行产物不提交。
 
-第一阶段完整规格见 `docs/superpowers/specs/2026-09-03-phase-one-quant-system-design.md`。
+第一阶段完整规格见 `docs/superpowers/specs/2026-09-03-phase-one-quant-system-design.md`，已于2026-09-03获得用户确认并进入实施计划阶段。
 
 ### 7.5 多Agent研究扩展边界
 
