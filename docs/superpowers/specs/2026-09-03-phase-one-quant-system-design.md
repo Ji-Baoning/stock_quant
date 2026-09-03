@@ -83,7 +83,9 @@ stock/
 │   ├── project.yml
 │   ├── universe.yml
 │   ├── costs.yml
-│   └── sources.yml
+│   ├── sources.yml
+│   └── experiments/
+│       └── momentum_60d.yml
 ├── src/stock_quant/
 │   ├── config.py
 │   ├── cli.py
@@ -102,7 +104,13 @@ stock/
 │   │   ├── compare.py
 │   │   └── gates.py
 │   ├── factors/
+│   │   ├── base.py
+│   │   ├── models.py
 │   │   └── momentum.py
+│   ├── research/
+│   │   ├── spec.py
+│   │   ├── registry.py
+│   │   └── runner.py
 │   ├── portfolio/
 │   │   └── equal_weight.py
 │   ├── backtest/
@@ -126,7 +134,9 @@ stock/
 │   ├── standardized/
 │   ├── quarantine/
 │   ├── quality/
-│   └── runs/
+│   ├── runs/
+│   └── experiments/
+│       └── registry.parquet
 └── reports/
 ```
 
@@ -135,7 +145,8 @@ stock/
 - `data_sources`只请求数据并保留原始响应。
 - `data_model`负责代码、日期、类型、单位、清洗和标准化。
 - `data_quality`负责原始检查、跨源比较和发布门禁。
-- `factors`只根据标准数据生成因子值。
+- `factors`定义统一因子契约，并只根据固定版本的标准数据生成标准化因子结果。
+- `research`校验实验规格、解析固定数据版本，并编排因子、组合、回测和报告；不承载具体策略规则。
 - `portfolio`把因子排名转换为目标权重与目标股数。
 - `backtest`负责账户、持仓批次、公司行为、订单、成交和成本。
 - `analytics`只读取回测产物并计算指标。
@@ -151,6 +162,7 @@ stock/
 - `universe.yml`：30只固定样本及选入原因。
 - `costs.yml`：按生效日期维护佣金、税费、滑点和整手规则。
 - `sources.yml`：数据源开关、超时、重试和限流，不包含Token。
+- `experiments/*.yml`：研究假设、固定输入版本、因子、组合、成本和评价策略；不包含运行时密钥。
 
 Tushare Token仅从`TUSHARE_TOKEN`环境变量读取。`.env.example`只包含占位名称，真实`.env`被Git忽略。Token不得进入代码、配置快照、运行清单、日志或异常响应。
 
@@ -366,6 +378,62 @@ Momentum_{60}(i,t)=\frac{AdjustedClose_{i,t}}{AdjustedClose_{i,t-60}}-1
 - 不使用未来值填充；
 - 并列时按股票代码排序，结果确定。
 
+### 15.1 统一因子契约
+
+60日动量必须作为统一`Factor`协议的第一个实现，不允许由研究脚本直接生成无约束的临时列。协议至少公开：
+
+```text
+name
+version
+lookback
+required_fields
+frequency
+compute(context) -> FactorResult
+```
+
+`context`在实验开始时解析并固定`dataset_version`、股票池版本和允许读取的日期范围。因子运行期间只能读取该只读上下文，不得再次解析`CURRENT`，也不得写入标准数据层。
+
+`FactorResult`至少包含：
+
+```text
+trade_date
+symbol
+factor_name
+factor_version
+raw_value
+processed_value
+is_valid
+invalid_reason
+```
+
+`processed_value`在第一阶段可与`raw_value`相同，但保留该字段用于后续去极值、标准化和中性化。任何无效值必须给出原因，不能仅以`NaN`表达。
+
+### 15.2 实验规格与身份
+
+所有正式研究由不可变的`ExperimentSpec`描述，至少包含：
+
+```text
+hypothesis
+factor_names_and_versions
+dataset_version
+universe_version
+date_range
+train_validation_holdout_policy
+preprocessing
+portfolio_rule
+cost_model
+random_seed
+code_commit
+parent_experiment_ids
+agent_id_optional
+```
+
+`experiment_id`由规范化后的实验规格、固定数据版本和代码提交共同计算确定性哈希。相同输入得到相同ID；任何会改变结果的输入变化都必须产生新ID。
+
+实验产物先写入`data/runs/<run_id>/`并完成校验，再原子发布到`data/experiments/<experiment_id>/`；发布目录不得覆盖。相同ID已经存在时复用并报告既有结果。未通过研究评价门禁的实验也作为完整结果发布并保留结论，避免只保留表现良好的结果；因异常而未完成的运行保留在`data/runs/<run_id>/`，记录失败阶段和原因，但不得形成半成品实验目录。实验索引`data/experiments/registry.parquet`由单一发布者依据各实验清单重建，Agent或研究进程不得直接并发修改。
+
+第一阶段仅做工程验证，不伪造统计意义上的训练集、验证集和隐藏测试集；`train_validation_holdout_policy`明确记录为`not_applicable_engineering_mvp`。该字段和边界校验仍在一期建立，以便扩大到可信全市场数据后冻结时间切分。
+
 ## 16. 组合构建
 
 每个信号日从合格股票中按动量降序选择前10只，每只目标权重10%。合格股票不足10只时保留现金，不使用次日信息临时替代无法成交股票。
@@ -463,6 +531,8 @@ CREATED → FETCHING → RAW_SAVED → CLEANING → VALIDATING
 
 失败转为`FAILED`，记录阶段、异常类型和可否重试。
 
+研究实验另有`CREATED → RUNNING → COMPLETED → ACCEPTED|REJECTED`状态；`ACCEPTED`仅表示通过当前配置的研究门禁，不表示获准实盘。执行异常进入运行级`FAILED`，不把不完整产物发布为实验。
+
 临时网络错误、限流、服务端错误和BaoStock会话失效最多重试3次，递增等待且单次不超过30秒。Token无效、权限不足、字段变化、类型错误、参数错误、主键冲突和无法解释的公司行为不自动重试。
 
 上一版`CURRENT`在失败时保持可用。中断后允许使用相同`run_id`继续，不重复请求已经成功并验证的数据。
@@ -490,12 +560,15 @@ CREATED → FETCHING → RAW_SAVED → CLEANING → VALIDATING
 
 结构化日志至少包含时间、级别、运行编号、阶段、来源、证券、事件和消息。异常响应先脱敏，任何密钥都不得写入日志。
 
-每次回测输出：
+每次正式研究在`data/experiments/<experiment_id>/`输出：
 
 ```text
+experiment_spec.yml
+experiment_manifest.json
 run_manifest.json
 config_snapshot.yml
 dataset_version.txt
+factor_results.parquet
 signals.parquet
 target_positions.parquet
 orders.parquet
@@ -506,7 +579,7 @@ daily_equity.parquet
 metrics.json
 ```
 
-运行清单记录Git提交、Python与依赖版本、数据哈希、因子参数、成本情景和随机种子。没有Git版本时明确记录`unversioned`。
+实验清单和运行清单记录Git提交、Python与依赖版本、数据哈希、因子名称与版本、成本情景、随机种子、父实验ID及可选的`agent_id`。没有Git版本时明确记录`unversioned`。
 
 CLI成功退出码为0，失败返回非0。终端只显示摘要，完整诊断保存在运行目录。禁止部分失败后仍返回成功。
 
@@ -517,11 +590,12 @@ CLI成功退出码为0，失败返回非0。终端只显示摘要，完整诊断
 ```bash
 python -m stock_quant data update
 python -m stock_quant data validate
-python -m stock_quant backtest momentum_60d
+python -m stock_quant research run --spec configs/experiments/momentum_60d.yml
+python -m stock_quant backtest momentum_60d  # 仅供局部调试
 python -m stock_quant report build
 ```
 
-Notebook解释数据、因子和回测结果；HTML报告用于浏览与分享；CSV或Parquet明细用于人工核验。第一阶段不开发Web仪表盘。
+`research run`是产生可复现正式结果的唯一入口，负责固定数据版本并发布完整实验产物。直接`backtest`命令仅用于局部调试，其结果不得进入正式实验索引。Notebook解释数据、因子和回测结果；HTML报告用于浏览与分享；CSV或Parquet明细用于人工核验。第一阶段不开发Web仪表盘。
 
 ## 27. 报告内容
 
@@ -535,7 +609,7 @@ Notebook解释数据、因子和回测结果；HTML报告用于浏览与分享�
 
 ### 28.1 单元测试
 
-覆盖代码与单位转换、重复和OHLC检查、60日动量、稳定排序、等权组合、整手、现金约束、佣金最低额、印花税、滑点、T+1、公司行为、停牌估值、回撤和换手率。
+覆盖代码与单位转换、重复和OHLC检查、因子协议、`FactorResult`模式、60日动量、稳定排序、`ExperimentSpec`校验与确定性ID、等权组合、整手、现金约束、佣金最低额、印花税、滑点、T+1、公司行为、停牌估值、回撤和换手率。
 
 ### 28.2 合成边界数据
 
@@ -561,6 +635,10 @@ Notebook解释数据、因子和回测结果；HTML报告用于浏览与分享�
 
 `pytest -m smoke`在用户本地提供环境变量后请求少量股票短区间，只验证接口连通和契约，不声称验证数据绝对正确。
 
+### 28.8 实验隔离与并发边界测试
+
+验证实验开始后即使`CURRENT`变化也仍只读取已固定的数据版本；相同规格产生相同`experiment_id`并复用既有结果；已发布实验目录不可覆盖；评价为`REJECTED`的实验进入索引并保留原因；执行失败只保留运行审计且不发布半成品；多个研究进程先写各自运行目录，共享索引只能由持有发布锁的单一发布者更新。
+
 ## 29. 验收标准
 
 - Conda环境可从配置重新创建。
@@ -568,7 +646,11 @@ Notebook解释数据、因子和回测结果；HTML报告用于浏览与分享�
 - 三源原始快照独立、不可变且可追溯。
 - 清洗审计、跨源比较和HTML质量报告完整。
 - 故意破坏数据时门禁阻止回测。
+- 60日动量通过统一`Factor`协议运行并输出合规`FactorResult`。
 - 60日动量通过防未来函数测试。
+- 正式研究只能经`ExperimentSpec`和`research run`启动。
+- 实验ID可确定性复现，已发布产物不可覆盖，`REJECTED`实验与执行失败均可审计。
+- 实验全程只读固定`dataset_version`，`CURRENT`变化不影响进行中的实验。
 - 三种成本情景均能完成回测。
 - 整手、T+1、停牌和最小公司行为通过测试。
 - 相同数据、配置和代码重复运行结果相同。
@@ -590,6 +672,8 @@ Notebook解释数据、因子和回测结果；HTML报告用于浏览与分享�
 - 全A股可信策略评价；
 - 财务因子、多因子组合、行业中性化和优化器；
 - 机器学习、分钟或Tick数据；
+- LLM或多Agent编排器、并行任务调度器和自动因子生成；
+- 自动模型训练、预测服务和隐藏测试集评审服务；
 - 融资融券；
 - 完整红利税；
 - 配股、合并、换股等复杂公司行为；
@@ -606,3 +690,31 @@ Notebook解释数据、因子和回测结果；HTML报告用于浏览与分享�
 - 升级Tushare权限或替换数据供应商而不改写因子逻辑。
 
 这些接口只保持清晰边界，第一阶段不提前实现。
+
+## 33. 多Agent扩展边界
+
+一期不实现多Agent系统，但其研究内核必须允许未来由人、脚本或Agent通过同一个`ExperimentSpec`和`Factor`协议发起实验。未来推荐职责拆分为：假设生成、因子实现、独立评价、反例审查和因子组合；各角色交换结构化实验产物，不以自然语言聊天记录作为唯一依据。
+
+并发与数据所有权遵循：
+
+- 标准数据单写多读；研究Agent只能读取固定的`dataset_version`。
+- 每个Agent在独立Git worktree或等价隔离环境中修改代码，在独立`experiment_id`目录写产物。
+- 只有中央发布流程可更新`CURRENT`、实验注册表和候选策略状态。
+- Agent不得修改历史原始数据、成本假设、冻结的时间切分或隐藏测试结果。
+- Agent不得删除失败实验、接触券商密钥、直接下单或自行批准进入实盘。
+- 自动预测只输出带版本的预期收益、排名或置信度；仍须经过组合、风控、订单和人工授权边界。
+
+这使一期的单进程实现保持简单，同时避免未来为多Agent研究重写因子、实验追踪和数据访问接口。
+
+## 34. 后续研究治理
+
+30只股票与免费数据只能验证工程链路，不能支撑自动发现有效因子或评价模型泛化能力。进入自动因子探索、因子组合或机器学习前，必须先具备可信的时点化全市场数据，并建立：
+
+- 冻结的训练、验证和隐藏时间外测试区间；
+- 滚动训练与市场状态分段评价；
+- 多重检验、试验次数和父子实验谱系记录；
+- 与基准因子、成本、换手和容量的统一比较门禁；
+- 独立评价者无法读取或反复调试隐藏测试结果的权限隔离；
+- 人工审批后才允许候选策略进入影子盘，影子盘通过后才讨论小资金实盘。
+
+Qlib可在这一阶段承接数据集、模型训练与预测，但预测输出仍须适配本项目的`FactorResult`或后续统一信号接口；Agent编排层只负责任务和证据流转，不绕过数据、回测、风险及实盘边界。
