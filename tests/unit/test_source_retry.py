@@ -53,17 +53,30 @@ def data_request() -> DataRequest:
 def test_retry_retries_rate_limit_but_not_authentication(fake_source, data_request):
     """Retry classification must never repeat calls rejected for bad credentials."""
     fake_source.failures = [RateLimitError("slow"), None]
+    sleeps: list[float] = []
 
     assert (
-        fetch_with_retry(fake_source, data_request, RetryPolicy(max_attempts=3)).source
+        fetch_with_retry(
+            fake_source,
+            data_request,
+            RetryPolicy(max_attempts=3),
+            sleeper=sleeps.append,
+        ).source
         == "fake"
     )
     assert fake_source.calls == 2
+    assert sleeps == [1.0]
 
     fake_source.failures = [AuthenticationError("bad token")]
     with pytest.raises(AuthenticationError):
-        fetch_with_retry(fake_source, data_request, RetryPolicy(max_attempts=3))
+        fetch_with_retry(
+            fake_source,
+            data_request,
+            RetryPolicy(max_attempts=3),
+            sleeper=sleeps.append,
+        )
     assert fake_source.calls == 3
+    assert sleeps == [1.0]
 
 
 def test_retry_policy_refuses_limits_beyond_the_supplier_contract():

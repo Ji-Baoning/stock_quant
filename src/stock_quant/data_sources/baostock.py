@@ -66,7 +66,7 @@ class BaoStockSource:
             translated = translate_supplier_error(error, baostock=True)
             if translated is error:
                 raise
-            raise translated from error
+            raise translated from None
         finally:
             if logged_in:
                 self._client.logout()

@@ -147,9 +147,9 @@ def validate_supplier_frame(
         raise ContractError("supplier marked its response as truncated")
 
     symbol_column = _first_present(frame, symbol_columns)
-    if require_symbol and symbol_column is None:
-        raise ContractError("supplier response has no symbol column")
-    if symbol_column is not None:
+    if require_symbol:
+        if symbol_column is None:
+            raise ContractError("supplier response has no symbol column")
         returned_symbols = {
             _comparison_symbol(value) for value in frame[symbol_column].dropna()
         }

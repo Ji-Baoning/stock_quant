@@ -52,6 +52,11 @@ class AkShareClient:
             raise self.frame
         return self.frame
 
+    def stock_info_a_code_name(self) -> pd.DataFrame:
+        if isinstance(self.frame, Exception):
+            raise self.frame
+        return self.frame
+
 
 class BaoResponse:
     def __init__(self, frame: pd.DataFrame) -> None:
@@ -170,6 +175,21 @@ def test_akshare_and_baostock_return_recorded_native_columns():
     assert ak_result.frame.columns.tolist() == ["日期", "代码", "开盘", "收盘"]
     assert bao_result.frame.columns.tolist() == ["date", "code", "open", "close"]
     assert (bao_client.logins, bao_client.logouts) == (1, 1)
+
+
+def test_akshare_returns_recorded_stock_metadata_without_symbol_set_equality():
+    """A universe endpoint is validated for shape, not per-symbol set equality."""
+    frame = pd.read_csv(
+        FIXTURES / "akshare_stock_metadata.csv", dtype={"code": str}
+    )
+
+    result = AkShareSource(SourceConfig(), AkShareClient(frame)).fetch(
+        _request("stock_metadata", "000001")
+    )
+
+    assert result.endpoint == "stock_metadata"
+    assert result.frame.columns.tolist() == ["code", "name"]
+    assert result.frame["code"].tolist() == ["000001", "600000"]
 
 
 def _source_for(

@@ -35,25 +35,31 @@ class AkShareSource:
         self._client = client
 
     def fetch(self, request: DataRequest) -> FetchResult:
-        handlers: dict[str, tuple[Callable[[DataRequest], pd.DataFrame], str, bool]] = {
+        handlers: dict[
+            str, tuple[Callable[[DataRequest], pd.DataFrame], str, bool, bool]
+        ] = {
             "index_history": (
                 self._index_history,
                 "akshare.stock_zh_index_hist_em",
+                True,
                 True,
             ),
             "stock_metadata": (
                 self._stock_metadata,
                 "akshare.stock_info_a_code_name",
                 False,
+                False,
             ),
             "cninfo_corporate_actions": (
                 self._cninfo_corporate_actions,
                 "akshare.stock_fhps_detail_cninfo",
                 False,
+                False,
             ),
             "eastmoney_corporate_actions": (
                 self._eastmoney_corporate_actions,
                 "akshare.stock_fhps_detail_em",
+                False,
                 False,
             ),
         }
@@ -61,7 +67,9 @@ class AkShareSource:
             raise ValueError(f"unsupported AKShare endpoint: {request.endpoint}")
         if len(request.symbols) != 1:
             raise ValueError("AKShare requests require exactly one symbol")
-        handler, supplier_endpoint, date_required = handlers[request.endpoint]
+        handler, supplier_endpoint, date_required, require_symbol = handlers[
+            request.endpoint
+        ]
         request_timestamp = _utc_timestamp()
         try:
             frame = handler(request)
@@ -69,7 +77,7 @@ class AkShareSource:
             translated = translate_supplier_error(error)
             if translated is error:
                 raise
-            raise translated from error
+            raise translated from None
         response_timestamp = _utc_timestamp()
         validate_supplier_frame(
             frame,
@@ -77,6 +85,7 @@ class AkShareSource:
             symbol_columns=("代码", "code", "symbol", "ts_code"),
             date_columns=("日期", "date", "trade_date", "公告日期"),
             require_date=date_required,
+            require_symbol=require_symbol,
         )
         return FetchResult(
             source=self.name,

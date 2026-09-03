@@ -63,7 +63,7 @@ class TushareSource:
             translated = translate_supplier_error(error)
             if translated is error:
                 raise
-            raise translated from error
+            raise translated from None
         response_timestamp = _utc_timestamp()
         self._validate(frame, request)
         return FetchResult(
