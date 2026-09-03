@@ -211,7 +211,10 @@ def _parse_event(
         "status": STATUS_IMPLEMENTED if implemented else STATUS_NOT_IMPLEMENTED,
         "source": source,
     }
-    plan = _text(row, columns["plan"])
+    # ``plan`` is optional (see _resolve_columns): when no 方案 / 方案说明 column is
+    # present it resolves to "" and must not be read, so it falls back to its
+    # documented default (absent -> no text) for unsupported tagging.
+    plan = _text(row, columns["plan"]) if columns["plan"] else None
     progress_text = _text(row, columns["progress"])
     event["unsupported"] = _mentions_unsupported(plan, progress_text)
     return event

@@ -205,6 +205,39 @@ def test_build_is_deterministic_across_factor_row_order():
     assert first.unallocated_weight == second.unallocated_weight
 
 
+def test_unaffordable_top_rank_slot_stays_cash_without_backfill():
+    # A top-ranked name whose floored quantity is below one lot cannot afford a
+    # single lot, so it is excluded and its equal-weight slot stays unallocated
+    # cash; the next-ranked affordable name still enters at its own rank, and a
+    # still-lower affordable name is never backfilled into the dropped slot.
+    rows = [
+        _factor_row("600519.SH", 0.10),  # rank 1 -- signal close far too high
+        _factor_row("000001.SZ", 0.09),  # rank 2 -- affordable, still enters
+        _factor_row("000002.SZ", 0.08),  # rank 3 -- affordable but outside top_n
+    ]
+    prices = pd.DataFrame(
+        [
+            {"symbol": "600519.SH", "close": 50000.0},
+            {"symbol": "000001.SZ", "close": 10.0},
+            {"symbol": "000002.SZ", "close": 10.0},
+        ],
+        columns=["symbol", "close"],
+    )
+    target = TopNEqualWeight(top_n=2, lot_size=100).build(
+        _momentum_result(rows), prices, capital=100000
+    )
+    # 600519.SH would size to floor(0.5*100000/50000/100) == 0 lots: excluded.
+    assert "600519.SH" not in set(target.frame.symbol)
+    # The rank-2 affordable name enters at slot weight 1/2 (0.5 lots -> 5000).
+    assert target.frame.symbol.tolist() == ["000001.SZ"]
+    assert target.frame["rank"].tolist() == [2]
+    assert target.frame["target_quantity"].tolist() == [5000]
+    assert target.frame["target_weight"].tolist() == pytest.approx([0.5])
+    # Its slot stays unallocated cash and the rank-3 name is not promoted in.
+    assert "000002.SZ" not in set(target.frame.symbol)
+    assert target.unallocated_weight == pytest.approx(0.5)
+
+
 def test_invalid_rows_are_never_selected_even_when_top_ranked():
     rows = [_factor_row(symbol, _TIE_VALUES[symbol]) for symbol in _TIE_SYMBOLS]
     # A never-eligible name carries the highest value but is marked invalid.

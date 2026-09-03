@@ -82,3 +82,21 @@ neutral gate. Blocking update conditions include non-positive prices, schema
 violations, duplicate conflicts, source-fetch failures and unavailable required
 sources; optional validation failures and best-effort corporate-action gaps
 produce warnings, never blocks.
+
+## Known limitations
+
+Phase-one boundaries (report-only, not defects); the same list appears in every
+experiment report's 已知限制 section.
+
+- Cross-source stock close differences above tolerance are recorded as ERROR in
+  the quality report but are report-only at this phase: the Tushare primary
+  close series is authoritative for factors and backtests, and the publication
+  gate does not depend on strategy inputs (design §13.5).
+  跨源收盘价差异超过容差时，仅在质量报告中记录为 ERROR，本阶段不阻断发布：因子与
+  回测以 Tushare 主源收盘序列为准，发布门禁与策略输入无关（设计 §13.5）。
+- No adjusted (复权) daily series is published or consumed at the factor layer
+  in phase one; momentum runs on the unadjusted series (adjusted_close=close).
+  BaoStock adjusted data is fetched only for optional continuity/cross-checks,
+  never for factors.
+  本阶段不发布、也不消费复权日线：动量基于未复权序列计算（adjusted_close=close）；
+  BaoStock 复权数据仅用于可选的延续性与交叉核对，不参与因子。

@@ -221,7 +221,9 @@ def _holdings() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _experiment_input() -> ExperimentReportInput:
+def _experiment_input(
+    known_limitations: tuple[str, ...] | None = None,
+) -> ExperimentReportInput:
     benchmark = _benchmark()
     scenarios: list[ExperimentScenario] = []
     for name in ("zero_cost", "commission_tax", "full_cost"):
@@ -240,6 +242,12 @@ def _experiment_input() -> ExperimentReportInput:
                 metrics=metrics,
             )
         )
+    if known_limitations is None:
+        known_limitations = (
+            "T+1 约束：当日买入次日方可卖出；卖出受限时记录未成交订单。",
+            "停牌沿用最近有效收盘价仅用于估值，延续价格不得用于成交。",
+            "不模拟盘口排队、概率性部分成交与非线性市场冲击。",
+        )
     return ExperimentReportInput(
         experiment_id="exp-abc123",
         run_id="run-xyz789",
@@ -252,11 +260,7 @@ def _experiment_input() -> ExperimentReportInput:
         benchmark_closes=benchmark,
         benchmark_symbols=("000300.SH", "000905.SH"),
         generated_at="2024-01-09T09:00:00",
-        known_limitations=(
-            "T+1 约束：当日买入次日方可卖出；卖出受限时记录未成交订单。",
-            "停牌沿用最近有效收盘价仅用于估值，延续价格不得用于成交。",
-            "不模拟盘口排队、概率性部分成交与非线性市场冲击。",
-        ),
+        known_limitations=known_limitations,
     )
 
 
@@ -423,6 +427,29 @@ def test_experiment_html_is_self_contained(tmp_path):
     path = render_experiment_report(_experiment_input(), tmp_path / "report.html")
     html = path.read_text(encoding="utf-8")
     _assert_self_contained(html)
+
+
+def test_experiment_html_always_surfaces_phase_one_known_limitations(tmp_path):
+    # The CLI report build path supplies no run-specific known limitations; the
+    # two phase-one boundaries must still render in the 已知限制 section.
+    path = render_experiment_report(
+        _experiment_input(known_limitations=()), tmp_path / "report.html"
+    )
+    html = path.read_text(encoding="utf-8")
+    assert "跨源收盘价差异超过容差" in html
+    assert "Tushare 主源收盘序列为准" in html
+    assert "不发布、也不消费复权日线" in html
+    assert "adjusted_close=close" in html
+    # Run-specific limitations still follow the phase-one boundaries when given.
+    with_extra = _experiment_input(
+        known_limitations=("自定义实验限制：示例。",)
+    )
+    combined = render_experiment_report(
+        with_extra, tmp_path / "report2.html"
+    ).read_text(encoding="utf-8")
+    phase_one_pos = combined.index("跨源收盘价差异超过容差")
+    extra_pos = combined.index("自定义实验限制：示例。")
+    assert phase_one_pos < extra_pos
 
 
 # --------------------------------------------------------------------------- #

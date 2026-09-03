@@ -42,6 +42,9 @@ _EASTMONEY_COLUMNS = [
     "方案进度",
     "方案",
 ]
+# Eastmoney may report 方案进度 without a standalone 方案 / 方案说明 column; the
+# optional ``plan`` field must then fall back to its documented default.
+_EASTMONEY_COLUMNS_WITHOUT_PLAN = [c for c in _EASTMONEY_COLUMNS if c != "方案"]
 
 
 def _per10(per_share: float) -> float:
@@ -104,6 +107,33 @@ def eastmoney_cash(
             }
         ],
         columns=_EASTMONEY_COLUMNS,
+    )
+
+
+def eastmoney_without_plan_column(
+    per_share: float,
+    *,
+    symbol: str = "600519",
+    progress: str = "实施",
+    bonus_per_10: float = 0.0,
+    cap_per_10: float = 0.0,
+) -> pd.DataFrame:
+    """An Eastmoney frame with ``方案进度`` but no ``方案`` / ``方案说明`` column."""
+    return pd.DataFrame(
+        [
+            {
+                "代码": symbol,
+                "名称": "placeholder",
+                "最新公告日期": "2020-05-20",
+                "股权登记日": "2020-06-10",
+                "除权除息日": "2020-06-11",
+                "现金分红-现金分红比例": _per10(per_share),
+                "送转股份-送股比例": bonus_per_10,
+                "送转股份-转股比例": cap_per_10,
+                "方案进度": progress,
+            }
+        ],
+        columns=_EASTMONEY_COLUMNS_WITHOUT_PLAN,
     )
 
 
@@ -234,3 +264,44 @@ def test_cross_source_equal_unsupported_stays_unsupported():
     )
     assert result.accepted.empty
     assert (result.quarantined["reason"] == REASON_UNSUPPORTED_CORPORATE_ACTION).all()
+
+
+def test_plan_column_absent_uses_documented_default_without_raising():
+    # Regression: an Eastmoney-shaped frame with 方案进度 but no standalone
+    # 方案 / 方案说明 column used to crash ``normalize_corporate_actions`` with
+    # ``KeyError('')`` because the optional plan field was resolved to "" and
+    # then read unconditionally. The plan read is now skipped when no column is
+    # present, so the plan keeps its documented default (absent -> no text) and
+    # normalization proceeds.
+    result = normalize_corporate_actions(
+        None, eastmoney_without_plan_column(per_share=0.1)
+    )
+    assert not result.accepted.empty
+    assert result.quarantined.empty
+    row = result.accepted.iloc[0]
+    assert row["symbol"] == "600519.SH"
+    assert row["confirmed_by"] == "eastmoney"
+    assert row["status"] == "implemented"
+    assert row["cash_dividend_per_share"] == pytest.approx(0.1)
+
+
+def test_plan_column_absent_unsupported_detection_still_reads_progress():
+    # With no 方案 / 方案说明 column the plan defaults to absent, but unsupported
+    # keyword detection must still consult the 方案进度 text.
+    result = normalize_corporate_actions(
+        None, eastmoney_without_plan_column(per_share=0.1, progress="拟配股")
+    )
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == REASON_UNSUPPORTED_CORPORATE_ACTION
+
+
+def test_plan_column_absent_second_supplier_never_reads_empty_plan():
+    # Cross-source path: a plan-less Eastmoney frame reconciled against CNINFO
+    # must not read the empty plan resolution on either side.
+    result = normalize_corporate_actions(
+        _cninfo_plan(cash_per_10=1.0),
+        eastmoney_without_plan_column(per_share=0.1),
+    )
+    assert result.quarantined.empty
+    assert not result.accepted.empty
+    assert result.accepted.iloc[0]["confirmed_by"] == "cninfo+eastmoney"

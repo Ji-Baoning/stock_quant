@@ -97,6 +97,16 @@ _RUN_MANIFEST = "run_manifest.json"
 #: open without re-optimising quantities against a later price.
 _SIZING_FRACTION = 0.85
 
+#: Bar quality annotation fed to factors and the backtest engine for the
+#: phase-one authoritative path.  Design §13.5: the publication gate must not
+#: depend on strategy inputs, and cross-source stock-close disagreement above
+#: tolerance is a non-required, report-only signal -- the Tushare primary close
+#: series is authoritative for factors and backtests.  Cross-source close ERROR
+#: is therefore never fed here: it is surfaced only in the quality report.  The
+#: value stays the constant "INFO" (no ERROR bars reach factors/engine); this
+#: name documents the ruling instead of a bare literal.
+QUALITY_SEVERITY_AUTHORITATIVE = "INFO"
+
 _DEPENDENCY_VERSIONS = ("pandas", "numpy", "pyarrow", "duckdb", "pydantic", "yaml")
 
 
@@ -1112,7 +1122,10 @@ class ResearchRunner:
             "trade_date": equity["trade_date"],
             "open": equity["open"],
             "close": equity["close"],
-            "quality_severity": "INFO",
+            # Phase-one ruling (§13.5): the primary close series is authoritative;
+            # engine ERROR-level bars (e.g. cross-source close disagreement) are
+            # report-only and never reach the backtest.
+            "quality_severity": QUALITY_SEVERITY_AUTHORITATIVE,
         })
         benchmark_symbols = set(self._project_config.benchmark_symbols)
         benchmark = daily[daily["symbol"].isin(benchmark_symbols)].copy()
@@ -1349,7 +1362,10 @@ class _DatasetFactorAdapter:
             "source": rows["source"],
             "adjustment": rows["adjustment"],
             "adjusted_close": rows["close"],
-            "quality_severity": "INFO",
+            # Phase-one ruling (§13.5): the Tushare primary close series is
+            # authoritative for factors; per-bar cross-source close ERROR is
+            # report-only (quality report) and never fed to a factor.
+            "quality_severity": QUALITY_SEVERITY_AUTHORITATIVE,
             "listed_trading_days": listed,
         })
         return out

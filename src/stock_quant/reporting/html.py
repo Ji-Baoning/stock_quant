@@ -64,6 +64,23 @@ _PRIMARY_BENCHMARK = "000300.SH"
 # send-to-cloud links disabled.
 _PLOTLY_CONFIG = {"displaylogo": False}
 
+# Phase-one universal limitations, surfaced in every experiment report's
+# 已知限制 section (and the README).  They are report-only boundaries, not
+# defects: cross-source stock-close disagreement above tolerance is recorded as
+# ERROR in the quality report but the Tushare primary close series is
+# authoritative for factors and backtests (design §13.5 keeps the publication
+# gate strategy-independent), and no adjusted (复权) daily series is published
+# or consumed at the factor layer in phase one -- momentum runs on the
+# unadjusted series (adjusted_close=close) and BaoStock adjusted data is fetched
+# only for optional continuity/cross-checks, never for factors.
+_PHASE_ONE_KNOWN_LIMITATIONS = (
+    "跨源收盘价差异超过容差时，仅在质量报告中记录为 ERROR，本阶段不阻断发布："
+    "因子与回测以 Tushare 主源收盘序列为准（设计 §13.5 令发布门禁与策略输入无关），"
+    "跨源收盘差异仅作报告提示。",
+    "本阶段不发布、也不消费复权日线：动量基于未复权序列计算（adjusted_close=close）；"
+    "BaoStock 复权数据仅用于可选的延续性与交叉核对，不参与因子。",
+)
+
 # --------------------------------------------------------------------------- #
 # Input types (frozen, presentation-level)
 # --------------------------------------------------------------------------- #
@@ -583,7 +600,11 @@ def render_experiment_report(
         charts=charts,
         plotly_js=_plotlyjs(),
         scenario_sections=_scenario_sections(experiment),
-        known_limitations=list(experiment.known_limitations),
+        # Phase-one boundaries always lead the 已知限制 list; any run-specific
+        # limitations supplied by the caller follow.
+        known_limitations=(
+            list(_PHASE_ONE_KNOWN_LIMITATIONS) + list(experiment.known_limitations)
+        ),
         primary_benchmark=experiment.primary_benchmark_symbol,
         benchmark_excess=(
             _pct(benchmark_excess) if benchmark_excess is not None else "—"
