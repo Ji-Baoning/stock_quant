@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2",
     "PyYAML>=6",
+    "typer>=0.9",
 ]
 
 [tool.setuptools.packages.find]
