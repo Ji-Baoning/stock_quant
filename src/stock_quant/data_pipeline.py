@@ -1,0 +1,1152 @@
+"""Offline-servable data update/validate pipeline over real suppliers.
+
+Task 13 wires an operator-facing ``data update`` / ``data validate`` flow on top
+of the immutable dataset publisher, the raw-store, the supplier adapters and the
+shared quality vocabulary.  The pipeline is unit-tested entirely offline with
+stub ``DataSource`` adapters (the constructor ``sources`` override mapping), so
+no test ever imports a supplier SDK, touches a network or reads a token.
+
+Role model (kept deliberately small and explicit):
+
+- ``tushare`` -- the *required primary* stock daily source (unadjusted bars for
+  every security listed in the carried ``security_master``).
+- ``akshare`` -- the *required reference* source: one ``index_history`` request
+  per configured benchmark plus best-effort corporate-action reconciliation
+  (``cninfo`` / ``eastmoney``).  Corporate actions are *best-effort*: an empty
+  or absent response is a legitimate empty table, and a fetch failure is a
+  ``WARNING`` that never blocks.
+- ``baostock`` -- the *optional validation* daily source (unadjusted).  A
+  failure is a ``WARNING`` (``optional_source_failure``); the run still
+  publishes.
+
+``DataPipeline.update`` always fetches into the immutable raw-store *before*
+normalizing, merges the fresh canonical bars/corporate actions over the existing
+immutable dataset (security master and trading calendar are carried unchanged),
+renders the shared quality report, and publishes **only** when the neutral gate
+passes and no ``FATAL`` pipeline issue exists.  A blocked or failed update
+returns ``dataset_ref is None`` while remaining diagnosable through
+``quality_report`` / ``source_status`` / ``raw_snapshots``.
+
+Live end-date discovery (``--end`` omitted) reuses the previously published
+dataset as the coverage evidence for ``resolve_latest_complete_date``; an
+explicit ``--end`` bypasses discovery but the merged window still runs the full
+quality checks.  This is engineering scaffolding for the MVP, not evidence of
+alpha -- nothing here is investment advice.
+"""
+
+from __future__ import annotations
+
+import time as _sleep_module
+import uuid
+from dataclasses import dataclass
+from datetime import date
+from datetime import datetime as _datetime
+from datetime import time as dt_time
+from typing import Any, Mapping, Sequence
+
+import pandas as pd
+
+from stock_quant.config import SourceConfig, load_project_config
+from stock_quant.data_model.calendar import TradingCalendar
+from stock_quant.data_model.corporate_actions import (
+    RECONCILED_COLUMNS,
+    normalize_corporate_actions,
+)
+from stock_quant.data_model.dataset import (
+    DatasetNotFoundError,
+    DatasetPublisher,
+    DatasetReader,
+    PublicationBlocked,
+)
+from stock_quant.data_model.normalize import normalize_daily
+from stock_quant.data_model.schemas import (
+    CORPORATE_ACTION_COLUMNS,
+    DAILY_COLUMNS,
+    DAILY_SCHEMA,
+    SECURITY_MASTER_COLUMNS,
+    TRADING_CALENDAR_COLUMNS,
+)
+from stock_quant.data_quality.gates import evaluate_publication
+from stock_quant.data_quality.models import (
+    TABLE_CORPORATE_ACTION,
+    QualityIssue,
+    QualityReport,
+    Severity,
+)
+from stock_quant.data_quality.raw_checks import (
+    check_daily_values,
+    check_primary_key_conflicts,
+    check_provenance,
+    check_schema,
+    classify_missing_row,
+)
+from stock_quant.data_sources.base import (
+    AuthenticationError,
+    DataRequest,
+    DataSource,
+    RetryPolicy,
+    fetch_with_retry,
+    translate_supplier_error,
+)
+from stock_quant.data_sources.raw_store import RawStore
+
+# --------------------------------------------------------------------------- #
+# Pipeline-level issue codes (kept out of the shared neutral-gate vocabulary:
+# they are gate conditions owned by this module, never by the dataset gate).
+# --------------------------------------------------------------------------- #
+
+CODE_SOURCE_FETCH_FAILED = "source_fetch_failed"
+CODE_REQUIRED_SOURCE_DISABLED = "required_source_disabled"
+CODE_NO_CURRENT_DATASET = "no_current_dataset"
+CODE_DATA_DISCOVERY_UNRESOLVED = "data_discovery_unresolved"
+CODE_OPTIONAL_SOURCE_FAILURE = "optional_source_failure"
+
+_CONFIGURED_SOURCES = ("tushare", "akshare", "baostock")
+_REQUIRED_ROLE = {"tushare": True, "akshare": True, "baostock": False}
+
+
+# --------------------------------------------------------------------------- #
+# Public value types
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class SourceStatus:
+    """Outcome of one configured source within an update."""
+
+    source: str
+    required: bool
+    ok: bool
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceCoverage:
+    """Latest *contiguous* complete open day each data role has reached.
+
+    ``stock_primary`` is the required primary stock daily series; ``benchmarks``
+    maps each benchmark symbol to its latest complete open day; ``validation``
+    maps each optional validation source to its latest complete open day.
+    """
+
+    stock_primary: date | None
+    benchmarks: Mapping[str, date]
+    validation: Mapping[str, date]
+
+
+@dataclass(frozen=True)
+class DataUpdateRequest:
+    """Idempotent request for one data update run.
+
+    ``end_date`` ``None`` triggers latest-complete-date discovery over the
+    currently published dataset; ``sources`` restricts to a subset of the
+    configured names.
+    """
+
+    start_date: date | None = None
+    end_date: date | None = None
+    sources: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class DataUpdateResult:
+    """One update's outcome: always diagnosable, published only when gated."""
+
+    quality_report: QualityReport
+    dataset_ref: Any
+    run_id: str
+    resolved_end_date: date | None
+    source_status: tuple[SourceStatus, ...]
+    raw_snapshots: tuple[str, ...]
+
+
+def resolve_latest_complete_date(
+    status: SourceCoverage,
+    calendar: TradingCalendar,
+    publication_time: dt_time,
+) -> date | None:
+    """Return the newest open day every required data role is complete through.
+
+    A day ``d`` is *complete* when the primary stock series, every benchmark
+    symbol and at least one validation source each reach ``d``.  Walking starts
+    at the newest open day on or before today; that day is ineligible until the
+    configured ``publication_time`` has passed.  Returns ``None`` when no open
+    day in the calendar satisfies the requirements.
+    """
+    open_days = calendar.open_days
+    if not open_days:
+        return None
+    now = _datetime.now()
+    today = now.date()
+    if calendar.is_trading_day(today):
+        first_candidate = today
+        today_eligible = now.time() >= publication_time
+    else:
+        first_candidate = _previous_open_day(open_days, today)
+        today_eligible = True
+    if not today_eligible:
+        first_candidate = _previous_open_day(open_days, first_candidate)
+    if first_candidate is None:
+        return None
+    candidates = [
+        day for day in reversed(open_days) if day <= first_candidate
+    ]
+    for day in candidates:
+        if _day_complete(status, day):
+            return day
+    return None
+
+
+def _previous_open_day(open_days: tuple[date, ...], day: date) -> date | None:
+    for candidate in reversed(open_days):
+        if candidate < day:
+            return candidate
+    return None
+
+
+def _day_complete(status: SourceCoverage, day: date) -> bool:
+    if status.stock_primary is None or status.stock_primary < day:
+        return False
+    if not status.benchmarks:
+        return False
+    if any(latest is None or latest < day for latest in status.benchmarks.values()):
+        return False
+    if not status.validation:
+        return False
+    return any(
+        latest is not None and latest >= day
+        for latest in status.validation.values()
+    )
+
+
+# --------------------------------------------------------------------------- #
+# DataPipeline
+# --------------------------------------------------------------------------- #
+
+
+class DataPipeline:
+    """Fetch, normalise, quality-check and publish one data update."""
+
+    def __init__(
+        self,
+        project_root,
+        *,
+        config_root=None,
+        sources: Mapping[str, DataSource] | None = None,
+        sleeper=_sleep_module.sleep,
+        secrets: Sequence[object] = (),
+    ) -> None:
+        self._project_root = type(project_root)(project_root)
+        self._config_root = (
+            type(project_root)(config_root) if config_root is not None
+            else self._project_root
+        )
+        self._overrides = dict(sources or {})
+        self._sleeper = sleeper
+        self._secrets = tuple(secrets)
+        self._project_config = load_project_config(self._config_root)
+        self._raw_store = RawStore(self._project_root)
+
+    # -- public surface --------------------------------------------------- #
+
+    def validate(self, version: str | None = None) -> QualityReport:
+        """Re-run the shared quality checks over a published dataset version.
+
+        ``version`` defaults to the ``CURRENT`` dataset.  The report carries the
+        same issue vocabulary as a publish-time report and is gate-evaluable,
+        but never publishes anything.
+        """
+        publisher = DatasetPublisher(self._project_root)
+        if version is None:
+            version = publisher.current().version
+        issues: list[QualityIssue] = []
+        reader = DatasetReader(self._project_root)
+        with reader.open(version) as context:
+            daily = context.read("daily_bar")
+            issues.extend(
+                check_schema(daily, DAILY_SCHEMA, table="daily_bar")
+            )
+            issues.extend(
+                check_primary_key_conflicts(daily, table="daily_bar")
+            )
+            issues.extend(check_daily_values(daily, table="daily_bar"))
+            issues.extend(check_provenance(daily, table="daily_bar"))
+        return QualityReport(issues=tuple(issues))
+
+    def update(self, request: DataUpdateRequest) -> DataUpdateResult:
+        """Run one gated, raw-preserving data update."""
+        run_id = f"data_update_{uuid.uuid4().hex[:12]}"
+        statuses: dict[str, SourceStatus] = {}
+        issues: list[QualityIssue] = []
+        raw_snapshots: list[str] = []
+
+        enabled = self._enabled_names(request)
+        for name in _CONFIGURED_SOURCES:
+            statuses[name] = SourceStatus(
+                source=name,
+                required=_REQUIRED_ROLE[name],
+                ok=False,
+                reason="not_run",
+            )
+
+        # ---- the carried, immutable baseline --------------------------- #
+        baseline = self._read_baseline(issues)
+        if baseline is None:
+            statuses = {name: status for name, status in statuses.items()}
+            return self._result(
+                issues, None, run_id, None, statuses, raw_snapshots
+            )
+        master, calendar_open, current_daily, current_ca = baseline
+
+        # ---- required-source availability gate -------------------------- #
+        required_blocked = self._require_available(enabled, issues, statuses)
+        if required_blocked:
+            return self._result(
+                issues,
+                None,
+                run_id,
+                None,
+                statuses,
+                raw_snapshots,
+            )
+
+        end = request.end_date
+        resolved_end: date | None = end
+        if end is None:
+            resolved_end = self._discover_end(calendar_open, current_daily)
+            if resolved_end is None:
+                issues.append(
+                    _issue(
+                        Severity.FATAL,
+                        CODE_DATA_DISCOVERY_UNRESOLVED,
+                        details={
+                            "message": (
+                                "no latest complete date could be resolved; pass "
+                                "an explicit --end or update the calendar first"
+                            )
+                        },
+                    )
+                )
+                return self._result(
+                    issues, None, run_id, None, statuses, raw_snapshots
+                )
+            end = resolved_end
+        start = request.start_date or self._project_config.start_date
+        if end < start:
+            issues.append(
+                _issue(
+                    Severity.FATAL,
+                    CODE_SOURCE_FETCH_FAILED,
+                    details={
+                        "message": "request end_date precedes start_date",
+                        "source": "request",
+                    },
+                )
+            )
+            return self._result(
+                issues, None, run_id, end, statuses, raw_snapshots
+            )
+
+        # ---- required primary stock daily ------------------------------- #
+        equity_symbols = _equity_symbols(master)
+        primary_rows: list[pd.DataFrame] = []
+        primary_dates: set[date] = set()
+        fatal = self._fetch_primary_stock(
+            enabled,
+            equity_symbols,
+            start,
+            end,
+            issues,
+            statuses,
+            raw_snapshots,
+            primary_rows,
+            primary_dates,
+        )
+        if fatal:
+            return self._result(issues, None, run_id, end, statuses, raw_snapshots)
+
+        # ---- required benchmark history --------------------------------- #
+        benchmark_symbols = tuple(self._project_config.benchmark_symbols)
+        benchmark_rows: list[pd.DataFrame] = []
+        benchmark_dates: set[date] = set()
+        fatal = self._fetch_benchmarks(
+            enabled,
+            benchmark_symbols,
+            start,
+            end,
+            issues,
+            statuses,
+            raw_snapshots,
+            benchmark_rows,
+            benchmark_dates,
+        )
+        if fatal:
+            return self._result(issues, None, run_id, end, statuses, raw_snapshots)
+
+        # ---- best-effort corporate actions ------------------------------ #
+        corporate_action = current_ca
+        if "akshare" in enabled:
+            corporate_action = self._refresh_corporate_actions(
+                enabled,
+                equity_symbols,
+                start,
+                end,
+                issues,
+                statuses,
+                raw_snapshots,
+                current_ca,
+            )
+
+        # ---- optional validation daily ---------------------------------- #
+        validation_rows: list[pd.DataFrame] = []
+        if "baostock" in enabled:
+            self._fetch_validation_daily(
+                enabled,
+                equity_symbols,
+                start,
+                end,
+                issues,
+                statuses,
+                raw_snapshots,
+                validation_rows,
+            )
+
+        # ---- quality report over the merged canonical daily ------------- #
+        ingested = pd.Timestamp.now(tz="UTC")
+        new_daily = self._merge_daily(
+            current_daily,
+            primary_rows,
+            benchmark_rows,
+            equity_symbols,
+            benchmark_symbols,
+            start,
+            end,
+            ingested,
+        )
+        issues.extend(check_schema(new_daily, DAILY_SCHEMA, table="daily_bar"))
+        issues.extend(check_primary_key_conflicts(new_daily, table="daily_bar"))
+        issues.extend(check_daily_values(new_daily, table="daily_bar"))
+        issues.extend(check_provenance(new_daily, table="daily_bar"))
+        issues.extend(
+            self._missing_issues(
+                equity_symbols,
+                master,
+                start,
+                end,
+                benchmark_dates,
+                primary_dates,
+                _symbol_dates(validation_rows),
+                ingested,
+            )
+        )
+
+        report = QualityReport(issues=tuple(issues))
+        decision = evaluate_publication(report)
+        fatal_present = any(
+            item.severity is Severity.FATAL for item in report.issues
+        )
+        if not decision.passed or fatal_present:
+            return self._result(
+                issues, None, run_id, end, statuses, raw_snapshots
+            )
+
+        # ---- publish ---------------------------------------------------- #
+        tables = {
+            "daily_bar": new_daily,
+            "security_master": master[list(SECURITY_MASTER_COLUMNS)],
+            "corporate_action": corporate_action[
+                list(CORPORATE_ACTION_COLUMNS)
+            ],
+            "trading_calendar": _calendar_frame(calendar_open)[
+                list(TRADING_CALENDAR_COLUMNS)
+            ],
+        }
+        try:
+            dataset_ref = DatasetPublisher(self._project_root).publish(
+                tables, report, build_config={"run_id": run_id}
+            )
+        except PublicationBlocked as error:
+            issues.append(
+                _issue(
+                    Severity.FATAL,
+                    CODE_SOURCE_FETCH_FAILED,
+                    details={"message": str(error)},
+                )
+            )
+            return self._result(
+                issues, None, run_id, end, statuses, raw_snapshots
+            )
+        return self._result(issues, dataset_ref, run_id, end, statuses, raw_snapshots)
+
+    # ------------------------------------------------------------------ #
+    # helpers
+    # ------------------------------------------------------------------ #
+
+    def _enabled_names(self, request: DataUpdateRequest) -> frozenset[str]:
+        enabled = {
+            name
+            for name, config in self._project_config.sources.items()
+            if config.enabled
+        }
+        if request.sources is not None:
+            allowed = set(request.sources)
+            enabled = {name for name in enabled if name in allowed}
+        return frozenset(enabled)
+
+    def _source(self, name: str) -> DataSource:
+        override = self._overrides.get(name)
+        if override is not None:
+            return override
+        config = self._project_config.sources[name]
+        try:
+            return _build_source(name, config)
+        except KeyError as error:
+            raise AuthenticationError(
+                f"source {name!r} requires {error.args[0]} to be configured"
+            ) from None
+        except Exception as error:  # noqa: BLE001 - surface cleanly to the CLI
+            raise AuthenticationError(
+                f"cannot initialise source {name!r}: {translate_supplier_error(error)}"
+            ) from None
+
+    def _read_baseline(self, issues: list[QualityIssue]):
+        """The carried master/calendar/current tables, or None + fatal issue."""
+        try:
+            ref = DatasetPublisher(self._project_root).current()
+        except DatasetNotFoundError:
+            issues.append(
+                _issue(
+                    Severity.FATAL,
+                    CODE_NO_CURRENT_DATASET,
+                    details={
+                        "message": (
+                            "no published dataset to update; a dataset carrying "
+                            "security_master and trading_calendar must exist first"
+                        )
+                    },
+                )
+            )
+            return None
+        reader = DatasetReader(self._project_root)
+        with reader.open(ref.version) as context:
+            master = context.read("security_master")
+            calendar_frame = context.read("trading_calendar")
+            daily = context.read("daily_bar")
+            ca = context.read(TABLE_CORPORATE_ACTION)
+        open_days = tuple(
+            sorted(
+                day.date()
+                for day, flag in zip(
+                    calendar_frame["calendar_date"],
+                    calendar_frame["is_trading_day"],
+                )
+                if bool(flag)
+            )
+        )
+        return master, open_days, daily, ca
+
+    def _require_available(
+        self,
+        enabled: frozenset[str],
+        issues: list[QualityIssue],
+        statuses: dict[str, SourceStatus],
+    ) -> bool:
+        """Mark unavailable required sources; True when any is missing."""
+        blocked = False
+        for name in _CONFIGURED_SOURCES:
+            if _REQUIRED_ROLE[name] and name not in enabled:
+                blocked = True
+                statuses[name] = SourceStatus(
+                    source=name,
+                    required=True,
+                    ok=False,
+                    reason=f"required source {name!r} is not enabled in config",
+                )
+                issues.append(
+                    _issue(
+                        Severity.FATAL,
+                        CODE_REQUIRED_SOURCE_DISABLED,
+                        symbol=None,
+                        details={"source": name},
+                    )
+                )
+        return blocked
+
+    def _fetch_primary_stock(
+        self,
+        enabled,
+        symbols,
+        start,
+        end,
+        issues,
+        statuses,
+        raw_snapshots,
+        primary_rows,
+        primary_dates,
+    ) -> bool:
+        if "tushare" not in enabled:
+            return False
+        source = self._adapter_or_fail("tushare", statuses)
+        if source is None:
+            return True
+        for symbol in symbols:
+            result = self._dispatch(
+                "tushare", source, "daily", symbol, start, end,
+                {"adjustment": "unadjusted"}, required=True, issues=issues,
+            )
+            if result is None:
+                statuses["tushare"] = SourceStatus(
+                    "tushare", True, False,
+                    reason=f"required fetch failed for {symbol}",
+                )
+                return True
+            raw_snapshots.append(self._record_raw(result))
+            clean = normalize_daily(
+                result.frame, "tushare", _ingest_time(result.metadata)
+            )
+            primary_rows.append(clean.valid)
+            primary_dates.update(clean.valid["trade_date"].dt.date)
+        statuses["tushare"] = SourceStatus("tushare", True, True)
+        return False
+
+    def _fetch_benchmarks(
+        self,
+        enabled,
+        symbols,
+        start,
+        end,
+        issues,
+        statuses,
+        raw_snapshots,
+        benchmark_rows,
+        benchmark_dates,
+    ) -> bool:
+        if "akshare" not in enabled:
+            return False
+        source = self._adapter_or_fail("akshare", statuses)
+        if source is None:
+            return True
+        for symbol in symbols:
+            result = self._dispatch(
+                "akshare", source, "index_history", symbol, start, end, {},
+                required=True, issues=issues,
+            )
+            if result is None:
+                statuses["akshare"] = SourceStatus(
+                    "akshare", True, False,
+                    reason=f"required fetch failed for {symbol}",
+                )
+                return True
+            raw_snapshots.append(self._record_raw(result))
+            try:
+                clean = _normalize_index(result.frame, symbol, result.metadata)
+            except Exception as error:  # noqa: BLE001 - required reference role
+                issues.append(
+                    _issue(
+                        Severity.FATAL,
+                        CODE_SOURCE_FETCH_FAILED,
+                        details={
+                            "source": "akshare",
+                            "endpoint": "index_history",
+                            "symbol": symbol,
+                            "message": str(error),
+                        },
+                    )
+                )
+                statuses["akshare"] = SourceStatus(
+                    "akshare", True, False, reason=str(error)
+                )
+                return True
+            benchmark_rows.append(clean)
+            benchmark_dates.update(clean["trade_date"].dt.date)
+        statuses["akshare"] = SourceStatus("akshare", True, True)
+        return False
+
+    def _refresh_corporate_actions(
+        self,
+        enabled,
+        symbols,
+        start,
+        end,
+        issues,
+        statuses,
+        raw_snapshots,
+        current_ca,
+    ):
+        """Reconcile cninfo/eastmoney per held security, best-effort."""
+        source = self._overrides.get("akshare") or self._build_lazy("akshare")
+        if source is None:
+            return current_ca
+        cninfo_frames: list[pd.DataFrame] = []
+        eastmoney_frames: list[pd.DataFrame] = []
+        for symbol in symbols:
+            for endpoint, sink in (
+                ("cninfo_corporate_actions", cninfo_frames),
+                ("eastmoney_corporate_actions", eastmoney_frames),
+            ):
+                try:
+                    result = self._fetch_one(
+                        source,
+                        DataRequest(endpoint, (symbol,), start, end, {}),
+                    )
+                    raw_snapshots.append(self._record_raw(result))
+                    if not result.frame.empty:
+                        sink.append(result.frame)
+                except Exception as error:  # noqa: BLE001 - best-effort role
+                    issues.append(
+                        _issue(
+                            Severity.WARNING,
+                            CODE_OPTIONAL_SOURCE_FAILURE,
+                            details={
+                                "source": "akshare",
+                                "endpoint": endpoint,
+                                "message": str(error),
+                            },
+                        )
+                    )
+        try:
+            accepted = normalize_corporate_actions(
+                pd.concat(cninfo_frames, ignore_index=True)
+                if cninfo_frames else None,
+                pd.concat(eastmoney_frames, ignore_index=True)
+                if eastmoney_frames else None,
+            ).accepted
+        except Exception as error:  # noqa: BLE001
+            issues.append(
+                _issue(
+                    Severity.WARNING,
+                    CODE_OPTIONAL_SOURCE_FAILURE,
+                    details={
+                        "source": "akshare",
+                        "message": f"corporate-action reconciliation: {error}",
+                    },
+                )
+            )
+            return current_ca
+        if accepted.empty:
+            return current_ca
+        canonical = _corporate_actions_canonical(accepted)
+        return _merge_corporate_actions(current_ca, canonical)
+
+    def _build_lazy(self, name):
+        try:
+            return self._source(name)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _fetch_validation_daily(
+        self,
+        enabled,
+        symbols,
+        start,
+        end,
+        issues,
+        statuses,
+        raw_snapshots,
+        validation_rows,
+    ) -> None:
+        source = self._adapter_or_warn("baostock", issues)
+        if source is None:
+            statuses["baostock"] = SourceStatus(
+                "baostock", False, False,
+                reason="optional source unavailable",
+            )
+            return
+        failures = 0
+        for symbol in symbols:
+            result = self._dispatch(
+                "baostock", source, "daily", symbol, start, end,
+                {"adjustment": "unadjusted"}, required=False, issues=issues,
+            )
+            if result is None:
+                failures += 1
+                continue
+            raw_snapshots.append(self._record_raw(result))
+            validation_rows.append(
+                normalize_daily(
+                    result.frame, "baostock", _ingest_time(result.metadata)
+                ).valid
+            )
+        if failures:
+            statuses["baostock"] = SourceStatus(
+                "baostock", False, False,
+                reason=f"{failures} of {len(symbols)} validation requests failed",
+            )
+        else:
+            statuses["baostock"] = SourceStatus("baostock", False, True)
+
+    def _adapter_or_fail(self, name, statuses):
+        try:
+            return self._source(name)
+        except Exception as error:  # noqa: BLE001
+            statuses[name] = SourceStatus(
+                source=name,
+                required=True,
+                ok=False,
+                reason=str(error),
+            )
+            return None
+
+    def _adapter_or_warn(self, name, issues):
+        try:
+            return self._source(name)
+        except Exception as error:  # noqa: BLE001
+            issues.append(
+                _issue(
+                    Severity.WARNING,
+                    CODE_OPTIONAL_SOURCE_FAILURE,
+                    details={"source": name, "message": str(error)},
+                )
+            )
+            return None
+
+    def _dispatch(
+        self,
+        name,
+        source,
+        endpoint,
+        symbol,
+        start,
+        end,
+        params,
+        *,
+        required: bool,
+        issues=None,
+    ):
+        config: SourceConfig = self._project_config.sources.get(
+            name, SourceConfig()
+        )
+        policy = RetryPolicy(
+            max_attempts=min(config.max_retries + 1, 3),
+            maximum_wait_seconds=min(config.timeout_seconds, 30),
+        )
+        request = DataRequest(endpoint, (symbol,), start, end, params)
+        try:
+            return fetch_with_retry(
+                source, request, policy, sleeper=self._sleeper
+            )
+        except Exception as error:  # noqa: BLE001
+            message = str(translate_supplier_error(error))
+            if required:
+                issues.append(
+                    _issue(
+                        Severity.FATAL,
+                        CODE_SOURCE_FETCH_FAILED,
+                        details={
+                            "source": name,
+                            "endpoint": endpoint,
+                            "symbol": symbol,
+                            "message": message,
+                        },
+                    )
+                )
+                return None
+            if issues is not None:
+                issues.append(
+                    _issue(
+                        Severity.WARNING,
+                        CODE_OPTIONAL_SOURCE_FAILURE,
+                        details={
+                            "source": name,
+                            "endpoint": endpoint,
+                            "symbol": symbol,
+                            "message": message,
+                        },
+                    )
+                )
+            return None
+
+    def _fetch_one(self, source, request):
+        config = self._project_config.sources.get(
+            "akshare", SourceConfig()
+        )
+        policy = RetryPolicy(
+            max_attempts=min(config.max_retries + 1, 3),
+            maximum_wait_seconds=min(config.timeout_seconds, 30),
+        )
+        return fetch_with_retry(source, request, policy, sleeper=self._sleeper)
+
+    def _record_raw(self, result) -> str:
+        snapshot = self._raw_store.save(result)
+        return snapshot.sha256
+
+    def _merge_daily(
+        self,
+        current,
+        primary_rows,
+        benchmark_rows,
+        equity_symbols,
+        benchmark_symbols,
+        start,
+        end,
+        ingested,
+    ) -> pd.DataFrame:
+        replaced = set(equity_symbols) | set(benchmark_symbols)
+        traded = current["trade_date"]
+        overlap = (
+            (traded >= pd.Timestamp(start))
+            & (traded <= pd.Timestamp(end))
+            & (current["symbol"].isin(replaced))
+        )
+        kept = current.loc[~overlap].copy()
+        fresh = _concat(primary_rows + benchmark_rows)
+        if fresh is None:
+            merged = kept
+        else:
+            merged = pd.concat([kept, fresh], ignore_index=True)
+        return _coerce_daily(merged, ingested)
+
+    def _missing_issues(
+        self,
+        equity_symbols,
+        master,
+        start,
+        end,
+        benchmark_dates,
+        primary_dates,
+        validation_dates,
+        ingested,
+    ) -> list[QualityIssue]:
+        grid = sorted(day for day in benchmark_dates if start <= day <= end)
+        if not grid:
+            return []
+        details = {
+            str(row["symbol"]): (_as_date(row["list_date"]),
+                                 _as_date(row["delist_date"]))
+            for row in master.to_dict("records")
+        }
+        issues: list[QualityIssue] = []
+        for symbol in equity_symbols:
+            list_date, delist_date = details.get(symbol, (None, None))
+            if list_date is not None and list_date > grid[0]:
+                continue
+            if delist_date is not None and delist_date < grid[-1]:
+                continue
+            for day in grid:
+                key = (symbol, day)
+                if key in primary_dates:
+                    continue
+                code = classify_missing_row(
+                    trade_date=day,
+                    list_date=list_date,
+                    delist_date=delist_date,
+                    is_trading_day=True,
+                    primary_present=False,
+                    validation_present=key in validation_dates,
+                )
+                issues.append(
+                    _issue(
+                        Severity.WARNING,
+                        code,
+                        symbol=symbol,
+                        trade_date=day,
+                        table="daily_bar",
+                    )
+                )
+        return issues
+
+    def _discover_end(self, calendar_open, current_daily) -> date | None:
+        if not calendar_open:
+            return None
+        calendar = TradingCalendar.from_open_days(calendar_open)
+        benchmark_symbols = tuple(self._project_config.benchmark_symbols)
+        by_symbol = {symbol: set() for symbol in benchmark_symbols}
+        tushare_dates: set[date] = set()
+        for record in current_daily.to_dict("records"):
+            symbol = str(record["symbol"])
+            day = _as_date(record["trade_date"])
+            if symbol in by_symbol:
+                by_symbol[symbol].add(day)
+            elif record.get("source") == "tushare":
+                tushare_dates.add(day)
+        if not tushare_dates or any(
+            not dates for dates in by_symbol.values()
+        ):
+            return None
+        coverage = SourceCoverage(
+            stock_primary=max(tushare_dates),
+            benchmarks={s: max(dates) for s, dates in by_symbol.items()},
+            validation={"akshare": max(tushare_dates)},
+        )
+        return resolve_latest_complete_date(coverage, calendar, dt_time(15, 0))
+
+    def _result(
+        self,
+        issues,
+        dataset_ref,
+        run_id,
+        resolved_end,
+        statuses,
+        raw_snapshots,
+    ) -> DataUpdateResult:
+        return DataUpdateResult(
+            quality_report=QualityReport(issues=tuple(issues)),
+            dataset_ref=dataset_ref,
+            run_id=run_id,
+            resolved_end_date=resolved_end,
+            source_status=tuple(
+                statuses[name] for name in _CONFIGURED_SOURCES
+            ),
+            raw_snapshots=tuple(raw_snapshots),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Builders / canonicalisers local to the pipeline
+# --------------------------------------------------------------------------- #
+
+
+def _build_source(name: str, config: SourceConfig) -> DataSource:
+    if name == "tushare":
+        from stock_quant.data_sources.tushare import TushareSource
+
+        return TushareSource(config, client=None)
+    if name == "akshare":
+        from stock_quant.data_sources.akshare import AkShareSource
+
+        return AkShareSource(config, client=None)
+    if name == "baostock":
+        from stock_quant.data_sources.baostock import BaoStockSource
+
+        return BaoStockSource(config, client=None)
+    raise ValueError(f"unknown configured source: {name}")
+
+
+def _ingest_time(metadata: object) -> object:
+    """A deterministic ingest timestamp from adapter metadata when present."""
+    if isinstance(metadata, dict):
+        value = metadata.get("response_timestamp")
+        if value is not None:
+            return pd.Timestamp(value)
+    return pd.Timestamp.now(tz="UTC")
+
+
+def _equity_symbols(master: pd.DataFrame) -> list[str]:
+    symbols = [str(row["symbol"]) for row in master.to_dict("records")]
+    return sorted(symbols)
+
+
+def _concat(frames: list[pd.DataFrame]) -> pd.DataFrame | None:
+    frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
+
+
+def _symbol_dates(frames: list[pd.DataFrame]) -> set[tuple[str, date]]:
+    out: set[tuple[str, date]] = set()
+    for frame in frames:
+        for record in frame.to_dict("records"):
+            out.add((str(record["symbol"]), _as_date(record["trade_date"])))
+    return out
+
+
+def _normalize_index(
+    frame: pd.DataFrame, symbol: str, metadata: object
+) -> pd.DataFrame:
+    """Canonicalise one AKShare index_history response into daily columns."""
+    columns = {
+        "日期": "trade_date",
+        "开盘": "open",
+        "最高": "high",
+        "最低": "low",
+        "收盘": "close",
+        "成交量": "volume",
+        "成交额": "amount",
+    }
+    present = {name: column for name, column in columns.items()
+               if name in frame.columns}
+    missing = [name for name in columns if name not in present]
+    if missing:
+        raise ValueError(
+            f"index_history response is missing columns: {', '.join(missing)}"
+        )
+    rows: list[dict[str, object]] = []
+    ingested = _ingest_time(metadata)
+    for record in frame.to_dict("records"):
+        rows.append(
+            {
+                "trade_date": pd.Timestamp(record["日期"]),
+                "symbol": symbol,
+                "open": float(record["开盘"]),
+                "high": float(record["最高"]),
+                "low": float(record["最低"]),
+                "close": float(record["收盘"]),
+                "volume": int(record["成交量"]) * 100,
+                "amount": float(record["成交额"]),
+                "adjustment": "unadjusted",
+                "source": "akshare",
+                "ingested_at": ingested,
+            }
+        )
+    return pd.DataFrame(rows, columns=DAILY_COLUMNS)
+
+
+def _coerce_daily(frame: pd.DataFrame, ingested) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=DAILY_COLUMNS)
+    out = frame[list(DAILY_COLUMNS)].copy()
+    out["trade_date"] = pd.to_datetime(out["trade_date"])
+    for column in ("open", "high", "low", "close", "amount"):
+        out[column] = out[column].astype("float64")
+    out["volume"] = out["volume"].astype("int64")
+    out["ingested_at"] = pd.to_datetime(out["ingested_at"], utc=True)
+    return out
+
+
+def _corporate_actions_canonical(accepted: pd.DataFrame) -> pd.DataFrame:
+    columns = list(RECONCILED_COLUMNS)
+    source = accepted["confirmed_by"] if "confirmed_by" in accepted.columns \
+        else "cninfo+eastmoney"
+    canonical = accepted[columns[:-1]].copy()
+    canonical["source"] = source
+    canonical["status"] = "implemented"
+    return canonical[list(CORPORATE_ACTION_COLUMNS)].reset_index(drop=True)
+
+
+def _merge_corporate_actions(
+    current: pd.DataFrame, fresh: pd.DataFrame
+) -> pd.DataFrame:
+    if current.empty:
+        return fresh
+    key = ["symbol", "ex_date"]
+    existing = current[list(CORPORATE_ACTION_COLUMNS)]
+    kept = existing.loc[
+        ~existing.set_index(key).index.isin(fresh.set_index(key).index)
+    ]
+    merged = pd.concat([kept, fresh], ignore_index=True)
+    return merged[list(CORPORATE_ACTION_COLUMNS)]
+
+
+def _calendar_frame(open_days: tuple[date, ...]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "calendar_date": pd.to_datetime(open_days),
+            "is_trading_day": [True] * len(open_days),
+        }
+    )
+
+
+def _as_date(value: object) -> date | None:
+    if value is None or pd.isna(value):
+        return None
+    return pd.Timestamp(value).date()
+
+
+def _issue(
+    severity,
+    code,
+    *,
+    symbol=None,
+    trade_date=None,
+    table="data_update",
+    details=None,
+) -> QualityIssue:
+    return QualityIssue(
+        severity=severity,
+        code=code,
+        table=table,
+        symbol=symbol,
+        trade_date=trade_date,
+        details=dict(details or {}),
+    )
