@@ -1,0 +1,236 @@
+"""Corporate-action cross-source reconciliation tests (Task 5).
+
+``normalize_corporate_actions`` consumes supplier-native corporate-action
+frames in the documented AKShare layouts (CNINFO primary, Eastmoney
+cross-check) and reconciles them into implemented, supported events. These
+tests never call a network or supplier; every frame is authored inline.
+"""
+
+import pandas as pd
+import pytest
+
+from stock_quant.data_model.corporate_actions import (
+    REASON_CROSS_SOURCE_CONFLICT,
+    REASON_INCOMPLETE,
+    REASON_NOT_IMPLEMENTED,
+    REASON_UNSUPPORTED_CORPORATE_ACTION,
+    normalize_corporate_actions,
+)
+
+# Documented supplier-native column names (CNINFO primary, Eastmoney cross).
+_CNINFO_COLUMNS = [
+    "证券代码",
+    "证券简称",
+    "公告日期",
+    "股权登记日",
+    "除权除息日",
+    "派息(税前)(元/10股)",
+    "送股(股/10股)",
+    "转增(股/10股)",
+    "进度",
+    "方案",
+]
+_EASTMONEY_COLUMNS = [
+    "代码",
+    "名称",
+    "最新公告日期",
+    "股权登记日",
+    "除权除息日",
+    "现金分红-现金分红比例",
+    "送转股份-送股比例",
+    "送转股份-转股比例",
+    "方案进度",
+    "方案",
+]
+
+
+def _per10(per_share: float) -> float:
+    """Convert a per-share fraction to the native per-10-share value exactly."""
+    return float(per_share) * 10
+
+
+def cninfo_cash(
+    per_share: float,
+    *,
+    symbol: str = "600519",
+    announcement: str = "2020-05-20",
+    record: str = "2020-06-10",
+    ex: str = "2020-06-11",
+    progress: str = "实施",
+    plan: str = "10派1元(含税)",
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "证券代码": symbol,
+                "证券简称": "placeholder",
+                "公告日期": announcement,
+                "股权登记日": record,
+                "除权除息日": ex,
+                "派息(税前)(元/10股)": _per10(per_share),
+                "送股(股/10股)": 0.0,
+                "转增(股/10股)": 0.0,
+                "进度": progress,
+                "方案": plan,
+            }
+        ],
+        columns=_CNINFO_COLUMNS,
+    )
+
+
+def eastmoney_cash(
+    per_share: float,
+    *,
+    symbol: str = "600519",
+    announcement: str = "2020-05-20",
+    record: str = "2020-06-10",
+    ex: str = "2020-06-11",
+    progress: str = "实施",
+    plan: str = "10派1元(含税)",
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "代码": symbol,
+                "名称": "placeholder",
+                "最新公告日期": announcement,
+                "股权登记日": record,
+                "除权除息日": ex,
+                "现金分红-现金分红比例": _per10(per_share),
+                "送转股份-送股比例": 0.0,
+                "送转股份-转股比例": 0.0,
+                "方案进度": progress,
+                "方案": plan,
+            }
+        ],
+        columns=_EASTMONEY_COLUMNS,
+    )
+
+
+def _cninfo_plan(
+    *,
+    cash_per_10: float = 0.0,
+    bonus_per_10: float = 0.0,
+    cap_per_10: float = 0.0,
+    progress: str = "实施",
+    plan: str = "10派1元(含税)",
+    record: str | None = "2020-06-10",
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "证券代码": "600519",
+                "证券简称": "placeholder",
+                "公告日期": "2020-05-20",
+                "股权登记日": record,
+                "除权除息日": "2020-06-11",
+                "派息(税前)(元/10股)": cash_per_10,
+                "送股(股/10股)": bonus_per_10,
+                "转增(股/10股)": cap_per_10,
+                "进度": progress,
+                "方案": plan,
+            }
+        ],
+        columns=_CNINFO_COLUMNS,
+    )
+
+
+def test_conflicting_implemented_actions_are_quarantined():
+    result = normalize_corporate_actions(cninfo_cash(0.1), eastmoney_cash(0.2))
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == REASON_CROSS_SOURCE_CONFLICT
+
+
+def test_conflicting_actions_preserve_both_source_records():
+    result = normalize_corporate_actions(cninfo_cash(0.1), eastmoney_cash(0.2))
+    assert len(result.quarantined) == 2
+    assert set(result.quarantined["confirmed_by"]) == {"cninfo", "eastmoney"}
+    assert (result.quarantined["reason"] == REASON_CROSS_SOURCE_CONFLICT).all()
+
+
+def test_equal_cninfo_and_eastmoney_facts_cross_confirm_to_one_row():
+    result = normalize_corporate_actions(cninfo_cash(0.1), eastmoney_cash(0.1))
+    assert result.quarantined.empty
+    assert len(result.accepted) == 1
+    row = result.accepted.iloc[0]
+    assert row["symbol"] == "600519.SH"
+    assert row["confirmed_by"] == "cninfo+eastmoney"
+    assert row["status"] == "implemented"
+    assert row["cash_dividend_per_share"] == pytest.approx(0.1)
+
+
+def test_conflict_detects_differing_record_date_even_when_ratio_matches():
+    result = normalize_corporate_actions(
+        cninfo_cash(0.1, record="2020-06-10"),
+        eastmoney_cash(0.1, record="2020-06-11"),
+    )
+    assert result.accepted.empty
+    assert (result.quarantined["reason"] == REASON_CROSS_SOURCE_CONFLICT).all()
+
+
+def test_single_source_implemented_action_is_accepted():
+    result = normalize_corporate_actions(cninfo_cash(0.1), None)
+    assert not result.accepted.empty
+    assert result.quarantined.empty
+    assert result.accepted.iloc[0]["confirmed_by"] == "cninfo"
+
+
+def test_both_empty_frames_yield_typed_empty_result():
+    result = normalize_corporate_actions(None, pd.DataFrame())
+    assert result.accepted.empty
+    assert result.quarantined.empty
+
+
+def test_not_implemented_action_is_quarantined_not_accepted():
+    result = normalize_corporate_actions(_cninfo_plan(progress="预案"), None)
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == REASON_NOT_IMPLEMENTED
+
+
+def test_implemented_action_missing_record_date_is_incomplete():
+    result = normalize_corporate_actions(_cninfo_plan(record=None), None)
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == REASON_INCOMPLETE
+
+
+def test_implemented_action_without_distribution_components_is_incomplete():
+    result = normalize_corporate_actions(_cninfo_plan(cash_per_10=0.0), None)
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == REASON_INCOMPLETE
+
+
+def test_mixed_cash_bonus_and_capitalization_fields_are_preserved():
+    frame = _cninfo_plan(cash_per_10=10.0, bonus_per_10=2.0, cap_per_10=3.0)
+    result = normalize_corporate_actions(frame, None)
+    row = result.accepted.iloc[0]
+    assert row["cash_dividend_per_share"] == pytest.approx(1.0)
+    assert row["bonus_share_ratio"] == pytest.approx(0.2)
+    assert row["capitalization_ratio"] == pytest.approx(0.3)
+    # No rights issue in this plan: the rights fields are preserved as empty.
+    assert pd.isna(row["rights_issue_ratio"])
+    assert pd.isna(row["rights_issue_price"])
+
+
+def test_rights_issue_plan_is_tagged_unsupported():
+    result = normalize_corporate_actions(
+        _cninfo_plan(cash_per_10=5.0, plan="拟配股，每10股配2股"), None
+    )
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == REASON_UNSUPPORTED_CORPORATE_ACTION
+
+
+def test_merger_conversion_plan_is_tagged_unsupported():
+    result = normalize_corporate_actions(
+        _cninfo_plan(plan="吸收合并注销股份"), None
+    )
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == REASON_UNSUPPORTED_CORPORATE_ACTION
+
+
+def test_cross_source_equal_unsupported_stays_unsupported():
+    result = normalize_corporate_actions(
+        _cninfo_plan(plan="配股每10股配2股"),
+        eastmoney_cash(0.0, plan="配股每10股配2股"),
+    )
+    assert result.accepted.empty
+    assert (result.quarantined["reason"] == REASON_UNSUPPORTED_CORPORATE_ACTION).all()
