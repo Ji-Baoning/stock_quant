@@ -28,6 +28,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from stock_quant.data_model.corporate_action_coverage import (
+    CoverageReason,
+    CoverageStatus,
+    coverage_frame,
+    coverage_record,
+)
 from stock_quant.data_model.dataset import DatasetPublisher
 from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COLUMNS,
@@ -45,6 +51,7 @@ from stock_quant.research.models import (
     ResearchRunFailed,
 )
 from stock_quant.research.runner import ResearchRunner
+from stock_quant.research.trust import DataTrustMode
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SPEC = "configs/experiments/momentum_60d.yml"
@@ -196,13 +203,55 @@ def _trading_calendar() -> pd.DataFrame:
     )[TRADING_CALENDAR_COLUMNS]
 
 
+def _universe_symbols() -> tuple[str, ...]:
+    return tuple(symbol for symbol, _ in EQUITY_GROWTH)
+
+
+def _coverage(
+    symbols: tuple[str, ...],
+    *,
+    status: CoverageStatus,
+    reason: CoverageReason | None = None,
+    window_start: date = _CAL_START,
+    window_end: date = _BARS_END,
+) -> pd.DataFrame:
+    """One deterministic coverage row per symbol over a common window.
+
+    The default window is the full synthetic calendar, a superset of the
+    execution window any momentum spec derives, so a single row per symbol is
+    always enough evidence when the status is trusted.
+    """
+    records = [
+        coverage_record(
+            symbol,
+            window_start,
+            window_end,
+            status,
+            reason,
+            checked_at=_INGESTED,
+        )
+        for symbol in sorted(symbols)
+    ]
+    return coverage_frame(records)
+
+
 def _publish_synthetic_dataset(
     project_root: Path,
     *,
     index_close: tuple[float, float] = (4000.0, 2000.0),
     limit_locked_symbols: tuple[str, ...] = (),
+    coverage: pd.DataFrame | None = None,
 ) -> str:
-    """Publish the synthetic market under ``project_root``; return its version."""
+    """Publish the synthetic market under ``project_root``; return its version.
+
+    The default dataset carries an explicit ``VERIFIED_EMPTY`` coverage row per
+    universe symbol (empty facts are only trusted through explicit evidence),
+    so the ResearchRunner's RESEARCH gate passes over the default market.
+    """
+    if coverage is None:
+        coverage = _coverage(
+            _universe_symbols(), status=CoverageStatus.VERIFIED_EMPTY
+        )
     tables = {
         "daily_bar": _bars(
             _weekdays(_BARS_START, _BARS_END),
@@ -211,11 +260,34 @@ def _publish_synthetic_dataset(
         ),
         "security_master": _security_master(),
         "corporate_action": _corporate_action(),
+        "corporate_action_coverage": coverage,
         "trading_calendar": _trading_calendar(),
     }
     return DatasetPublisher(project_root).publish(
         tables, QualityReport()
     ).version
+
+
+def _publish_dataset_with_untrusted_coverage(project_root: Path) -> str:
+    """Republish CURRENT so every holding's coverage evidence is UNTRUSTED."""
+    return _publish_synthetic_dataset(
+        project_root,
+        coverage=_coverage(
+            _universe_symbols(),
+            status=CoverageStatus.UNTRUSTED,
+            reason=CoverageReason.SOURCE_FETCH_FAILED,
+        ),
+    )
+
+
+def _publish_dataset_with_verified_empty_coverage(project_root: Path) -> str:
+    """Republish CURRENT so every holding's coverage is explicitly VERIFIED_EMPTY."""
+    return _publish_synthetic_dataset(
+        project_root,
+        coverage=_coverage(
+            _universe_symbols(), status=CoverageStatus.VERIFIED_EMPTY
+        ),
+    )
 
 
 def _new_env(tmp_path) -> _Env:
@@ -390,3 +462,21 @@ def test_published_metrics_record_unreachable_orders(tmp_path):
         )
         # ...so the run diverged from the ideal target plan and must say so.
         assert summary["plan_diverged"] is True
+
+
+def test_research_rejects_untrusted_but_engineering_is_untrusted(env):
+    _publish_dataset_with_untrusted_coverage(env.root)
+    runner = ResearchRunner(env.root, config_root=_REPO_ROOT)
+    with pytest.raises(ResearchRunFailed, match="corporate action trust"):
+        runner.run(_SPEC)
+    debug = runner.run(_SPEC, trust_mode=DataTrustMode.ENGINEERING)
+    assert json.loads(
+        (debug.path / "metrics.json").read_text(encoding="utf-8")
+    )["evaluation"]["status"] == "UNTRUSTED"
+
+
+def test_research_accepts_verified_empty_coverage(env):
+    _publish_dataset_with_verified_empty_coverage(env.root)
+    assert ResearchRunner(
+        env.root, config_root=_REPO_ROOT
+    ).run(_SPEC).manifest.status in ("ACCEPTED", "REJECTED")

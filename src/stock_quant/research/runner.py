@@ -73,6 +73,10 @@ from stock_quant.research.registry import (
     PublishedExperiment,
 )
 from stock_quant.research.spec import ExperimentSpec, load_experiment_spec
+from stock_quant.research.trust import (
+    DataTrustMode,
+    evaluate_corporate_action_trust,
+)
 
 _CURRENT = "CURRENT"
 
@@ -392,16 +396,24 @@ class ResearchRunner:
         spec_path: str | Path,
         *,
         stage_observer=None,
+        trust_mode: DataTrustMode | str = DataTrustMode.RESEARCH,
     ) -> PublishedExperiment:
         """Freeze, run and publish one experiment spec.
 
         ``stage_observer(stage, state)`` is called after each fine stage
         completes; an observer that raises aborts the run into a FAILED state
-        (useful for injected-failure tests).  ``spec_path`` is resolved against
-        ``config_root`` unless absolute.
+        (useful for injected-failure tests).  ``trust_mode`` selects the
+        corporate-action evidence bar: ``research`` (the default) raises before
+        any backtest when the pinned coverage is not trusted, while
+        ``engineering`` still runs the full pipeline and records the decision as
+        an UNTRUSTED metrics evaluation that can never publish an ACCEPTED
+        experiment.  ``spec_path`` is resolved against ``config_root`` unless
+        absolute.
         """
         observer = self._observer if stage_observer is None else stage_observer
-        frozen = self._freeze(spec_path)
+        mode = trust_mode if isinstance(trust_mode, DataTrustMode) \
+            else DataTrustMode(trust_mode)
+        frozen = self._freeze(spec_path, trust_mode=mode)
         state = self._begin(frozen)
         try:
             self._active_stage = None
@@ -410,6 +422,10 @@ class ResearchRunner:
             state.status = RunStatus.COMPLETED
             state.stage = DataStage.REPORTED
             state.touch()
+            # A resumed-fully run skipped the backtest gate that records the
+            # decision, so recompute it here to keep the manifest complete.
+            if state.corporate_action_trust is None:
+                self._record_run_trust(state, frozen)
             write_run_manifest(self._run_dir, state)
             self._logger.info(
                 "experiment published",
@@ -475,7 +491,9 @@ class ResearchRunner:
     # Freeze / identity / workspace
     # ------------------------------------------------------------------ #
 
-    def _freeze(self, spec_path: str | Path) -> ExperimentSpec:
+    def _freeze(
+        self, spec_path: str | Path, *, trust_mode: DataTrustMode
+    ) -> ExperimentSpec:
         path = Path(spec_path)
         if not path.is_absolute():
             path = self._config_root / path
@@ -493,6 +511,7 @@ class ResearchRunner:
             dataset_version=dataset_version,
             universe_version=universe_version,
             code_commit=code_commit,
+            trust_mode=trust_mode,
         )
 
     def _detect_code_commit(self) -> str | None:
@@ -535,6 +554,7 @@ class ResearchRunner:
             random_seed=frozen.random_seed,
             parent_experiment_ids=list(frozen.parent_experiment_ids),
             agent_id=frozen.agent_id,
+            trust_mode=frozen.trust_mode.value,
         )
         write_run_manifest(run_dir, state)
         self._digest = self._run_digest(frozen)
@@ -685,23 +705,31 @@ class ResearchRunner:
             else None
         accepted = ExperimentEvaluation.ACCEPTED.value
         rejected = ExperimentEvaluation.REJECTED.value
+        untrusted = ExperimentEvaluation.UNTRUSTED.value
         # No silent ACCEPTED default: the manifest is written only from an
         # explicit evaluator decision, so a run can never be stamped accepted
-        # just because an evaluator failed to record one.
-        if status not in (accepted, rejected):
+        # just because an evaluator failed to record one.  An UNTRUSTED
+        # metrics decision (an untrusted ENGINEERING diagnostic) is allowed
+        # here but is always recorded as a REJECTED experiment -- the registry
+        # and its immutable manifests only ever carry ACCEPTED or REJECTED.
+        if status not in (accepted, rejected, untrusted):
             raise ValueError(
                 f"cannot publish run {self._run_id}: metrics.json records no "
-                "explicit evaluator decision; an ACCEPTED or REJECTED status "
-                "is required before the experiment manifest is written"
+                "explicit evaluator decision; an ACCEPTED, REJECTED or "
+                "UNTRUSTED status is required before the experiment manifest "
+                "is written"
             )
-        if status == rejected and not (isinstance(reason, str) and reason.strip()):
+        if status in (rejected, untrusted) and not (
+            isinstance(reason, str) and reason.strip()
+        ):
             raise ValueError(
-                f"cannot publish run {self._run_id}: a REJECTED experiment "
-                "requires an explicit reason in metrics.json evaluation"
+                f"cannot publish run {self._run_id}: a REJECTED or UNTRUSTED "
+                "experiment requires an explicit reason in metrics.json "
+                "evaluation"
             )
         manifest = {
             "experiment_id": state.experiment_id,
-            "status": status,
+            "status": rejected if status == untrusted else status,
             "dataset_version": frozen.dataset_version,
             "universe_version": frozen.universe_version,
             "code_commit": frozen.code_commit,
@@ -767,6 +795,122 @@ class ResearchRunner:
         calendar = self._calendar()
         return calendar.last_trading_day_each_week(
             frozen.date_range.start_date, frozen.date_range.end_date
+        )
+
+    # ------------------------------------------------------------------ #
+    # Corporate-action trust gate
+    # ------------------------------------------------------------------ #
+
+    def _record_run_trust(
+        self, state: RunState, frozen: ExperimentSpec
+    ) -> dict[str, object]:
+        """Compute this run's corporate-action trust record and store it.
+
+        The record is the single deterministic decision shared by the backtest
+        gate, the report/metrics stage and the run manifest.  Storing it on
+        ``state`` means even a FAILED research run's manifest shows exactly
+        which possible holdings were not trusted and why.
+        """
+        window_start, window_end = self._execution_window()
+        decision = evaluate_corporate_action_trust(
+            self._coverage_evidence(frozen),
+            self._universe_symbols,
+            window_start,
+            window_end,
+        )
+        record: dict[str, object] = {
+            "mode": frozen.trust_mode.value,
+            "dataset_version": frozen.dataset_version,
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+        }
+        record.update(decision.to_dict())
+        state.corporate_action_trust = record
+        return record
+
+    def _coverage_evidence(
+        self, frozen: ExperimentSpec
+    ) -> pd.DataFrame | None:
+        """The pinned coverage table, or ``None`` when the dataset lacks one.
+
+        An older dataset that predates the coverage-evidence table has no
+        ``corporate_action_coverage`` key and therefore no verified evidence:
+        the evaluator reads every holding as ``SOURCE_NOT_REQUESTED`` rather
+        than trusting empty evidence.
+        """
+        context = self._open_context(frozen.dataset_version)
+        if "corporate_action_coverage" not in context.tables:
+            return None
+        return context.read("corporate_action_coverage")
+
+    def _execution_window(self) -> tuple[date, date]:
+        """The coverage window a run must tile: the open day immediately before
+        the first execution through the last execution."""
+        signals = pd.read_parquet(self._run_dir / "signals.parquet")
+        if signals.empty:
+            raise ValueError(
+                f"run {self._run_id} produced no signals; cannot derive the "
+                "corporate-action coverage window"
+            )
+        execution_days = sorted(
+            {_as_date(day) for day in signals["execution_date"]}
+        )
+        first_execution = execution_days[0]
+        open_days = self._calendar().open_days
+        try:
+            index = open_days.index(first_execution)
+        except ValueError as error:
+            raise ValueError(
+                f"first execution {first_execution.isoformat()} is not an open "
+                "day of the pinned calendar"
+            ) from error
+        window_start = open_days[index - 1] if index > 0 else first_execution
+        return window_start, execution_days[-1]
+
+    def _enforce_research_trust(
+        self, state: RunState, frozen: ExperimentSpec
+    ) -> None:
+        """Raise before any backtest when a RESEARCH run's evidence is untrusted.
+
+        An ENGINEERING run records the same decision and proceeds as a
+        diagnostic; the report stage then stamps its evaluation UNTRUSTED so it
+        can never publish an ACCEPTED experiment manifest.
+        """
+        record = self._record_run_trust(state, frozen)
+        if record["trusted"]:
+            return
+        if frozen.trust_mode is DataTrustMode.RESEARCH:
+            reasons = record["reasons"]
+            if not isinstance(reasons, list):
+                raise TypeError("corporate action trust reasons must be a list")
+            codes = ", ".join(
+                sorted({str(item["code"]) for item in reasons})
+            )
+            raise ValueError(
+                f"corporate action trust: research run {self._run_id} cannot "
+                f"backtest dataset {frozen.dataset_version}: "
+                f"{len(reasons)} of {len(self._universe_symbols)} possible "
+                f"holdings lack full VERIFIED corporate-action coverage across "
+                f"{record['window_start']}..{record['window_end']}; "
+                f"untrusted codes: {codes}"
+            )
+
+    def _untrusted_reason(
+        self, frozen: ExperimentSpec, record: Mapping[str, object]
+    ) -> str:
+        """The explicit reason an untrusted ENGINEERING run publishes REJECTED."""
+        reasons = record["reasons"]
+        if not isinstance(reasons, list):
+            raise TypeError("corporate action trust reasons must be a list")
+        details = "; ".join(
+            f"{item['symbol']}:{item['code']}" for item in reasons
+        )
+        return (
+            f"corporate action trust: mode={record['mode']} dataset "
+            f"{record['dataset_version']} is untrusted; "
+            f"{len(reasons)} of {len(self._universe_symbols)} possible holdings "
+            f"lack full VERIFIED corporate-action coverage across "
+            f"{record['window_start']}..{record['window_end']}; {details}"
         )
 
     # ------------------------------------------------------------------ #
@@ -1002,6 +1146,10 @@ class ResearchRunner:
         self, state: RunState, frozen: ExperimentSpec
     ) -> dict[str, str]:
         """Project ideal targets through each scenario's live account state."""
+        # The corporate-action gate runs first, before the target schedule is
+        # read or the market/engine is built, so a RESEARCH run with untrusted
+        # evidence never spends time on a backtest it will not keep.
+        self._enforce_research_trust(state, frozen)
         target_schedule = self._read_target_schedule()
         market = self._load_market(frozen, target_schedule)
         outputs: dict[str, str] = {}
@@ -1274,6 +1422,19 @@ class ResearchRunner:
             raise TypeError(
                 "evaluator must return an Evaluation, got "
                 f"{type(evaluation).__name__}"
+            )
+        # Persist the trust decision alongside the performance claim so
+        # metrics.json is self-auditing; an ENGINEERING run whose evidence is
+        # untrusted is stamped UNTRUSTED (never ACCEPTED) with its reason.
+        trust_record = self._record_run_trust(state, frozen)
+        metrics["corporate_action_trust"] = trust_record
+        if (
+            frozen.trust_mode is DataTrustMode.ENGINEERING
+            and not bool(trust_record["trusted"])
+        ):
+            evaluation = Evaluation(
+                ExperimentEvaluation.UNTRUSTED,
+                self._untrusted_reason(frozen, trust_record),
             )
         metrics["evaluation"] = {
             "status": evaluation.status.value,

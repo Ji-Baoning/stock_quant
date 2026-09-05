@@ -64,10 +64,16 @@ class DataStage(str, Enum):
 
 
 class ExperimentEvaluation(str, Enum):
-    """Engineering/performance acceptance recorded on a published experiment."""
+    """Engineering/performance acceptance recorded on a published experiment.
+
+    ``UNTRUSTED`` records a run whose corporate-action evidence is not trusted
+    (an ENGINEERING diagnostic); it is never written to an experiment manifest,
+    which only ever records ``ACCEPTED`` or ``REJECTED``.
+    """
 
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
+    UNTRUSTED = "UNTRUSTED"
 
 
 @dataclass(frozen=True)
@@ -139,6 +145,8 @@ class RunState(BaseModel):
     random_seed: int | None = None
     parent_experiment_ids: list[str] = Field(default_factory=list)
     agent_id: str | None = None
+    trust_mode: str = "research"
+    corporate_action_trust: dict[str, Any] | None = None
     created_at: str = Field(default_factory=_utc_now)
     updated_at: str = Field(default_factory=_utc_now)
     failed_stage: str | None = None

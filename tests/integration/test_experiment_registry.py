@@ -251,6 +251,27 @@ def test_publish_requires_an_accepted_or_rejected_evaluation(
     assert not (_experiments_root(tmp_path) / identity.experiment_id).exists()
 
 
+def test_registry_rejects_an_untrusted_manifest_status(tmp_path, identity, frozen_spec):
+    """A metrics-level UNTRUSTED decision never reaches an experiment manifest.
+
+    The runner maps an untrusted ENGINEERING decision onto a REJECTED manifest
+    (never ACCEPTED), so the immutable registry must refuse a manifest that
+    literally claims ``UNTRUSTED`` as its status.
+    """
+    registry = ExperimentRegistry(tmp_path)
+    run_dir = tmp_path / "data" / "runs" / "run_untrusted"
+    _stage_publish(
+        run_dir,
+        frozen_spec,
+        identity,
+        evaluation="UNTRUSTED",
+        evaluation_reason="corporate action trust: source fetch failed",
+    )
+    with pytest.raises(ExperimentRegistryError):
+        registry.publish(run_dir, identity)
+    assert not (_experiments_root(tmp_path) / identity.experiment_id).exists()
+
+
 def test_publish_validates_declared_artifact_hashes_before_renaming(
     tmp_path, identity, frozen_spec
 ):

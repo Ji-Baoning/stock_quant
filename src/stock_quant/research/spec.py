@@ -28,6 +28,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from stock_quant.research.trust import DataTrustMode
+
 #: Reserved dataset/universe version placeholder; resolved to an explicit
 #: version by :meth:`ExperimentSpec.freeze` before an identity may be computed.
 _CURRENT = "CURRENT"
@@ -89,6 +91,7 @@ class ExperimentSpec(BaseModel):
     code_commit: str = "unversioned"
     parent_experiment_ids: list[str] = Field(default_factory=list)
     agent_id: str | None = None
+    trust_mode: DataTrustMode = DataTrustMode.RESEARCH
 
     @model_validator(mode="after")
     def _validate_content(self) -> "ExperimentSpec":
@@ -124,15 +127,18 @@ class ExperimentSpec(BaseModel):
         dataset_version: str | None = None,
         universe_version: str | None = None,
         code_commit: str | None = None,
+        trust_mode: DataTrustMode | None = None,
     ) -> "ExperimentSpec":
         """Return an explicit-version copy, resolving any ``CURRENT`` placeholder.
 
         Resolution happens exactly here: every version the spec keeps must be
         explicit, so a requested ``CURRENT`` with no supplied explicit version
         is an error rather than a silently unresolved spec.  Supplying an
-        explicit version for an already-explicit field overrides it.
+        explicit version for an already-explicit field overrides it.  The
+        corporate-action ``trust_mode`` is pinned the same way, so a stored
+        frozen spec never loses which evidence bar the run applied.
         """
-        updates: dict[str, str] = {}
+        updates: dict[str, object] = {}
         if dataset_version is not None:
             updates["dataset_version"] = dataset_version
         elif self.dataset_version == _CURRENT:
@@ -149,6 +155,8 @@ class ExperimentSpec(BaseModel):
             )
         if code_commit is not None:
             updates["code_commit"] = code_commit
+        if trust_mode is not None:
+            updates["trust_mode"] = trust_mode
         if not updates:
             return self
         return self.model_copy(update=updates)
