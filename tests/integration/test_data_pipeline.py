@@ -263,6 +263,31 @@ def _eastmoney_cash(symbol: str) -> pd.DataFrame:
     )
 
 
+def _cninfo_single_cash(symbol: str) -> pd.DataFrame:
+    """CNINFO frame holding ONLY the cross-confirmable cash dividend.
+
+    Reuses the first row of ``_cninfo_cash_and_rights_issue`` -- the exact cash
+    dividend the sibling test proves books at 0.46/share -- while dropping the
+    unsupported rights-issue sibling so nothing is quarantined for ``symbol``.
+    """
+    return _cninfo_cash_and_rights_issue(symbol).head(1).reset_index(drop=True)
+
+
+def _verified_cash_dividend_sources() -> dict[str, DataSource]:
+    """``600036.SH`` reports a cross-confirmed cash dividend (accepted) with
+    nothing unsupported; every other symbol answers no events."""
+    clean = StubAdapter(
+        "akshare",
+        action_frames={
+            "600036.SH": {
+                "cninfo_corporate_actions": _cninfo_single_cash("600036.SH"),
+                "eastmoney_corporate_actions": _eastmoney_cash("600036.SH"),
+            }
+        },
+    )
+    return _all_stubs(akshare=clean)
+
+
 def _mixed_accepted_and_unsupported_action_sources() -> dict[str, DataSource]:
     """``600000.SH`` reports BOTH a cross-confirmed cash dividend (accepted) and
     an unsupported CNINFO rights issue (quarantined) inside the update window;
@@ -491,6 +516,32 @@ def test_update_marks_mixed_accepted_and_unsupported_window_untrusted(project):
     row = coverage.loc[coverage["symbol"] == "600000.SH"].iloc[0]
     assert row["status"] == "UNTRUSTED"
     assert row["reason"] == "UNSUPPORTED_ACTION"
+
+
+def test_update_marks_clean_cross_confirmed_cash_dividend_verified(project):
+    """Positive control for the has_accepted -> VERIFIED branch.
+
+    A symbol whose window holds ONLY a cross-confirmed cash dividend -- no
+    unsupported sibling to quarantine -- must publish a VERIFIED coverage row
+    with no reason, and the dividend must book.  Without this control every
+    published coverage row in the suite is VERIFIED_EMPTY or quarantined, so
+    the accepted-fact verdict the whole trust gate keys on is unprotected.
+    """
+    result = DataPipeline(
+        project.root, sources=_verified_cash_dividend_sources()
+    ).update(_request())
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        facts = context.read("corporate_action")
+        coverage = context.read("corporate_action_coverage")
+    # The dividend books as the accepted fact the sibling test proves (0.46).
+    booked = facts.loc[facts["symbol"] == "600036.SH"]
+    assert len(booked) == 1
+    assert booked.iloc[0]["cash_dividend_per_share"] == pytest.approx(0.46)
+    # ... and, with nothing quarantined, the window reads VERIFIED, reason None.
+    row = coverage.loc[coverage["symbol"] == "600036.SH"].iloc[0]
+    assert row["status"] == "VERIFIED"
+    assert pd.isna(row["reason"])
 
 
 def test_update_blocked_records_raw_responses(project):
