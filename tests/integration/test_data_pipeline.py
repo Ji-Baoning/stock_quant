@@ -69,14 +69,17 @@ _WINDOW_END = date(2021, 11, 30)
 class StubAdapter:
     """A ``DataSource`` whose ``fetch`` returns deterministic raw frames.
 
-    ``raise_with`` forces a permanent/transient supplier failure;
-    ``negative_close_symbol`` injects one illegal (negative-close) bar so the
-    publication gate blocks.
+    ``raise_with`` forces a permanent/transient supplier failure on every
+    request; ``failing_endpoints`` narrows a failure to the named endpoints
+    only (so an action endpoint can fail while the same supplier still serves
+    its benchmark history); ``negative_close_symbol`` injects one illegal
+    (negative-close) bar so the publication gate blocks.
     """
 
     name: str
     raise_with: type[Exception] | None = None
     negative_close_symbol: str | None = None
+    failing_endpoints: tuple[str, ...] = ()
     calls: list = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -84,6 +87,9 @@ class StubAdapter:
 
     def fetch(self, request: DataRequest) -> FetchResult:
         self.calls.append((request.endpoint, request.symbols[0]))
+        if request.endpoint in self.failing_endpoints:
+            failure = self.raise_with or RuntimeError
+            raise failure(f"{self.name} supplier failure on {request.endpoint}")
         if self.raise_with is not None:
             raise self.raise_with(f"{self.name} supplier failure")
         frame = self._frame(request)
@@ -148,6 +154,20 @@ def _all_stubs(**overrides) -> dict[str, DataSource]:
         if override is not None:
             stubs[name] = override
     return stubs
+
+
+def _successful_empty_action_sources() -> dict[str, DataSource]:
+    """Every source healthy; both action endpoints answer with no events."""
+    return _all_stubs()
+
+
+def _one_failing_action_endpoint() -> dict[str, DataSource]:
+    """The CNINFO action endpoint fails per symbol while akshare still serves
+    its benchmark history and the Eastmoney cross-check answers empty."""
+    failing = StubAdapter(
+        "akshare", failing_endpoints=("cninfo_corporate_actions",)
+    )
+    return _all_stubs(akshare=failing)
 
 
 @pytest.fixture
@@ -321,6 +341,23 @@ def test_update_with_explicit_end_publishes_merged_dataset(project):
     assert result.dataset_ref.version != project.version
     assert result.resolved_end_date == _WINDOW_END
     assert all(status.ok for status in result.source_status)
+
+
+def test_update_records_empty_success_and_fetch_failure(project):
+    ok = DataPipeline(
+        project.root, sources=_successful_empty_action_sources()
+    ).update(_request())
+    bad = DataPipeline(
+        project.root, sources=_one_failing_action_endpoint()
+    ).update(_request())
+    with DatasetReader(project.root).open(ok.dataset_ref.version) as context:
+        assert set(context.read("corporate_action_coverage").status) == {
+            "VERIFIED_EMPTY"
+        }
+    with DatasetReader(project.root).open(bad.dataset_ref.version) as context:
+        assert "SOURCE_FETCH_FAILED" in set(
+            context.read("corporate_action_coverage").reason
+        )
 
 
 def test_update_blocked_records_raw_responses(project):

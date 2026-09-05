@@ -48,7 +48,18 @@ import pandas as pd
 
 from stock_quant.config import SourceConfig, load_project_config
 from stock_quant.data_model.calendar import TradingCalendar
+from stock_quant.data_model.corporate_action_coverage import (
+    OUTCOME_FAILED,
+    OUTCOME_SUCCESS_EMPTY,
+    OUTCOME_SUCCESS_EVENTS,
+    CoverageReason,
+    CoverageStatus,
+    coverage_frame,
+    coverage_record,
+)
 from stock_quant.data_model.corporate_actions import (
+    REASON_CROSS_SOURCE_CONFLICT,
+    REASON_UNSUPPORTED_CORPORATE_ACTION,
     RECONCILED_COLUMNS,
     normalize_corporate_actions,
 )
@@ -431,8 +442,9 @@ class DataPipeline:
 
         # ---- best-effort corporate actions ------------------------------ #
         corporate_action = current_ca
+        coverage = coverage_frame([])
         if "akshare" in enabled:
-            corporate_action = self._refresh_corporate_actions(
+            corporate_action, coverage = self._refresh_corporate_actions(
                 enabled,
                 equity_symbols,
                 start,
@@ -509,6 +521,7 @@ class DataPipeline:
             "corporate_action": corporate_action[
                 list(CORPORATE_ACTION_COLUMNS)
             ],
+            "corporate_action_coverage": coverage,
             "trading_calendar": _calendar_frame(calendar_open)[
                 list(TRADING_CALENDAR_COLUMNS)
             ],
@@ -777,13 +790,23 @@ class DataPipeline:
         raw_snapshots,
         current_ca,
     ):
-        """Reconcile cninfo/eastmoney per held security, best-effort."""
+        """Reconcile cninfo/eastmoney per held security, best-effort.
+
+        Returns ``(facts, coverage)``: the merged canonical corporate-action
+        facts and one evidence row per symbol/window recording every endpoint's
+        outcome plus the content hash of each successful raw snapshot.  Empty
+        facts are never trusted by default -- only an explicit successful
+        no-event answer from *every* requested endpoint yields ``VERIFIED_EMPTY``,
+        and any endpoint failure leaves the window ``UNTRUSTED``.
+        """
         source = self._overrides.get("akshare") or self._build_lazy("akshare")
         if source is None:
-            return current_ca
+            return current_ca, coverage_frame([])
         cninfo_frames: list[pd.DataFrame] = []
         eastmoney_frames: list[pd.DataFrame] = []
+        outcomes_by_symbol: dict[str, dict[str, dict[str, object]]] = {}
         for symbol in symbols:
+            symbol_outcomes: dict[str, dict[str, object]] = {}
             for endpoint, sink in (
                 ("cninfo_corporate_actions", cninfo_frames),
                 ("eastmoney_corporate_actions", eastmoney_frames),
@@ -793,10 +816,23 @@ class DataPipeline:
                         source,
                         DataRequest(endpoint, (symbol,), start, end, {}),
                     )
-                    raw_snapshots.append(self._record_raw(result))
+                    snapshot_sha256 = self._record_raw(result)
+                    raw_snapshots.append(snapshot_sha256)
+                    symbol_outcomes[endpoint] = {
+                        "ok": True,
+                        "empty": bool(result.frame.empty),
+                        "snapshot_sha256": snapshot_sha256,
+                        "checked_at": _ingest_time(result.metadata),
+                    }
                     if not result.frame.empty:
                         sink.append(result.frame)
                 except Exception as error:  # noqa: BLE001 - best-effort role
+                    symbol_outcomes[endpoint] = {
+                        "ok": False,
+                        "empty": True,
+                        "snapshot_sha256": None,
+                        "checked_at": None,
+                    }
                     issues.append(
                         _issue(
                             Severity.WARNING,
@@ -804,17 +840,40 @@ class DataPipeline:
                             details={
                                 "source": "akshare",
                                 "endpoint": endpoint,
+                                "symbol": symbol,
                                 "message": str(error),
                             },
                         )
                     )
+            outcomes_by_symbol[symbol] = symbol_outcomes
+        accepted, quarantined = self._reconcile_action_frames(
+            cninfo_frames, eastmoney_frames, issues
+        )
+        coverage = coverage_frame(
+            [
+                _coverage_record_for(
+                    symbol,
+                    start,
+                    end,
+                    outcomes_by_symbol[symbol],
+                    _accepted_symbols(accepted),
+                    _quarantine_reasons_by_symbol(quarantined),
+                )
+                for symbol in symbols
+            ]
+        )
+        if accepted.empty:
+            return current_ca, coverage
+        canonical = _corporate_actions_canonical(accepted)
+        return _merge_corporate_actions(current_ca, canonical), coverage
+
+    def _reconcile_action_frames(self, cninfo_frames, eastmoney_frames, issues):
+        """Reconcile collected supplier frames; empty defaults on failure."""
         try:
-            accepted = normalize_corporate_actions(
-                pd.concat(cninfo_frames, ignore_index=True)
-                if cninfo_frames else None,
-                pd.concat(eastmoney_frames, ignore_index=True)
-                if eastmoney_frames else None,
-            ).accepted
+            reconciled = normalize_corporate_actions(
+                _concat(cninfo_frames), _concat(eastmoney_frames)
+            )
+            return reconciled.accepted, reconciled.quarantined
         except Exception as error:  # noqa: BLE001
             issues.append(
                 _issue(
@@ -826,11 +885,7 @@ class DataPipeline:
                     },
                 )
             )
-            return current_ca
-        if accepted.empty:
-            return current_ca
-        canonical = _corporate_actions_canonical(accepted)
-        return _merge_corporate_actions(current_ca, canonical)
+            return pd.DataFrame(), pd.DataFrame()
 
     def _build_lazy(self, name):
         try:
@@ -1250,6 +1305,110 @@ def _coerce_daily(frame: pd.DataFrame, ingested) -> pd.DataFrame:
     out["volume"] = out["volume"].astype("int64")
     out["ingested_at"] = pd.to_datetime(out["ingested_at"], utc=True)
     return out
+
+
+def _coverage_record_for(
+    symbol: str,
+    start: date,
+    end: date,
+    outcomes: dict[str, dict[str, object]],
+    accepted_symbols: frozenset[str],
+    quarantine_reasons: Mapping[str, set[str]],
+) -> dict[str, object]:
+    """Render one symbol/window's evidence row from its endpoint outcomes."""
+    sources = [
+        {"endpoint": endpoint, "outcome": _endpoint_outcome_label(outcome)}
+        for endpoint, outcome in outcomes.items()
+    ]
+    snapshot_hashes = {
+        endpoint: outcome["snapshot_sha256"]
+        for endpoint, outcome in outcomes.items()
+        if outcome["snapshot_sha256"] is not None
+    }
+    status, reason = _coverage_verdict(
+        outcomes,
+        has_accepted=symbol in accepted_symbols,
+        quarantine_reasons=quarantine_reasons.get(symbol),
+    )
+    return coverage_record(
+        symbol,
+        start,
+        end,
+        status,
+        reason,
+        sources=sources,
+        snapshot_hashes=snapshot_hashes,
+        checked_at=_coverage_checked_at(outcomes),
+    )
+
+
+def _coverage_verdict(
+    outcomes: dict[str, dict[str, object]],
+    *,
+    has_accepted: bool,
+    quarantine_reasons: set[str] | None,
+) -> tuple[CoverageStatus, CoverageReason | None]:
+    """Decide one symbol/window's status from its endpoint fetch outcomes."""
+    if any(not outcome["ok"] for outcome in outcomes.values()):
+        return CoverageStatus.UNTRUSTED, CoverageReason.SOURCE_FETCH_FAILED
+    if not any(not outcome["empty"] for outcome in outcomes.values()):
+        return CoverageStatus.VERIFIED_EMPTY, None
+    if has_accepted:
+        return CoverageStatus.VERIFIED, None
+    return (
+        CoverageStatus.UNTRUSTED,
+        _coverage_reason_for_quarantine(quarantine_reasons),
+    )
+
+
+def _coverage_reason_for_quarantine(
+    reasons: set[str] | None,
+) -> CoverageReason:
+    if reasons is None:
+        return CoverageReason.FACTS_INCOMPLETE
+    if REASON_CROSS_SOURCE_CONFLICT in reasons:
+        return CoverageReason.SOURCE_CONFLICT
+    if REASON_UNSUPPORTED_CORPORATE_ACTION in reasons:
+        return CoverageReason.UNSUPPORTED_ACTION
+    return CoverageReason.FACTS_INCOMPLETE
+
+
+def _endpoint_outcome_label(outcome: dict[str, object]) -> str:
+    if not outcome["ok"]:
+        return OUTCOME_FAILED
+    if outcome["empty"]:
+        return OUTCOME_SUCCESS_EMPTY
+    return OUTCOME_SUCCESS_EVENTS
+
+
+def _coverage_checked_at(outcomes: dict[str, dict[str, object]]):
+    candidates = [
+        outcome["checked_at"]
+        for outcome in outcomes.values()
+        if outcome["checked_at"] is not None
+    ]
+    if candidates:
+        return candidates[-1]
+    return pd.Timestamp.now(tz="UTC")
+
+
+def _accepted_symbols(accepted: pd.DataFrame) -> frozenset[str]:
+    if accepted.empty or "symbol" not in accepted.columns:
+        return frozenset()
+    return frozenset(str(value) for value in accepted["symbol"])
+
+
+def _quarantine_reasons_by_symbol(
+    quarantined: pd.DataFrame,
+) -> dict[str, set[str]]:
+    reasons: dict[str, set[str]] = {}
+    if quarantined.empty or "symbol" not in quarantined.columns:
+        return reasons
+    for record in quarantined.to_dict("records"):
+        symbol = str(record["symbol"])
+        value = record.get("reason")
+        reasons.setdefault(symbol, set()).add(str(value) if value else "")
+    return reasons
 
 
 def _corporate_actions_canonical(accepted: pd.DataFrame) -> pd.DataFrame:

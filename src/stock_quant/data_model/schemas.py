@@ -54,6 +54,22 @@ CORPORATE_ACTION_COLUMNS = [
     "status",
 ]
 
+# Corporate-action coverage evidence records, per symbol and window, whether
+# the action sources were actually checked and what was concluded.  Empty
+# facts are never trusted by default: an explicit successful no-event response
+# from every applicable endpoint yields VERIFIED_EMPTY, any endpoint failure or
+# an unrequested/missing source yields UNTRUSTED with a structured reason.
+CORPORATE_ACTION_COVERAGE_COLUMNS = [
+    "symbol",
+    "window_start",
+    "window_end",
+    "status",
+    "reason",
+    "sources",
+    "snapshot_hashes",
+    "checked_at",
+]
+
 # Security master lists the point-in-time identifier attributes per instrument.
 SECURITY_MASTER_COLUMNS = [
     "symbol",
@@ -103,6 +119,22 @@ def _corporate_action_fields() -> list[pa.Field]:
     ]
 
 
+def _corporate_action_coverage_fields() -> list[pa.Field]:
+    # ``sources`` and ``snapshot_hashes`` carry deterministic JSON (one entry
+    # per supplier endpoint) so the evidence stays machine-readable inside a
+    # single string column, matching the Arrow vocabulary already in use.
+    return [
+        pa.field("symbol", pa.string()),
+        pa.field("window_start", pa.date32()),
+        pa.field("window_end", pa.date32()),
+        pa.field("status", pa.string()),
+        pa.field("reason", pa.string()),
+        pa.field("sources", pa.string()),
+        pa.field("snapshot_hashes", pa.string()),
+        pa.field("checked_at", pa.timestamp("us", tz="UTC")),
+    ]
+
+
 def _security_master_fields() -> list[pa.Field]:
     return [
         pa.field("symbol", pa.string()),
@@ -123,5 +155,6 @@ def _trading_calendar_fields() -> list[pa.Field]:
 
 DAILY_SCHEMA = pa.schema(_daily_fields())
 CORPORATE_ACTION_SCHEMA = pa.schema(_corporate_action_fields())
+CORPORATE_ACTION_COVERAGE_SCHEMA = pa.schema(_corporate_action_coverage_fields())
 SECURITY_MASTER_SCHEMA = pa.schema(_security_master_fields())
 TRADING_CALENDAR_SCHEMA = pa.schema(_trading_calendar_fields())
