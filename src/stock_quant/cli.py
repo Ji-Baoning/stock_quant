@@ -36,6 +36,7 @@ import pandas as pd
 import typer
 
 from stock_quant.analytics.performance import PerformanceMetrics, compute_metrics
+from stock_quant.bootstrap import bootstrap_dataset
 from stock_quant.config import load_project_config
 from stock_quant.data_model.dataset import DatasetReader
 from stock_quant.data_pipeline import DataPipeline, DataUpdateRequest
@@ -128,6 +129,34 @@ def _run_one_research(
 # --------------------------------------------------------------------------- #
 # data group
 # --------------------------------------------------------------------------- #
+
+
+@data_app.command("bootstrap")
+def data_bootstrap(
+    root: Path = typer.Option(".", "--root", help="Project root."),
+    calendar_csv: Path | None = typer.Option(
+        None,
+        "--calendar-csv",
+        help="Official trading-day file (one ISO date per line).",
+    ),
+) -> None:
+    """Publish the baseline dataset required before the first data update."""
+    try:
+        result = bootstrap_dataset(root, calendar_csv=calendar_csv)
+    except Exception as error:  # noqa: BLE001 - surface cleanly to the operator
+        _echo_failure(str(error))
+        raise typer.Exit(code=1) from None
+    typer.echo(f"published seed dataset: {result.version}")
+    typer.echo(f"security_master symbols : {result.symbol_count}")
+    typer.echo(
+        f"trading_calendar days    : {result.trading_day_count} "
+        f"({result.start}..{result.end})"
+    )
+    typer.echo(f"CURRENT -> {result.version}")
+    typer.echo(
+        "NOTE: weekday-approximation calendar (no CN holidays). "
+        "Use --calendar-csv for official exchange days."
+    )
 
 
 @data_app.command("update")

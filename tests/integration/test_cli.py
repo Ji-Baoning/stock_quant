@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from pathlib import Path
 
 import pytest
 from conftest import build_fixture_project  # noqa: E402
@@ -112,6 +113,23 @@ def test_data_validate_reports_current_dataset(
     assert result.exit_code == 0, result.stdout
     assert fixture_root.version in result.stdout
     assert "PASS" in result.stdout
+
+
+def test_data_bootstrap_publishes_initial_dataset(cli_runner, tmp_path):
+    """Bootstrap creates the baseline tables required by the first update."""
+    root = tmp_path / "seed-project"
+    configs = root / "configs"
+    configs.mkdir(parents=True)
+    repo_configs = Path(__file__).resolve().parents[2] / "configs"
+    for name in ("project.yml", "universe.yml"):
+        shutil.copy(repo_configs / name, configs / name)
+
+    result = cli_runner.invoke(app, ["data", "bootstrap", "--root", str(root)])
+
+    assert result.exit_code == 0, result.stdout
+    assert "published seed dataset:" in result.stdout
+    assert "CURRENT ->" in result.stdout
+    assert (root / "data" / "standardized" / "CURRENT").is_file()
 
 
 def test_research_command_is_the_only_publisher_of_formal_experiments(
