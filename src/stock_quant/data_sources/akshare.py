@@ -40,7 +40,7 @@ class AkShareSource:
         ] = {
             "index_history": (
                 self._index_history,
-                "akshare.stock_zh_index_hist_em",
+                "",
                 True,
                 True,
             ),
@@ -70,6 +70,9 @@ class AkShareSource:
         handler, supplier_endpoint, date_required, require_symbol = handlers[
             request.endpoint
         ]
+        if request.endpoint == "index_history":
+            supplier_endpoint = self._index_history_endpoint()
+            require_symbol = not self._uses_current_index_history_api()
         request_timestamp = _utc_timestamp()
         try:
             frame = handler(request)
@@ -102,6 +105,12 @@ class AkShareSource:
         )
 
     def _index_history(self, request: DataRequest) -> pd.DataFrame:
+        if self._uses_current_index_history_api():
+            return self._client.stock_zh_index_daily_em(
+                symbol=_eastmoney_index_symbol(request.symbols[0]),
+                start_date=request.start_date.strftime("%Y%m%d"),
+                end_date=request.end_date.strftime("%Y%m%d"),
+            )
         return self._client.stock_zh_index_hist_em(
             symbol=request.symbols[0],
             period="daily",
@@ -109,6 +118,14 @@ class AkShareSource:
             end_date=request.end_date.strftime("%Y%m%d"),
             adjust="",
         )
+
+    def _index_history_endpoint(self) -> str:
+        if self._uses_current_index_history_api():
+            return "akshare.stock_zh_index_daily_em"
+        return "akshare.stock_zh_index_hist_em"
+
+    def _uses_current_index_history_api(self) -> bool:
+        return hasattr(self._client, "stock_zh_index_daily_em")
 
     def _stock_metadata(self, request: DataRequest) -> pd.DataFrame:
         return self._client.stock_info_a_code_name()
@@ -118,3 +135,10 @@ class AkShareSource:
 
     def _eastmoney_corporate_actions(self, request: DataRequest) -> pd.DataFrame:
         return self._client.stock_fhps_detail_em(symbol=request.symbols[0])
+
+
+def _eastmoney_index_symbol(symbol: str) -> str:
+    """Add the market prefix required by AKShare's current EM endpoint."""
+    if symbol.startswith(("sh", "sz", "csi")):
+        return symbol
+    return f"sz{symbol}" if symbol.startswith("399") else f"sh{symbol}"

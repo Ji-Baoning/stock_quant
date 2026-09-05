@@ -16,6 +16,7 @@ from stock_quant.data_sources.base import (
     AuthenticationError,
     ContractError,
     DataRequest,
+    ServerError,
 )
 from stock_quant.data_sources.tushare import TushareSource
 
@@ -55,6 +56,18 @@ class AkShareClient:
     def stock_info_a_code_name(self) -> pd.DataFrame:
         if isinstance(self.frame, Exception):
             raise self.frame
+        return self.frame
+
+
+class CurrentAkShareClient:
+    """Minimal shape of the current AKShare index-history API."""
+
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+        self.arguments: dict[str, str] | None = None
+
+    def stock_zh_index_daily_em(self, **kwargs: str) -> pd.DataFrame:
+        self.arguments = kwargs
         return self.frame
 
 
@@ -175,6 +188,41 @@ def test_akshare_and_baostock_return_recorded_native_columns():
     assert ak_result.frame.columns.tolist() == ["日期", "代码", "开盘", "收盘"]
     assert bao_result.frame.columns.tolist() == ["date", "code", "open", "close"]
     assert (bao_client.logins, bao_client.logouts) == (1, 1)
+
+
+def test_akshare_uses_current_index_history_api_with_market_prefix():
+    """Current AKShare expects an Eastmoney market-prefixed index symbol."""
+    client = CurrentAkShareClient(pd.read_csv(FIXTURES / "akshare_index_history.csv"))
+
+    result = AkShareSource(SourceConfig(), client).fetch(
+        _request("index_history", "000300")
+    )
+
+    assert client.arguments == {
+        "symbol": "sh000300",
+        "start_date": "20200101",
+        "end_date": "20200102",
+    }
+    assert result.metadata["supplier_endpoint"] == "akshare.stock_zh_index_daily_em"
+
+
+def test_current_akshare_index_history_does_not_require_a_symbol_column():
+    """The current endpoint identifies the index in the request, not its frame."""
+    frame = pd.DataFrame(
+        {
+            "date": ["2020-01-01", "2020-01-02"],
+            "open": [1.0, 2.0],
+            "high": [2.0, 3.0],
+            "low": [0.5, 1.5],
+            "close": [1.5, 2.5],
+        }
+    )
+
+    result = AkShareSource(SourceConfig(), CurrentAkShareClient(frame)).fetch(
+        _request("index_history", "000300")
+    )
+
+    assert result.frame.equals(frame)
 
 
 def test_akshare_returns_recorded_stock_metadata_without_symbol_set_equality():
@@ -328,6 +376,27 @@ def test_tushare_rejects_response_contaminated_with_an_unrequested_symbol(
         TushareSource(SourceConfig(), TushareClient(frame)).fetch(
             _request("daily", "000001.SZ")
         )
+
+
+def test_tushare_maps_chinese_daily_permission_denial_to_authentication_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    source = TushareSource(
+        SourceConfig(), TushareClient(Exception("抱歉，您没有接口(daily)访问权限"))
+    )
+
+    with pytest.raises(AuthenticationError):
+        source.fetch(_request("daily", "000001.SZ"))
+
+
+def test_baostock_maps_chinese_network_error_to_server_error():
+    source = BaoStockSource(
+        SourceConfig(), BaoStockClient(RuntimeError("网络接收错误"))
+    )
+
+    with pytest.raises(ServerError):
+        source.fetch(_request("daily", "sz.000001"))
 
 
 @pytest.mark.parametrize(

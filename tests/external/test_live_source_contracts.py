@@ -77,7 +77,11 @@ def test_akshare_index_history_live_contract() -> None:
     start, end = _recent_window()
     request = DataRequest("index_history", (_INDEX_SYMBOL,), start, end, {})
     result = AkShareSource(SourceConfig()).fetch(request)
-    _assert_raw_contract(result.frame, {"日期", "开盘", "最高", "最低", "收盘"})
+    if result.metadata["supplier_endpoint"].endswith("daily_em"):
+        required = {"date", "open", "high", "low", "close"}
+    else:
+        required = {"日期", "开盘", "最高", "最低", "收盘"}
+    _assert_raw_contract(result.frame, required)
 
 
 @pytest.mark.external

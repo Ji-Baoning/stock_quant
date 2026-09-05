@@ -195,13 +195,26 @@ def translate_supplier_error(error: Exception, *, baostock: bool = False) -> Exc
     ):
         return error
     message = str(error).lower()
-    if any(word in message for word in ("token", "auth", "permission", "unauthorized")):
+    if any(
+        word in message
+        for word in ("token", "auth", "permission", "unauthorized", "权限", "没有接口")
+    ):
         return AuthenticationError("supplier authentication failed")
     if baostock and any(word in message for word in ("not login", "session", "login")):
         return BaoStockSessionExpiredError("BaoStock session expired")
     if any(word in message for word in ("rate limit", "too many", "429")):
         return RateLimitError("supplier rate limit exceeded")
-    server_markers = ("timeout", "temporar", "connection", "500", "502", "503")
+    server_markers = (
+        "timeout",
+        "temporar",
+        "connection",
+        "500",
+        "502",
+        "503",
+        "网络",
+        "连接失败",
+        "接收错误",
+    )
     if any(word in message for word in server_markers):
         return ServerError("supplier server failure")
     return error
