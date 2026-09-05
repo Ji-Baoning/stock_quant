@@ -223,6 +223,7 @@ def _holdings() -> pd.DataFrame:
 
 def _experiment_input(
     known_limitations: tuple[str, ...] | None = None,
+    corporate_action_trust: dict | None = None,
 ) -> ExperimentReportInput:
     benchmark = _benchmark()
     scenarios: list[ExperimentScenario] = []
@@ -261,6 +262,7 @@ def _experiment_input(
         benchmark_symbols=("000300.SH", "000905.SH"),
         generated_at="2024-01-09T09:00:00",
         known_limitations=known_limitations,
+        corporate_action_trust=corporate_action_trust,
     )
 
 

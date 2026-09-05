@@ -29,6 +29,9 @@
   .kv { width: auto; }
   .kv td { padding: 3px 10px 3px 0; border: none; }
   .empty { color: #999; font-style: italic; }
+  .trust-ok { color: #2e7d32; font-weight: 600; }
+  .banner.trust-fail { border-color: #c62828; background: #fdecea; }
+  .banner.trust-fail strong { color: #b71c1c; }
 </style>
 </head>
 <body>
@@ -40,6 +43,32 @@
     <strong>工程验证</strong>：本报告仅用于验证“数据 → 研究 → 回测 → 报告”完整链路，
     <strong>不代表策略具备实盘价值</strong>，不构成任何投资建议，不使用结果指导真实资金交易。
   </div>
+
+  {% if not trust.trusted %}
+  <div class="banner trust-fail">
+    <strong>数据可信度未通过</strong>：未复权收益核算缺少完整可信的公司行为覆盖证据，
+    本结果不可作为可信绩效发布（仅限 engineering 诊断；正式研究拒绝在回测前运行）。
+  </div>
+  {% endif %}
+
+  <section>
+    <h2>公司行为可信度核验</h2>
+    {% if trust.trusted %}
+      <p class="trust-ok">公司行为证据已核验通过（可信）：相关标的在公司行为覆盖窗口内均持有
+      VERIFIED / VERIFIED_EMPTY 的完整证据，未复权收益核算可信。</p>
+    {% else %}
+      <p>以下标的/窗口的公司行为证据未通过核验，其未复权收益不可视为完整总收益：</p>
+      {% if trust.window_text %}<p>核验窗口：{{ trust.window_text }}</p>{% endif %}
+      {% if trust.reasons %}
+      <table>
+        <thead><tr><th>证券代码</th><th>原因代码</th></tr></thead>
+        <tbody>
+          {% for reason in trust.reasons %}<tr><td>{{ reason.symbol }}</td><td>{{ reason.code }}</td></tr>{% endfor %}
+        </tbody>
+      </table>
+      {% else %}<p class="empty">不可信结论未携带逐标的原因。</p>{% endif %}
+    {% endif %}
+  </section>
 
   <section>
     <h2>版本与配置</h2>

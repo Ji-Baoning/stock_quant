@@ -56,6 +56,7 @@ from stock_quant.reporting.html import (
 from stock_quant.research.models import ResearchRunFailed
 from stock_quant.research.registry import ExperimentRegistry, PublishedExperiment
 from stock_quant.research.runner import AnalyticsInput, ResearchRunner
+from stock_quant.research.trust import DataTrustMode
 
 app = typer.Typer(
     help=(
@@ -110,8 +111,13 @@ def _run_one_research(
     spec: str,
     *,
     registry: ExperimentRegistry | None = None,
+    trust_mode: DataTrustMode = DataTrustMode.RESEARCH,
 ) -> "PublishedExperiment":
-    """Run a spec; ``registry`` overrides the formal experiments root."""
+    """Run a spec; ``registry`` overrides the formal experiments root.
+
+    Formal ``research run`` always runs RESEARCH (no bypass); only the debug
+    ``backtest`` path may select ``DataTrustMode.ENGINEERING``.
+    """
     runner = ResearchRunner(
         project_root,
         analytics=_ExperimentAnalytics(project_root),
@@ -120,10 +126,23 @@ def _run_one_research(
     if registry is not None:
         runner._registry = registry  # type: ignore[attr-defined]
     try:
-        return runner.run(spec)
+        return runner.run(spec, trust_mode=trust_mode)
     except ResearchRunFailed as error:
         _echo_failure(str(error))
         raise typer.Exit(code=1) from None
+
+
+def _echo_trust(published: "PublishedExperiment") -> None:
+    """Print the frozen corporate-action trust verdict from the artifacts."""
+    trusted = True
+    metrics_path = Path(published.path) / "metrics.json"
+    if metrics_path.is_file():
+        record = json.loads(metrics_path.read_text(encoding="utf-8")).get(
+            "corporate_action_trust"
+        )
+        if isinstance(record, dict):
+            trusted = bool(record.get("trusted"))
+    typer.echo(f"trust={'TRUSTED' if trusted else 'UNTRUSTED'}")
 
 
 # --------------------------------------------------------------------------- #
@@ -247,10 +266,16 @@ def research_run(
     ),
     root: Path = typer.Option(".", "--root", help="Project root."),
 ) -> None:
-    """Run one experiment spec end-to-end and publish it (content-addressed)."""
+    """Run one experiment spec end-to-end and publish it (content-addressed).
+
+    Formal research always applies the RESEARCH corporate-action trust bar and
+    refuses to backtest a dataset whose pinned coverage is not trusted, so a
+    formal run can never lower its own evidence bar.
+    """
     published = _run_one_research(Path(root), spec)
     typer.echo(f"experiment_id={published.experiment_id}")
     typer.echo(f"published={published.path}")
+    _echo_trust(published)
 
 
 # --------------------------------------------------------------------------- #
@@ -272,11 +297,29 @@ def backtest_momentum_60d(
     spec: str = typer.Option(
         "configs/experiments/momentum_60d.yml", "--spec", help="Experiment spec path."
     ),
+    engineering: bool = typer.Option(
+        False,
+        "--engineering",
+        help=(
+            "Run as an UNTRUSTED diagnostic even when corporate-action coverage "
+            "is missing/incomplete (never a trusted performance claim)."
+        ),
+    ),
 ) -> None:
-    """Run the momentum spec into the debug area without publishing formally."""
-    published = _run_one_research(Path(root), spec, registry=_DebugRegistry(Path(root)))
+    """Run the momentum spec into the debug area without publishing formally.
+
+    The debug backtest is RESEARCH by default; ``--engineering`` keeps the run
+    going when the pinned corporate-action coverage is not trusted, stamps it
+    UNTRUSTED and prints ``trust=UNTRUSTED`` so the shell can tell a completed
+    diagnostic from a trusted performance claim.
+    """
+    mode = DataTrustMode.ENGINEERING if engineering else DataTrustMode.RESEARCH
+    published = _run_one_research(
+        Path(root), spec, registry=_DebugRegistry(Path(root)), trust_mode=mode
+    )
     typer.echo(f"experiment_id={published.experiment_id}")
     typer.echo(f"debug={published.path}")
+    _echo_trust(published)
 
 
 # --------------------------------------------------------------------------- #
@@ -411,6 +454,9 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
         run_id=run_id,
         hypothesis=str(spec.get("hypothesis", "")),
         initial_cash=float(meta.get("initial_cash", 0.0)),
+        # The frozen trust decision persisted in metrics.json; the report reads
+        # it and renders trusted or untrusted state from these committed bytes.
+        corporate_action_trust=metrics.get("corporate_action_trust"),
     )
 
 

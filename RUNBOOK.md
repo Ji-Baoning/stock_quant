@@ -29,7 +29,7 @@ export TUSHARE_TOKEN='<你的轮换后token>'      # 只进环境变量，绝不
 ```bash
 cd ~/work/program/stock/.worktrees/phase-one-quant-system
 conda run -n py310 python -m ruff check src tests
-conda run -n py310 python -m pytest -q        # 373 过；external/smoke 默认剔除
+conda run -n py310 python -m pytest -q        # 413 过；external/smoke 默认剔除
 ```
 
 ## 阶段 2 · 引导基线数据集（一次性；让 data update 可启动）
@@ -77,6 +77,22 @@ python -m stock_quant research run --spec configs/experiments/momentum_60d.yml -
 
 REJECTED 实验也会完整发布并留原因；跑挂只留 `data/runs/` 审计、不发布半成品。
 
+正式研究受**公司行为可信门禁**约束：执行窗口内每只股票池标的都必须持有
+`VERIFIED` / `VERIFIED_EMPTY` 的公司行为覆盖证据，否则实验在回测前即被 REJECTED
+并打印不可信原因（如 `SOURCE_NOT_REQUESTED` / `SOURCE_FETCH_FAILED`）。
+`research run` **没有任何降级绕过开关**（`--help` 里无 `--engineering`）——正式
+结论永远不降低自己的证据标准。
+
+核验覆盖证据（人工抽查）：
+- 证据表 = 数据集内的 `corporate_action_coverage` 表，位于
+  `data/standardized/<dataset_version>/corporate_action_coverage.parquet`
+  （`data/standardized/CURRENT` 指向当前版本，`manifest.json` 列出全部表）；
+  每行含 symbol、window_start/end、status（`VERIFIED`/`VERIFIED_EMPTY`/
+  `UNTRUSTED`）、reason、sources、snapshot_hashes、checked_at。
+- 或核对冻结实验本身：`data/experiments/<experiment_id>/metrics.json` 的
+  `metrics.corporate_action_trust` 记录 {mode、dataset_version、window_start/end、
+  trusted、reasons:[{code,symbol}]}。
+
 ## 阶段 6 · 报表 + 人工核查
 
 ```bash
@@ -95,5 +111,8 @@ python -m stock_quant report build --root .        # 最新实验 HTML + 当前�
 2. **B2 akshare 实时缺口**：akshare 基准接口实时返回无 symbol 列 → 阶段 4 基准角色
    可能 BLOCK。先按运维文档 §4.6 操作侧对账，或决定改适配器（上游改动，离线不可验）。
 3. **`backtest momentum_60d` 只进 `data/runs/debug`**，正式结论看 `research run`。
+   `--engineering` 只在覆盖证据不足时把**同一只数据集**跑成 UNTRUSTED 诊断
+   （stdout 打 `trust=UNTRUSTED`、报表显示"数据可信度未通过"+原因），仅限排障，
+   永不构成可信绩效；正式研究没有该开关。
 4. **复权序列未发布/未消费**：动量跑未复权（adjusted_close=close）。
 5. **无盈利/实盘就绪声明**：本 MVP 是工程链路验收，不是投资建议。

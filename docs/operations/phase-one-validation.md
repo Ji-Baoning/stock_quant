@@ -135,15 +135,22 @@ python -m stock_quant report build --root <ROOT>
 7. **公司行为现场核对**：cninfo/东财分红送转明细与上市公司公告逐条对照；特别核对
    **紧凑配股措辞**（如“10配3”类）是否被现有子串标记算法漏匹配（任务 5 已知小项
    (d)），冲突项进入 `corporate_action` 或隔离清单并记录原因。
-8. **两个基准覆盖**：`configs/project.yml` 的 `benchmark_symbols`
+8. **公司行为可信覆盖证据核验**：研究运行的不可信回退结论取决于数据集是否携带覆盖
+   证据，而非“公司行为表恰好为空”。验收活数据集时应抽查证据表
+   `data/standardized/<version>/corporate_action_coverage.parquet`：每只股票池标的在
+   验收窗口内都应有 `VERIFIED`/`VERIFIED_EMPTY` 行（含 window_start/end、reason、
+   sources、checked_at），而不是 `UNTRUSTED`/`SOURCE_NOT_REQUESTED`。对任意冻结实验，
+   可读 `data/experiments/<id>/metrics.json` 的 `metrics.corporate_action_trust`
+   复核其 mode、dataset_version、window 与 trusted/reasons 记录。
+9. **两个基准覆盖**：`configs/project.yml` 的 `benchmark_symbols`
    （`000300.SH`、`000905.SH`）在发布 `daily_bar` 中均有覆盖；逐窗口核对基准与
    tushare 主序列都完整才把该日视为“完整交易日”。
-9. **历史涨跌幅时间表（与官方来源核对）**：`configs/trading_rules.yml` 各行生效日期
-   与比例，对照交易所当时官方规则再用于真实数据验收——创业板普通股票
-   2020-08-24 起 10%→20%、科创板开板（2019-07-22）起 20%、主板 ST/*ST 5%，并确认
-   ST 状态为**按生效日（effective-dated）**解析、规则行带文档化生效日期。
-10. **日历与官方日历核对**：把 fixture/真实日历与官方交易所日历对照验收日期区间。
-11. **秘密扫描（接受活数据前最后一步）**：
+10. **历史涨跌幅时间表（与官方来源核对）**：`configs/trading_rules.yml` 各行生效日期
+    与比例，对照交易所当时官方规则再用于真实数据验收——创业板普通股票
+    2020-08-24 起 10%→20%、科创板开板（2019-07-22）起 20%、主板 ST/*ST 5%，并确认
+    ST 状态为**按生效日（effective-dated）**解析、规则行带文档化生效日期。
+11. **日历与官方日历核对**：把 fixture/真实日历与官方交易所日历对照验收日期区间。
+12. **秘密扫描（接受活数据前最后一步）**：
 
 ```bash
 git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
@@ -159,6 +166,10 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
   适配器使用规范未复权 `daily_bar`。BaoStock 失败仅记为 WARNING，不阻断发布。
 - **首个数据集无 CLI 引导**：见第 1 节，`security_master`/`trading_calendar` 基线需
   由代码引导发布后再用 `data update` 扩展。
+- **`--engineering` 仅限诊断，永不构成正式绩效**：正式研究 `research run` 无此开关
+  （不可降级绕过证据门禁）；`backtest momentum_60d --engineering` 只把同一只覆盖证据
+  不足的数据集跑成 UNTRUSTED 诊断（stdout 打印 `trust=UNTRUSTED`，报表渲染
+  "数据可信度未通过" + 原因/标的），产物进 `data/runs/debug`，不得作为可信绩效发布。
 - 无任何策略盈利或实盘就绪声明。
 
 ## 6. 记录模板（按数据集/实验 ID 留存，不入库）

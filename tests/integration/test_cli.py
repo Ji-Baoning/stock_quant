@@ -15,8 +15,10 @@ from pathlib import Path
 import pytest
 from conftest import build_fixture_project  # noqa: E402
 from test_end_to_end import run_offline_fixture  # noqa: E402  (after app import)
+from test_reports import _experiment_input  # noqa: E402  (synthetic report helper)
 
 from stock_quant.cli import app  # noqa: F401  (gates Step 2 collection)
+from stock_quant.reporting.html import render_experiment_report
 
 
 def test_official_research_command_returns_zero_and_prints_identity(
@@ -209,3 +211,62 @@ def test_report_build_fails_when_backtest_workspace_pruned(
     assert result.exit_code != 0
     assert "FAILED" in result.stdout
     assert "backtest workspace was pruned" in result.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: the corporate-action trust boundary on the public surface
+# --------------------------------------------------------------------------- #
+
+
+def test_formal_research_has_no_bypass(cli_runner):
+    """Formal ``research run`` must never expose an ``--engineering`` bypass."""
+    result = cli_runner.invoke(app, ["research", "run", "--help"])
+    assert result.exit_code == 0, result.stdout
+    assert "--engineering" not in result.output
+
+
+def test_debug_and_report_show_untrusted_reason(
+    cli_runner, broken_fixture_root, tmp_path
+):
+    """The debug backtest surfaces the frozen UNTRUSTED decision on stdout, and
+    the report renders the same untrusted reason with the affected symbol."""
+    result = cli_runner.invoke(
+        app,
+        [
+            "backtest",
+            "momentum_60d",
+            "--root",
+            str(broken_fixture_root.root),
+            "--engineering",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "trust=UNTRUSTED" in result.output
+
+    report_path = render_experiment_report(
+        _experiment_input(
+            corporate_action_trust={
+                "trusted": False,
+                "reasons": [{"symbol": "600000.SH", "code": "SOURCE_FETCH_FAILED"}],
+            }
+        ),
+        tmp_path / "untrusted.html",
+    )
+    html = report_path.read_text(encoding="utf-8")
+    assert "数据可信度未通过" in html
+    assert "600000.SH" in html
+    assert "SOURCE_FETCH_FAILED" in html
+
+
+def test_fixture_project_dataset_publishes_trusted_coverage(fixture_root):
+    """The shared fixture dataset itself must carry trusted coverage evidence.
+
+    Without it the default RESEARCH runs in the CLI / end-to-end suite fail the
+    corporate-action trust gate before any backtest (SOURCE_NOT_REQUESTED).
+    """
+    from stock_quant.data_model.dataset import DatasetReader
+
+    with DatasetReader(fixture_root.root).open(fixture_root.version) as context:
+        coverage = context.read("corporate_action_coverage")
+    assert not coverage.empty
+    assert set(coverage["status"]) == {"VERIFIED_EMPTY"}

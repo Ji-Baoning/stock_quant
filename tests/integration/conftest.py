@@ -4,8 +4,9 @@ Task 13 wires the research runner to a Typer CLI and builds a thin end-to-end
 acceptance over one synthetic project.  A test-support file is justified here
 because *both* ``test_cli.py`` and ``test_end_to_end.py`` need the exact same
 deterministic synthetic project (a ``configs/`` tree copied from the
-repository plus one content-addressed 4-table dataset) and the same two
-fixtures (``cli_runner``, ``fixture_root``).  All fixtures are offline and live
+repository plus one content-addressed 5-table dataset that also carries a
+``corporate_action_coverage`` evidence table) and the same two fixtures
+(``cli_runner``, ``fixture_root``).  All fixtures are offline and live
 under ``tmp_path_factory``; nothing here touches the network or a token, and no
 real market data is committed.
 """
@@ -19,6 +20,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from stock_quant.data_model.corporate_action_coverage import (
+    CoverageReason,
+    CoverageStatus,
+    coverage_frame,
+    coverage_record,
+)
 from stock_quant.data_model.dataset import DatasetPublisher
 from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COLUMNS,
@@ -119,9 +126,15 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
 
     Copies the repository ``configs/`` tree (project/sources/costs/rules/
     universe) into ``root/configs/``, authors a short experiment spec, then
-    publishes a deterministic 4-table dataset over the repository's 30-symbol
-    universe plus two benchmark indices.  ``broken=True`` omits the
-    ``corporate_action`` table so a research run fails at the backtest stage.
+    publishes a deterministic 5-table dataset over the repository's 30-symbol
+    universe plus two benchmark indices, including one ``corporate_action_coverage``
+    row per universe symbol over the whole fixture bars window so the default
+    RESEARCH runs in the CLI / end-to-end suite pass the corporate-action trust
+    gate.  ``broken=True`` keeps the (empty) facts table so an ENGINEERING
+    diagnostic can still replay, but marks every coverage row UNTRUSTED
+    (``SOURCE_FETCH_FAILED``): a RESEARCH run must fail the gate before any
+    backtest while an ENGINEERING run may still complete as an UNTRUSTED
+    diagnostic that is never accepted as a trusted performance claim.
     """
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -143,12 +156,43 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
         "daily_bar": _bars(sessions, universe),
         "security_master": _security_master(universe),
         "corporate_action": _corporate_action(),
+        "corporate_action_coverage": _coverage_table(universe, trusted=not broken),
         "trading_calendar": _trading_calendar(),
     }
-    if broken:
-        tables.pop("corporate_action")
     version = DatasetPublisher(root).publish(tables, QualityReport()).version
     return FixtureProject(root=root, version=version)
+
+
+def _coverage_table(universe: Universe, *, trusted: bool) -> pd.DataFrame:
+    """One deterministic coverage row per universe symbol over the full bars.
+
+    The corporate_action facts table of this fixture is empty; that is only
+    trusted when the evidence says so.  ``trusted=True`` publishes a
+    ``VERIFIED_EMPTY`` row per symbol over ``BARS_START..BARS_END`` (both action
+    endpoints succeeded and found nothing) so the RESEARCH gate accepts the
+    dataset; ``trusted=False`` publishes ``UNTRUSTED``/``SOURCE_FETCH_FAILED``
+    rows (the same empty facts are *not* trusted because the sources could not
+    be checked), which the RESEARCH gate rejects.
+    """
+    status = CoverageStatus.VERIFIED_EMPTY if trusted else CoverageStatus.UNTRUSTED
+    outcome = "success_empty" if trusted else "failed"
+    reason = None if trusted else CoverageReason.SOURCE_FETCH_FAILED
+    endpoints = ("cninfo_corporate_actions", "eastmoney_corporate_actions")
+    records = [
+        coverage_record(
+            entry.symbol,
+            BARS_START,
+            BARS_END,
+            status,
+            reason,
+            sources=[
+                {"endpoint": endpoint, "outcome": outcome} for endpoint in endpoints
+            ],
+            checked_at=_INGESTED,
+        )
+        for entry in universe.entries
+    ]
+    return coverage_frame(records)
 
 
 def _bars(sessions: list[date], universe: Universe) -> pd.DataFrame:

@@ -117,6 +117,12 @@ class ExperimentReportInput:
     primary_benchmark_symbol: str = _PRIMARY_BENCHMARK
     known_limitations: tuple[str, ...] = ()
     generated_at: str = ""
+    #: The frozen corporate-action trust decision recorded on the run
+    #: (``metrics["corporate_action_trust"]``): ``{"trusted", "reasons",
+    #: "mode", "dataset_version", "window_start", "window_end"}``.  ``None``
+    #: (report inputs that predate the trust gate) reads as a trusted default so
+    #: no report renders an untrusted alarm it cannot substantiate.
+    corporate_action_trust: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -219,6 +225,43 @@ def _day(value: object) -> date:
 
 def _iso(value: object) -> str:
     return _day(value).isoformat()
+
+
+def _trust_block(corporate_action_trust: dict | None) -> dict[str, object]:
+    """The report header's corporate-action trust verdict block.
+
+    A missing mapping reads as a *trusted* default so a report input that
+    predates the trust gate (or a renderer caller that does not carry the
+    decision) never shows an untrusted alarm it cannot substantiate.  When the
+    frozen decision is present, the block carries its ``trusted`` flag, the
+    per-holding ``reasons`` (only the stable ``symbol`` / ``code`` fields the
+    decision records) and the covered date range when the decision names one.
+    """
+    if not isinstance(corporate_action_trust, dict):
+        return {"trusted": True, "reasons": [], "window_text": ""}
+    trusted = bool(corporate_action_trust.get("trusted"))
+    raw_reasons = corporate_action_trust.get("reasons")
+    reasons: list[dict[str, str]] = []
+    if isinstance(raw_reasons, list):
+        for item in raw_reasons:
+            if not isinstance(item, dict):
+                continue
+            reasons.append(
+                {
+                    "symbol": str(item.get("symbol", "")),
+                    "code": str(item.get("code", "")),
+                }
+            )
+    window_start = corporate_action_trust.get("window_start")
+    window_end = corporate_action_trust.get("window_end")
+    window_text = ""
+    if window_start and window_end:
+        window_text = f"{_iso(window_start)} ~ {_iso(window_end)}"
+    return {
+        "trusted": trusted,
+        "reasons": reasons,
+        "window_text": window_text,
+    }
 
 
 def _money(value: float | int | None, nd: int = 2) -> str:
@@ -669,6 +712,7 @@ def render_experiment_report(
         benchmark_excess=(
             _pct(benchmark_excess) if benchmark_excess is not None else "—"
         ),
+        trust=_trust_block(experiment.corporate_action_trust),
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(body, encoding="utf-8")
