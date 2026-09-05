@@ -21,7 +21,6 @@ from stock_quant.data_model.clean import (
     RULE_DUPLICATE_ROW_COLLAPSE,
     CleanResult,
     parse_number,
-    parse_shares,
     parse_trade_date,
 )
 from stock_quant.data_model.schemas import AUDIT_COLUMNS, DAILY_COLUMNS
@@ -88,11 +87,17 @@ def normalize_daily(
         if invalid:
             continue
 
-        volume = parse_shares(row[volume_column])
-        if volume is None:
+        raw_volume = parse_number(row[volume_column])
+        if raw_volume is None:
             rejected_indices.append(index)
             rejected_reasons.append(REASON_INVALID_VOLUME)
             continue
+        scaled_volume = raw_volume * volume_factor
+        if not scaled_volume.is_integer():
+            rejected_indices.append(index)
+            rejected_reasons.append(REASON_INVALID_VOLUME)
+            continue
+        volume = int(scaled_volume)
 
         valid_records.append(
             {
@@ -102,7 +107,7 @@ def normalize_daily(
                 "high": numbers["high"],
                 "low": numbers["low"],
                 "close": numbers["close"],
-                "volume": volume * volume_factor,
+                "volume": volume,
                 "amount": numbers["amount"] * amount_factor,
                 "adjustment": _UNADJUSTED,
                 "source": source,

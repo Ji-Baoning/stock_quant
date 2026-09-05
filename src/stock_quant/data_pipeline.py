@@ -1193,26 +1193,45 @@ def _normalize_index(
         "成交量": "volume",
         "成交额": "amount",
     }
+    if "date" in frame.columns:
+        columns = {
+            "date": "trade_date",
+            "open": "open",
+            "high": "high",
+            "low": "low",
+            "close": "close",
+            "volume": "volume",
+            "amount": "amount",
+        }
     present = {name: column for name, column in columns.items()
                if name in frame.columns}
-    missing = [name for name in columns if name not in present]
+    optional = {"成交额", "amount"}
+    missing = [
+        name for name in columns if name not in present and name not in optional
+    ]
     if missing:
         raise ValueError(
             f"index_history response is missing columns: {', '.join(missing)}"
         )
     rows: list[dict[str, object]] = []
     ingested = _ingest_time(metadata)
+    source_columns = {target: source for source, target in present.items()}
+    volume_multiplier = 1 if "date" in frame.columns else 100
     for record in frame.to_dict("records"):
         rows.append(
             {
-                "trade_date": pd.Timestamp(record["日期"]),
+                "trade_date": pd.Timestamp(record[source_columns["trade_date"]]),
                 "symbol": symbol,
-                "open": float(record["开盘"]),
-                "high": float(record["最高"]),
-                "low": float(record["最低"]),
-                "close": float(record["收盘"]),
-                "volume": int(record["成交量"]) * 100,
-                "amount": float(record["成交额"]),
+                "open": float(record[source_columns["open"]]),
+                "high": float(record[source_columns["high"]]),
+                "low": float(record[source_columns["low"]]),
+                "close": float(record[source_columns["close"]]),
+                "volume": float(record[source_columns["volume"]]) * volume_multiplier,
+                "amount": (
+                    float(record[source_columns["amount"]])
+                    if "amount" in source_columns
+                    else 0.0
+                ),
                 "adjustment": "unadjusted",
                 "source": "akshare",
                 "ingested_at": ingested,

@@ -195,7 +195,7 @@ def test_akshare_uses_current_index_history_api_with_market_prefix():
     client = CurrentAkShareClient(pd.read_csv(FIXTURES / "akshare_index_history.csv"))
 
     result = AkShareSource(SourceConfig(), client).fetch(
-        _request("index_history", "000300")
+        _request("index_history", "000300.SH")
     )
 
     assert client.arguments == {
@@ -434,3 +434,136 @@ def test_adapters_map_date_range_mismatch_to_contract_error(
 
     with pytest.raises(ContractError):
         source.fetch(_request(endpoint, symbol))
+
+
+def _index_history_frame(dates: list[str]) -> pd.DataFrame:
+    """A minimal current-API index frame keyed on the English date column."""
+    count = len(dates)
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "open": [float(i) for i in range(count)],
+            "high": [float(i) for i in range(count)],
+            "low": [float(i) for i in range(count)],
+            "close": [float(i) for i in range(count)],
+        }
+    )
+
+
+class ScriptedIndexClient:
+    """Current-API akshare client whose index endpoints respond independently."""
+
+    def __init__(
+        self,
+        em: pd.DataFrame | Exception,
+        daily: pd.DataFrame | Exception,
+        tx: pd.DataFrame | Exception,
+    ) -> None:
+        self._responses = {"em": em, "daily": daily, "tx": tx}
+        self.calls: list[str] = []
+
+    def _run(self, name: str) -> pd.DataFrame:
+        self.calls.append(name)
+        outcome = self._responses[name]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def stock_zh_index_daily_em(self, **_: str) -> pd.DataFrame:
+        return self._run("em")
+
+    def stock_zh_index_daily(self, symbol: str = "") -> pd.DataFrame:
+        return self._run("daily")
+
+    def stock_zh_index_daily_tx(self, symbol: str = "") -> pd.DataFrame:
+        return self._run("tx")
+
+
+def test_akshare_index_history_uses_eastmoney_when_it_responds():
+    client = ScriptedIndexClient(
+        em=_index_history_frame(["2020-01-01", "2020-01-02"]),
+        daily=_index_history_frame(["2019-01-01"]),
+        tx=_index_history_frame(["2019-01-01"]),
+    )
+
+    result = AkShareSource(SourceConfig(), client).fetch(
+        _request("index_history", "000300")
+    )
+
+    assert client.calls == ["em"]
+    assert result.metadata["supplier_endpoint"] == "akshare.stock_zh_index_daily_em"
+
+
+def test_akshare_index_history_falls_back_to_sina_when_eastmoney_fails():
+    client = ScriptedIndexClient(
+        em=RuntimeError("connection reset by eastmoney"),
+        daily=_index_history_frame(
+            ["2019-12-31", "2020-01-01", "2020-01-02", "2020-01-03"]
+        ),
+        tx=_index_history_frame(["2019-01-01"]),
+    )
+
+    result = AkShareSource(SourceConfig(), client).fetch(
+        _request("index_history", "000300")
+    )
+
+    assert client.calls == ["em", "daily"]
+    assert result.metadata["supplier_endpoint"] == "akshare.stock_zh_index_daily"
+    assert result.frame["date"].tolist() == ["2020-01-01", "2020-01-02"]
+
+
+def test_akshare_index_history_falls_back_when_eastmoney_returns_empty():
+    client = ScriptedIndexClient(
+        em=pd.DataFrame(),
+        daily=_index_history_frame(["2020-01-01", "2020-01-02"]),
+        tx=_index_history_frame(["2019-01-01"]),
+    )
+
+    result = AkShareSource(SourceConfig(), client).fetch(
+        _request("index_history", "000300")
+    )
+
+    assert client.calls == ["em", "daily"]
+    assert result.metadata["supplier_endpoint"] == "akshare.stock_zh_index_daily"
+
+
+def test_akshare_index_history_uses_tencent_only_as_last_resort():
+    client = ScriptedIndexClient(
+        em=RuntimeError("connection reset by eastmoney"),
+        daily=RuntimeError("sina rate limited this caller"),
+        tx=_index_history_frame(["2020-01-01", "2020-01-02"]),
+    )
+
+    result = AkShareSource(SourceConfig(), client).fetch(
+        _request("index_history", "000300")
+    )
+
+    assert client.calls == ["em", "daily", "tx"]
+    assert result.metadata["supplier_endpoint"] == "akshare.stock_zh_index_daily_tx"
+
+
+def test_akshare_index_history_surfaces_eastmoney_error_when_all_fallbacks_fail():
+    client = ScriptedIndexClient(
+        em=RuntimeError("connection aborted"),
+        daily=RuntimeError("connection aborted"),
+        tx=RuntimeError("connection aborted"),
+    )
+
+    with pytest.raises(ServerError):
+        AkShareSource(SourceConfig(), client).fetch(
+            _request("index_history", "000300")
+        )
+
+
+def test_akshare_index_history_does_not_try_fallbacks_for_csi_symbols():
+    client = ScriptedIndexClient(
+        em=RuntimeError("connection aborted"),
+        daily=_index_history_frame(["2020-01-01", "2020-01-02"]),
+        tx=_index_history_frame(["2020-01-01", "2020-01-02"]),
+    )
+
+    with pytest.raises(ServerError):
+        AkShareSource(SourceConfig(), client).fetch(
+            _request("index_history", "csi931151")
+        )
+    assert client.calls == ["em"]

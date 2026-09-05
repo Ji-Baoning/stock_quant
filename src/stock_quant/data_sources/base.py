@@ -116,7 +116,17 @@ def fetch_with_retry(
     *,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> FetchResult:
-    """Fetch once for permanent failures and retry only transient supplier errors."""
+    """Fetch once for permanent failures and retry only transient supplier errors.
+
+    TODO(follow-up): the SDK calls inside ``source.fetch`` have no I/O timeout,
+    so a peer that silently drops packets (observed 2026-09-05: baostock on
+    :10030) blocks here for the socket default instead of failing fast into the
+    transient-error/retry path. ``config.timeout_seconds`` only bounds the retry
+    sleep, never the call itself. Give ``source.fetch`` a wall-clock bound (a
+    socket default timeout or a bounded-thread wrapper) and translate expiry
+    into a ``TransientSourceError`` so adapters surface ``ServerError`` and the
+    optional-source WARNING path still holds.
+    """
     for attempt in range(1, policy.max_attempts + 1):
         try:
             return source.fetch(request)
