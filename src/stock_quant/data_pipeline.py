@@ -1348,17 +1348,28 @@ def _coverage_verdict(
     has_accepted: bool,
     quarantine_reasons: set[str] | None,
 ) -> tuple[CoverageStatus, CoverageReason | None]:
-    """Decide one symbol/window's status from its endpoint fetch outcomes."""
+    """Decide one symbol/window's status from its endpoint fetch outcomes.
+
+    ``VERIFIED`` requires a fully accounted window: every requested endpoint
+    answered, at least one returned events, and the symbol holds an accepted
+    reconciled fact with *nothing* quarantined.  A quarantined event (cross-
+    source conflict / unsupported action / incomplete record) for the symbol
+    makes the window ``UNTRUSTED`` even when a sibling event for the same
+    symbol/window was accepted, so a conflicting or unbooked event can never
+    be masked by an accepted row while the coverage reads ``VERIFIED``.
+    """
     if any(not outcome["ok"] for outcome in outcomes.values()):
         return CoverageStatus.UNTRUSTED, CoverageReason.SOURCE_FETCH_FAILED
     if not any(not outcome["empty"] for outcome in outcomes.values()):
         return CoverageStatus.VERIFIED_EMPTY, None
+    if quarantine_reasons:
+        return (
+            CoverageStatus.UNTRUSTED,
+            _coverage_reason_for_quarantine(quarantine_reasons),
+        )
     if has_accepted:
         return CoverageStatus.VERIFIED, None
-    return (
-        CoverageStatus.UNTRUSTED,
-        _coverage_reason_for_quarantine(quarantine_reasons),
-    )
+    return CoverageStatus.UNTRUSTED, CoverageReason.FACTS_INCOMPLETE
 
 
 def _coverage_reason_for_quarantine(

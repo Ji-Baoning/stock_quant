@@ -37,7 +37,6 @@ from stock_quant.data_model.schemas import CORPORATE_ACTION_COVERAGE_COLUMNS
 OUTCOME_FAILED = "failed"
 OUTCOME_SUCCESS_EMPTY = "success_empty"
 OUTCOME_SUCCESS_EVENTS = "success_with_events"
-OUTCOME_NOT_REQUESTED = "not_requested"
 
 
 class CoverageStatus(str, Enum):

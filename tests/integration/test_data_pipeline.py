@@ -73,17 +73,22 @@ class StubAdapter:
     request; ``failing_endpoints`` narrows a failure to the named endpoints
     only (so an action endpoint can fail while the same supplier still serves
     its benchmark history); ``negative_close_symbol`` injects one illegal
-    (negative-close) bar so the publication gate blocks.
+    (negative-close) bar so the publication gate blocks;
+    ``action_frames`` maps a symbol to per-endpoint corporate-action frames
+    (returned for ``cninfo_corporate_actions`` / ``eastmoney_corporate_actions``
+    only, so one symbol can hold accepted plus quarantined events).
     """
 
     name: str
     raise_with: type[Exception] | None = None
     negative_close_symbol: str | None = None
     failing_endpoints: tuple[str, ...] = ()
+    action_frames: dict[str, dict[str, pd.DataFrame]] | None = None
     calls: list = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "calls", [])
+        object.__setattr__(self, "action_frames", self.action_frames or {})
 
     def fetch(self, request: DataRequest) -> FetchResult:
         self.calls.append((request.endpoint, request.symbols[0]))
@@ -109,8 +114,12 @@ class StubAdapter:
         if request.endpoint in (
             "cninfo_corporate_actions",
             "eastmoney_corporate_actions",
-            "stock_metadata",
         ):
+            overrides = self.action_frames.get(symbol)
+            if overrides and request.endpoint in overrides:
+                return overrides[request.endpoint]
+            return pd.DataFrame()
+        if request.endpoint == "stock_metadata":
             return pd.DataFrame()
         rows: list[dict[str, object]] = []
         for day in sessions:
@@ -168,6 +177,108 @@ def _one_failing_action_endpoint() -> dict[str, DataSource]:
         "akshare", failing_endpoints=("cninfo_corporate_actions",)
     )
     return _all_stubs(akshare=failing)
+
+
+# Native AKShare corporate-action columns (CNINFO primary, Eastmoney cross).
+_ACTION_CNINFO_COLUMNS = [
+    "证券代码",
+    "证券简称",
+    "公告日期",
+    "股权登记日",
+    "除权除息日",
+    "派息(税前)(元/10股)",
+    "送股(股/10股)",
+    "转增(股/10股)",
+    "进度",
+    "方案",
+]
+_ACTION_EASTMONEY_COLUMNS = [
+    "代码",
+    "名称",
+    "最新公告日期",
+    "股权登记日",
+    "除权除息日",
+    "现金分红-现金分红比例",
+    "送转股份-送股比例",
+    "送转股份-转股比例",
+    "方案进度",
+    "方案",
+]
+
+
+def _cninfo_cash_and_rights_issue(symbol: str) -> pd.DataFrame:
+    """One CNINFO frame carrying a cross-confirmable cash dividend (implemented)
+    plus an unsupported rights issue (quarantined) for ``symbol``."""
+    code = symbol.split(".")[0]
+    return pd.DataFrame(
+        [
+            {
+                "证券代码": code,
+                "证券简称": "placeholder",
+                "公告日期": "2021-11-02",
+                "股权登记日": "2021-11-10",
+                "除权除息日": "2021-11-11",
+                "派息(税前)(元/10股)": 4.6,
+                "送股(股/10股)": 0.0,
+                "转增(股/10股)": 0.0,
+                "进度": "实施",
+                "方案": "10派4.6元(含税)",
+            },
+            {
+                "证券代码": code,
+                "证券简称": "placeholder",
+                "公告日期": "2021-11-05",
+                "股权登记日": "2021-11-17",
+                "除权除息日": "2021-11-18",
+                "派息(税前)(元/10股)": 0.0,
+                "送股(股/10股)": 0.0,
+                "转增(股/10股)": 0.0,
+                "进度": "实施",
+                "方案": "拟配股，每10股配2股",
+            },
+        ],
+        columns=_ACTION_CNINFO_COLUMNS,
+    )
+
+
+def _eastmoney_cash(symbol: str) -> pd.DataFrame:
+    """The matching Eastmoney cash dividend that cross-confirms the CNINFO one."""
+    code = symbol.split(".")[0]
+    return pd.DataFrame(
+        [
+            {
+                "代码": code,
+                "名称": "placeholder",
+                "最新公告日期": "2021-11-02",
+                "股权登记日": "2021-11-10",
+                "除权除息日": "2021-11-11",
+                "现金分红-现金分红比例": 4.6,
+                "送转股份-送股比例": 0.0,
+                "送转股份-转股比例": 0.0,
+                "方案进度": "实施",
+                "方案": "10派4.6元(含税)",
+            }
+        ],
+        columns=_ACTION_EASTMONEY_COLUMNS,
+    )
+
+
+def _mixed_accepted_and_unsupported_action_sources() -> dict[str, DataSource]:
+    """``600000.SH`` reports BOTH a cross-confirmed cash dividend (accepted) and
+    an unsupported CNINFO rights issue (quarantined) inside the update window;
+    every other symbol answers no events."""
+    mixed = StubAdapter(
+        "akshare",
+        action_frames={
+            "600000.SH": {
+                "cninfo_corporate_actions": _cninfo_cash_and_rights_issue(
+                    "600000.SH"
+                ),
+                "eastmoney_corporate_actions": _eastmoney_cash("600000.SH"),
+            }
+        },
+    )
+    return _all_stubs(akshare=mixed)
 
 
 @pytest.fixture
@@ -358,6 +469,28 @@ def test_update_records_empty_success_and_fetch_failure(project):
         assert "SOURCE_FETCH_FAILED" in set(
             context.read("corporate_action_coverage").reason
         )
+
+
+def test_update_marks_mixed_accepted_and_unsupported_window_untrusted(project):
+    """A symbol/window holding BOTH an accepted fact and a quarantined
+    unsupported event must not read VERIFIED: the unbooked rights issue would
+    otherwise disappear from the evidence while the coverage row claims the
+    window is fully accounted."""
+    result = DataPipeline(
+        project.root, sources=_mixed_accepted_and_unsupported_action_sources()
+    ).update(_request())
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        facts = context.read("corporate_action")
+        coverage = context.read("corporate_action_coverage")
+    # The cash dividend is genuinely booked (has_accepted) ...
+    booked = facts.loc[facts["symbol"] == "600000.SH"]
+    assert len(booked) == 1
+    assert booked.iloc[0]["cash_dividend_per_share"] == pytest.approx(0.46)
+    # ... yet the sibling rights issue keeps the window from reading VERIFIED.
+    row = coverage.loc[coverage["symbol"] == "600000.SH"].iloc[0]
+    assert row["status"] == "UNTRUSTED"
+    assert row["reason"] == "UNSUPPORTED_ACTION"
 
 
 def test_update_blocked_records_raw_responses(project):
