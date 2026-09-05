@@ -36,9 +36,12 @@ conda run -n py310 python -m pytest -q        # 413 过；external/smoke 默认�
 
 ```bash
 cd ~/work/program/stock/project
-python bootstrap_seed.py            # 发布 security_master + 日历 + 空日线/公司行为
-# 官方交易日历（可选，替代周历近似）：
-# python bootstrap_seed.py --calendar-csv official_calendar.txt
+python -m stock_quant data bootstrap --root .   # 发布 security_master + 日历 + 空日线/公司行为
+# 等价直调脚本（与上面 CLI 相同效果，额外打印 benchmark_symbols 提示）：
+# python bootstrap_seed.py --root .
+# 官方交易日历（可选，替代周历近似）；CLI 与直调脚本都接受：
+# python -m stock_quant data bootstrap --root . --calendar-csv official_calendar.txt
+# python bootstrap_seed.py --root . --calendar-csv official_calendar.txt
 python -m stock_quant data validate --root .   # 应 PASS（空数据集自检）
 ```
 
@@ -105,9 +108,10 @@ python -m stock_quant report build --root .        # 最新实验 HTML + 当前�
 
 ## 已知边界（务必记住，不是 bug）
 
-1. **首个基线无 CLI**：`data update` 只扩展已有数据集；`security_master`/
-   `trading_calendar` 用 `bootstrap_seed.py` 发布（合成周历近似 + 合成 list_date，
-   官方日历用 `--calendar-csv`，操作侧 §4 核对）。
+1. **`data bootstrap` 发布首个基线；`data update` 只扩展**：首个基线由
+   `python -m stock_quant data bootstrap --root .` 发布（`bootstrap_seed.py` 是
+   与它等价的直调脚本）；`data update` 只能扩展已有数据集。基线用合成周历近似 +
+   合成 list_date，官方日历用 `--calendar-csv`，操作侧 §4 核对。
 2. **B2 akshare 实时缺口**：akshare 基准接口实时返回无 symbol 列 → 阶段 4 基准角色
    可能 BLOCK。先按运维文档 §4.6 操作侧对账，或决定改适配器（上游改动，离线不可验）。
 3. **`backtest momentum_60d` 只进 `data/runs/debug`**，正式结论看 `research run`。

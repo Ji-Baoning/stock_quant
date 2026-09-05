@@ -1400,7 +1400,7 @@ def _coverage_checked_at(outcomes: dict[str, dict[str, object]]):
     ]
     if candidates:
         return candidates[-1]
-    return pd.Timestamp.now(tz="UTC")
+    return None
 
 
 def _accepted_symbols(accepted: pd.DataFrame) -> frozenset[str]:

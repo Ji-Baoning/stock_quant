@@ -24,10 +24,10 @@ export TUSHARE_TOKEN=<your_rotated_token>   # 仅环境变量，绝不入库
 
 - 工作目录下已存在一个**已发布数据集**（携带 `security_master` 与
   `trading_calendar`）。`data update` 只能“扩展”既有数据集；**首个
-  security_master/calendar 数据集需由代码引导发布**（阶段一无
-  `data bootstrap` CLI）。最小可复制的引导写法见
-  `tests/smoke/test_small_market_download.py::build_smoke_project`（把
-  configs/universe.yml 的 30 只样本换成目标 universe，日历用目标区间开市日），
+  security_master/calendar 基线数据集**由 `python -m stock_quant data bootstrap
+  --root <ROOT>`（或等价的直调脚本 `bootstrap_seed.py`）引导发布。最小可复制的
+  引导写法见 `tests/smoke/test_small_market_download.py::build_smoke_project`
+  （把 configs/universe.yml 的 30 只样本换成目标 universe，日历用目标区间开市日），
   与 `tests/integration/conftest.py::build_fixture_project` 同一技法。
 
 ## 2. 命令总览
@@ -164,8 +164,10 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
   可下载或核对，勿期待 adjusted 制品。
 - **BaoStock 仅为可选校验来源**：因子层不消费 BaoStock *复权*序列；研究运行因子的
   适配器使用规范未复权 `daily_bar`。BaoStock 失败仅记为 WARNING，不阻断发布。
-- **首个数据集无 CLI 引导**：见第 1 节，`security_master`/`trading_calendar` 基线需
-  由代码引导发布后再用 `data update` 扩展。
+- **`data bootstrap` 发布首个基线；`data update` 只扩展**：见第 1 节，
+  `python -m stock_quant data bootstrap` 发布 `security_master`/`trading_calendar`
+  （+空 `daily_bar`/`corporate_action`）基线；`data update` 只扩展已有数据集。
+  `bootstrap_seed.py` 是与该 CLI 等价的直调脚本。
 - **`--engineering` 仅限诊断，永不构成正式绩效**：正式研究 `research run` 无此开关
   （不可降级绕过证据门禁）；`backtest momentum_60d --engineering` 只把同一只覆盖证据
   不足的数据集跑成 UNTRUSTED 诊断（stdout 打印 `trust=UNTRUSTED`，报表渲染

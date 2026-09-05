@@ -179,6 +179,19 @@ def _one_failing_action_endpoint() -> dict[str, DataSource]:
     return _all_stubs(akshare=failing)
 
 
+def _all_action_endpoints_failing() -> dict[str, DataSource]:
+    """Every corporate-action endpoint fails per symbol while akshare still
+    serves its benchmark history (so the update publishes)."""
+    failing = StubAdapter(
+        "akshare",
+        failing_endpoints=(
+            "cninfo_corporate_actions",
+            "eastmoney_corporate_actions",
+        ),
+    )
+    return _all_stubs(akshare=failing)
+
+
 # Native AKShare corporate-action columns (CNINFO primary, Eastmoney cross).
 _ACTION_CNINFO_COLUMNS = [
     "证券代码",
@@ -494,6 +507,24 @@ def test_update_records_empty_success_and_fetch_failure(project):
         assert "SOURCE_FETCH_FAILED" in set(
             context.read("corporate_action_coverage").reason
         )
+
+
+def test_update_all_action_endpoints_failed_publishes_null_checked_at(project):
+    """An all-endpoint-failed coverage row must not carry a wall clock.
+
+    Coverage evidence must be byte-deterministic: when every action endpoint
+    fails there is no source ``checked_at`` to record, so the published row's
+    ``checked_at`` is NaT rather than a live ``pd.Timestamp.now``.
+    """
+    result = DataPipeline(project.root, sources=_all_action_endpoints_failing()).update(
+        _request()
+    )
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        coverage = context.read("corporate_action_coverage")
+    assert set(coverage["status"]) == {"UNTRUSTED"}
+    assert "SOURCE_FETCH_FAILED" in set(coverage["reason"])
+    assert coverage["checked_at"].isna().all()
 
 
 def test_update_marks_mixed_accepted_and_unsupported_window_untrusted(project):

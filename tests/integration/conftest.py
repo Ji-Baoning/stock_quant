@@ -312,5 +312,6 @@ def fixture_root(tmp_path_factory) -> FixtureProject:
 
 @pytest.fixture
 def broken_fixture_root(tmp_path) -> FixtureProject:
-    """A synthetic project whose dataset omits ``corporate_action``."""
+    """A synthetic project whose corporate-action coverage evidence is
+    UNTRUSTED (``SOURCE_FETCH_FAILED``) over an empty facts table."""
     return build_fixture_project(tmp_path / "broken", broken=True)

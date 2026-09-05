@@ -883,13 +883,14 @@ class ResearchRunner:
             reasons = record["reasons"]
             if not isinstance(reasons, list):
                 raise TypeError("corporate action trust reasons must be a list")
+            affected = len({str(item["symbol"]) for item in reasons})
             codes = ", ".join(
                 sorted({str(item["code"]) for item in reasons})
             )
             raise ValueError(
                 f"corporate action trust: research run {self._run_id} cannot "
                 f"backtest dataset {frozen.dataset_version}: "
-                f"{len(reasons)} of {len(self._universe_symbols)} possible "
+                f"{affected} of {len(self._universe_symbols)} possible "
                 f"holdings lack full VERIFIED corporate-action coverage across "
                 f"{record['window_start']}..{record['window_end']}; "
                 f"untrusted codes: {codes}"
@@ -902,13 +903,14 @@ class ResearchRunner:
         reasons = record["reasons"]
         if not isinstance(reasons, list):
             raise TypeError("corporate action trust reasons must be a list")
+        affected = len({str(item["symbol"]) for item in reasons})
         details = "; ".join(
             f"{item['symbol']}:{item['code']}" for item in reasons
         )
         return (
             f"corporate action trust: mode={record['mode']} dataset "
             f"{record['dataset_version']} is untrusted; "
-            f"{len(reasons)} of {len(self._universe_symbols)} possible holdings "
+            f"{affected} of {len(self._universe_symbols)} possible holdings "
             f"lack full VERIFIED corporate-action coverage across "
             f"{record['window_start']}..{record['window_end']}; {details}"
         )
