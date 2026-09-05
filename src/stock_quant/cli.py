@@ -345,6 +345,12 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
         fills = pd.read_parquet(scenario_dir / "fills.parquet")
         rejections = pd.read_parquet(scenario_dir / "rejections.parquet")
         action_ledger = pd.read_parquet(scenario_dir / "action_ledger.parquet")
+        execution_path = scenario_dir / "execution_diagnostics.json"
+        execution_summary = (
+            json.loads(execution_path.read_text(encoding="utf-8"))
+            if execution_path.is_file()
+            else None
+        )
         committed = (committed_scenarios.get(name) or {}).get("performance")
         metrics_out = (
             _performance_from_dict(committed)
@@ -362,6 +368,7 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
                     columns=["symbol", "quantity", "market_value", "weight"]
                 ),
                 metrics=metrics_out,
+                execution_summary=execution_summary,
             )
         )
     return ExperimentReportInput(
@@ -478,14 +485,6 @@ class _ExperimentAnalytics:
 
     def compute(self, metrics_input: AnalyticsInput) -> dict[str, object]:
         scenarios: dict[str, object] = {}
-        planned = pd.read_parquet(
-            metrics_input.run_dir / "orders.parquet",
-            columns=["order_id", "quantity"],
-        )
-        planned_quantity = {
-            str(row["order_id"]): int(row["quantity"])
-            for row in planned.to_dict("records")
-        }
         benchmark = _benchmark_closes(
             self._project_root,
             metrics_input.dataset_version,
@@ -496,13 +495,13 @@ class _ExperimentAnalytics:
             equity = pd.read_parquet(directory / "daily_equity.parquet")
             fills = pd.read_parquet(directory / "fills.parquet")
             rejections = pd.read_parquet(directory / "rejections.parquet")
+            adjustments = pd.read_parquet(
+                directory / "rebalance_adjustments.parquet"
+            )
             start = float(equity["total_equity"].iloc[0])
             end = float(equity["total_equity"].iloc[-1])
             n_rejections = int(len(rejections))
-            filled_quantity = {
-                str(row["order_id"]): int(row["quantity"])
-                for row in fills[["order_id", "quantity"]].to_dict("records")
-            }
+            n_pretrade_adjustments = int(len(adjustments))
             summary: dict[str, object] = {
                 "periods": int(len(equity)),
                 "start_date": _date_text(equity["trade_date"].iloc[0]),
@@ -530,10 +529,21 @@ class _ExperimentAnalytics:
                         else []
                     )
                 },
-                "plan_diverged": any(
-                    filled_quantity.get(order_id, 0) != quantity
-                    for order_id, quantity in planned_quantity.items()
-                ),
+                "n_pretrade_adjustments": n_pretrade_adjustments,
+                "pretrade_adjusted_quantity": int(
+                    adjustments["rejected_quantity"].sum()
+                )
+                if n_pretrade_adjustments
+                else 0,
+                "pretrade_adjustments_by_reason": {
+                    str(reason): int(count)
+                    for reason, count in (
+                        adjustments["reason"].value_counts().items()
+                        if n_pretrade_adjustments
+                        else []
+                    )
+                },
+                "plan_diverged": bool(n_pretrade_adjustments or n_rejections),
                 "performance": compute_metrics(
                     equity, fills, benchmark
                 ).to_dict(),

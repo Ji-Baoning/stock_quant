@@ -97,6 +97,7 @@ class ExperimentScenario:
     action_ledger: pd.DataFrame
     holdings: pd.DataFrame
     metrics: PerformanceMetrics
+    execution_summary: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -531,6 +532,61 @@ def _action_rows(frame: pd.DataFrame) -> tuple[list[str], list[list[str]]]:
     return _frame_table(frame, columns, row_of)
 
 
+def _daily_trade_snapshot_rows(frame: pd.DataFrame) -> list[list[str]]:
+    """Return per-day BUY/SELL top-five trades by notional."""
+    if frame is None or frame.empty:
+        return []
+    required = {"trade_date", "side", "symbol", "quantity", "price"}
+    if not required.issubset(frame.columns):
+        return []
+    data = frame.copy()
+    data["notional"] = data["quantity"].astype(float) * data["price"].astype(float)
+    data = data.sort_values(
+        ["trade_date", "side", "notional", "symbol"],
+        ascending=[True, True, False, True],
+    )
+    data["rank"] = data.groupby(["trade_date", "side"], sort=False).cumcount()
+    data = data[data["rank"] < 5]
+    rows: list[list[str]] = []
+    for record in data.to_dict("records"):
+        rows.append(
+            [
+                _iso(record.get("trade_date")),
+                "买入" if record.get("side") == "BUY" else "卖出",
+                str(record.get("symbol", "")),
+                _money(record.get("notional")),
+                _int_text(record.get("quantity")),
+            ]
+        )
+    return rows
+
+
+def _execution_rows(summary: dict[str, object] | None) -> list[list[str]]:
+    """Format the persisted execution-drift summary for one cost scenario."""
+    if not summary:
+        return []
+    pretrade = summary.get("pretrade_adjustments_by_reason", {})
+    pretrade_text = "、".join(
+        f"{reason}: {count}" for reason, count in sorted(dict(pretrade).items())
+    ) or "无"
+    reasons = summary.get("rejections_by_reason", {})
+    rejection_text = "、".join(
+        f"{reason}: {count}" for reason, count in sorted(dict(reasons).items())
+    ) or "无"
+    return [
+        [
+            _money(summary.get("planned_gross_notional")),
+            _money(summary.get("actual_gross_notional")),
+            _money(summary.get("unfilled_notional")),
+            _pct(summary.get("execution_deviation_ratio")),
+            pretrade_text,
+            rejection_text,
+            _money(summary.get("end_cash")),
+            _pct(summary.get("stale_asset_ratio")),
+        ]
+    ]
+
+
 def _scenario_sections(
     experiment: ExperimentReportInput,
 ) -> list[dict]:
@@ -543,6 +599,8 @@ def _scenario_sections(
         holdings_cols, holdings_rows = _holdings_rows(scenario.holdings)
         unfilled_cols, unfilled_rows = _unfilled_rows(scenario.rejections)
         action_cols, action_rows = _action_rows(scenario.action_ledger)
+        execution_rows = _execution_rows(scenario.execution_summary)
+        daily_trade_rows = _daily_trade_snapshot_rows(scenario.fills)
         sections.append(
             {
                 "name": scenario.name,
@@ -560,6 +618,8 @@ def _scenario_sections(
                 "unfilled_rows": unfilled_rows,
                 "action_cols": action_cols,
                 "action_rows": action_rows,
+                "execution_rows": execution_rows,
+                "daily_trade_rows": daily_trade_rows,
             }
         )
     return sections

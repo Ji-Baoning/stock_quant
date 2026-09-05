@@ -40,7 +40,7 @@ import pandas as pd
 import yaml
 
 from stock_quant.backtest.costs import CostModel
-from stock_quant.backtest.engine import BacktestEngine, BacktestRequest, OrderDay
+from stock_quant.backtest.engine import BacktestEngine, BacktestRequest, TargetDay
 from stock_quant.backtest.models import BUY, SELL, Fill, Order
 from stock_quant.config import load_project_config
 from stock_quant.data_model.calendar import TradingCalendar
@@ -190,39 +190,31 @@ def _factor_provider_default() -> Mapping[str, Factor]:
 class _DefaultAnalytics:
     """Per-scenario summary over the completed backtest ledgers.
 
-    Besides the equity/fill summary each scenario records how many planned
-    orders the engine rejected and why (``n_rejections``,
-    ``rejections_by_reason``, ``rejected_quantity``) plus a
-    ``plan_diverged`` flag when any planned order did not reach its full
-    requested quantity -- a partial buy or a rejected order -- so a run whose
-    schedule contained an unreachable order is self-auditing from
-    ``metrics.json`` even though rejected orders are not published artifacts.
+    Besides the equity/fill summary each scenario records how the ideal target
+    plan diverged from what actually executed, in two audited categories.
+    Orders the projector already knew could not trade are cut before
+    submission and appear as pre-trade adjustments (``n_pretrade_adjustments``,
+    ``pretrade_adjustments_by_reason``, ``pretrade_adjusted_quantity``);
+    orders the executor rejected at execution time appear under the
+    ``n_rejections`` keys.  ``plan_diverged`` is set when either category is
+    non-empty, so a run whose schedule contained an unreachable order is
+    self-auditing from ``metrics.json`` alone.
     """
 
     def compute(self, metrics_input: AnalyticsInput) -> dict[str, object]:
         scenarios: dict[str, object] = {}
-        # The planned order schedule is shared by every cost scenario: each
-        # order_id's requested quantity is the divergence yardstick below.
-        planned = pd.read_parquet(
-            metrics_input.run_dir / "orders.parquet",
-            columns=["order_id", "quantity"],
-        )
-        planned_quantity = {
-            str(row["order_id"]): int(row["quantity"])
-            for row in planned.to_dict("records")
-        }
         for scenario in metrics_input.scenarios:
             directory = metrics_input.run_dir / "backtest" / scenario
             equity = pd.read_parquet(directory / "daily_equity.parquet")
             fills = pd.read_parquet(directory / "fills.parquet")
             rejections = pd.read_parquet(directory / "rejections.parquet")
+            adjustments = pd.read_parquet(
+                directory / "rebalance_adjustments.parquet"
+            )
             start = float(equity["total_equity"].iloc[0])
             end = float(equity["total_equity"].iloc[-1])
             n_rejections = int(len(rejections))
-            filled_quantity = {
-                str(row["order_id"]): int(row["quantity"])
-                for row in fills[["order_id", "quantity"]].to_dict("records")
-            }
+            n_pretrade_adjustments = int(len(adjustments))
             scenarios[scenario] = {
                 "periods": int(len(equity)),
                 "start_date": _date_text(equity["trade_date"].iloc[0]),
@@ -250,10 +242,21 @@ class _DefaultAnalytics:
                         else []
                     )
                 },
-                "plan_diverged": any(
-                    filled_quantity.get(order_id, 0) != quantity
-                    for order_id, quantity in planned_quantity.items()
-                ),
+                "n_pretrade_adjustments": n_pretrade_adjustments,
+                "pretrade_adjusted_quantity": int(
+                    adjustments["rejected_quantity"].sum()
+                )
+                if n_pretrade_adjustments
+                else 0,
+                "pretrade_adjustments_by_reason": {
+                    str(reason): int(count)
+                    for reason, count in (
+                        adjustments["reason"].value_counts().items()
+                        if n_pretrade_adjustments
+                        else []
+                    )
+                },
+                "plan_diverged": bool(n_pretrade_adjustments or n_rejections),
             }
         return {"scenarios": scenarios}
 
@@ -998,9 +1001,9 @@ class ResearchRunner:
     def _produce_backtest(
         self, state: RunState, frozen: ExperimentSpec
     ) -> dict[str, str]:
-        """Replay the precomputed order schedule once per cost scenario."""
-        schedule = self._read_schedule()
-        market = self._load_market(frozen, schedule)
+        """Project ideal targets through each scenario's live account state."""
+        target_schedule = self._read_target_schedule()
+        market = self._load_market(frozen, target_schedule)
         outputs: dict[str, str] = {}
         scenario_names = list(frozen.cost_scenarios)
         for scenario in scenario_names:
@@ -1016,7 +1019,7 @@ class ResearchRunner:
                 ),
                 bars=market.bars,
                 corporate_actions=market.corporate_actions,
-                schedule=schedule,
+                target_schedule=target_schedule,
                 benchmark_symbols=tuple(self._project_config.benchmark_symbols),
                 benchmarks=market.benchmarks,
             )
@@ -1031,8 +1034,24 @@ class ResearchRunner:
             result.daily_equity.to_parquet(
                 directory / "daily_equity.parquet", index=False
             )
-            for relative in ("fills.parquet", "rejections.parquet",
-                             "action_ledger.parquet", "daily_equity.parquet"):
+            result.submitted_orders.to_parquet(
+                directory / "submitted_orders.parquet", index=False
+            )
+            result.rebalance_adjustments.to_parquet(
+                directory / "rebalance_adjustments.parquet", index=False
+            )
+            result.executable_targets.to_parquet(
+                directory / "executable_targets.parquet", index=False
+            )
+            for relative in (
+                "fills.parquet",
+                "rejections.parquet",
+                "action_ledger.parquet",
+                "daily_equity.parquet",
+                "submitted_orders.parquet",
+                "rebalance_adjustments.parquet",
+                "executable_targets.parquet",
+            ):
                 outputs[f"backtest/{scenario}/{relative}"] = _sha256_file(
                     directory / relative
                 )
@@ -1066,33 +1085,35 @@ class ResearchRunner:
             return CANONICAL_SCENARIO
         return scenario_names[-1]
 
-    def _read_schedule(self) -> tuple[OrderDay, ...]:
-        orders = pd.read_parquet(self._run_dir / "orders.parquet")
-        if orders.empty:
+    def _read_target_schedule(self) -> tuple[TargetDay, ...]:
+        targets = pd.read_parquet(self._run_dir / "target_positions.parquet")
+        signals = pd.read_parquet(self._run_dir / "signals.parquet")
+        if targets.empty or signals.empty:
             return ()
-        by_day: dict[date, dict[str, list[Order]]] = {}
-        for record in orders.to_dict("records"):
-            day = _as_date(record["execution_date"])
-            order = Order(
-                order_id=str(record["order_id"]),
-                side=str(record["side"]),
-                symbol=str(record["symbol"]),
-                quantity=int(record["quantity"]),
-                note="weekly_rebalance",
+        execution_by_signal = {
+            _as_date(record["signal_date"]): _as_date(record["execution_date"])
+            for record in signals.to_dict("records")
+        }
+        by_day: dict[date, dict[str, int]] = {}
+        for record in targets.to_dict("records"):
+            signal_day = _as_date(record["trade_date"])
+            execution_day = execution_by_signal.get(signal_day)
+            if execution_day is None:
+                raise ValueError(
+                    f"target positions for {signal_day} have no execution date"
+                )
+            by_day.setdefault(execution_day, {})[str(record["symbol"])] = int(
+                record["target_quantity"]
             )
-            by_day.setdefault(day, {"sells": [], "buys": []})[
-                "sells" if order.side == SELL else "buys"
-            ].append(order)
         return tuple(
-            OrderDay(
+            TargetDay(
                 trade_date=day,
-                sells=tuple(parts["sells"]),
-                buys=tuple(parts["buys"]),
+                target_quantities=quantities,
             )
-            for day, parts in sorted(by_day.items())
+            for day, quantities in sorted(by_day.items())
         )
 
-    def _load_market(self, frozen: ExperimentSpec, schedule: tuple[OrderDay, ...]):
+    def _load_market(self, frozen: ExperimentSpec, schedule: Sequence[TargetDay]):
         """The pinned equity/benchmark/corporate-action frames for one replay."""
         calendar = self._calendar()
         execution_days = sorted(

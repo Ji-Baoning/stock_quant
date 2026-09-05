@@ -35,6 +35,7 @@ from stock_quant.data_model.schemas import (
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
 )
+from stock_quant.data_model.trading_rules import REASON_SELL_AT_LOWER_LIMIT
 from stock_quant.data_quality.models import QualityReport
 from stock_quant.factors.momentum import Momentum60
 from stock_quant.research.models import (
@@ -363,9 +364,11 @@ def test_rerun_reuses_same_experiment_and_skips_factor(tmp_path):
 def test_published_metrics_record_unreachable_orders(tmp_path):
     # 601318.SH stays ranked in the weekly top-10 (its signal-day closes are
     # untouched) but its Monday execution-day bar opens below the lower price
-    # limit, so every weekly trim-sell of it is price-limit-blocked -- a
-    # scheduled sell the plan can never reach.  Rejections are not published
-    # artifacts, so the engineering gate must see them in metrics.json.
+    # limit, so every weekly trim-sell of it is price-limit-blocked -- an ideal
+    # order the projector can already know will fail.  Such predictable
+    # constraints are cut before submission and audited as pre-trade
+    # adjustments (the executor no longer rejects them), so the engineering
+    # gate must see the withheld sell in metrics.json's adjustment aggregates.
     symbol = "601318.SH"
     project_root = tmp_path / "project"
     _publish_synthetic_dataset(project_root, limit_locked_symbols=(symbol,))
@@ -378,6 +381,12 @@ def test_published_metrics_record_unreachable_orders(tmp_path):
     scenarios = metrics["scenarios"]
     assert isinstance(scenarios, dict) and scenarios
     for summary in scenarios.values():
-        assert int(summary["n_rejections"]) > 0
-        assert summary["rejections_by_reason"]
+        # Every price-limit-blocked trim is diverted to the pre-trade ledger...
+        assert int(summary["n_rejections"]) == 0
+        assert int(summary["n_pretrade_adjustments"]) > 0
+        assert (
+            REASON_SELL_AT_LOWER_LIMIT
+            in summary["pretrade_adjustments_by_reason"]
+        )
+        # ...so the run diverged from the ideal target plan and must say so.
         assert summary["plan_diverged"] is True

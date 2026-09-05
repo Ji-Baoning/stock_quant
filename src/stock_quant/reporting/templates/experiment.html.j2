@@ -19,6 +19,8 @@
   h2 { font-size: 17px; margin: 0 0 10px; }
   h3 { font-size: 15px; margin: 18px 0 6px; }
   h4 { font-size: 13px; margin: 12px 0 6px; color: #333; }
+  details.daily-trade-snapshot { margin: 12px 0 10px; }
+  details.daily-trade-snapshot summary { cursor: pointer; color: #333; font-size: 13px; }
   p { margin: 6px 0; font-size: 13px; }
   table { border-collapse: collapse; width: 100%; font-size: 12px; margin: 6px 0 10px; }
   th, td { border: 1px solid #e2e2e5; padding: 5px 7px; text-align: left; }
@@ -85,41 +87,49 @@
       </tbody>
     </table>
 
-    <h4>持仓</h4>
+    <h4>执行偏离诊断</h4>
     <table>
+      <thead><tr><th>计划成交额（元）</th><th>实际成交额（元）</th><th>未成交额（元）</th><th>执行偏离率</th><th>调仓前约束原因</th><th>执行拒绝原因</th><th>期末现金（元）</th><th>停牌资产比例</th></tr></thead>
+      <tbody>
+        {% if scenario.execution_rows %}
+          {% for row in scenario.execution_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
+        {% else %}
+          <tr><td class="empty" colspan="8">无执行偏离诊断数据</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+
+    <h4>持仓</h4>
+    {% if scenario.holdings_rows %}<table>
       <thead><tr>{% for column in scenario.holdings_cols %}<th>{{ column }}</th>{% endfor %}</tr></thead>
       <tbody>
-        {% if scenario.holdings_rows %}
-          {% for row in scenario.holdings_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
-        {% else %}
-          <tr><td class="empty" colspan="{{ scenario.holdings_cols | length }}">无持仓数据</td></tr>
-        {% endif %}
+        {% for row in scenario.holdings_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
       </tbody>
-    </table>
+    </table>{% else %}<p class="empty">📭 回测期末无持仓</p>{% endif %}
 
     <h4>未成交订单</h4>
-    <table>
+    {% if scenario.unfilled_rows %}<table>
       <thead><tr>{% for column in scenario.unfilled_cols %}<th>{{ column }}</th>{% endfor %}</tr></thead>
       <tbody>
-        {% if scenario.unfilled_rows %}
-          {% for row in scenario.unfilled_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
-        {% else %}
-          <tr><td class="empty" colspan="{{ scenario.unfilled_cols | length }}">无未成交订单</td></tr>
-        {% endif %}
+        {% for row in scenario.unfilled_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
       </tbody>
-    </table>
+    </table>{% else %}<p class="empty">📭 回测期内无未成交订单</p>{% endif %}
 
     <h4>公司行为流水</h4>
-    <table>
+    {% if scenario.action_rows %}<table>
       <thead><tr>{% for column in scenario.action_cols %}<th>{{ column }}</th>{% endfor %}</tr></thead>
       <tbody>
-        {% if scenario.action_rows %}
-          {% for row in scenario.action_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
-        {% else %}
-          <tr><td class="empty" colspan="{{ scenario.action_cols | length }}">无公司行为记录</td></tr>
-        {% endif %}
+        {% for row in scenario.action_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
       </tbody>
-    </table>
+    </table>{% else %}<p class="empty">📭 回测期内无公司行为记录</p>{% endif %}
+
+    <details class="daily-trade-snapshot">
+      <summary>每日持仓快照（每日买入/卖出 Top 5）</summary>
+      {% if scenario.daily_trade_rows %}<table>
+        <thead><tr><th>交易日</th><th>方向</th><th>证券代码</th><th>成交金额（元）</th><th>数量</th></tr></thead>
+        <tbody>{% for row in scenario.daily_trade_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+      </table>{% else %}<p class="empty">📭 回测期内无成交记录</p>{% endif %}
+    </details>
   </section>
   {% endfor %}
 

@@ -51,6 +51,10 @@ from stock_quant.backtest.models import (
     Order,
     as_decimal,
 )
+from stock_quant.backtest.rebalance import (
+    RebalanceAdjustment,
+    project_rebalance,
+)
 from stock_quant.backtest.valuation import AccountValuation, value_account
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.trading_rules import TradingRuleBook
@@ -95,6 +99,17 @@ EQUITY_COLUMNS = (
     "stale_market_value",
     "stale_days",
 )
+SUBMITTED_ORDER_COLUMNS = ("trade_date", "order_id", "side", "symbol", "quantity")
+REBALANCE_ADJUSTMENT_COLUMNS = (
+    "trade_date",
+    "side",
+    "symbol",
+    "requested_quantity",
+    "executable_quantity",
+    "rejected_quantity",
+    "reason",
+)
+EXECUTABLE_TARGET_COLUMNS = ("trade_date", "symbol", "target_quantity")
 
 #: Bar columns the engine needs from the caller's daily market frame.
 BAR_REQUIRED_COLUMNS = ("symbol", "trade_date", "open", "close", "quality_severity")
@@ -136,6 +151,29 @@ class OrderDay:
 
 
 @dataclass(frozen=True)
+class TargetDay:
+    """Ideal target quantities to project against the live account at one open."""
+
+    trade_date: date
+    target_quantities: Mapping[str, int]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.trade_date, date):
+            raise TypeError(f"trade_date must be a date, got {self.trade_date!r}")
+        targets = dict(self.target_quantities)
+        for symbol, quantity in targets.items():
+            if not isinstance(symbol, str) or not symbol:
+                raise ValueError("target symbols must be non-empty strings")
+            if (
+                isinstance(quantity, bool)
+                or not isinstance(quantity, int)
+                or quantity < 0
+            ):
+                raise ValueError("target quantities must be non-negative integers")
+        object.__setattr__(self, "target_quantities", targets)
+
+
+@dataclass(frozen=True)
 class BacktestRequest:
     """Everything the engine needs for one replay -- all inputs are fixed."""
 
@@ -147,12 +185,15 @@ class BacktestRequest:
     bars: pd.DataFrame
     corporate_actions: pd.DataFrame
     schedule: tuple[OrderDay, ...] = ()
+    target_schedule: tuple[TargetDay, ...] = ()
     benchmark_symbols: tuple[str, ...] = ("000300.SH", "000905.SH")
     benchmarks: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     def __post_init__(self) -> None:
         if not self.dataset_version:
             raise ValueError("dataset_version must be non-empty")
+        if self.schedule and self.target_schedule:
+            raise ValueError("schedule and target_schedule cannot both be populated")
 
 
 @dataclass(frozen=True)
@@ -163,6 +204,9 @@ class BacktestResult:
     rejections: pd.DataFrame
     action_ledger: pd.DataFrame
     daily_equity: pd.DataFrame
+    submitted_orders: pd.DataFrame
+    rebalance_adjustments: pd.DataFrame
+    executable_targets: pd.DataFrame
 
 
 # --------------------------------------------------------------------------- #
@@ -187,14 +231,31 @@ class BacktestEngine:
         fills: list[dict] = []
         rejections: list[dict] = []
         equity: list[dict] = []
+        submitted_orders: list[dict] = []
+        rebalance_adjustments: list[dict] = []
+        executable_targets: list[dict] = []
 
         last_close: dict[str, Decimal] = {}
         stale: dict[str, int] = {}
 
         for day in market.window:
             self._apply_actions(account, market, day)
-            sells, buys = market.schedule_by(day)
-            orders = list(sells) + list(buys)
+            target = market.target_on(day)
+            if target is not None:
+                symbols = set(target) | {lot.symbol for lot in account.lots}
+                frame = self._projection_frame(day, symbols, market, last_close)
+                projection = project_rebalance(
+                    target, account, frame, day, request.cost_model, request.rule_book
+                )
+                orders = list(projection.sells) + list(projection.buys)
+                self._collect_projection(
+                    day, orders, projection.adjustments,
+                    projection.executable_target_quantities, submitted_orders,
+                    rebalance_adjustments, executable_targets,
+                )
+            else:
+                sells, buys = market.schedule_by(day)
+                orders = list(sells) + list(buys)
             if orders:
                 frame = self._execution_frame(
                     day, orders, market, last_close
@@ -210,6 +271,11 @@ class BacktestEngine:
             rejections=self._rejections_frame(rejections),
             action_ledger=self._action_ledger_frame(account.action_ledger),
             daily_equity=self._equity_frame(equity),
+            submitted_orders=self._submitted_orders_frame(submitted_orders),
+            rebalance_adjustments=self._rebalance_adjustments_frame(
+                rebalance_adjustments
+            ),
+            executable_targets=self._executable_targets_frame(executable_targets),
         )
 
     # ------------------------------------------------------------------ #
@@ -253,6 +319,39 @@ class BacktestEngine:
                 columns=list(EXECUTION_BAR_REQUIRED_COLUMNS + _BAR_OPTIONAL_COLUMNS)
             )
         return pd.DataFrame(records)
+
+    @staticmethod
+    def _projection_frame(
+        day: date,
+        symbols: set[str],
+        market: "_Market",
+        last_close: Mapping[str, Decimal],
+    ) -> pd.DataFrame:
+        """Visible execution-date bars for pre-trade target projection."""
+        records: list[dict] = []
+        optional_columns: set[str] = set()
+        for symbol in sorted(symbols):
+            row = market.day_rows.get(day, {}).get(symbol)
+            if row is None:
+                continue
+            record = {
+                "symbol": symbol,
+                "open": row.get("open"),
+                "pre_close": last_close.get(symbol),
+                "quality_severity": row.get("quality_severity") or _VALID_STATUS,
+            }
+            for column in _BAR_OPTIONAL_COLUMNS:
+                if column in row:
+                    record[column] = row[column]
+                    optional_columns.add(column)
+            records.append(record)
+        columns = list(EXECUTION_BAR_REQUIRED_COLUMNS)
+        columns += [
+            column
+            for column in _BAR_OPTIONAL_COLUMNS
+            if column in optional_columns
+        ]
+        return pd.DataFrame(records, columns=columns)
 
     @staticmethod
     def _advance_marks(
@@ -354,6 +453,47 @@ class BacktestEngine:
         )
 
     @staticmethod
+    def _collect_projection(
+        day: date,
+        orders: Sequence[Order],
+        adjustments: Sequence[RebalanceAdjustment],
+        executable_target_quantities: Mapping[str, int],
+        submitted_orders: list[dict],
+        rebalance_adjustments: list[dict],
+        executable_targets: list[dict],
+    ) -> None:
+        submitted_orders.extend(
+            {
+                "trade_date": day,
+                "order_id": order.order_id,
+                "side": order.side,
+                "symbol": order.symbol,
+                "quantity": order.quantity,
+            }
+            for order in orders
+        )
+        rebalance_adjustments.extend(
+            {
+                "trade_date": adjustment.trade_date,
+                "side": adjustment.side,
+                "symbol": adjustment.symbol,
+                "requested_quantity": adjustment.requested_quantity,
+                "executable_quantity": adjustment.executable_quantity,
+                "rejected_quantity": adjustment.rejected_quantity,
+                "reason": adjustment.reason,
+            }
+            for adjustment in adjustments
+        )
+        executable_targets.extend(
+            {
+                "trade_date": day,
+                "symbol": symbol,
+                "target_quantity": quantity,
+            }
+            for symbol, quantity in sorted(executable_target_quantities.items())
+        )
+
+    @staticmethod
     def _fills_frame(rows: list[dict]) -> pd.DataFrame:
         frame = pd.DataFrame(rows, columns=list(FILL_COLUMNS))
         for column in ("quantity",):
@@ -398,6 +538,27 @@ class BacktestEngine:
         frame["stale_days"] = frame["stale_days"].astype("int64")
         return frame
 
+    @staticmethod
+    def _submitted_orders_frame(rows: list[dict]) -> pd.DataFrame:
+        frame = pd.DataFrame(rows, columns=list(SUBMITTED_ORDER_COLUMNS))
+        return frame.astype({"quantity": "int64"})
+
+    @staticmethod
+    def _rebalance_adjustments_frame(rows: list[dict]) -> pd.DataFrame:
+        frame = pd.DataFrame(rows, columns=list(REBALANCE_ADJUSTMENT_COLUMNS))
+        return frame.astype(
+            {
+                "requested_quantity": "int64",
+                "executable_quantity": "int64",
+                "rejected_quantity": "int64",
+            }
+        )
+
+    @staticmethod
+    def _executable_targets_frame(rows: list[dict]) -> pd.DataFrame:
+        frame = pd.DataFrame(rows, columns=list(EXECUTABLE_TARGET_COLUMNS))
+        return frame.astype({"target_quantity": "int64"})
+
     # ------------------------------------------------------------------ #
     # Readiness: benchmark coverage and executable clean bars
     # ------------------------------------------------------------------ #
@@ -438,10 +599,10 @@ class BacktestEngine:
             for order in market.orders_on(day):
                 row = market.day_rows.get(day, {}).get(order.symbol)
                 if row is None:
-                    raise ReadinessError(
-                        f"order {order.order_id} for {order.symbol} on "
-                        f"{day.isoformat()} has no bar that day (suspended)"
-                    )
+                    # The executor records this as suspended_or_unknown; it is
+                    # a normal, auditable order rejection rather than a run
+                    # readiness failure.
+                    continue
                 if _is_error_severity(row.get("quality_severity")):
                     raise ReadinessError(
                         f"order {order.order_id} for {order.symbol} on "
@@ -529,6 +690,9 @@ class _Market:
             )
         self.window = tuple(day for day in open_days if first <= day <= last)
         self.schedule_by_day = _schedule_index(request.schedule, self.window)
+        self.target_by_day = _target_schedule_index(
+            request.target_schedule, self.window
+        )
         self.actions_by_id, self.unkeyed_actions = _action_index(
             request.corporate_actions
         )
@@ -541,6 +705,10 @@ class _Market:
             order.symbol
             for orders in self.schedule_by_day.values()
             for order in orders
+        } | {
+            symbol
+            for targets in self.target_by_day.values()
+            for symbol in targets
         }
 
     def actions_on(self, day: date) -> tuple[dict, ...]:
@@ -553,6 +721,9 @@ class _Market:
 
     def orders_on(self, day: date) -> tuple[Order, ...]:
         return self.schedule_by_day.get(day, ())
+
+    def target_on(self, day: date) -> Mapping[str, int] | None:
+        return self.target_by_day.get(day)
 
     def schedule_by(self, day: date) -> tuple[tuple[Order, ...], tuple[Order, ...]]:
         """The day's sells and buys as separate order tuples."""
@@ -610,6 +781,26 @@ def _schedule_index(
     return {
         day: tuple(orders) for day, orders in sorted(by_day.items())
     }
+
+
+def _target_schedule_index(
+    schedule: tuple[TargetDay, ...], window: tuple[date, ...]
+) -> dict[date, Mapping[str, int]]:
+    open_days = set(window)
+    indexed: dict[date, Mapping[str, int]] = {}
+    for target_day in schedule:
+        if target_day.trade_date not in open_days:
+            raise ReadinessError(
+                f"targets scheduled on {target_day.trade_date.isoformat()}, which is "
+                "not an open day of the window"
+            )
+        if target_day.trade_date in indexed:
+            raise ReadinessError(
+                "multiple target books scheduled on "
+                f"{target_day.trade_date.isoformat()}"
+            )
+        indexed[target_day.trade_date] = target_day.target_quantities
+    return indexed
 
 
 def _action_index(

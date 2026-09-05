@@ -423,6 +423,81 @@ def test_experiment_html_covers_required_sections(tmp_path):
     assert "exp-abc123" in html  # experiment version
 
 
+def test_experiment_html_renders_execution_divergence_summary(tmp_path):
+    report = _experiment_input()
+    scenario = report.scenarios[0]
+    report = ExperimentReportInput(
+        **{
+            **report.__dict__,
+            "scenarios": (
+                ExperimentScenario(
+                    **{
+                        **scenario.__dict__,
+                        "execution_summary": {
+                            "planned_gross_notional": 100000.0,
+                            "actual_gross_notional": 85000.0,
+                            "unfilled_notional": 15000.0,
+                            "execution_deviation_ratio": 0.15,
+                            "pretrade_adjustments_by_reason": {
+                                "insufficient_cash": 2
+                            },
+                            "rejections_by_reason": {"suspended_or_unknown": 3},
+                            "end_cash": 12000.0,
+                            "stale_asset_ratio": 0.02,
+                        },
+                    }
+                ),
+            ),
+        }
+    )
+
+    html = render_experiment_report(report, tmp_path / "report.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "执行偏离诊断" in html
+    assert "15.00%" in html
+    assert "insufficient_cash: 2" in html
+    assert "suspended_or_unknown: 3" in html
+
+
+def test_experiment_html_has_collapsed_daily_trade_snapshot(tmp_path):
+    report_path = tmp_path / "report.html"
+    html = render_experiment_report(_experiment_input(), report_path).read_text(
+        encoding="utf-8"
+    )
+    assert '<details class="daily-trade-snapshot">' in html
+    assert "每日持仓快照" in html
+    assert "600001.SH" in html
+    assert "买入" in html
+
+
+def test_experiment_html_collapses_empty_ledgers_to_hint(tmp_path):
+    report = _experiment_input()
+    empty = report.scenarios[0]
+    report = ExperimentReportInput(
+        **{
+            **report.__dict__,
+            "scenarios": (
+                ExperimentScenario(
+                    **{
+                        **empty.__dict__,
+                        "holdings": pd.DataFrame(),
+                        "rejections": pd.DataFrame(),
+                        "action_ledger": pd.DataFrame(),
+                    }
+                ),
+            ),
+        }
+    )
+    html = render_experiment_report(report, tmp_path / "report.html").read_text(
+        encoding="utf-8"
+    )
+    assert "📭 回测期末无持仓" in html
+    assert "📭 回测期内无未成交订单" in html
+    assert "📭 回测期内无公司行为记录" in html
+
+
 def test_experiment_html_is_self_contained(tmp_path):
     path = render_experiment_report(_experiment_input(), tmp_path / "report.html")
     html = path.read_text(encoding="utf-8")

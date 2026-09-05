@@ -89,6 +89,14 @@ def test_published_experiment_holds_complete_immutable_artifact_contract(
         assert isinstance(summary["performance"], dict)
         assert "max_drawdown" in summary["performance"]
         assert "benchmark_excess_return" in summary["performance"]
+    run_id = metrics["meta"]["run_id"]
+    for scenario in scenarios:
+        scenario_dir = (
+            Path(fixture_root.root) / "data" / "runs" / run_id / "backtest" / scenario
+        )
+        assert (scenario_dir / "submitted_orders.parquet").is_file()
+        assert (scenario_dir / "rebalance_adjustments.parquet").is_file()
+        assert (scenario_dir / "executable_targets.parquet").is_file()
     html = (outcome.path / "report.html").read_text(encoding="utf-8")
     assert len(html) > 0
 

@@ -34,6 +34,7 @@ from stock_quant.backtest.engine import (
     BacktestRequest,
     OrderDay,
     ReadinessError,
+    TargetDay,
 )
 from stock_quant.backtest.models import BUY, SELL, Order
 from stock_quant.config import CostRate
@@ -848,13 +849,66 @@ def test_readiness_rejects_an_incomplete_benchmark_coverage():
         BacktestEngine().run(_request_with(benchmarks=benchmarks))
 
 
-def test_readiness_rejects_an_order_on_a_suspended_bar():
+def test_execution_records_rejection_for_an_order_on_a_suspended_bar():
     bars = _read_fixture("bars.parquet").copy()
     # GAMMA trades sessions 21..25 to no bar already; instead force a scheduled
     # order date's bar away to simulate an execution-day suspension.
     bars = bars[bars.trade_date != _MARKET.days[1]]  # no bars on buy day S1
-    with pytest.raises(ReadinessError):
-        BacktestEngine().run(_request_with(bars=bars))
+    result = BacktestEngine().run(_request_with(bars=bars))
+    assert any(
+        rejection["reason"] == "suspended_or_unknown"
+        for rejection in result.rejections.to_dict("records")
+    )
+
+
+def test_target_day_projects_cash_and_static_market_constraints_before_execution():
+    """Dynamic ideal targets emit adjustments, rather than known rejections."""
+    request = BacktestRequest(
+        dataset_version=_DATASET_VERSION,
+        initial_cash=1500,
+        calendar=TradingCalendar.from_open_days(_MARKET.days),
+        rule_book=TradingRuleBook.from_yaml(
+            _REPO_ROOT / "configs" / "trading_rules.yml"
+        ),
+        cost_model=CostModel(_cost_rate(_SCENARIOS["full_cost"])),
+        bars=_MARKET.bars,
+        corporate_actions=_MARKET.corporate_actions,
+        benchmarks=_MARKET.benchmarks,
+        target_schedule=(
+            TargetDay(
+                trade_date=_MARKET.days[1],
+                target_quantities={
+                    ALPHA: 200,  # only one lot fits the fee-inclusive budget
+                    ETA: 100,  # session 1 is at the upper limit
+                    GAMMA: 100,
+                },
+            ),
+            TargetDay(
+                trade_date=_MARKET.days[21],
+                target_quantities={ALPHA: 100, GAMMA: 100},
+            ),
+            TargetDay(
+                trade_date=_MARKET.days[40],
+                target_quantities={ALPHA: 100, ETA: 100},
+            ),
+        ),
+    )
+
+    result = BacktestEngine().run(request)
+
+    submitted = result.submitted_orders
+    assert [(row.side, row.symbol, row.quantity) for row in submitted.itertuples()] == [
+        (BUY, ALPHA, 100)
+    ]
+    assert set(result.rejections.reason) == set()
+    assert {
+        (row.symbol, row.reason)
+        for row in result.rebalance_adjustments.itertuples()
+    } >= {
+        (ALPHA, "insufficient_cash"),
+        (ETA, REASON_BUY_AT_UPPER_LIMIT),
+        (GAMMA, "suspended_or_unknown"),
+    }
 
 
 def test_readiness_rejects_a_cross_source_conflict_on_a_held_name():
