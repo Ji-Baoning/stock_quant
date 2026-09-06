@@ -480,3 +480,21 @@ def test_research_accepts_verified_empty_coverage(env):
     assert ResearchRunner(
         env.root, config_root=_REPO_ROOT
     ).run(_SPEC).manifest.status in ("ACCEPTED", "REJECTED")
+
+
+def test_engineering_never_publishes_accepted_even_with_trusted_evidence(env):
+    # Mode-level trust ruling: ENGINEERING is diagnostic-only, so even fully
+    # trusted coverage never yields an ACCEPTED experiment (formal acceptance
+    # is reserved for RESEARCH); the evaluation is stamped UNTRUSTED and the
+    # manifest REJECTED with a mode reason naming the diagnostic-only rule.
+    _publish_dataset_with_verified_empty_coverage(env.root)
+    runner = ResearchRunner(env.root, config_root=_REPO_ROOT)
+    debug = runner.run(_SPEC, trust_mode=DataTrustMode.ENGINEERING)
+    metrics = json.loads(
+        (debug.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics["corporate_action_trust"]["trusted"] is True
+    assert metrics["evaluation"]["status"] == "UNTRUSTED"
+    assert "diagnostic-only" in metrics["evaluation"]["reason"]
+    assert "never publishes an ACCEPTED" in metrics["evaluation"]["reason"]
+    assert debug.manifest.status == "REJECTED"

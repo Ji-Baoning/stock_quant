@@ -915,6 +915,24 @@ class ResearchRunner:
             f"{record['window_start']}..{record['window_end']}; {details}"
         )
 
+    def _engineering_reason(
+        self, frozen: ExperimentSpec, record: Mapping[str, object]
+    ) -> str:
+        """Why an ENGINEERING diagnostic never publishes an ACCEPTED experiment.
+
+        Names the data when its evidence is untrusted, or the mode when its
+        evidence is trusted (an ENGINEERING run is diagnostic-only; formal
+        acceptance is reserved for RESEARCH).
+        """
+        if not bool(record["trusted"]):
+            return self._untrusted_reason(frozen, record)
+        return (
+            f"corporate action trust: mode={record['mode']} is diagnostic-only "
+            f"and never publishes an ACCEPTED experiment; dataset "
+            f"{record['dataset_version']} has trusted coverage across "
+            f"{record['window_start']}..{record['window_end']}"
+        )
+
     # ------------------------------------------------------------------ #
     # Stage producers
     # ------------------------------------------------------------------ #
@@ -1426,17 +1444,16 @@ class ResearchRunner:
                 f"{type(evaluation).__name__}"
             )
         # Persist the trust decision alongside the performance claim so
-        # metrics.json is self-auditing; an ENGINEERING run whose evidence is
-        # untrusted is stamped UNTRUSTED (never ACCEPTED) with its reason.
+        # metrics.json is self-auditing.  ENGINEERING is diagnostic-only and
+        # never publishes an ACCEPTED experiment, so every ENGINEERING run is
+        # stamped UNTRUSTED here regardless of evidence: the reason names the
+        # data when its evidence is untrusted, or the mode when it is trusted.
         trust_record = self._record_run_trust(state, frozen)
         metrics["corporate_action_trust"] = trust_record
-        if (
-            frozen.trust_mode is DataTrustMode.ENGINEERING
-            and not bool(trust_record["trusted"])
-        ):
+        if frozen.trust_mode is DataTrustMode.ENGINEERING:
             evaluation = Evaluation(
                 ExperimentEvaluation.UNTRUSTED,
-                self._untrusted_reason(frozen, trust_record),
+                self._engineering_reason(frozen, trust_record),
             )
         metrics["evaluation"] = {
             "status": evaluation.status.value,

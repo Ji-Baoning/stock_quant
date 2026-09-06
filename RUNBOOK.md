@@ -115,8 +115,10 @@ python -m stock_quant report build --root .        # 最新实验 HTML + 当前�
 2. **B2 akshare 实时缺口**：akshare 基准接口实时返回无 symbol 列 → 阶段 4 基准角色
    可能 BLOCK。先按运维文档 §4.6 操作侧对账，或决定改适配器（上游改动，离线不可验）。
 3. **`backtest momentum_60d` 只进 `data/runs/debug`**，正式结论看 `research run`。
-   `--engineering` 只在覆盖证据不足时把**同一只数据集**跑成 UNTRUSTED 诊断
-   （stdout 打 `trust=UNTRUSTED`、报表显示"数据可信度未通过"+原因），仅限排障，
-   永不构成可信绩效；正式研究没有该开关。
+   `--engineering` 是**纯诊断，永不发布 ACCEPTED**：即使覆盖证据可信，该 run 的评价
+   也恒为 UNTRUSTED（实验清单 REJECTED，理由为 diagnostic-only）；覆盖证据不足时理由
+   改为点明数据 UNTRUSTED 与原因。stdout 的 `trust=` 反映**数据**可信度——可信数据在
+   工程模式下仍打印 `trust=TRUSTED`，但该 run 仍非正式结论。仅限排障，永不构成可信
+   绩效；正式研究没有该开关。
 4. **复权序列未发布/未消费**：动量跑未复权（adjusted_close=close）。
 5. **无盈利/实盘就绪声明**：本 MVP 是工程链路验收，不是投资建议。

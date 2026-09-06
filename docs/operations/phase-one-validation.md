@@ -168,10 +168,12 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
   `python -m stock_quant data bootstrap` 发布 `security_master`/`trading_calendar`
   （+空 `daily_bar`/`corporate_action`）基线；`data update` 只扩展已有数据集。
   `bootstrap_seed.py` 是与该 CLI 等价的直调脚本。
-- **`--engineering` 仅限诊断，永不构成正式绩效**：正式研究 `research run` 无此开关
-  （不可降级绕过证据门禁）；`backtest momentum_60d --engineering` 只把同一只覆盖证据
-  不足的数据集跑成 UNTRUSTED 诊断（stdout 打印 `trust=UNTRUSTED`，报表渲染
-  "数据可信度未通过" + 原因/标的），产物进 `data/runs/debug`，不得作为可信绩效发布。
+- **`--engineering` 仅限诊断，永不构成正式绩效（mode-level）**：正式研究 `research run`
+  无此开关（不可降级绕过证据门禁）；`backtest momentum_60d --engineering` 即使覆盖证据
+  可信也**永不发布 ACCEPTED**——评价恒为 UNTRUSTED、实验清单 REJECTED（理由为
+  diagnostic-only；覆盖证据不足时理由改为点明数据 UNTRUSTED + 原因/标的）。stdout 的
+  `trust=` 反映数据可信度（可信数据在工程模式下仍打印 `trust=TRUSTED`，但产物仍非正式
+  结论），产物进 `data/runs/debug`，不得作为可信绩效发布。
 - 无任何策略盈利或实盘就绪声明。
 
 ## 6. 记录模板（按数据集/实验 ID 留存，不入库）
