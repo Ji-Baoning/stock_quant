@@ -12,6 +12,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import pandas as pd
+
 from stock_quant.cli import (
     app,  # noqa: F401  (imported before the CLI exists to gate Step 2)
 )
@@ -89,14 +91,33 @@ def test_published_experiment_holds_complete_immutable_artifact_contract(
         assert isinstance(summary["performance"], dict)
         assert "max_drawdown" in summary["performance"]
         assert "benchmark_excess_return" in summary["performance"]
+        assert "n_pretrade_adjustments" not in summary
+        assert "planned_order_count" in summary
+        assert "filled_order_count" in summary
+        assert "unfilled_reason_counts" in summary
     run_id = metrics["meta"]["run_id"]
+    plan = pd.read_parquet(outcome.path / "orders.parquet")
+    submitted_frames: list[pd.DataFrame] = []
     for scenario in scenarios:
         scenario_dir = (
             Path(fixture_root.root) / "data" / "runs" / run_id / "backtest" / scenario
         )
-        assert (scenario_dir / "submitted_orders.parquet").is_file()
-        assert (scenario_dir / "rebalance_adjustments.parquet").is_file()
-        assert (scenario_dir / "executable_targets.parquet").is_file()
+        submitted = pd.read_parquet(scenario_dir / "submitted_orders.parquet")
+        submitted_frames.append(submitted)
+        assert (scenario_dir / "order_diffs.parquet").is_file()
+        assert not (scenario_dir / "rebalance_adjustments.parquet").exists()
+        assert not (scenario_dir / "executable_targets.parquet").exists()
+        # The submitted set is exactly the frozen plan ledger.
+        sub = submitted[["order_id", "side", "symbol", "quantity"]].sort_values(
+            "order_id"
+        ).reset_index(drop=True)
+        planned = plan[["order_id", "side", "symbol", "quantity"]].sort_values(
+            "order_id"
+        ).reset_index(drop=True)
+        assert sub.equals(planned)
+    # Submitted orders are scenario-independent (spec section 6).
+    for frame in submitted_frames[1:]:
+        assert submitted_frames[0].equals(frame)
     html = (outcome.path / "report.html").read_text(encoding="utf-8")
     assert len(html) > 0
 

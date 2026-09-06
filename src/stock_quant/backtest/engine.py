@@ -256,6 +256,11 @@ class BacktestEngine:
             else:
                 sells, buys = market.schedule_by(day)
                 orders = list(sells) + list(buys)
+                # One submitted record per plan order (spec section 2): the
+                # schedule path emits the raw plan as the audit trail.  The
+                # target projection path keeps its own collection until the
+                # execution-day projection is removed in the next task.
+                self._collect_submitted(day, orders, submitted_orders)
             if orders:
                 frame = self._execution_frame(
                     day, orders, market, last_close
@@ -436,6 +441,24 @@ class BacktestEngine:
                     "reason": rejected.reason,
                 }
             )
+
+    @staticmethod
+    def _collect_submitted(
+        day: date,
+        orders: Sequence[Order],
+        submitted_orders: list[dict],
+    ) -> None:
+        """One audit row per plan order submitted on ``day`` (spec section 2)."""
+        submitted_orders.extend(
+            {
+                "trade_date": day,
+                "order_id": order.order_id,
+                "side": order.side,
+                "symbol": order.symbol,
+                "quantity": order.quantity,
+            }
+            for order in orders
+        )
 
     @staticmethod
     def _collect_equity(

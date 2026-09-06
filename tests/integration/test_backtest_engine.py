@@ -30,6 +30,7 @@ from pandas.testing import assert_frame_equal
 from stock_quant.backtest.corporate_actions import UnsupportedCorporateAction
 from stock_quant.backtest.costs import CostModel
 from stock_quant.backtest.engine import (
+    SUBMITTED_ORDER_COLUMNS,
     BacktestEngine,
     BacktestRequest,
     OrderDay,
@@ -859,6 +860,28 @@ def test_execution_records_rejection_for_an_order_on_a_suspended_bar():
         rejection["reason"] == "suspended_or_unknown"
         for rejection in result.rejections.to_dict("records")
     )
+
+
+def test_golden_submitted_orders_match_the_plan_schedule():
+    """Spec section 3: on the fixed schedule the submitted set equals the plan
+    ledger order-for-order (id is the join key, fields confirm)."""
+    result = BacktestEngine().run(_request("full_cost"))
+    rows = []
+    for order_day in _MARKET.schedule:
+        for order in list(order_day.sells) + list(order_day.buys):
+            rows.append(
+                {
+                    "trade_date": order_day.trade_date,
+                    "order_id": order.order_id,
+                    "side": order.side,
+                    "symbol": order.symbol,
+                    "quantity": order.quantity,
+                }
+            )
+    expected = pd.DataFrame(rows, columns=list(SUBMITTED_ORDER_COLUMNS))
+    expected["quantity"] = expected["quantity"].astype("int64")
+    assert_frame_equal(result.submitted_orders, expected)
+    assert result.submitted_orders["order_id"].is_unique
 
 
 def test_target_day_projects_cash_and_static_market_constraints_before_execution():
