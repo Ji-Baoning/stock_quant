@@ -605,25 +605,30 @@ def _daily_trade_snapshot_rows(frame: pd.DataFrame) -> list[list[str]]:
 
 
 def _execution_rows(summary: dict[str, object] | None) -> list[list[str]]:
-    """Format the persisted execution-drift summary for one cost scenario."""
+    """Format the persisted execution-drift summary for one cost scenario.
+
+    ``summary`` is the execution_diagnostics.json object written under the Goal
+    #3 schema (spec section 8): order-level counts plus notional priced at the
+    signal-day close, with unfilled reasons counted by reason.  Missing keys
+    degrade gracefully to "无"/blank until the local writer is updated.
+    """
     if not summary:
         return []
-    pretrade = summary.get("pretrade_adjustments_by_reason", {})
-    pretrade_text = "、".join(
-        f"{reason}: {count}" for reason, count in sorted(dict(pretrade).items())
-    ) or "无"
-    reasons = summary.get("rejections_by_reason", {})
-    rejection_text = "、".join(
+    reasons = summary.get("unfilled_reason_counts", {})
+    reason_text = "、".join(
         f"{reason}: {count}" for reason, count in sorted(dict(reasons).items())
     ) or "无"
     return [
         [
+            _int_text(summary.get("planned_order_count")),
+            _int_text(summary.get("filled_order_count")),
+            _int_text(summary.get("partial_order_count")),
+            _int_text(summary.get("rejected_order_count")),
             _money(summary.get("planned_gross_notional")),
             _money(summary.get("actual_gross_notional")),
             _money(summary.get("unfilled_notional")),
             _pct(summary.get("execution_deviation_ratio")),
-            pretrade_text,
-            rejection_text,
+            reason_text,
             _money(summary.get("end_cash")),
             _pct(summary.get("stale_asset_ratio")),
         ]

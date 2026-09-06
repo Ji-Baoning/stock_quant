@@ -30,11 +30,11 @@ from pandas.testing import assert_frame_equal
 from stock_quant.backtest.corporate_actions import UnsupportedCorporateAction
 from stock_quant.backtest.costs import CostModel
 from stock_quant.backtest.engine import (
+    SUBMITTED_ORDER_COLUMNS,
     BacktestEngine,
     BacktestRequest,
     OrderDay,
     ReadinessError,
-    TargetDay,
 )
 from stock_quant.backtest.models import BUY, SELL, Order
 from stock_quant.config import CostRate
@@ -861,8 +861,31 @@ def test_execution_records_rejection_for_an_order_on_a_suspended_bar():
     )
 
 
-def test_target_day_projects_cash_and_static_market_constraints_before_execution():
-    """Dynamic ideal targets emit adjustments, rather than known rejections."""
+def test_golden_submitted_orders_match_the_plan_schedule():
+    """Spec section 3: on the fixed schedule the submitted set equals the plan
+    ledger order-for-order (id is the join key, fields confirm)."""
+    result = BacktestEngine().run(_request("full_cost"))
+    rows = []
+    for order_day in _MARKET.schedule:
+        for order in list(order_day.sells) + list(order_day.buys):
+            rows.append(
+                {
+                    "trade_date": order_day.trade_date,
+                    "order_id": order.order_id,
+                    "side": order.side,
+                    "symbol": order.symbol,
+                    "quantity": order.quantity,
+                }
+            )
+    expected = pd.DataFrame(rows, columns=list(SUBMITTED_ORDER_COLUMNS))
+    expected["quantity"] = expected["quantity"].astype("int64")
+    assert_frame_equal(result.submitted_orders, expected)
+    assert result.submitted_orders["order_id"].is_unique
+
+
+def test_pure_intent_plan_replay_records_fills_partials_and_rejections():
+    """The engine submits the raw plan (no pre-sizing) and the executor turns
+    affordability / price-limit / suspension into fills and rejections."""
     request = BacktestRequest(
         dataset_version=_DATASET_VERSION,
         initial_cash=1500,
@@ -874,41 +897,83 @@ def test_target_day_projects_cash_and_static_market_constraints_before_execution
         bars=_MARKET.bars,
         corporate_actions=_MARKET.corporate_actions,
         benchmarks=_MARKET.benchmarks,
-        target_schedule=(
-            TargetDay(
-                trade_date=_MARKET.days[1],
-                target_quantities={
-                    ALPHA: 200,  # only one lot fits the fee-inclusive budget
-                    ETA: 100,  # session 1 is at the upper limit
-                    GAMMA: 100,
-                },
+        schedule=(
+            OrderDay(
+                trade_date=_DAYS[1],
+                sells=(Order("o102", SELL, ALPHA, 200),),
+                buys=(Order("o101", BUY, ALPHA, 200),),
             ),
-            TargetDay(
-                trade_date=_MARKET.days[21],
-                target_quantities={ALPHA: 100, GAMMA: 100},
+            OrderDay(
+                trade_date=_DAYS[22],
+                buys=(Order("o104", BUY, GAMMA, 100),),
             ),
-            TargetDay(
-                trade_date=_MARKET.days[40],
-                target_quantities={ALPHA: 100, ETA: 100},
+            OrderDay(
+                trade_date=_DAYS[40],
+                buys=(Order("o103", BUY, ETA, 100),),
             ),
         ),
     )
 
     result = BacktestEngine().run(request)
 
-    submitted = result.submitted_orders
-    assert [(row.side, row.symbol, row.quantity) for row in submitted.itertuples()] == [
-        (BUY, ALPHA, 100)
+    # The whole raw plan was submitted: nothing was trimmed or re-sized by
+    # execution-day information.
+    submitted = sorted(
+        (row.order_id, row.side, row.symbol, int(row.quantity))
+        for row in result.submitted_orders.itertuples()
+    )
+    assert submitted == sorted(
+        [
+            ("o101", BUY, ALPHA, 200),
+            ("o102", SELL, ALPHA, 200),
+            ("o103", BUY, ETA, 100),
+            ("o104", BUY, GAMMA, 100),
+        ]
+    )
+    # o101 is cash-partial (one whole lot fits), everything else rejected.
+    assert [(row.order_id, int(row.quantity)) for row in result.fills.itertuples()] == [
+        ("o101", 100)
     ]
-    assert set(result.rejections.reason) == set()
     assert {
-        (row.symbol, row.reason)
-        for row in result.rebalance_adjustments.itertuples()
-    } >= {
-        (ALPHA, "insufficient_cash"),
-        (ETA, REASON_BUY_AT_UPPER_LIMIT),
-        (GAMMA, "suspended_or_unknown"),
+        (row.order_id, row.reason, int(row.rejected_quantity))
+        for row in result.rejections.itertuples()
+    } == {
+        ("o101", "insufficient_cash", 100),
+        ("o102", "insufficient_sellable_quantity", 200),
+        ("o103", REASON_BUY_AT_UPPER_LIMIT, 100),
+        ("o104", "suspended_or_unknown", 100),
     }
+
+
+def test_changing_only_an_execution_day_open_changes_only_that_orders_outcome():
+    """P0.3 acceptance: perturb one execution-day open (ETA day 40 to below its
+    upper limit) and only that order's fill/rejection outcome changes; the
+    submitted order set -- the frozen plan -- is byte-identical."""
+    variant = _read_fixture("bars.parquet").copy()
+    mask = (variant["symbol"] == ETA) & (variant["trade_date"] == _DAYS[40])
+    variant.loc[mask, "open"] = 10.9  # under the 11.0 upper limit
+    base = BacktestEngine().run(_request_with(schedule=_MARKET.schedule))
+    changed = BacktestEngine().run(
+        _request_with(bars=variant, schedule=_MARKET.schedule)
+    )
+    assert_frame_equal(base.submitted_orders, changed.submitted_orders)
+    # Everything except order o11 is identical across both runs.
+    assert_frame_equal(
+        base.fills[base.fills.order_id != "o11"].reset_index(drop=True),
+        changed.fills[changed.fills.order_id != "o11"].reset_index(drop=True),
+    )
+    assert_frame_equal(
+        base.rejections[base.rejections.order_id != "o11"].reset_index(drop=True),
+        changed.rejections[changed.rejections.order_id != "o11"].reset_index(
+            drop=True
+        ),
+    )
+    # o11: upper-limit rejection in the base, a fill in the changed run.
+    assert list(base.rejections[base.rejections.order_id == "o11"].reason) == [
+        REASON_BUY_AT_UPPER_LIMIT
+    ]
+    assert changed.rejections[changed.rejections.order_id == "o11"].empty
+    assert list(changed.fills[changed.fills.order_id == "o11"].quantity) == [100]
 
 
 def test_readiness_rejects_a_cross_source_conflict_on_a_held_name():

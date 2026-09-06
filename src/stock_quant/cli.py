@@ -54,6 +54,11 @@ from stock_quant.reporting.html import (
     render_quality_report,
 )
 from stock_quant.research.models import ResearchRunFailed
+from stock_quant.research.reconcile import (
+    STATUS_FILLED,
+    STATUS_PARTIAL,
+    STATUS_REJECTED,
+)
 from stock_quant.research.registry import ExperimentRegistry, PublishedExperiment
 from stock_quant.research.runner import AnalyticsInput, ResearchRunner
 from stock_quant.research.trust import DataTrustMode
@@ -570,13 +575,37 @@ class _ExperimentAnalytics:
             equity = pd.read_parquet(directory / "daily_equity.parquet")
             fills = pd.read_parquet(directory / "fills.parquet")
             rejections = pd.read_parquet(directory / "rejections.parquet")
-            adjustments = pd.read_parquet(
-                directory / "rebalance_adjustments.parquet"
-            )
+            diffs = pd.read_parquet(directory / "order_diffs.parquet")
             start = float(equity["total_equity"].iloc[0])
             end = float(equity["total_equity"].iloc[-1])
             n_rejections = int(len(rejections))
-            n_pretrade_adjustments = int(len(adjustments))
+            planned_order_count = int(len(diffs))
+            planned_quantity = (
+                int(diffs["planned_quantity"].sum()) if planned_order_count else 0
+            )
+            filled_quantity = (
+                int(diffs["filled_quantity"].sum()) if planned_order_count else 0
+            )
+            unfilled_quantity = planned_quantity - filled_quantity
+            status_counts = (
+                diffs["status"].value_counts().to_dict() if planned_order_count else {}
+            )
+            filled_order_count = int(status_counts.get(STATUS_FILLED, 0))
+            partial_order_count = int(status_counts.get(STATUS_PARTIAL, 0))
+            rejected_order_count = int(status_counts.get(STATUS_REJECTED, 0))
+            unfilled = (
+                diffs[diffs["status"] != STATUS_FILLED]
+                if planned_order_count
+                else diffs
+            )
+            unfilled_reason_counts = {
+                str(reason): int(count)
+                for reason, count in (
+                    unfilled["reason"].value_counts().items()
+                    if planned_order_count and len(unfilled)
+                    else []
+                )
+            }
             summary: dict[str, object] = {
                 "periods": int(len(equity)),
                 "start_date": _date_text(equity["trade_date"].iloc[0]),
@@ -592,6 +621,7 @@ class _ExperimentAnalytics:
                 "stamp_tax": _round2(float(fills["stamp_tax"].sum()))
                 if len(fills)
                 else 0.0,
+                # Flow level (rejections.parquet, one row per rejection record).
                 "n_rejections": n_rejections,
                 "rejected_quantity": int(rejections["rejected_quantity"].sum())
                 if n_rejections
@@ -604,21 +634,16 @@ class _ExperimentAnalytics:
                         else []
                     )
                 },
-                "n_pretrade_adjustments": n_pretrade_adjustments,
-                "pretrade_adjusted_quantity": int(
-                    adjustments["rejected_quantity"].sum()
-                )
-                if n_pretrade_adjustments
-                else 0,
-                "pretrade_adjustments_by_reason": {
-                    str(reason): int(count)
-                    for reason, count in (
-                        adjustments["reason"].value_counts().items()
-                        if n_pretrade_adjustments
-                        else []
-                    )
-                },
-                "plan_diverged": bool(n_pretrade_adjustments or n_rejections),
+                # Order level (order_diffs.parquet, one row per planned order).
+                "planned_order_count": planned_order_count,
+                "planned_quantity": planned_quantity,
+                "filled_quantity": filled_quantity,
+                "unfilled_quantity": unfilled_quantity,
+                "filled_order_count": filled_order_count,
+                "partial_order_count": partial_order_count,
+                "rejected_order_count": rejected_order_count,
+                "unfilled_reason_counts": unfilled_reason_counts,
+                "plan_diverged": bool(unfilled_quantity > 0),
                 "performance": compute_metrics(
                     equity, fills, benchmark
                 ).to_dict(),
