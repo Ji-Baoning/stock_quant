@@ -157,6 +157,13 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
 ```
 
     任何命中人工复核；已提交文件中不得出现凭证或疑似凭证长串。
+13. **证券主数据现场核对**：活数据集的 `security_master` 中 `list_date`/`delist_date`/
+    `list_status` 应可逐标的回溯到 tushare `stock_basic` 快照：抽查
+    `data/standardized/<version>/security_master_coverage.parquet`——每只股票池标的应
+    恰有一行（`source=tushare.stock_basic`、`snapshot_sha256` 对应原始快照哈希）。
+    研究冻结以「每标的行存在」为 VERIFIED 前提；缺行/空表/旧数据集在 RESEARCH 模式会被
+    拒绝（逐标的 `SOURCE_NOT_REQUESTED`），bootstrap 空种子恒被拒。对已发布数据集执行
+    `data validate` 复核「事实 vs 行情边界」WARNING 与「coverage↔master 一致性」FATAL。
 
 ## 5. 阶段一已知限制（对齐操作者预期）
 
@@ -168,6 +175,9 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
   `python -m stock_quant data bootstrap` 发布 `security_master`/`trading_calendar`
   （+空 `daily_bar`/`corporate_action`）基线；`data update` 只扩展已有数据集。
   `bootstrap_seed.py` 是与该 CLI 等价的直调脚本。
+- **tushare `stock_basic` 快照是默认“仅上市（L）”参照**：universe 若含已退市/长期停牌
+  样本，会以 `master_snapshot_incomplete` 形式暴露——本期 30 只固定上市样本下属预期
+  行为。
 - **`--engineering` 仅限诊断，永不构成正式绩效（mode-level）**：正式研究 `research run`
   无此开关（不可降级绕过证据门禁）；`backtest momentum_60d --engineering` 即使覆盖证据
   可信也**永不发布 ACCEPTED**——评价恒为 UNTRUSTED、实验清单 REJECTED（理由为

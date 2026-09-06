@@ -555,3 +555,63 @@ def test_engineering_never_publishes_accepted_even_with_trusted_evidence(env):
     assert "diagnostic-only" in metrics["evaluation"]["reason"]
     assert "never publishes an ACCEPTED" in metrics["evaluation"]["reason"]
     assert debug.manifest.status == "REJECTED"
+
+
+def _publish_dataset_without_master_evidence(project_root: Path) -> str:
+    """Republish CURRENT with an empty security_master_coverage table."""
+    from stock_quant.data_model.security_master import master_coverage_frame
+
+    return _publish_synthetic_dataset(
+        project_root,
+        master_coverage=master_coverage_frame([]),
+    )
+
+
+def test_research_rejects_missing_master_evidence_but_engineering_is_untrusted(
+    env,
+):
+    """Empty master evidence freezes RESEARCH; ENGINEERING still diagnoses.
+
+    The rejection must name the security-master evidence and happen before any
+    backtest; the ENGINEERING run proceeds as an UNTRUSTED diagnostic that can
+    never be accepted as a trusted performance claim.
+    """
+    _publish_dataset_without_master_evidence(env.root)
+    runner = ResearchRunner(env.root, config_root=_REPO_ROOT)
+    with pytest.raises(ResearchRunFailed, match="security master evidence"):
+        runner.run(_SPEC)
+    debug = runner.run(_SPEC, trust_mode=DataTrustMode.ENGINEERING)
+    metrics = json.loads(
+        (debug.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics["evaluation"]["status"] == "UNTRUSTED"
+    assert debug.manifest.status == "REJECTED"
+
+
+def test_new_stock_excluded_before_120_listed_days(tmp_path):
+    """A symbol with a real list_date under 120 sessions before the window end
+    never enters a factor candidate set (momentum seasoning)."""
+    sessions = _weekdays(_BARS_START, _BARS_END)
+    fresh_symbol = "603999.SH"
+    fresh_list_date = sessions[-90]
+    fresh_growth = 0.00200
+    project_root = tmp_path / "project"
+    _publish_synthetic_dataset(
+        project_root,
+        fresh=(fresh_symbol, fresh_list_date, fresh_growth),
+    )
+    runner = ResearchRunner(project_root, config_root=_REPO_ROOT)
+    experiment = runner.run(_SPEC)
+    assert experiment.manifest.status in ("ACCEPTED", "REJECTED")
+
+    factors = pd.read_parquet(experiment.path / "factor_results.parquet")
+    fresh_rows = factors.loc[factors["symbol"] == fresh_symbol]
+    assert not fresh_rows.empty, "the fresh symbol must produce factor rows"
+    assert not fresh_rows["is_valid"].astype(bool).any()
+    assert "seasoning_below_120" in set(fresh_rows["invalid_reason"])
+
+    targets = pd.read_parquet(experiment.path / "target_positions.parquet")
+    assert fresh_symbol not in set(targets["symbol"]), (
+        "a symbol with fewer than 120 listed trading days must be kept out of "
+        "target positions"
+    )
