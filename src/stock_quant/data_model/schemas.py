@@ -93,6 +93,7 @@ SECURITY_MASTER_COLUMNS = [
     "board",
     "list_date",
     "delist_date",
+    "list_status",
 ]
 
 # Trading calendar marks which calendar dates are confirmed open days.
@@ -158,6 +159,7 @@ def _security_master_fields() -> list[pa.Field]:
         pa.field("board", pa.string()),
         pa.field("list_date", pa.date32()),
         pa.field("delist_date", pa.date32()),
+        pa.field("list_status", pa.string()),
     ]
 
 

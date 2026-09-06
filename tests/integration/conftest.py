@@ -4,8 +4,9 @@ Task 13 wires the research runner to a Typer CLI and builds a thin end-to-end
 acceptance over one synthetic project.  A test-support file is justified here
 because *both* ``test_cli.py`` and ``test_end_to_end.py`` need the exact same
 deterministic synthetic project (a ``configs/`` tree copied from the
-repository plus one content-addressed 5-table dataset that also carries a
-``corporate_action_coverage`` evidence table) and the same two fixtures
+repository plus one content-addressed 6-table dataset that also carries
+``corporate_action_coverage`` and ``security_master_coverage`` evidence
+tables) and the same two fixtures
 (``cli_runner``, ``fixture_root``).  All fixtures are offline and live
 under ``tmp_path_factory``; nothing here touches the network or a token, and no
 real market data is committed.
@@ -32,6 +33,12 @@ from stock_quant.data_model.schemas import (
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
+)
+from stock_quant.data_model.security_master import (
+    MASTER_SOURCE_STOCK_BASIC,
+    ListStatus,
+    master_coverage_frame,
+    master_coverage_record,
 )
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_quality.models import QualityReport
@@ -126,15 +133,18 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
 
     Copies the repository ``configs/`` tree (project/sources/costs/rules/
     universe) into ``root/configs/``, authors a short experiment spec, then
-    publishes a deterministic 5-table dataset over the repository's 30-symbol
+    publishes a deterministic 6-table dataset over the repository's 30-symbol
     universe plus two benchmark indices, including one ``corporate_action_coverage``
     row per universe symbol over the whole fixture bars window so the default
     RESEARCH runs in the CLI / end-to-end suite pass the corporate-action trust
-    gate.  ``broken=True`` keeps the (empty) facts table so an ENGINEERING
-    diagnostic can still replay, but marks every coverage row UNTRUSTED
-    (``SOURCE_FETCH_FAILED``): a RESEARCH run must fail the gate before any
-    backtest while an ENGINEERING run may still complete as an UNTRUSTED
-    diagnostic that is never accepted as a trusted performance claim.
+    gate, and one ``security_master_coverage`` row per universe symbol (at the
+    master's listing facts) so the RESEARCH master-evidence gate accepts the
+    dataset too.  ``broken=True`` keeps the (empty) facts table so an
+    ENGINEERING diagnostic can still replay, but marks every coverage row
+    UNTRUSTED (``SOURCE_FETCH_FAILED``) and keeps the security-master coverage
+    table *empty*: a RESEARCH run must fail a gate before any backtest while an
+    ENGINEERING run may still complete as an UNTRUSTED diagnostic that is never
+    accepted as a trusted performance claim.
     """
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -155,6 +165,9 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
     tables = {
         "daily_bar": _bars(sessions, universe),
         "security_master": _security_master(universe),
+        "security_master_coverage": _master_coverage_table(
+            universe, present=not broken
+        ),
         "corporate_action": _corporate_action(),
         "corporate_action_coverage": _coverage_table(universe, trusted=not broken),
         "trading_calendar": _trading_calendar(),
@@ -193,6 +206,32 @@ def _coverage_table(universe: Universe, *, trusted: bool) -> pd.DataFrame:
         for entry in universe.entries
     ]
     return coverage_frame(records)
+
+
+def _master_coverage_table(universe: Universe, *, present: bool) -> pd.DataFrame:
+    """One deterministic security_master_coverage row per universe symbol.
+
+    Row presence is the whole evidence vocabulary: ``present=True`` publishes a
+    row per symbol at the master's listing facts (the RESEARCH master-evidence
+    gate accepts the dataset); ``present=False`` (the ``broken`` fixture)
+    publishes an empty table so a RESEARCH run is rejected for missing master
+    evidence while an ENGINEERING diagnostic may still replay.
+    """
+    if not present:
+        return master_coverage_frame([])
+    records = [
+        master_coverage_record(
+            entry.symbol,
+            list_date=LIST_DATE,
+            list_status=ListStatus.L,
+            source=MASTER_SOURCE_STOCK_BASIC,
+            snapshot_sha256="f" * 64,
+            sdk_version="fixture",
+            checked_at=_INGESTED,
+        )
+        for entry in universe.entries
+    ]
+    return master_coverage_frame(records)
 
 
 def _bars(sessions: list[date], universe: Universe) -> pd.DataFrame:
@@ -258,6 +297,7 @@ def _security_master(universe: Universe) -> pd.DataFrame:
             "delist_date": pd.Series(
                 pd.NaT, index=range(n), dtype="datetime64[ns]"
             ),
+            "list_status": [ListStatus.L.value] * n,
         }
     )[SECURITY_MASTER_COLUMNS]
 
