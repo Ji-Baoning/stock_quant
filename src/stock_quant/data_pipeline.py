@@ -120,6 +120,8 @@ CODE_DATA_DISCOVERY_UNRESOLVED = "data_discovery_unresolved"
 CODE_OPTIONAL_SOURCE_FAILURE = "optional_source_failure"
 CODE_UNIVERSE_MASTER_MISMATCH = "universe_master_mismatch"
 CODE_MASTER_SNAPSHOT_INCOMPLETE = "master_snapshot_incomplete"
+CODE_MASTER_BAR_BOUNDARY = "master_bar_boundary"
+CODE_MASTER_COVERAGE_MISMATCH = "master_coverage_mismatch"
 
 _CONFIGURED_SOURCES = ("tushare", "akshare", "baostock")
 _REQUIRED_ROLE = {"tushare": True, "akshare": True, "baostock": False}
@@ -314,7 +316,12 @@ class DataPipeline:
             issues.extend(check_daily_values(daily, table="daily_bar"))
             issues.extend(check_provenance(daily, table="daily_bar"))
             master = context.read("security_master")
+            coverage = None
+            if "security_master_coverage" in context.tables:
+                coverage = context.read("security_master_coverage")
         issues.extend(self._universe_master_issues(master))
+        issues.extend(self._master_bar_boundary_issues(master, daily))
+        issues.extend(self._master_coverage_consistency_issues(master, coverage))
         return QualityReport(issues=tuple(issues))
 
     def update(self, request: DataUpdateRequest) -> DataUpdateResult:
@@ -514,6 +521,7 @@ class DataPipeline:
                 ingested,
             )
         )
+        issues.extend(self._master_bar_boundary_issues(master, new_daily))
 
         report = QualityReport(issues=tuple(issues))
         decision = evaluate_publication(report)
@@ -624,6 +632,115 @@ class DataPipeline:
                     "security_master_symbol_count": len(master_symbols),
                     "missing_from_security_master": missing,
                     "extra_in_security_master": extra,
+                },
+            )
+        ]
+
+    def _master_bar_boundary_issues(
+        self, master: pd.DataFrame, daily: pd.DataFrame
+    ) -> list[QualityIssue]:
+        """WARNING when a bar row lies outside its symbol's listing window.
+
+        A bar before ``list_date`` (or after ``delist_date``) contradicts the
+        refreshed master facts.  Missing rows are *not* this check's job -- they
+        are classified separately by ``classify_missing_row``.  A WARNING never
+        blocks publication; it surfaces a source-vs-master disagreement.
+        """
+        if daily is None or daily.empty:
+            return []
+        bounds = {
+            str(row["symbol"]): (_as_date(row["list_date"]),
+                                 _as_date(row["delist_date"]))
+            for row in master.to_dict("records")
+        }
+        issues: list[QualityIssue] = []
+        for record in daily.to_dict("records"):
+            symbol = str(record["symbol"])
+            list_date, delist_date = bounds.get(symbol, (None, None))
+            if list_date is None and delist_date is None:
+                continue
+            trade_date = _as_date(record["trade_date"])
+            if trade_date is None:
+                continue
+            if list_date is not None and trade_date < list_date:
+                boundary = "before_list_date"
+            elif delist_date is not None and trade_date > delist_date:
+                boundary = "after_delist_date"
+            else:
+                continue
+            issues.append(
+                _issue(
+                    Severity.WARNING,
+                    CODE_MASTER_BAR_BOUNDARY,
+                    symbol=symbol,
+                    trade_date=trade_date,
+                    table="daily_bar",
+                    details={
+                        "boundary": boundary,
+                        "list_date": list_date.isoformat()
+                        if list_date is not None else None,
+                        "delist_date": delist_date.isoformat()
+                        if delist_date is not None else None,
+                    },
+                )
+            )
+        return issues
+
+    def _master_coverage_consistency_issues(
+        self, master: pd.DataFrame, coverage: pd.DataFrame | None
+    ) -> list[QualityIssue]:
+        """Validate-only FATAL when evidence is absent or disagrees with master.
+
+        Never runs inside ``update()``: the refresh builds the coverage rows
+        from the very master it publishes, so a mismatch there is impossible;
+        the check guards the *stored* dataset against drift, tampering or an
+        older schema.
+        """
+        covered = _covered_symbols(coverage)
+        missing = sorted(
+            {str(row["symbol"]) for row in master.to_dict("records")} - covered
+        )
+        if missing:
+            return [
+                _issue(
+                    Severity.FATAL,
+                    CODE_MASTER_COVERAGE_MISMATCH,
+                    table="security_master",
+                    details={
+                        "message": (
+                            "security_master_coverage is missing rows for "
+                            "pinned symbols"
+                        ),
+                        "missing": missing,
+                    },
+                )
+            ]
+        facts = {
+            str(row["symbol"]): row
+            for row in coverage.to_dict("records")
+        }
+        disagree: list[str] = []
+        for record in master.to_dict("records"):
+            symbol = str(record["symbol"])
+            fact = facts[symbol]
+            if (
+                _as_date(record["list_date"]) != _as_date(fact["list_date"])
+                or _as_date(record["delist_date"])
+                != _as_date(fact["delist_date"])
+                or str(record["list_status"]) != str(fact["list_status"])
+            ):
+                disagree.append(symbol)
+        if not disagree:
+            return []
+        return [
+            _issue(
+                Severity.FATAL,
+                CODE_MASTER_COVERAGE_MISMATCH,
+                table="security_master",
+                details={
+                    "message": "security_master disagrees with its coverage "
+                    "evidence",
+                    "symbols": sorted(disagree),
                 },
             )
         ]
@@ -1642,6 +1759,12 @@ def _calendar_frame(open_days: tuple[date, ...]) -> pd.DataFrame:
             "is_trading_day": [True] * len(open_days),
         }
     )
+
+
+def _covered_symbols(coverage: pd.DataFrame | None) -> set[str]:
+    if coverage is None or not isinstance(coverage, pd.DataFrame):
+        return set()
+    return set(str(value) for value in coverage.get("symbol", []))
 
 
 def _as_date(value: object) -> date | None:

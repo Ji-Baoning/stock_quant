@@ -22,8 +22,11 @@ from conftest import build_fixture_project  # noqa: E402
 
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+from stock_quant.data_model.security_master import master_coverage_frame
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
+    CODE_MASTER_BAR_BOUNDARY,
+    CODE_MASTER_COVERAGE_MISMATCH,
     CODE_MASTER_SNAPSHOT_INCOMPLETE,
     CODE_OPTIONAL_SOURCE_FAILURE,
     CODE_SOURCE_FETCH_FAILED,
@@ -848,3 +851,122 @@ def test_discovery_reports_fallback_when_a_benchmark_series_lags(project, monkey
     assert result.dataset_ref is not None
     assert result.resolved_end_date == date(2022, 1, 5)
     assert result.resolved_end_is_fallback is True
+
+
+# --------------------------------------------------------------------------- #
+# Master fact-vs-bar boundary and coverage-consistency checks (Task 5)
+# --------------------------------------------------------------------------- #
+
+
+def _republish_current_tables(
+    root: Path,
+    *,
+    master_coverage: pd.DataFrame | None = None,
+    include_master_coverage: bool = True,
+) -> str:
+    """Republish CURRENT with an optional security_master_coverage variant.
+
+    ``master_coverage`` replaces the published table; ``include_master_coverage
+    = False`` omits it entirely (the "older dataset" shape).  Used only to stage
+    validate-only audit breaches the pipeline itself can never write.
+    """
+    publisher = DatasetPublisher(root)
+    version = publisher.current().version
+    reader = DatasetReader(root)
+    with reader.open(version) as context:
+        tables = {
+            "daily_bar": context.read("daily_bar"),
+            "security_master": context.read("security_master"),
+            "corporate_action": context.read("corporate_action"),
+            "corporate_action_coverage": context.read(
+                "corporate_action_coverage"
+            ),
+            "trading_calendar": context.read("trading_calendar"),
+        }
+        if include_master_coverage:
+            tables["security_master_coverage"] = (
+                master_coverage
+                if master_coverage is not None
+                else context.read("security_master_coverage")
+            )
+    return publisher.publish(tables, QualityReport()).version
+
+
+def _update_and_validate(project, **tushare_overrides):
+    """One healthy update; returns ``(pipeline, result)`` for the follow-on."""
+    tushare = StubAdapter("tushare", **tushare_overrides)
+    pipeline = DataPipeline(project.root, sources=_all_stubs(tushare=tushare))
+    result = pipeline.update(_request())
+    assert result.dataset_ref is not None
+    return pipeline, result
+
+
+def test_update_reports_bar_before_list_date_as_warning(project):
+    """A stock_basic list_date inside the bar window exposes pre-listing bars as
+    a WARNING (fact-vs-bar boundary) and never blocks publication."""
+    _, result = _update_and_validate(
+        project,
+        stock_basic_list_date_by_symbol={"600000.SH": date(2021, 11, 20)},
+    )
+    assert result.dataset_ref is not None
+    report = result.quality_report
+    assert report.by_code()[CODE_MASTER_BAR_BOUNDARY] >= 1
+    issue = next(
+        item for item in report.issues if item.code == CODE_MASTER_BAR_BOUNDARY
+    )
+    assert issue.severity is Severity.WARNING
+    assert issue.symbol == "600000.SH"
+
+
+def test_validate_reports_bar_before_list_date_as_warning(project):
+    """The same boundary check re-runs over a published version in validate(),
+    and the update-derived dataset stays coverage-consistent (no FATAL)."""
+    pipeline, result = _update_and_validate(
+        project,
+        stock_basic_list_date_by_symbol={"600000.SH": date(2021, 11, 20)},
+    )
+    report = pipeline.validate(result.dataset_ref.version)
+    assert report.by_code()[CODE_MASTER_BAR_BOUNDARY] >= 1
+    issue = next(
+        item for item in report.issues if item.code == CODE_MASTER_BAR_BOUNDARY
+    )
+    assert issue.severity is Severity.WARNING
+    assert report.by_severity()[Severity.FATAL.value] == 0
+
+
+def test_validate_surfaces_master_coverage_mismatch_as_fatal(project):
+    """Validate-only: a coverage row disagreeing with master is a FATAL break."""
+    pipeline, result = _update_and_validate(project)
+    version = result.dataset_ref.version
+    reader = DatasetReader(project.root)
+    with reader.open(version) as context:
+        coverage = context.read("security_master_coverage")
+    records = coverage.to_dict("records")
+    for record in records:
+        if record["symbol"] == "600000.SH":
+            record["list_status"] = "P"
+    _republish_current_tables(
+        project.root, master_coverage=master_coverage_frame(records)
+    )
+    report = pipeline.validate()
+    assert report.by_code()[CODE_MASTER_COVERAGE_MISMATCH] == 1
+    issue = next(
+        item for item in report.issues
+        if item.code == CODE_MASTER_COVERAGE_MISMATCH
+    )
+    assert issue.severity is Severity.FATAL
+    assert issue.details["symbols"] == ["600000.SH"]
+
+
+def test_validate_surfaces_missing_master_coverage_as_fatal(project):
+    """Validate-only: a dataset without the evidence table cannot validate."""
+    pipeline, _ = _update_and_validate(project)
+    _republish_current_tables(project.root, include_master_coverage=False)
+    report = pipeline.validate()
+    assert report.by_code()[CODE_MASTER_COVERAGE_MISMATCH] == 1
+    issue = next(
+        item for item in report.issues
+        if item.code == CODE_MASTER_COVERAGE_MISMATCH
+    )
+    assert issue.severity is Severity.FATAL
+    assert issue.details["missing"]
