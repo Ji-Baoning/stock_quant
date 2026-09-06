@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据质量报告（工程验证）</title>
+<script>{% if plotly_js %}{{ plotly_js | safe }}{% endif %}</script>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; padding: 24px; color: #1a1a1a; background: #f7f7f8; }
+  main { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .subtitle { color: #555; font-size: 13px; margin: 0 0 16px; }
+  .banner { border: 1px solid #b3261e; background: #fdecea; padding: 10px 14px;
+            border-radius: 6px; font-size: 14px; margin: 0 0 18px; }
+  .banner.pass { border-color: #1e7b34; background: #e9f7ec; }
+  section { background: #fff; border: 1px solid #e2e2e5; border-radius: 8px;
+            padding: 14px 18px; margin: 0 0 18px; }
+  h2 { font-size: 17px; margin: 0 0 10px; }
+  h3 { font-size: 14px; margin: 12px 0 6px; }
+  p { margin: 6px 0; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; margin: 6px 0 10px; }
+  th, td { border: 1px solid #e2e2e5; padding: 5px 7px; text-align: left; }
+  th { background: #f0f0f2; }
+  .chart-host { height: 460px; }
+  .kv td { padding: 3px 10px 3px 0; border: none; }
+  .empty { color: #999; font-style: italic; }
+</style>
+</head>
+<body>
+<main>
+  <h1>数据质量报告</h1>
+  <p class="subtitle">当前数据集版本：{{ dataset_version }}</p>
+
+  <div class="banner{% if gate %} pass{% endif %}">
+    <strong>门禁决定：{{ gate_text }}</strong> —— 当前构建{% if gate %}可通过中性发布门禁{% else %}被中性发布门禁拦截{% endif %}。
+    {% if gate_reasons %}<ul>{% for reason in gate_reasons %}<li>{{ reason }}</li>{% endfor %}</ul>{% endif %}
+  </div>
+
+  <section>
+    <h2>来源与版本状态</h2>
+    <table>
+      <thead><tr><th>数据源</th><th>状态</th><th>版本</th></tr></thead>
+      <tbody>
+        {% for source in sources %}
+          <tr><td>{{ source.source }}</td><td>{{ source.status or "—" }}</td><td>{{ source.version or "—" }}</td></tr>
+        {% else %}
+          <tr><td class="empty" colspan="3">无来源状态记录</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <h2>构建行数</h2>
+    <table>
+      <thead><tr><th>原始行数</th><th>标准行数</th><th>隔离行数</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>{{ counts.raw }}</td>
+          <td>{{ counts.standard }}</td>
+          <td>{{ counts.quarantine }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>问题分类统计</h2>
+    <table>
+      <thead><tr><th>类别</th><th>记录数</th></tr></thead>
+      <tbody>
+        {% for group in category_groups %}
+          <tr><td>{{ group.label }}</td><td>{{ group.count }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {% for group in category_groups %}
+      <h3>{{ group.label }} 明细</h3>
+      <table>
+        <thead><tr><th>严重级</th><th>代码</th><th>表</th><th>证券代码</th><th>日期</th><th>说明</th></tr></thead>
+        <tbody>
+          {% for row in group.rows %}
+            <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+          {% else %}
+            <tr><td class="empty" colspan="6">无记录</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endfor %}
+
+    <h3>缺失类别记录数</h3>
+    <table>
+      <thead><tr>{% for column in missing_cols %}<th>{{ column }}</th>{% endfor %}</tr></thead>
+      <tbody>
+        {% for row in missing_rows %}
+          <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+        {% else %}
+          <tr><td class="empty" colspan="{{ missing_cols | length }}">无缺失分类记录</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <h3>严重级分布</h3>
+    <table>
+      <thead><tr><th>严重级</th><th>数量</th></tr></thead>
+      <tbody>
+        {% for item in severity_counts %}
+          <tr><td>{{ item.severity }}</td><td>{{ item.count }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>跨源差异</h2>
+    <table>
+      <thead><tr>{% for column in cross_cols %}<th>{{ column }}</th>{% endfor %}</tr></thead>
+      <tbody>
+        {% for row in cross_rows %}
+          <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+        {% else %}
+          <tr><td class="empty" colspan="{{ cross_cols | length }}">无跨源比较记录</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% for chart in charts %}
+      <div class="chart-host">{{ chart | safe }}</div>
+    {% endfor %}
+  </section>
+
+  <section>
+    <h2>复权差异样本</h2>
+    <table>
+      <thead><tr>{% for column in adj_cols %}<th>{{ column }}</th>{% endfor %}</tr></thead>
+      <tbody>
+        {% for row in adj_rows %}
+          <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+        {% else %}
+          <tr><td class="empty" colspan="{{ adj_cols | length }}">无复权样本</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="empty">差异与样本仅用于工程核对，不代表任何供应商错误原文。</p>
+  </section>
+</main>
+</body>
+</html>

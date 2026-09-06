@@ -1,0 +1,12 @@
+tushare:
+  enabled: true
+  timeout_seconds: 30
+  max_retries: 3
+akshare:
+  enabled: true
+  timeout_seconds: 30
+  max_retries: 3
+baostock:
+  enabled: true
+  timeout_seconds: 30
+  max_retries: 3

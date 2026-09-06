@@ -1,0 +1,221 @@
+# 固定工程股票池（fixed engineering universe）
+#
+# 30 只人工策划的边界样本股，用于验证工程链路，不是投资推荐（coverage
+# fixtures rather than recommendations）。名单固定后不随当前市场变化自动更换
+# （设计规格 §7）。name_at_selection 取自 selected_as_of 时点的证券简称快照。
+selected_as_of: 2026-09-03
+entries:
+  # ---- 沪市主板 8 只 ----
+  - symbol: 600000.SH
+    name_at_selection: 浦发银行
+    exchange: SH
+    board: sh_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 沪市主板银行股，2020 年前长期上市、持续交易且现金分红稳定；工程覆盖样本，非推荐。
+  - symbol: 600036.SH
+    name_at_selection: 招商银行
+    exchange: SH
+    board: sh_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 沪市主板大盘银行股，覆盖 2020 年前上市与高流动性边界；工程覆盖样本，非推荐。
+  - symbol: 600519.SH
+    name_at_selection: 贵州茅台
+    exchange: SH
+    board: sh_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 沪市主板高价股边界与稳定现金分红样本；工程覆盖样本，非推荐。
+  - symbol: 601318.SH
+    name_at_selection: 中国平安
+    exchange: SH
+    board: sh_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 沪市主板保险大盘股，2020 年前上市，覆盖金融权重股边界；工程覆盖样本，非推荐。
+  - symbol: 601398.SH
+    name_at_selection: 工商银行
+    exchange: SH
+    board: sh_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 沪市主板低价大盘股边界，2020 年前长期上市；工程覆盖样本，非推荐。
+  - symbol: 601857.SH
+    name_at_selection: 中国石油
+    exchange: SH
+    board: sh_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 沪市主板能源大盘股，2020 年前上市，覆盖低价高流动性边界；工程覆盖样本，非推荐。
+  - symbol: 601919.SH
+    name_at_selection: 中远海控
+    exchange: SH
+    board: sh_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 沪市主板航运周期股，历史上曾有证券简称变更，覆盖名称状态变化边界；工程覆盖样本，非推荐。
+  - symbol: 603288.SH
+    name_at_selection: 海天味业
+    exchange: SH
+    board: sh_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 沪市主板消费大盘股，2020 年前上市且持续现金分红；工程覆盖样本，非推荐。
+  # ---- 深市主板 8 只 ----
+  - symbol: 000001.SZ
+    name_at_selection: 平安银行
+    exchange: SZ
+    board: sz_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 深市主板银行股，上市历史极长，覆盖持续交易与现金分红边界；工程覆盖样本，非推荐。
+  - symbol: 000333.SZ
+    name_at_selection: 美的集团
+    exchange: SZ
+    board: sz_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 深市主板家电大盘股，2020 年前上市，覆盖高流动性边界；工程覆盖样本，非推荐。
+  - symbol: 000651.SZ
+    name_at_selection: 格力电器
+    exchange: SZ
+    board: sz_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 深市主板家电大盘股，2020 年前长期上市且高现金分红；工程覆盖样本，非推荐。
+  - symbol: 000858.SZ
+    name_at_selection: 五粮液
+    exchange: SZ
+    board: sz_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 深市主板白酒高价股边界，2020 年前上市；工程覆盖样本，非推荐。
+  - symbol: 002415.SZ
+    name_at_selection: 海康威视
+    exchange: SZ
+    board: sz_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 深市主板（原中小板并入）科技大盘股，2020 年前上市；工程覆盖样本，非推荐。
+  - symbol: 002475.SZ
+    name_at_selection: 立讯精密
+    exchange: SZ
+    board: sz_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 深市主板（原中小板）电子制造大盘股，2020 年前上市；工程覆盖样本，非推荐。
+  - symbol: 002594.SZ
+    name_at_selection: 比亚迪
+    exchange: SZ
+    board: sz_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 深市主板（原中小板）新能源车大盘股，2020 年前上市；工程覆盖样本，非推荐。
+  - symbol: 002714.SZ
+    name_at_selection: 牧原股份
+    exchange: SZ
+    board: sz_main
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 深市主板（原中小板）农业周期股，2020 年前上市；工程覆盖样本，非推荐。
+  # ---- 创业板 7 只 ----
+  - symbol: 300001.SZ
+    name_at_selection: 特锐德
+    exchange: SZ
+    board: chinext
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 创业板首批上市公司，2020 年前上市，覆盖创业板 10%/20% 涨跌幅切换前的持续交易；工程覆盖样本，非推荐。
+  - symbol: 300059.SZ
+    name_at_selection: 东方财富
+    exchange: SZ
+    board: chinext
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 创业板券商互联网大盘股，2020 年前上市且高流动性；工程覆盖样本，非推荐。
+  - symbol: 300122.SZ
+    name_at_selection: 智飞生物
+    exchange: SZ
+    board: chinext
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 创业板疫苗股，2020 年前上市；工程覆盖样本，非推荐。
+  - symbol: 300274.SZ
+    name_at_selection: 阳光电源
+    exchange: SZ
+    board: chinext
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 创业板电力电子大盘股，2020 年前上市；工程覆盖样本，非推荐。
+  - symbol: 300750.SZ
+    name_at_selection: 宁德时代
+    exchange: SZ
+    board: chinext
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 创业板动力电池龙头，2018 年上市，覆盖 2020 年前后持续交易与高流动性边界；工程覆盖样本，非推荐。
+  - symbol: 300760.SZ
+    name_at_selection: 迈瑞医疗
+    exchange: SZ
+    board: chinext
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 创业板医疗器械高价股边界，2018 年上市；工程覆盖样本，非推荐。
+  - symbol: 301269.SZ
+    name_at_selection: 华大九天
+    exchange: SZ
+    board: chinext
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_after_2020, pre_listing_gap_expected]
+    selection_reason: 创业板注册制 EDA 股，2022 年上市，覆盖窗口内新上市导致的前期缺失边界；工程覆盖样本，非推荐。
+  # ---- 科创板 7 只 ----
+  - symbol: 688001.SH
+    name_at_selection: 华兴源创
+    exchange: SH
+    board: star
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 科创板首只上市公司（2019 年），覆盖科创 20% 涨跌幅与首批无涨跌幅前五日制度；工程覆盖样本，非推荐。
+  - symbol: 688008.SH
+    name_at_selection: 澜起科技
+    exchange: SH
+    board: star
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 科创板首批半导体股（2019 年上市）；工程覆盖样本，非推荐。
+  - symbol: 688009.SH
+    name_at_selection: 中国通号
+    exchange: SH
+    board: star
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 科创板首批大盘股（2019 年上市）；工程覆盖样本，非推荐。
+  - symbol: 688036.SH
+    name_at_selection: 传音控股
+    exchange: SH
+    board: star
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 科创板手机出海龙头（2019 年上市）；工程覆盖样本，非推荐。
+  - symbol: 688111.SH
+    name_at_selection: 金山办公
+    exchange: SH
+    board: star
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_before_2020]
+    selection_reason: 科创板软件大盘股（2019 年上市），覆盖 2020-01-01 起即持续交易；工程覆盖样本，非推荐。
+  - symbol: 688506.SH
+    name_at_selection: 百利天恒
+    exchange: SH
+    board: star
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_after_2020, pre_listing_gap_expected]
+    selection_reason: 科创板创新药股，2022 年上市，覆盖窗口内新上市导致的前期缺失边界；工程覆盖样本，非推荐。
+  - symbol: 688981.SH
+    name_at_selection: 中芯国际
+    exchange: SH
+    board: star
+    selected_as_of: 2026-09-03
+    boundary_tags: [listed_after_2020, pre_listing_gap_expected]
+    selection_reason: 科创板晶圆代工龙头，2020-07 上市，覆盖 2020 年内上市导致的前期缺失与上市首五交易日边界；工程覆盖样本，非推荐。
