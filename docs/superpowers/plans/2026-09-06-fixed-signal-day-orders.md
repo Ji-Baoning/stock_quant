@@ -79,6 +79,12 @@ def _plan(rows: list[dict]) -> pd.DataFrame:
 
 
 def _submitted(rows: list[dict]) -> pd.DataFrame:
+    # Empty guard mirrors _fills/_rejections: pd.DataFrame([]) has no
+    # columns, so _submitted([]) would KeyError before reconcile runs.
+    if not rows:
+        return pd.DataFrame(
+            columns=["trade_date", "order_id", "side", "symbol", "quantity"]
+        )
     frame = pd.DataFrame(rows)
     frame["trade_date"] = frame["trade_date"].map(date.fromisoformat)
     return frame
