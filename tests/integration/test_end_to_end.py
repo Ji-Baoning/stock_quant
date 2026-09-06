@@ -1,0 +1,109 @@
+"""Complete offline acceptance: one reproducible research run over the CLI.
+
+The three brief behaviour tests live here plus the acceptance file helpers
+(``run_offline_fixture``) shared with ``test_cli.py``.  Everything runs over a
+deterministic synthetic project from ``conftest``; nothing touches a network or
+a token and no market data is committed.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+from stock_quant.cli import (
+    app,  # noqa: F401  (imported before the CLI exists to gate Step 2)
+)
+from stock_quant.research.models import REQUIRED_ARTIFACTS
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    """What one offline fixture run produced (experiment id + manifest dict)."""
+
+    experiment_id: str
+    path: Path
+    manifest: dict
+
+
+def run_offline_fixture(project_root) -> RunOutcome:
+    """Invoke the real CLI research command and read the published manifest."""
+    from typer.testing import CliRunner
+
+    outcome = CliRunner().invoke(
+        app,
+        [
+            "research",
+            "run",
+            "--spec",
+            "configs/experiments/momentum_60d.yml",
+            "--root",
+            str(project_root),
+        ],
+    )
+    assert outcome.exit_code == 0, outcome.stdout
+    experiment_id = _parse_experiment_id(outcome.stdout)
+    path = Path(project_root) / "data" / "experiments" / experiment_id
+    manifest = json.loads(
+        (path / "experiment_manifest.json").read_text(encoding="utf-8")
+    )
+    return RunOutcome(experiment_id=experiment_id, path=path, manifest=manifest)
+
+
+def _parse_experiment_id(stdout: str) -> str:
+    for line in stdout.splitlines():
+        if "experiment_id=" in line:
+            return line.strip().split("experiment_id=", 1)[1].strip()
+    raise AssertionError(f"no experiment_id= line in stdout:\n{stdout}")
+
+
+def test_cached_end_to_end_run_is_reproducible(fixture_root):
+    first = run_offline_fixture(fixture_root.root)
+    second = run_offline_fixture(fixture_root.root)
+    assert first.experiment_id == second.experiment_id
+    assert first.manifest["artifacts"] == second.manifest["artifacts"]
+
+
+def test_published_experiment_holds_complete_immutable_artifact_contract(
+    fixture_root,
+):
+    outcome = run_offline_fixture(fixture_root.root)
+    assert set(p.name for p in outcome.path.iterdir()) == REQUIRED_ARTIFACTS
+    manifest = outcome.manifest
+    assert manifest["experiment_id"] == outcome.experiment_id
+    assert manifest["status"] in ("ACCEPTED", "REJECTED")
+    assert manifest["dataset_version"] == fixture_root.version
+    # The CLI analytics adapter must record the auditable keys plus the richer
+    # PerformanceMetrics dictionary for every cost scenario.
+    metrics = json.loads(
+        (outcome.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    assert isinstance(metrics["evaluation"], dict)
+    scenarios = metrics["scenarios"]
+    assert set(scenarios) == {"zero_cost", "commission_tax", "full_cost"}
+    for summary in scenarios.values():
+        assert int(summary["periods"]) > 0
+        assert "n_rejections" in summary
+        assert "plan_diverged" in summary
+        assert isinstance(summary["performance"], dict)
+        assert "max_drawdown" in summary["performance"]
+        assert "benchmark_excess_return" in summary["performance"]
+    run_id = metrics["meta"]["run_id"]
+    for scenario in scenarios:
+        scenario_dir = (
+            Path(fixture_root.root) / "data" / "runs" / run_id / "backtest" / scenario
+        )
+        assert (scenario_dir / "submitted_orders.parquet").is_file()
+        assert (scenario_dir / "rebalance_adjustments.parquet").is_file()
+        assert (scenario_dir / "executable_targets.parquet").is_file()
+    html = (outcome.path / "report.html").read_text(encoding="utf-8")
+    assert len(html) > 0
+
+
+def test_metrics_are_deterministic_across_cached_runs(fixture_root):
+    first = run_offline_fixture(fixture_root.root)
+    second = run_offline_fixture(fixture_root.root)
+    first_metrics = (first.path / "metrics.json").read_bytes()
+    second_metrics = (second.path / "metrics.json").read_bytes()
+    assert first_metrics == second_metrics

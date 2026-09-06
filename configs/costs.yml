@@ -1,0 +1,22 @@
+scenarios:
+  - name: zero_cost
+    rates:
+      - effective_from: 2020-01-01
+        commission_rate: 0.0
+        minimum_commission: 0.0
+        stamp_tax_sell_rate: 0.0
+        slippage_rate: 0.0
+  - name: commission_tax
+    rates:
+      - effective_from: 2020-01-01
+        commission_rate: 0.0003
+        minimum_commission: 5
+        stamp_tax_sell_rate: 0.0005
+        slippage_rate: 0.0
+  - name: full_cost
+    rates:
+      - effective_from: 2020-01-01
+        commission_rate: 0.0003
+        minimum_commission: 5
+        stamp_tax_sell_rate: 0.0005
+        slippage_rate: 0.001

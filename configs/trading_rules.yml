@@ -1,0 +1,48 @@
+# A股涨跌幅与新股无涨跌幅制度（effective-dated trading rules）
+#
+# TradingRuleBook 按市场/板块/证券状态/生效日期解析本文件，执行代码不内嵌
+# 比例（全局约束：规则的时效性依据交易所当时官方规则，见 PROJECT_MEMORY §9）。
+# 本时间表在任务 14 的操作核对清单中与官方来源核对后再用于真实数据验收；此
+# 处是已声明的配置，运行时绝不联网获取。
+#
+# 板块 key：sh_main（沪主板）、sz_main（深主板，含原中小板并入）、chinext
+# （创业板）、star（科创板）。rate 采用字符串以保留精确十进制语义。
+price_tick: "0.01"
+price_limits:
+  # 沪深主板普通股票：±10%（自 1996-12-16 起）
+  - boards: [sh_main, sz_main]
+    status: NORMAL
+    effective_from: 1996-12-16
+    rate: "0.10"
+  # 沪深主板风险警示股票 ST/*ST：±5%（自 1998 年实施风险警示涨跌幅起）
+  - boards: [sh_main, sz_main]
+    status: ["ST", "*ST"]
+    effective_from: 1998-04-27
+    rate: "0.05"
+  # 创业板注册制改革（2020-08-24）前普通股票：±10%
+  - boards: [chinext]
+    status: NORMAL
+    effective_from: 2009-10-30
+    rate: "0.10"
+  # 创业板注册制改革（2020-08-24）后普通股票：±20%
+  - boards: [chinext]
+    status: NORMAL
+    effective_from: 2020-08-24
+    rate: "0.20"
+  # 科创板自开板（2019-07-22）起普通股票：±20%
+  - boards: [star]
+    status: NORMAL
+    effective_from: 2019-07-22
+    rate: "0.20"
+no_limit_first_sessions:
+  # 注册制新股上市前五个交易日不设涨跌幅限制。
+  - boards: [star]
+    effective_from: 2019-07-22
+    sessions: 5
+  - boards: [chinext]
+    effective_from: 2020-08-24
+    sessions: 5
+  # 全面注册制（首批 2023-04-10 上市）后主板新股同样适用。
+  - boards: [sh_main, sz_main]
+    effective_from: 2023-04-10
+    sessions: 5

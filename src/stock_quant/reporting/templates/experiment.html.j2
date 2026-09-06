@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>实验绩效报告（工程验证）</title>
+<script>{% if plotly_js %}{{ plotly_js | safe }}{% endif %}</script>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; padding: 24px; color: #1a1a1a; background: #f7f7f8; }
+  main { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .subtitle { color: #555; font-size: 13px; margin: 0 0 16px; }
+  .banner { border: 1px solid #d8a600; background: #fff7d6; padding: 10px 14px;
+            border-radius: 6px; font-size: 14px; margin: 0 0 18px; }
+  section { background: #fff; border: 1px solid #e2e2e5; border-radius: 8px;
+            padding: 14px 18px; margin: 0 0 18px; }
+  h2 { font-size: 17px; margin: 0 0 10px; }
+  h3 { font-size: 15px; margin: 18px 0 6px; }
+  h4 { font-size: 13px; margin: 12px 0 6px; color: #333; }
+  details.daily-trade-snapshot { margin: 12px 0 10px; }
+  details.daily-trade-snapshot summary { cursor: pointer; color: #333; font-size: 13px; }
+  p { margin: 6px 0; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; margin: 6px 0 10px; }
+  th, td { border: 1px solid #e2e2e5; padding: 5px 7px; text-align: left; }
+  th { background: #f0f0f2; white-space: nowrap; }
+  .chart-host { height: 460px; }
+  .kv { width: auto; }
+  .kv td { padding: 3px 10px 3px 0; border: none; }
+  .empty { color: #999; font-style: italic; }
+  .trust-ok { color: #2e7d32; font-weight: 600; }
+  .banner.trust-fail { border-color: #c62828; background: #fdecea; }
+  .banner.trust-fail strong { color: #b71c1c; }
+</style>
+</head>
+<body>
+<main>
+  <h1>实验绩效报告</h1>
+  <p class="subtitle">实验 {{ versions.experiment_id }}{% if versions.run_id %} · 运行 {{ versions.run_id }}{% endif %}</p>
+
+  <div class="banner">
+    <strong>工程验证</strong>：本报告仅用于验证“数据 → 研究 → 回测 → 报告”完整链路，
+    <strong>不代表策略具备实盘价值</strong>，不构成任何投资建议，不使用结果指导真实资金交易。
+  </div>
+
+  {% if not trust.trusted %}
+  <div class="banner trust-fail">
+    <strong>数据可信度未通过</strong>：未复权收益核算缺少完整可信的公司行为覆盖证据，
+    本结果不可作为可信绩效发布（仅限 engineering 诊断；正式研究拒绝在回测前运行）。
+  </div>
+  {% endif %}
+
+  <section>
+    <h2>公司行为可信度核验</h2>
+    {% if trust.trusted %}
+      <p class="trust-ok">公司行为证据已核验通过（可信）：相关标的在公司行为覆盖窗口内均持有
+      VERIFIED / VERIFIED_EMPTY 的完整证据，未复权收益核算可信。</p>
+    {% else %}
+      <p>以下标的/窗口的公司行为证据未通过核验，其未复权收益不可视为完整总收益：</p>
+      {% if trust.window_text %}<p>核验窗口：{{ trust.window_text }}</p>{% endif %}
+      {% if trust.reasons %}
+      <table>
+        <thead><tr><th>证券代码</th><th>原因代码</th></tr></thead>
+        <tbody>
+          {% for reason in trust.reasons %}<tr><td>{{ reason.symbol }}</td><td>{{ reason.code }}</td></tr>{% endfor %}
+        </tbody>
+      </table>
+      {% else %}<p class="empty">不可信结论未携带逐标的原因。</p>{% endif %}
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>版本与配置</h2>
+    <table class="kv">
+      <tr><td>实验版本（experiment_id）</td><td>{{ versions.experiment_id }}</td></tr>
+      <tr><td>运行版本（run_id）</td><td>{{ versions.run_id or "—" }}</td></tr>
+      <tr><td>数据版本（dataset_version）</td><td>{{ versions.dataset_version }}</td></tr>
+      <tr><td>股票池版本（universe_version）</td><td>{{ versions.universe_version }}</td></tr>
+      <tr><td>代码版本（code_commit）</td><td>{{ versions.code_commit }}</td></tr>
+      <tr><td>生成时间</td><td>{{ versions.generated_at or "—" }}</td></tr>
+      {% if hypothesis %}<tr><td>研究假设</td><td>{{ hypothesis }}</td></tr>{% endif %}
+      <tr><td>名义初始资金</td><td>{{ initial_cash }}</td></tr>
+      <tr><td>基准超额（相对 {{ primary_benchmark }}）</td><td>{{ benchmark_excess }}</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>绩效汇总</h2>
+    <table>
+      <thead>
+        <tr>{% for heading in summary_headings %}<th>{{ heading }}</th>{% endfor %}</tr>
+      </thead>
+      <tbody>
+        {% for row in summary_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>净值与回撤</h2>
+    {% for chart in charts %}
+      <div class="chart-host">{{ chart | safe }}</div>
+    {% endfor %}
+  </section>
+
+  {% for scenario in scenario_sections %}
+  <section>
+    <h3>成本情景：{{ scenario.name }}</h3>
+    <p>{{ scenario.cash_text }}</p>
+    <h4>{{ scenario.cost_title }}</h4>
+    <table>
+      <thead><tr><th>成本项</th><th>金额（元）</th></tr></thead>
+      <tbody>
+        {% for row in scenario.cost_rows %}<tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+
+    <h4>执行偏离诊断</h4>
+    <table>
+      <thead><tr><th>计划成交额（元）</th><th>实际成交额（元）</th><th>未成交额（元）</th><th>执行偏离率</th><th>调仓前约束原因</th><th>执行拒绝原因</th><th>期末现金（元）</th><th>停牌资产比例</th></tr></thead>
+      <tbody>
+        {% if scenario.execution_rows %}
+          {% for row in scenario.execution_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
+        {% else %}
+          <tr><td class="empty" colspan="8">无执行偏离诊断数据</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+
+    <h4>持仓</h4>
+    {% if scenario.holdings_rows %}<table>
+      <thead><tr>{% for column in scenario.holdings_cols %}<th>{{ column }}</th>{% endfor %}</tr></thead>
+      <tbody>
+        {% for row in scenario.holdings_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
+      </tbody>
+    </table>{% else %}<p class="empty">📭 回测期末无持仓</p>{% endif %}
+
+    <h4>未成交订单</h4>
+    {% if scenario.unfilled_rows %}<table>
+      <thead><tr>{% for column in scenario.unfilled_cols %}<th>{{ column }}</th>{% endfor %}</tr></thead>
+      <tbody>
+        {% for row in scenario.unfilled_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
+      </tbody>
+    </table>{% else %}<p class="empty">📭 回测期内无未成交订单</p>{% endif %}
+
+    <h4>公司行为流水</h4>
+    {% if scenario.action_rows %}<table>
+      <thead><tr>{% for column in scenario.action_cols %}<th>{{ column }}</th>{% endfor %}</tr></thead>
+      <tbody>
+        {% for row in scenario.action_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
+      </tbody>
+    </table>{% else %}<p class="empty">📭 回测期内无公司行为记录</p>{% endif %}
+
+    <details class="daily-trade-snapshot">
+      <summary>每日持仓快照（每日买入/卖出 Top 5）</summary>
+      {% if scenario.daily_trade_rows %}<table>
+        <thead><tr><th>交易日</th><th>方向</th><th>证券代码</th><th>成交金额（元）</th><th>数量</th></tr></thead>
+        <tbody>{% for row in scenario.daily_trade_rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+      </table>{% else %}<p class="empty">📭 回测期内无成交记录</p>{% endif %}
+    </details>
+  </section>
+  {% endfor %}
+
+  <section>
+    <h2>已知限制</h2>
+    <ul>
+      {% for limitation in known_limitations %}<li>{{ limitation }}</li>{% endfor %}
+    </ul>
+    <p class="empty">以上限制为本阶段工程实现的明确边界，评估结论不构成实盘准入。</p>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,20 @@
+name: stock-quant
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pandas
+  - numpy
+  - pyarrow
+  - duckdb
+  - pydantic
+  - typer
+  - pyyaml
+  - tushare
+  - akshare
+  - baostock
+  - jinja2
+  - plotly
+  - pytest
+  - pytest-cov
+  - ruff
