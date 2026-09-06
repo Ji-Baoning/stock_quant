@@ -923,7 +923,7 @@ class _DefaultAnalytics:
 
 - [ ] **Step 6: 镜像到 cli `_ExperimentAnalytics`**
 
-把 `cli.py` `_ExperimentAnalytics.compute` 中读取与 `summary` 组装替换为与 Step 5 完全一致的逻辑（读 `order_diffs.parquet` 替代 `rebalance_adjustments.parquet`，去掉 pretrade 三键，加计划账本层键），并保留 `"performance": compute_metrics(equity, fills, benchmark).to_dict(),`。两处 `summary` dict 的键必须与 Step 5 逐键一致（spec §7：cli 追加 `performance`）。`cli.py` 模块顶部加与 runner 相同的 reconcile import（`STATUS_FILLED, STATUS_PARTIAL, STATUS_REJECTED, reconcile_orders`）供本方法引用同一组常量。
+把 `cli.py` `_ExperimentAnalytics.compute` 中读取与 `summary` 组装替换为与 Step 5 完全一致的逻辑（读 `order_diffs.parquet` 替代 `rebalance_adjustments.parquet`，去掉 pretrade 三键，加计划账本层键），并保留 `"performance": compute_metrics(equity, fills, benchmark).to_dict(),`。两处 `summary` dict 的键必须与 Step 5 逐键一致（spec §7：cli 追加 `performance`）。`cli.py` 模块顶部加 reconcile import——**只引 `STATUS_FILLED, STATUS_PARTIAL, STATUS_REJECTED`**（cli 不调用 `reconcile_orders`，引它会 F401；`reconcile_orders` 仅在 runner 的 `_produce_backtest` 使用）。
 
 即：把现读 `rebalance_adjustments.parquet` 的语句删除，改为 `diffs = pd.read_parquet(directory / "order_diffs.parquet")`；删除 `n_pretrade_adjustments` 局部；把 pretrade 三键块替换为 Step 5 中从 `"planned_order_count"` 到 `"plan_diverged"` 的完整键块（保留 `"performance"` 在最后）。上面的行号（如 compute 561-627、读 573-575、pretrade 键块 607-621）是**当前 cli.py 原始文件**的定位，且本步要先加模块顶部 import——行号会因 +3 漂移，一律**以文本/符号定位**，勿按行号盲删。删除 import 区不再使用的名字（若 `adjustments`/`rebalance_adjustments` 后无引用，ruff 会提示未使用变量——以 `ruff check` 结果为准清理）。
 
