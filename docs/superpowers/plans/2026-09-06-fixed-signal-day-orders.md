@@ -1193,7 +1193,14 @@ Task 2 已在 `run()` 的 schedule `else:` 分支逐笔收集 submitted。本步
 ```
 
    `run()` 返回的 `BacktestResult(...)` 只保留五个既有字段，其中 submitted 用 `self._submitted_orders_frame(submitted_orders)`。
-7. `_collect_submitted` 已由 Task 2 新增（位于 `_collect` 旁）——本步**不重复添加**、原样保留；其上一条代码块里 `if orders:` 块首的调用即唯一调用点。
+7. **（使能改动，非纯删除）** 当冻结计划在同一执行日卖与买同一标的时（新 pure-intent 测试的 day1 ALPHA SELL 200 + BUY 200），`_execution_frame` 若按订单逐行出 bar 会产生同一 symbol 两行，触发 `ExecutionSimulator._validate_bars` 的"至多一行每 symbol"（execution.py:194）。须让 `_execution_frame` 去重为每 symbol 一行（bar 无方向、被该 symbol 的所有订单共享；保留 day_rows 缺行的跳过语义 = 停牌交执行器裁决）：
+   ```python
+   # iterate orders, add order.symbol to a ``seen`` set, skip already-seen
+   # symbols; per symbol append one bar row exactly as today
+   ```
+8. `_collect_submitted` 已由 Task 2 新增（位于 `_collect` 旁）——本步**不重复添加**、原样保留；其上一条代码块里 `if orders:` 块首的调用即唯一调用点。
+9. 删除方法：`_projection_frame`、`_collect_projection`、`_rebalance_adjustments_frame`、`_executable_targets_frame`。
+10. `_Market.__init__`：删除 `target_by_day` 的索引两行；`possible_held_symbols` 只留 schedule 推导；删除 `target_on` 方法与模块级 `_target_schedule_index` 函数：
 8. 删除方法：`_projection_frame`、`_collect_projection`、`_rebalance_adjustments_frame`、`_executable_targets_frame`。
 9. `_Market.__init__`：删除 `target_by_day` 的索引两行；`possible_held_symbols` 只留 schedule 推导；删除 `target_on` 方法与模块级 `_target_schedule_index` 函数：
 
