@@ -67,6 +67,9 @@ python -m stock_quant data validate --root .
 
 - 门禁与策略无关：非正价格/schema 冲突/必需源不可用 → BLOCK；跨源价差、复权缺失
   只记录不阻断（设计 §13.5）。
+- **`data update` 必须先刷新 tushare `stock_basic` 全市场快照**：该必需步骤刷新
+  `security_master` 的上市事实并发布 `security_master_coverage`（每标的一行 = 研究冻结
+  的证据）；拉取失败或快照缺某股票池标的 → 阻断发布。
 - 全区间再跑：`--start 2021-01-01 --end 2026-08-30`（= configs 范围；也可不给 --end，
   由"最新完整交易日 + 发布时间 15:00"规则自动发现）。
 

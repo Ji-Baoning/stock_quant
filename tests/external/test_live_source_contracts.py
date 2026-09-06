@@ -72,6 +72,22 @@ def test_tushare_daily_live_contract() -> None:
 
 
 @pytest.mark.external
+@pytest.mark.skipif(
+    find_spec("tushare") is None or not os.getenv("TUSHARE_TOKEN"),
+    reason="TUSHARE_TOKEN is required",
+)
+def test_tushare_stock_basic_live_contract() -> None:
+    """The live whole-market reference carries the master facts columns."""
+    start, end = _recent_window()
+    request = DataRequest("stock_basic", (), start, end, {})
+    result = TushareSource(SourceConfig()).fetch(request)
+    assert not result.frame.empty
+    required = {"ts_code", "name", "list_date", "delist_date", "list_status"}
+    missing = sorted(required - set(result.frame.columns))
+    assert not missing, f"live stock_basic response is missing columns: {missing}"
+
+
+@pytest.mark.external
 @pytest.mark.skipif(find_spec("akshare") is None, reason="akshare is not installed")
 def test_akshare_index_history_live_contract() -> None:
     start, end = _recent_window()

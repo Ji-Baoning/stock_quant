@@ -38,6 +38,7 @@ from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COVERAGE_SCHEMA,
     CORPORATE_ACTION_SCHEMA,
     DAILY_SCHEMA,
+    SECURITY_MASTER_COVERAGE_SCHEMA,
     SECURITY_MASTER_SCHEMA,
     TRADING_CALENDAR_SCHEMA,
 )
@@ -50,6 +51,7 @@ from stock_quant.data_quality.models import QualityReport, issue_dict_dumps
 STANDARDIZED_SCHEMAS: dict[str, pa.Schema] = {
     "daily_bar": DAILY_SCHEMA,
     "security_master": SECURITY_MASTER_SCHEMA,
+    "security_master_coverage": SECURITY_MASTER_COVERAGE_SCHEMA,
     "corporate_action": CORPORATE_ACTION_SCHEMA,
     "corporate_action_coverage": CORPORATE_ACTION_COVERAGE_SCHEMA,
     "trading_calendar": TRADING_CALENDAR_SCHEMA,

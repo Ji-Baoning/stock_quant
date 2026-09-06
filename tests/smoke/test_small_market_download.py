@@ -126,6 +126,7 @@ def _security_master() -> pd.DataFrame:
             "board": pd.Series(["sh_main"], dtype="object"),
             "list_date": pd.to_datetime([_LIST_DATE]),
             "delist_date": pd.Series([pd.NaT], dtype="datetime64[ns]"),
+            "list_status": pd.Series(["L"], dtype="object"),
         }
     )[SECURITY_MASTER_COLUMNS]
 

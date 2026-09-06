@@ -41,6 +41,12 @@ from stock_quant.data_model.schemas import (
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
 )
+from stock_quant.data_model.security_master import (
+    MASTER_SOURCE_STOCK_BASIC,
+    ListStatus,
+    master_coverage_frame,
+    master_coverage_record,
+)
 from stock_quant.data_model.trading_rules import REASON_SELL_AT_LOWER_LIMIT
 from stock_quant.data_quality.models import QualityReport
 from stock_quant.factors.momentum import Momentum60
@@ -105,6 +111,7 @@ def _bars(
     *,
     index_close: tuple[float, float],
     limit_locked_symbols: tuple[str, ...] = (),
+    fresh: tuple[str, date, float] | None = None,
 ) -> pd.DataFrame:
     """One deterministic daily_bar frame for all instruments over ``sessions``.
 
@@ -113,6 +120,8 @@ def _bars(
     the main-board lower price limit.  Such names stay ranked by the factor
     (their signal-day closes are untouched) but every Monday *sell* of them is
     price-limit-blocked by the engine -- a rejection, not a hard error.
+    ``fresh`` is ``(symbol, list_date, growth)`` for a recently-listed symbol
+    whose bars begin at its list date (the new-IPO acceptance fixture).
     """
     n = len(sessions)
     frames: list[pd.DataFrame] = []
@@ -127,6 +136,16 @@ def _bars(
             frames.append(_instrument_frame(sessions, symbol, closes, opens))
         else:
             frames.append(_instrument_frame(sessions, symbol, closes))
+    if fresh is not None:
+        symbol, list_date, growth = fresh
+        start_at = next(
+            index for index, day in enumerate(sessions) if day >= list_date
+        )
+        closes = [
+            _BASE_PRICE * math.exp(growth * (index - (n - 1)))
+            for index in range(start_at, n)
+        ]
+        frames.append(_instrument_frame(sessions[start_at:], symbol, closes))
     for symbol, level in zip(_BENCHMARK_SYMBOLS, index_close):
         frames.append(_instrument_frame(sessions, symbol, [level] * n))
     return pd.concat(frames, ignore_index=True)[DAILY_COLUMNS]
@@ -157,19 +176,32 @@ def _instrument_frame(
     )
 
 
-def _security_master() -> pd.DataFrame:
+def _security_master(
+    fresh: tuple[str, date, float] | None = None,
+) -> pd.DataFrame:
+    """One security_master row per EQUITY_GROWTH symbol, plus ``fresh``.
+
+    ``fresh`` is ``(symbol, list_date, growth)`` for the new-IPO acceptance
+    fixture; every row keeps ``list_status="L"``.  ``name`` stays a synthetic
+    label (universe.yml owns the real labels, as in production).
+    """
     symbols = [symbol for symbol, _ in EQUITY_GROWTH]
-    n = len(symbols)
-    list_dates = pd.to_datetime([_LIST_DATE] * n)
-    delist = pd.Series(pd.NaT, index=range(n), dtype="datetime64[ns]")
+    list_dates = [_LIST_DATE] * len(symbols)
+    if fresh is not None:
+        symbols = symbols + [fresh[0]]
+        list_dates = list_dates + [fresh[1]]
+    count = len(symbols)
     return pd.DataFrame(
         {
             "symbol": symbols,
             "name": [f"synth_{symbol}" for symbol in symbols],
-            "exchange": "SH",
-            "board": "sh_main",
-            "list_date": list_dates,
-            "delist_date": delist,
+            "exchange": ["SH"] * count,
+            "board": ["sh_main"] * count,
+            "list_date": pd.to_datetime(list_dates),
+            "delist_date": pd.Series(
+                pd.NaT, index=range(count), dtype="datetime64[ns]"
+            ),
+            "list_status": ["L"] * count,
         }
     )[SECURITY_MASTER_COLUMNS]
 
@@ -235,37 +267,62 @@ def _coverage(
     return coverage_frame(records)
 
 
+def _master_coverage(symbols: tuple[str, ...]) -> pd.DataFrame:
+    """One deterministic security_master_coverage row per symbol."""
+    records = [
+        master_coverage_record(
+            symbol,
+            list_date=_LIST_DATE,
+            list_status=ListStatus.L,
+            source=MASTER_SOURCE_STOCK_BASIC,
+            snapshot_sha256="f" * 64,
+            sdk_version="fixture",
+            checked_at=_INGESTED,
+        )
+        for symbol in sorted(symbols)
+    ]
+    return master_coverage_frame(records)
+
+
 def _publish_synthetic_dataset(
     project_root: Path,
     *,
     index_close: tuple[float, float] = (4000.0, 2000.0),
     limit_locked_symbols: tuple[str, ...] = (),
     coverage: pd.DataFrame | None = None,
+    master_coverage: pd.DataFrame | None = None,
+    fresh: tuple[str, date, float] | None = None,
 ) -> str:
     """Publish the synthetic market under ``project_root``; return its version.
 
-    The default dataset carries an explicit ``VERIFIED_EMPTY`` coverage row per
-    universe symbol (empty facts are only trusted through explicit evidence),
-    so the ResearchRunner's RESEARCH gate passes over the default market.
+    The default dataset carries an explicit ``VERIFIED_EMPTY`` corporate-action
+    coverage row per symbol AND a ``security_master_coverage`` row per symbol
+    (both evidence tables), so the ResearchRunner's RESEARCH gates pass over the
+    default market.  ``fresh`` optionally adds one recently-listed symbol
+    ``(symbol, list_date, growth)`` whose bars begin at its list date (the
+    new-IPO acceptance fixture); ``master_coverage`` overrides the evidence
+    (an empty frame publishes an empty table that fails the master gate).
     """
+    master = _security_master(fresh)
+    symbols = tuple(master["symbol"])
     if coverage is None:
-        coverage = _coverage(
-            _universe_symbols(), status=CoverageStatus.VERIFIED_EMPTY
-        )
+        coverage = _coverage(symbols, status=CoverageStatus.VERIFIED_EMPTY)
+    if master_coverage is None:
+        master_coverage = _master_coverage(symbols)
     tables = {
         "daily_bar": _bars(
             _weekdays(_BARS_START, _BARS_END),
             index_close=index_close,
             limit_locked_symbols=limit_locked_symbols,
+            fresh=fresh,
         ),
-        "security_master": _security_master(),
+        "security_master": master,
+        "security_master_coverage": master_coverage,
         "corporate_action": _corporate_action(),
         "corporate_action_coverage": coverage,
         "trading_calendar": _trading_calendar(),
     }
-    return DatasetPublisher(project_root).publish(
-        tables, QualityReport()
-    ).version
+    return DatasetPublisher(project_root).publish(tables, QualityReport()).version
 
 
 def _publish_dataset_with_untrusted_coverage(project_root: Path) -> str:
@@ -498,3 +555,63 @@ def test_engineering_never_publishes_accepted_even_with_trusted_evidence(env):
     assert "diagnostic-only" in metrics["evaluation"]["reason"]
     assert "never publishes an ACCEPTED" in metrics["evaluation"]["reason"]
     assert debug.manifest.status == "REJECTED"
+
+
+def _publish_dataset_without_master_evidence(project_root: Path) -> str:
+    """Republish CURRENT with an empty security_master_coverage table."""
+    from stock_quant.data_model.security_master import master_coverage_frame
+
+    return _publish_synthetic_dataset(
+        project_root,
+        master_coverage=master_coverage_frame([]),
+    )
+
+
+def test_research_rejects_missing_master_evidence_but_engineering_is_untrusted(
+    env,
+):
+    """Empty master evidence freezes RESEARCH; ENGINEERING still diagnoses.
+
+    The rejection must name the security-master evidence and happen before any
+    backtest; the ENGINEERING run proceeds as an UNTRUSTED diagnostic that can
+    never be accepted as a trusted performance claim.
+    """
+    _publish_dataset_without_master_evidence(env.root)
+    runner = ResearchRunner(env.root, config_root=_REPO_ROOT)
+    with pytest.raises(ResearchRunFailed, match="security master evidence"):
+        runner.run(_SPEC)
+    debug = runner.run(_SPEC, trust_mode=DataTrustMode.ENGINEERING)
+    metrics = json.loads(
+        (debug.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics["evaluation"]["status"] == "UNTRUSTED"
+    assert debug.manifest.status == "REJECTED"
+
+
+def test_new_stock_excluded_before_120_listed_days(tmp_path):
+    """A symbol with a real list_date under 120 sessions before the window end
+    never enters a factor candidate set (momentum seasoning)."""
+    sessions = _weekdays(_BARS_START, _BARS_END)
+    fresh_symbol = "603999.SH"
+    fresh_list_date = sessions[-90]
+    fresh_growth = 0.00200
+    project_root = tmp_path / "project"
+    _publish_synthetic_dataset(
+        project_root,
+        fresh=(fresh_symbol, fresh_list_date, fresh_growth),
+    )
+    runner = ResearchRunner(project_root, config_root=_REPO_ROOT)
+    experiment = runner.run(_SPEC)
+    assert experiment.manifest.status in ("ACCEPTED", "REJECTED")
+
+    factors = pd.read_parquet(experiment.path / "factor_results.parquet")
+    fresh_rows = factors.loc[factors["symbol"] == fresh_symbol]
+    assert not fresh_rows.empty, "the fresh symbol must produce factor rows"
+    assert not fresh_rows["is_valid"].astype(bool).any()
+    assert "seasoning_below_120" in set(fresh_rows["invalid_reason"])
+
+    targets = pd.read_parquet(experiment.path / "target_positions.parquet")
+    assert fresh_symbol not in set(targets["symbol"]), (
+        "a symbol with fewer than 120 listed trading days must be kept out of "
+        "target positions"
+    )
