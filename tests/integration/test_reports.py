@@ -436,15 +436,20 @@ def test_experiment_html_renders_execution_divergence_summary(tmp_path):
                     **{
                         **scenario.__dict__,
                         "execution_summary": {
+                            "planned_order_count": 20,
+                            "filled_order_count": 15,
+                            "partial_order_count": 2,
+                            "rejected_order_count": 3,
                             "planned_gross_notional": 100000.0,
                             "actual_gross_notional": 85000.0,
                             "unfilled_notional": 15000.0,
                             "execution_deviation_ratio": 0.15,
-                            "pretrade_adjustments_by_reason": {
-                                "insufficient_cash": 2
+                            "unfilled_reason_counts": {
+                                "insufficient_cash": 2,
+                                "suspended_or_unknown": 3,
                             },
-                            "rejections_by_reason": {"suspended_or_unknown": 3},
                             "end_cash": 12000.0,
+                            "cash_ratio": 0.3,
                             "stale_asset_ratio": 0.02,
                         },
                     }
@@ -458,9 +463,13 @@ def test_experiment_html_renders_execution_divergence_summary(tmp_path):
     )
 
     assert "执行偏离诊断" in html
+    assert "未成交原因" in html
+    assert "部分成交数" in html
+    assert "拒单数" in html
     assert "15.00%" in html
     assert "insufficient_cash: 2" in html
     assert "suspended_or_unknown: 3" in html
+    assert "调仓前约束" not in html
 
 
 def test_experiment_html_has_collapsed_daily_trade_snapshot(tmp_path):
