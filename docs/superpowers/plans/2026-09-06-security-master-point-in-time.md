@@ -1311,6 +1311,7 @@ def test_validate_surfaces_missing_master_coverage_as_fatal(project):
     )
     assert issue.severity is Severity.FATAL
     assert issue.details["missing"]
+```
 
 - [ ] **Step 2: Verify failure once**
 
