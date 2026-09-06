@@ -70,6 +70,21 @@ CORPORATE_ACTION_COVERAGE_COLUMNS = [
     "checked_at",
 ]
 
+# Security-master coverage evidence records one VERIFIED row per universe
+# symbol after a real tushare stock_basic refresh.  Row presence is the whole
+# vocabulary (no status/reason): a symbol with a row had its listing facts
+# confirmed against a live snapshot; an empty or absent table is unverified.
+SECURITY_MASTER_COVERAGE_COLUMNS = [
+    "symbol",
+    "list_date",
+    "delist_date",
+    "list_status",
+    "source",
+    "snapshot_sha256",
+    "sdk_version",
+    "checked_at",
+]
+
 # Security master lists the point-in-time identifier attributes per instrument.
 SECURITY_MASTER_COLUMNS = [
     "symbol",
@@ -78,6 +93,7 @@ SECURITY_MASTER_COLUMNS = [
     "board",
     "list_date",
     "delist_date",
+    "list_status",
 ]
 
 # Trading calendar marks which calendar dates are confirmed open days.
@@ -143,6 +159,20 @@ def _security_master_fields() -> list[pa.Field]:
         pa.field("board", pa.string()),
         pa.field("list_date", pa.date32()),
         pa.field("delist_date", pa.date32()),
+        pa.field("list_status", pa.string()),
+    ]
+
+
+def _security_master_coverage_fields() -> list[pa.Field]:
+    return [
+        pa.field("symbol", pa.string()),
+        pa.field("list_date", pa.date32()),
+        pa.field("delist_date", pa.date32()),
+        pa.field("list_status", pa.string()),
+        pa.field("source", pa.string()),
+        pa.field("snapshot_sha256", pa.string()),
+        pa.field("sdk_version", pa.string()),
+        pa.field("checked_at", pa.timestamp("us", tz="UTC")),
     ]
 
 
@@ -157,4 +187,5 @@ DAILY_SCHEMA = pa.schema(_daily_fields())
 CORPORATE_ACTION_SCHEMA = pa.schema(_corporate_action_fields())
 CORPORATE_ACTION_COVERAGE_SCHEMA = pa.schema(_corporate_action_coverage_fields())
 SECURITY_MASTER_SCHEMA = pa.schema(_security_master_fields())
+SECURITY_MASTER_COVERAGE_SCHEMA = pa.schema(_security_master_coverage_fields())
 TRADING_CALENDAR_SCHEMA = pa.schema(_trading_calendar_fields())

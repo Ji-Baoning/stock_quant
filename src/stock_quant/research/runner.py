@@ -44,11 +44,13 @@ from stock_quant.backtest.engine import BacktestEngine, BacktestRequest, TargetD
 from stock_quant.backtest.models import BUY, SELL, Fill, Order
 from stock_quant.config import load_project_config
 from stock_quant.data_model.calendar import TradingCalendar
+from stock_quant.data_model.corporate_action_coverage import CoverageReason
 from stock_quant.data_model.dataset import (
     DatasetContext,
     DatasetPublisher,
     DatasetReader,
 )
+from stock_quant.data_model.security_master import missing_master_coverage_symbols
 from stock_quant.data_model.trading_rules import TradingRuleBook
 from stock_quant.data_model.universe import Universe
 from stock_quant.factors.base import Factor, FactorContext
@@ -606,6 +608,7 @@ class ResearchRunner:
         # are already intact still has the universe symbols and pinned version.
         self._frozen_version = frozen.dataset_version
         self._universe_symbols = self._load_universe_symbols()
+        self._enforce_research_master_evidence(frozen)
         for label in _STAGE_LABELS:
             self._active_stage = label
             producer = {
@@ -895,6 +898,51 @@ class ResearchRunner:
                 f"{record['window_start']}..{record['window_end']}; "
                 f"untrusted codes: {codes}"
             )
+
+    def _master_coverage_evidence(
+        self, frozen: ExperimentSpec
+    ) -> pd.DataFrame | None:
+        """The pinned security_master_coverage table, or None when absent."""
+        context = self._open_context(frozen.dataset_version)
+        if "security_master_coverage" not in context.tables:
+            return None
+        return context.read("security_master_coverage")
+
+    def _enforce_research_master_evidence(
+        self, frozen: ExperimentSpec
+    ) -> None:
+        """Raise before any stage when a RESEARCH universe lacks master evidence.
+
+        Formal research requires one ``security_master_coverage`` row per
+        universe symbol: row presence means the listing facts were applied from
+        a real tushare ``stock_basic`` refresh.  A bootstrap seed, an older
+        dataset without the table and an incomplete refresh all fail here, each
+        symbol carrying the stable ``SOURCE_NOT_REQUESTED`` code.  ENGINEERING
+        always proceeds as a diagnostic (its evaluation is stamped UNTRUSTED by
+        the report stage).
+        """
+        if frozen.trust_mode is not DataTrustMode.RESEARCH:
+            return
+        missing = missing_master_coverage_symbols(
+            self._universe_symbols, self._master_coverage_evidence(frozen)
+        )
+        if not missing:
+            return
+        listed = ", ".join(
+            f"{symbol}:{CoverageReason.SOURCE_NOT_REQUESTED.value}"
+            for symbol in missing
+        )
+        raise ValueError(
+            "security master evidence: research run {} cannot use dataset {}: "
+            "{} of {} universe symbols have no security_master_coverage row "
+            "({})".format(
+                self._run_id,
+                frozen.dataset_version,
+                len(missing),
+                len(self._universe_symbols),
+                listed,
+            )
+        )
 
     def _untrusted_reason(
         self, frozen: ExperimentSpec, record: Mapping[str, object]

@@ -16,10 +16,9 @@ from stock_quant.data_model.schemas import (
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
 )
+from stock_quant.data_model.security_master import ListStatus
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_quality.models import QualityReport
-
-SYNTHETIC_LIST_DATE = date(2018, 1, 2)
 
 
 @dataclass(frozen=True)
@@ -96,10 +95,13 @@ def _security_master(universe: Universe) -> pd.DataFrame:
             "name": [entry.name_at_selection for entry in entries],
             "exchange": [entry.exchange for entry in entries],
             "board": [entry.board for entry in entries],
-            "list_date": pd.to_datetime([SYNTHETIC_LIST_DATE] * count),
+            "list_date": pd.Series(
+                pd.NaT, index=range(count), dtype="datetime64[ns]"
+            ),
             "delist_date": pd.Series(
                 pd.NaT, index=range(count), dtype="datetime64[ns]"
             ),
+            "list_status": [ListStatus.NOT_APPLIED.value] * count,
         }
     )[SECURITY_MASTER_COLUMNS]
 

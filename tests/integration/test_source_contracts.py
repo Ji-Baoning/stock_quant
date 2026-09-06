@@ -43,6 +43,11 @@ class TushareClient:
             raise self.frame
         return self.frame
 
+    def stock_basic(self, **_: str) -> pd.DataFrame:
+        if isinstance(self.frame, Exception):
+            raise self.frame
+        return self.frame
+
 
 class AkShareClient:
     def __init__(self, frame: pd.DataFrame | Exception) -> None:
@@ -152,6 +157,34 @@ def test_tushare_records_distinct_request_and_response_timestamps(
 
     assert result.metadata["request_timestamp"] == "2026-09-03T10:00:00+00:00"
     assert result.metadata["response_timestamp"] == "2026-09-03T10:00:02+00:00"
+
+
+def test_tushare_stock_basic_returns_whole_market_native_columns(monkeypatch):
+    """stock_basic is a whole-market reference: empty symbols, native columns."""
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    frame = pd.read_csv(FIXTURES / "tushare_stock_basic.csv", dtype={"list_date": str})
+    request = DataRequest("stock_basic", (), date(2020, 1, 1), date(2020, 1, 2))
+
+    result = TushareSource(SourceConfig(), TushareClient(frame)).fetch(request)
+
+    assert result.endpoint == "stock_basic"
+    assert result.frame.columns.tolist() == [
+        "ts_code", "name", "list_date", "delist_date", "list_status"
+    ]
+    assert result.metadata["supplier_endpoint"] == "tushare.pro.stock_basic"
+
+
+def test_tushare_stock_basic_rejects_symbol_scoped_request(monkeypatch):
+    """A symbol-scoped stock_basic request is a caller bug, not a valid query."""
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    frame = pd.read_csv(FIXTURES / "tushare_stock_basic.csv", dtype={"list_date": str})
+    client = TushareClient(frame)
+    request = DataRequest(
+        "stock_basic", ("600000.SH",), date(2020, 1, 1), date(2020, 1, 2)
+    )
+
+    with pytest.raises(ValueError, match="whole-market"):
+        TushareSource(SourceConfig(), client).fetch(request)
 
 
 def test_tushare_constructor_redacts_token_when_sdk_initialization_fails(

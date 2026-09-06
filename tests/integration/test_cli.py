@@ -133,6 +133,31 @@ def test_data_bootstrap_publishes_initial_dataset(cli_runner, tmp_path):
     assert "CURRENT ->" in result.stdout
     assert (root / "data" / "standardized" / "CURRENT").is_file()
 
+    # The seed must be an honest empty placeholder: NaT listing dates and
+    # NOT_APPLIED status, no security_master_coverage evidence table.
+    from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+
+    version = DatasetPublisher(root).current().version
+    with DatasetReader(root).open(version) as context:
+        assert "security_master_coverage" not in context.tables
+        master = context.read("security_master")
+    assert set(master["list_status"]) == {"NOT_APPLIED"}
+    assert master["list_date"].isna().all()
+    assert master["delist_date"].isna().all()
+
+
+def test_fixture_dataset_carries_master_coverage_rows(fixture_root):
+    """The default fixture publishes one security_master_coverage row per symbol."""
+    from stock_quant.data_model.dataset import DatasetReader
+
+    with DatasetReader(fixture_root.root).open(fixture_root.version) as context:
+        master = context.read("security_master")
+        coverage = context.read("security_master_coverage")
+    assert set(master["list_status"]) == {"L"}
+    assert not coverage.empty
+    assert set(coverage["symbol"]) == set(master["symbol"])
+    assert set(coverage["list_status"]) == {"L"}
+
 
 def test_research_command_is_the_only_publisher_of_formal_experiments(
     cli_runner, fixture_root
