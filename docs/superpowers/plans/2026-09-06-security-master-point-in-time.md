@@ -137,7 +137,7 @@ SECURITY_MASTER_COVERAGE_COLUMNS = [
 ]
 ```
 
-Add to `_security_master_fields()` an appended trailing field and add a new fields function + schema (after `_security_master_fields` / `SECURITY_MASTER_SCHEMA`):
+Add a new fields function + schema for the coverage table, placed after `_security_master_fields()` / `SECURITY_MASTER_SCHEMA` (do **not** modify `_security_master_fields` or `SECURITY_MASTER_COLUMNS` here — the master gains `list_status` in Task 2):
 
 ```python
 def _security_master_coverage_fields() -> list[pa.Field]:
