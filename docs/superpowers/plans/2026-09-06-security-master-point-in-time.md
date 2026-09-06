@@ -972,13 +972,7 @@ CODE_MASTER_SNAPSHOT_INCOMPLETE = "master_snapshot_incomplete"
             )
 ```
 
-4. After the `_missing_issues(...)` block (just before `report = QualityReport(...)`), extend issues with the fact-vs-bar boundary check over the *refreshed* master:
-
-```python
-        issues.extend(self._master_bar_boundary_issues(master, new_daily))
-```
-
-5. Publish the refreshed master and its evidence (extend the publish dict):
+4. Publish the refreshed master and its evidence (extend the publish dict):
 
 ```python
         tables = {
@@ -995,7 +989,7 @@ CODE_MASTER_SNAPSHOT_INCOMPLETE = "master_snapshot_incomplete"
         }
 ```
 
-6. Add the refresh method to the `DataPipeline` helpers (near `_refresh_corporate_actions`):
+5. Add the refresh method to the `DataPipeline` helpers (near `_refresh_corporate_actions`):
 
 ```python
     def _refresh_security_master(
@@ -1465,7 +1459,13 @@ def _covered_symbols(coverage: pd.DataFrame | None) -> set[str]:
     return set(str(value) for value in coverage.get("symbol", []))
 ```
 
-5. `update()` already extends issues with `_master_bar_boundary_issues` (Task 4 step 3.4); confirm that call site exists and the refresh runs before it.
+5. Add the `update()` call site: in `update()`, after the `_missing_issues(...)` block (just before `report = QualityReport(...)`), extend issues with the fact-vs-bar boundary check over the *refreshed* master:
+
+```python
+        issues.extend(self._master_bar_boundary_issues(master, new_daily))
+```
+
+The refresh (Task 4) runs well before this point, so `master` here is the refreshed frame and the check is a WARNING that never blocks publication.
 
 - [ ] **Step 4: Verify once, commit**
 
