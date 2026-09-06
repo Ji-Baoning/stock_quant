@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime as _dt
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -23,6 +24,7 @@ from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
+    CODE_MASTER_SNAPSHOT_INCOMPLETE,
     CODE_OPTIONAL_SOURCE_FAILURE,
     CODE_SOURCE_FETCH_FAILED,
     CODE_UNIVERSE_MASTER_MISMATCH,
@@ -60,6 +62,16 @@ _WINDOW_START = date(2021, 11, 1)
 _WINDOW_END = date(2021, 11, 30)
 
 
+#: The repository fixture universe every stub project is built from (30 symbols
+#: mirrored from ``conftest._REPO_ROOT`` / ``configs/universe.yml``).
+_FIXTURE_UNIVERSE_SYMBOLS = tuple(
+    Universe.from_yaml(
+        Path(__file__).resolve().parents[2] / "configs" / "universe.yml"
+    ).symbols
+)
+_STOCK_BASIC_LIST_DATE = date(2001, 1, 2)
+
+
 # --------------------------------------------------------------------------- #
 # Small stub supplier that answers per-symbol raw requests deterministically
 # --------------------------------------------------------------------------- #
@@ -76,7 +88,10 @@ class StubAdapter:
     (negative-close) bar so the publication gate blocks;
     ``action_frames`` maps a symbol to per-endpoint corporate-action frames
     (returned for ``cninfo_corporate_actions`` / ``eastmoney_corporate_actions``
-    only, so one symbol can hold accepted plus quarantined events).
+    only, so one symbol can hold accepted plus quarantined events);
+    ``stock_basic_symbols`` narrows the whole-market ``stock_basic`` response
+    to a subset (defaults to the fixture universe) and
+    ``stock_basic_list_date_by_symbol`` overrides a symbol's ``list_date``.
     """
 
     name: str
@@ -84,14 +99,23 @@ class StubAdapter:
     negative_close_symbol: str | None = None
     failing_endpoints: tuple[str, ...] = ()
     action_frames: dict[str, dict[str, pd.DataFrame]] | None = None
+    stock_basic_symbols: tuple[str, ...] | None = None
+    stock_basic_list_date_by_symbol: dict[str, date] | None = None
     calls: list = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "calls", [])
         object.__setattr__(self, "action_frames", self.action_frames or {})
+        object.__setattr__(
+            self,
+            "stock_basic_list_date_by_symbol",
+            self.stock_basic_list_date_by_symbol or {},
+        )
 
     def fetch(self, request: DataRequest) -> FetchResult:
-        self.calls.append((request.endpoint, request.symbols[0]))
+        self.calls.append(
+            (request.endpoint, request.symbols[0] if request.symbols else None)
+        )
         if request.endpoint in self.failing_endpoints:
             failure = self.raise_with or RuntimeError
             raise failure(f"{self.name} supplier failure on {request.endpoint}")
@@ -103,10 +127,12 @@ class StubAdapter:
             endpoint=request.endpoint,
             request_key=request_key(request),
             frame=frame,
-            metadata={"source": self.name},
+            metadata={"source": self.name, "sdk_version": "stub"},
         )
 
     def _frame(self, request: DataRequest) -> pd.DataFrame:
+        if request.endpoint == "stock_basic":
+            return self._stock_basic_frame()
         symbol = request.symbols[0]
         sessions = _weekdays(request.start_date, request.end_date)
         if request.endpoint == "index_history":
@@ -150,6 +176,31 @@ class StubAdapter:
                 "成交量": [0] * len(sessions),
                 "成交额": [0.0] * len(sessions),
             }
+        )
+
+    def _stock_basic_frame(self) -> pd.DataFrame:
+        """One whole-market stock_basic response over the configured symbols.
+
+        ``stock_basic_symbols`` defaults to the repository fixture universe so
+        the required refresh can verify every symbol; ``list_date`` defaults to
+        a real date well before the fixture windows (2001-01-02, observably
+        different from the fixtures' 2018-01-02 baseline) unless overridden per
+        symbol.
+        """
+        symbols = self.stock_basic_symbols or _FIXTURE_UNIVERSE_SYMBOLS
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": symbol,
+                    "name": f"stub_{symbol}",
+                    "list_date": self.stock_basic_list_date_by_symbol.get(
+                        symbol, _STOCK_BASIC_LIST_DATE
+                    ).strftime("%Y%m%d"),
+                    "delist_date": "",
+                    "list_status": "L",
+                }
+                for symbol in symbols
+            ]
         )
 
 
@@ -490,6 +541,50 @@ def test_update_with_explicit_end_publishes_merged_dataset(project):
     assert result.dataset_ref.version != project.version
     assert result.resolved_end_date == _WINDOW_END
     assert all(status.ok for status in result.source_status)
+
+
+def test_update_refreshes_master_and_publishes_master_coverage(project):
+    """A successful update applies stock_basic facts and records per-symbol
+    evidence rows, so the published master is traceable to the snapshot."""
+    result = DataPipeline(project.root, sources=_all_stubs()).update(_request())
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        master = context.read("security_master")
+        coverage = context.read("security_master_coverage")
+    assert set(master["list_date"].dt.date) == {_STOCK_BASIC_LIST_DATE}
+    assert set(master["list_status"]) == {"L"}
+    assert not coverage.empty
+    assert len(coverage) == len(master)
+    assert set(coverage["symbol"]) == set(master["symbol"])
+    assert set(coverage["list_status"]) == {"L"}
+    assert set(coverage["source"]) == {"tushare.stock_basic"}
+    assert coverage["snapshot_sha256"].str.len().eq(64).all()
+
+
+def test_stock_basic_fetch_failure_blocks_update(project):
+    failing = StubAdapter("tushare", failing_endpoints=("stock_basic",))
+    result = DataPipeline(project.root, sources=_all_stubs(tushare=failing)).update(
+        _request()
+    )
+    assert result.dataset_ref is None
+    assert CODE_SOURCE_FETCH_FAILED in result.quality_report.by_code()
+    tushare_status = next(
+        status for status in result.source_status if status.source == "tushare"
+    )
+    assert not tushare_status.ok and tushare_status.required
+
+
+def test_stock_basic_snapshot_missing_symbol_blocks_update(project):
+    """A whole-market snapshot that cannot account for a universe symbol must
+    never publish a dataset claiming verified master facts."""
+    incomplete = StubAdapter(
+        "tushare", stock_basic_symbols=_FIXTURE_UNIVERSE_SYMBOLS[:-1]
+    )
+    result = DataPipeline(
+        project.root, sources=_all_stubs(tushare=incomplete)
+    ).update(_request())
+    assert result.dataset_ref is None
+    assert CODE_MASTER_SNAPSHOT_INCOMPLETE in result.quality_report.by_code()
 
 
 def test_update_records_empty_success_and_fetch_failure(project):

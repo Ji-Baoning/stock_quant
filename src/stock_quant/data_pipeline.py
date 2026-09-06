@@ -77,6 +77,12 @@ from stock_quant.data_model.schemas import (
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
 )
+from stock_quant.data_model.security_master import (
+    MASTER_SOURCE_STOCK_BASIC,
+    ListStatus,
+    master_coverage_frame,
+    master_coverage_record,
+)
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import (
@@ -113,6 +119,7 @@ CODE_NO_CURRENT_DATASET = "no_current_dataset"
 CODE_DATA_DISCOVERY_UNRESOLVED = "data_discovery_unresolved"
 CODE_OPTIONAL_SOURCE_FAILURE = "optional_source_failure"
 CODE_UNIVERSE_MASTER_MISMATCH = "universe_master_mismatch"
+CODE_MASTER_SNAPSHOT_INCOMPLETE = "master_snapshot_incomplete"
 
 _CONFIGURED_SOURCES = ("tushare", "akshare", "baostock")
 _REQUIRED_ROLE = {"tushare": True, "akshare": True, "baostock": False}
@@ -388,6 +395,16 @@ class DataPipeline:
                 issues, None, run_id, end, statuses, raw_snapshots
             )
 
+        # ---- required security-master reference (tushare stock_basic) ----- #
+        master, master_coverage = self._refresh_security_master(
+            start, end, issues, statuses, raw_snapshots, master,
+        )
+        if master is None:
+            return self._result(
+                issues, None, run_id, end, statuses, raw_snapshots,
+                resolved_end_is_fallback=end_fallback,
+            )
+
         # ---- required primary stock daily ------------------------------- #
         equity_symbols = _equity_symbols(master)
         primary_rows: list[pd.DataFrame] = []
@@ -518,6 +535,7 @@ class DataPipeline:
         tables = {
             "daily_bar": new_daily,
             "security_master": master[list(SECURITY_MASTER_COLUMNS)],
+            "security_master_coverage": master_coverage,
             "corporate_action": corporate_action[
                 list(CORPORATE_ACTION_COLUMNS)
             ],
@@ -778,6 +796,102 @@ class DataPipeline:
             benchmark_dates.update(clean["trade_date"].dt.date)
         statuses["akshare"] = SourceStatus("akshare", True, True)
         return False
+
+    def _refresh_security_master(
+        self, start, end, issues, statuses, raw_snapshots, master,
+    ):
+        """Apply the required tushare stock_basic whole-market snapshot.
+
+        Runs only after ``_require_available`` has already blocked when tushare
+        is unavailable, so a ``None`` source here can only be an adapter
+        construction failure (already recorded as a FATAL issue by
+        ``_adapter_or_fail``).
+
+        Refreshes only the listing facts (``list_date`` / ``delist_date`` /
+        ``list_status``); the universe labels stay from ``configs/universe.yml``
+        as carried by ``master``.  Returns ``(refreshed_master, coverage)`` on
+        success, or ``(None, None)`` after a FATAL issue (transport failure or
+        a snapshot missing a universe symbol), which blocks publication.
+        """
+        source = self._adapter_or_fail("tushare", statuses)
+        if source is None:
+            # Adapter construction failure (e.g. a missing TUSHARE_TOKEN):
+            # ``_adapter_or_fail`` records the source status but no issue, so
+            # surface the same stable FATAL the daily path would have produced.
+            issues.append(
+                _issue(
+                    Severity.FATAL,
+                    CODE_SOURCE_FETCH_FAILED,
+                    details={
+                        "source": "tushare",
+                        "endpoint": "stock_basic",
+                        "message": (
+                            statuses["tushare"].reason or "adapter unavailable"
+                        ),
+                    },
+                )
+            )
+            return None, None
+        config = self._project_config.sources.get("tushare", SourceConfig())
+        policy = RetryPolicy(
+            max_attempts=min(config.max_retries + 1, 3),
+            maximum_wait_seconds=min(config.timeout_seconds, 30),
+        )
+        try:
+            result = fetch_with_retry(
+                source,
+                DataRequest("stock_basic", (), start, end, {}),
+                policy,
+                sleeper=self._sleeper,
+            )
+        except Exception as error:  # noqa: BLE001 - required role
+            issues.append(
+                _issue(
+                    Severity.FATAL,
+                    CODE_SOURCE_FETCH_FAILED,
+                    details={
+                        "source": "tushare",
+                        "endpoint": "stock_basic",
+                        "message": str(translate_supplier_error(error)),
+                    },
+                )
+            )
+            statuses["tushare"] = SourceStatus(
+                "tushare", True, False,
+                reason=f"stock_basic fetch failed: {error}",
+            )
+            return None, None
+        snapshot_sha256 = self._record_raw(result)
+        raw_snapshots.append(snapshot_sha256)
+        applied = _apply_stock_basic(
+            master,
+            result.frame,
+            snapshot_sha256,
+            sdk_version=str(result.metadata.get("sdk_version", "unknown")),
+            checked_at=_ingest_time(result.metadata),
+        )
+        if applied is None:
+            issues.append(
+                _issue(
+                    Severity.FATAL,
+                    CODE_MASTER_SNAPSHOT_INCOMPLETE,
+                    details={
+                        "message": (
+                            "tushare stock_basic snapshot cannot account for "
+                            "every universe symbol"
+                        ),
+                        "source": "tushare",
+                        "endpoint": "stock_basic",
+                    },
+                )
+            )
+            statuses["tushare"] = SourceStatus(
+                "tushare", True, False,
+                reason="stock_basic snapshot incomplete",
+            )
+            return None, None
+        statuses["tushare"] = SourceStatus("tushare", True, True)
+        return applied
 
     def _refresh_corporate_actions(
         self,
@@ -1305,6 +1419,81 @@ def _coerce_daily(frame: pd.DataFrame, ingested) -> pd.DataFrame:
     out["volume"] = out["volume"].astype("int64")
     out["ingested_at"] = pd.to_datetime(out["ingested_at"], utc=True)
     return out
+
+
+def _apply_stock_basic(master, raw, snapshot_sha256, *, sdk_version, checked_at):
+    """Map one stock_basic snapshot onto master rows and build coverage rows.
+
+    Only listing facts are refreshed; ``name``/``exchange``/``board`` stay from
+    the universe labels carried by ``master``.  Returns ``(refreshed_master,
+    coverage)`` or ``None`` when the snapshot cannot account for every master
+    symbol (a FATAL condition the caller records).
+    """
+    facts: dict[str, dict[str, object]] = {}
+    for record in raw.to_dict("records"):
+        ts_code = str(record.get("ts_code", "")).strip()
+        list_date = _stock_basic_date(record.get("list_date"))
+        status = str(record.get("list_status", "")).strip()
+        if not ts_code or list_date is None or status not in {
+            ListStatus.L.value,
+            ListStatus.D.value,
+            ListStatus.P.value,
+        }:
+            continue
+        facts[ts_code] = {
+            "list_date": list_date,
+            "delist_date": _stock_basic_date(record.get("delist_date")),
+            "list_status": status,
+        }
+    refreshed: list[dict[str, object]] = []
+    coverage_rows: list[dict[str, object]] = []
+    missing: list[str] = []
+    for record in master.to_dict("records"):
+        symbol = str(record["symbol"])
+        fact = facts.get(symbol)
+        if fact is None:
+            missing.append(symbol)
+            continue
+        row = dict(record)
+        row["list_date"] = pd.Timestamp(fact["list_date"])
+        row["delist_date"] = (
+            pd.Timestamp(fact["delist_date"])
+            if fact["delist_date"] is not None
+            else pd.NaT
+        )
+        row["list_status"] = fact["list_status"]
+        refreshed.append(row)
+        coverage_rows.append(
+            master_coverage_record(
+                symbol,
+                list_date=fact["list_date"],
+                delist_date=fact["delist_date"],
+                list_status=fact["list_status"],
+                source=MASTER_SOURCE_STOCK_BASIC,
+                snapshot_sha256=snapshot_sha256,
+                sdk_version=sdk_version,
+                checked_at=checked_at,
+            )
+        )
+    if missing:
+        return None
+    frame = pd.DataFrame(refreshed, columns=list(SECURITY_MASTER_COLUMNS))
+    frame["list_date"] = pd.to_datetime(frame["list_date"], errors="coerce")
+    frame["delist_date"] = pd.to_datetime(frame["delist_date"], errors="coerce")
+    return frame, master_coverage_frame(coverage_rows)
+
+
+def _stock_basic_date(value):
+    """Parse a stock_basic date cell (YYYYMMDD str / NaT / None) to ``date``."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"nat", "nan", "none", ""}:
+        return None
+    timestamp = pd.to_datetime(text, errors="coerce")
+    if pd.isna(timestamp):
+        return None
+    return timestamp.date()
 
 
 def _coverage_record_for(
