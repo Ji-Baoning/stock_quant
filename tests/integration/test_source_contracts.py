@@ -179,7 +179,9 @@ def test_tushare_stock_basic_rejects_symbol_scoped_request(monkeypatch):
     monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
     frame = pd.read_csv(FIXTURES / "tushare_stock_basic.csv", dtype={"list_date": str})
     client = TushareClient(frame)
-    request = DataRequest("stock_basic", ("600000.SH",), date(2020, 1, 1), date(2020, 1, 2))
+    request = DataRequest(
+        "stock_basic", ("600000.SH",), date(2020, 1, 1), date(2020, 1, 2)
+    )
 
     with pytest.raises(ValueError, match="whole-market"):
         TushareSource(SourceConfig(), client).fetch(request)

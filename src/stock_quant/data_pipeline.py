@@ -921,8 +921,8 @@ class DataPipeline:
 
         Runs only after ``_require_available`` has already blocked when tushare
         is unavailable, so a ``None`` source here can only be an adapter
-        construction failure (already recorded as a FATAL issue by
-        ``_adapter_or_fail``).
+        construction failure (already recorded as a source status by
+        ``_adapter_or_fail``, with no issue).
 
         Refreshes only the listing facts (``list_date`` / ``delist_date`` /
         ``list_status``); the universe labels stay from ``configs/universe.yml``
