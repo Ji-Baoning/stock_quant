@@ -10,6 +10,7 @@ from stock_quant.config import SourceConfig
 from stock_quant.data_sources.base import (
     DataRequest,
     FetchResult,
+    ServerError,
     _utc_timestamp,
     request_key,
     request_metadata,
@@ -58,7 +59,7 @@ class AkShareSource:
             ),
             "cninfo_corporate_actions": (
                 self._cninfo_corporate_actions,
-                "akshare.stock_fhps_detail_cninfo",
+                "akshare.stock_dividend_cninfo",
                 False,
                 False,
             ),
@@ -97,6 +98,8 @@ class AkShareSource:
             date_columns=("日期", "date", "trade_date", "公告日期"),
             require_date=date_required,
             require_symbol=require_symbol,
+            allow_empty=request.endpoint
+            in {"cninfo_corporate_actions", "eastmoney_corporate_actions"},
         )
         return FetchResult(
             source=self.name,
@@ -190,10 +193,21 @@ class AkShareSource:
         return self._client.stock_info_a_code_name()
 
     def _cninfo_corporate_actions(self, request: DataRequest) -> pd.DataFrame:
-        return self._client.stock_fhps_detail_cninfo(symbol=request.symbols[0])
+        symbol = request.symbols[0].split(".", maxsplit=1)[0]
+        try:
+            return self._client.stock_dividend_cninfo(symbol=symbol)
+        except KeyError as error:
+            if str(error) != "'实施方案公告日期'":
+                raise
+            return pd.DataFrame()
 
     def _eastmoney_corporate_actions(self, request: DataRequest) -> pd.DataFrame:
-        return self._client.stock_fhps_detail_em(symbol=request.symbols[0])
+        try:
+            return self._client.stock_fhps_detail_em(symbol=request.symbols[0])
+        except TypeError as error:
+            if "'NoneType' object is not subscriptable" not in str(error):
+                raise
+            raise ServerError("Eastmoney returned an empty result") from None
 
 
 def _eastmoney_index_symbol(symbol: str) -> str:

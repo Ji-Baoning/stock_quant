@@ -15,6 +15,7 @@ from stock_quant.data_model.corporate_actions import (
     REASON_NOT_IMPLEMENTED,
     REASON_UNSUPPORTED_CORPORATE_ACTION,
     normalize_corporate_actions,
+    prepare_cninfo_dividend_frame,
 )
 
 # Documented supplier-native column names (CNINFO primary, Eastmoney cross).
@@ -45,6 +46,92 @@ _EASTMONEY_COLUMNS = [
 # Eastmoney may report 方案进度 without a standalone 方案 / 方案说明 column; the
 # optional ``plan`` field must then fall back to its documented default.
 _EASTMONEY_COLUMNS_WITHOUT_PLAN = [c for c in _EASTMONEY_COLUMNS if c != "方案"]
+
+
+def test_prepare_cninfo_dividend_frame_maps_akshare_11823_schema():
+    """AKShare 1.18.23's dividend endpoint must feed the canonical parser."""
+    raw = pd.DataFrame(
+        [
+            {
+                "实施方案公告日期": "2024-05-20",
+                "分红类型": "现金分红",
+                "送股比例": 2.0,
+                "转增比例": 3.0,
+                "派息比例": 1.0,
+                "股权登记日": "2024-06-10",
+                "除权日": "2024-06-11",
+                "派息日": "2024-06-11",
+                "股份到账日": "2024-06-11",
+                "实施方案分红说明": "10送2转3派1元(含税)",
+                "报告时间": "2023-12-31",
+            }
+        ]
+    )
+
+    prepared = prepare_cninfo_dividend_frame(raw, "000333.SZ")
+    result = normalize_corporate_actions(prepared, None)
+
+    row = result.accepted.iloc[0]
+    assert row["symbol"] == "000333.SZ"
+    assert row["announcement_date"] == pd.Timestamp("2024-05-20").date()
+    assert row["record_date"] == pd.Timestamp("2024-06-10").date()
+    assert row["ex_date"] == pd.Timestamp("2024-06-11").date()
+    assert row["cash_dividend_per_share"] == 0.1
+    assert row["bonus_share_ratio"] == 0.2
+    assert row["capitalization_ratio"] == 0.3
+    assert row["status"] == "implemented"
+    assert row["confirmed_by"] == "cninfo"
+
+
+def test_prepare_cninfo_dividend_frame_preserves_legacy_cninfo_schema():
+    """Older recorded CNINFO frames remain valid after adding 1.18.23 support."""
+    legacy = cninfo_cash(0.1, symbol="600036")
+
+    prepared = prepare_cninfo_dividend_frame(legacy, "600036.SH")
+
+    assert prepared.equals(legacy)
+
+
+def test_normalize_combines_same_day_implemented_cninfo_distributions():
+    """Annual and special dividends sharing an ex date book as one event."""
+    raw = pd.DataFrame(
+        [
+            {
+                "实施方案公告日期": "2024-04-23",
+                "分红类型": "年度分红",
+                "送股比例": None,
+                "转增比例": None,
+                "派息比例": 20.11,
+                "股权登记日": "2024-04-29",
+                "除权日": "2024-04-30",
+                "派息日": "2024-04-30",
+                "股份到账日": None,
+                "实施方案分红说明": "10派20.11元(含税)",
+                "报告时间": "2023年报",
+            },
+            {
+                "实施方案公告日期": "2024-04-23",
+                "分红类型": "特别分红",
+                "送股比例": None,
+                "转增比例": None,
+                "派息比例": 30.17,
+                "股权登记日": "2024-04-29",
+                "除权日": "2024-04-30",
+                "派息日": "2024-04-30",
+                "股份到账日": None,
+                "实施方案分红说明": "10派30.17元(含税)",
+                "报告时间": "2023年报",
+            },
+        ]
+    )
+
+    prepared = prepare_cninfo_dividend_frame(raw, "300750.SZ")
+    result = normalize_corporate_actions(prepared, None)
+
+    assert len(result.accepted) == 1
+    assert result.accepted.iloc[0]["symbol"] == "300750.SZ"
+    assert result.accepted.iloc[0]["ex_date"] == pd.Timestamp("2024-04-30").date()
+    assert result.accepted.iloc[0]["cash_dividend_per_share"] == pytest.approx(5.028)
 
 
 def _per10(per_share: float) -> float:

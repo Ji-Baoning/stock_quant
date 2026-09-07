@@ -62,6 +62,7 @@ from stock_quant.data_model.corporate_actions import (
     REASON_UNSUPPORTED_CORPORATE_ACTION,
     RECONCILED_COLUMNS,
     normalize_corporate_actions,
+    prepare_cninfo_dividend_frame,
 )
 from stock_quant.data_model.dataset import (
     DatasetNotFoundError,
@@ -1056,7 +1057,10 @@ class DataPipeline:
                         "checked_at": _ingest_time(result.metadata),
                     }
                     if not result.frame.empty:
-                        sink.append(result.frame)
+                        frame = result.frame
+                        if endpoint == "cninfo_corporate_actions":
+                            frame = prepare_cninfo_dividend_frame(frame, symbol)
+                        sink.append(frame)
                 except Exception as error:  # noqa: BLE001 - best-effort role
                     symbol_outcomes[endpoint] = {
                         "ok": False,
