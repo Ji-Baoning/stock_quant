@@ -91,10 +91,13 @@ class AkShare11823DividendClient:
 
 
 class EastmoneyNullResultClient:
-    """AKShare's observed failure when Eastmoney returns ``result: null``."""
+    """Eastmoney null response with an available THS fallback."""
 
     def stock_fhps_detail_em(self, *, symbol: str) -> pd.DataFrame:
         raise TypeError("'NoneType' object is not subscriptable")
+
+    def stock_fhps_detail_ths(self, *, symbol: str) -> pd.DataFrame:
+        return pd.DataFrame()
 
 
 class EmptyCninfoDividendClient:
@@ -326,12 +329,14 @@ def test_akshare_uses_11823_cninfo_dividend_endpoint():
     assert result.metadata["supplier_endpoint"] == "akshare.stock_dividend_cninfo"
 
 
-def test_akshare_classifies_eastmoney_null_result_as_retryable_server_error():
-    """A null Eastmoney result is an upstream outage, not a caller error."""
-    source = AkShareSource(SourceConfig(), EastmoneyNullResultClient())
+def test_akshare_falls_back_to_ths_when_eastmoney_returns_null():
+    """An Eastmoney null response may be checked against independent THS data."""
+    result = AkShareSource(SourceConfig(), EastmoneyNullResultClient()).fetch(
+        _request("eastmoney_corporate_actions", "000333.SZ")
+    )
 
-    with pytest.raises(ServerError, match="Eastmoney returned an empty result"):
-        source.fetch(_request("eastmoney_corporate_actions", "000333.SZ"))
+    assert result.frame.empty
+    assert result.metadata["supplier_endpoint"] == "akshare.stock_fhps_detail_ths"
 
 
 def test_akshare_treats_empty_cninfo_dividend_response_as_empty_data():
