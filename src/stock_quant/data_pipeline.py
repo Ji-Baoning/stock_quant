@@ -63,6 +63,7 @@ from stock_quant.data_model.corporate_actions import (
     RECONCILED_COLUMNS,
     normalize_corporate_actions,
     prepare_cninfo_dividend_frame,
+    prepare_eastmoney_dividend_frame,
 )
 from stock_quant.data_model.dataset import (
     DatasetNotFoundError,
@@ -1034,14 +1035,14 @@ class DataPipeline:
         source = self._overrides.get("akshare") or self._build_lazy("akshare")
         if source is None:
             return current_ca, coverage_frame([])
-        cninfo_frames: list[pd.DataFrame] = []
-        eastmoney_frames: list[pd.DataFrame] = []
+        frames_by_symbol: dict[str, dict[str, list[pd.DataFrame]]] = {}
         outcomes_by_symbol: dict[str, dict[str, dict[str, object]]] = {}
         for symbol in symbols:
+            frames_by_symbol[symbol] = {"cninfo": [], "eastmoney": []}
             symbol_outcomes: dict[str, dict[str, object]] = {}
-            for endpoint, sink in (
-                ("cninfo_corporate_actions", cninfo_frames),
-                ("eastmoney_corporate_actions", eastmoney_frames),
+            for endpoint, source_name in (
+                ("cninfo_corporate_actions", "cninfo"),
+                ("eastmoney_corporate_actions", "eastmoney"),
             ):
                 try:
                     result = self._fetch_one(
@@ -1060,7 +1061,9 @@ class DataPipeline:
                         frame = result.frame
                         if endpoint == "cninfo_corporate_actions":
                             frame = prepare_cninfo_dividend_frame(frame, symbol)
-                        sink.append(frame)
+                        else:
+                            frame = prepare_eastmoney_dividend_frame(frame, symbol)
+                        frames_by_symbol[symbol][source_name].append(frame)
                 except Exception as error:  # noqa: BLE001 - best-effort role
                     symbol_outcomes[endpoint] = {
                         "ok": False,
@@ -1081,9 +1084,22 @@ class DataPipeline:
                         )
                     )
             outcomes_by_symbol[symbol] = symbol_outcomes
-        accepted, quarantined = self._reconcile_action_frames(
-            cninfo_frames, eastmoney_frames, issues
-        )
+        accepted_frames: list[pd.DataFrame] = []
+        quarantined_frames: list[pd.DataFrame] = []
+        for symbol in symbols:
+            accepted, quarantined = self._reconcile_action_frames(
+                frames_by_symbol[symbol]["cninfo"],
+                frames_by_symbol[symbol]["eastmoney"],
+                issues,
+            )
+            accepted_frames.append(accepted)
+            quarantined_frames.append(quarantined)
+        accepted = _concat(accepted_frames)
+        if accepted is None:
+            accepted = pd.DataFrame(columns=RECONCILED_COLUMNS)
+        quarantined = _concat(quarantined_frames)
+        if quarantined is None:
+            quarantined = pd.DataFrame()
         coverage = coverage_frame(
             [
                 _coverage_record_for(
