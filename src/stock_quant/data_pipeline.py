@@ -61,6 +61,7 @@ from stock_quant.data_model.corporate_actions import (
     REASON_CROSS_SOURCE_CONFLICT,
     REASON_UNSUPPORTED_CORPORATE_ACTION,
     RECONCILED_COLUMNS,
+    filter_corporate_actions_to_window,
     normalize_corporate_actions,
     prepare_cninfo_dividend_frame,
     prepare_eastmoney_dividend_frame,
@@ -1063,6 +1064,7 @@ class DataPipeline:
                             frame = prepare_cninfo_dividend_frame(frame, symbol)
                         else:
                             frame = prepare_eastmoney_dividend_frame(frame, symbol)
+                        frame = filter_corporate_actions_to_window(frame, start, end)
                         frames_by_symbol[symbol][source_name].append(frame)
                 except Exception as error:  # noqa: BLE001 - best-effort role
                     symbol_outcomes[endpoint] = {
@@ -1084,6 +1086,8 @@ class DataPipeline:
                         )
                     )
             outcomes_by_symbol[symbol] = symbol_outcomes
+            if "akshare" not in self._overrides:
+                self._sleeper(1)
         accepted_frames: list[pd.DataFrame] = []
         quarantined_frames: list[pd.DataFrame] = []
         for symbol in symbols:

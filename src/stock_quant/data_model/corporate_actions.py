@@ -142,6 +142,27 @@ def prepare_eastmoney_dividend_frame(frame: pd.DataFrame, symbol: str) -> pd.Dat
     return prepared
 
 
+def filter_corporate_actions_to_window(
+    frame: pd.DataFrame, start, end
+) -> pd.DataFrame:
+    """Exclude dated events outside the requested backtest window.
+
+    Missing ex-dates remain in the frame so the reconciliation layer can flag a
+    genuinely incomplete in-window record instead of silently discarding it.
+    """
+    if frame.empty:
+        return frame.copy()
+    ex_column = next(
+        (name for name in ("除权除息日", "除权日") if name in frame.columns), None
+    )
+    if ex_column is None:
+        return frame.copy()
+    dates = pd.to_datetime(frame[ex_column], errors="coerce")
+    in_window = (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))
+    keep = dates.isna() | in_window
+    return frame.loc[keep].reset_index(drop=True)
+
+
 def normalize_corporate_actions(
     cninfo: pd.DataFrame | None,
     eastmoney: pd.DataFrame | None,
