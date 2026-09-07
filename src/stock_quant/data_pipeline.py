@@ -1054,20 +1054,20 @@ class DataPipeline:
                     )
                     snapshot_sha256 = self._record_raw(result)
                     raw_snapshots.append(snapshot_sha256)
-                    symbol_outcomes[endpoint] = {
-                        "ok": True,
-                        "empty": bool(result.frame.empty),
-                        "snapshot_sha256": snapshot_sha256,
-                        "checked_at": _ingest_time(result.metadata),
-                    }
-                    if not result.frame.empty:
-                        frame = result.frame
+                    frame = result.frame
+                    if not frame.empty:
                         if endpoint == "cninfo_corporate_actions":
                             frame = prepare_cninfo_dividend_frame(frame, symbol)
                         else:
                             frame = prepare_eastmoney_dividend_frame(frame, symbol)
                         frame = filter_corporate_actions_to_window(frame, start, end)
                         frames_by_symbol[symbol][source_name].append(frame)
+                    symbol_outcomes[endpoint] = {
+                        "ok": True,
+                        "empty": bool(frame.empty),
+                        "snapshot_sha256": snapshot_sha256,
+                        "checked_at": _ingest_time(result.metadata),
+                    }
                 except Exception as error:  # noqa: BLE001 - best-effort role
                     symbol_outcomes[endpoint] = {
                         "ok": False,

@@ -407,6 +407,73 @@ def _mixed_accepted_and_unsupported_action_sources() -> dict[str, DataSource]:
     return _all_stubs(akshare=mixed)
 
 
+def _cninfo_cash_out_of_window(symbol: str) -> pd.DataFrame:
+    """An implemented CNINFO cash dividend dated AFTER the backtest window.
+
+    The ex-date (2021-12-17) lies past ``_WINDOW_END`` (2021-11-30), so the row
+    survives ``prepare_cninfo_dividend_frame`` but is dropped by
+    ``filter_corporate_actions_to_window``: the raw response carries rows while
+    the window itself holds no in-window event.
+    """
+    code = symbol.split(".")[0]
+    return pd.DataFrame(
+        [
+            {
+                "证券代码": code,
+                "证券简称": "placeholder",
+                "公告日期": "2021-12-10",
+                "股权登记日": "2021-12-16",
+                "除权除息日": "2021-12-17",
+                "派息(税前)(元/10股)": 4.6,
+                "送股(股/10股)": 0.0,
+                "转增(股/10股)": 0.0,
+                "进度": "实施",
+                "方案": "10派4.6元(含税)",
+            }
+        ],
+        columns=_ACTION_CNINFO_COLUMNS,
+    )
+
+
+def _eastmoney_cash_out_of_window(symbol: str) -> pd.DataFrame:
+    """The matching Eastmoney cash dividend dated after the backtest window."""
+    code = symbol.split(".")[0]
+    return pd.DataFrame(
+        [
+            {
+                "代码": code,
+                "名称": "placeholder",
+                "最新公告日期": "2021-12-10",
+                "股权登记日": "2021-12-16",
+                "除权除息日": "2021-12-17",
+                "现金分红-现金分红比例": 4.6,
+                "送转股份-送股比例": 0.0,
+                "送转股份-转股比例": 0.0,
+                "方案进度": "实施",
+                "方案": "10派4.6元(含税)",
+            }
+        ],
+        columns=_ACTION_EASTMONEY_COLUMNS,
+    )
+
+
+def _out_of_window_cash_sources() -> dict[str, DataSource]:
+    """``600036.SH`` reports only implemented dividends dated past the window
+    on both endpoints; every other symbol answers no events."""
+    source = StubAdapter(
+        "akshare",
+        action_frames={
+            "600036.SH": {
+                "cninfo_corporate_actions": _cninfo_cash_out_of_window("600036.SH"),
+                "eastmoney_corporate_actions": _eastmoney_cash_out_of_window(
+                    "600036.SH"
+                ),
+            }
+        },
+    )
+    return _all_stubs(akshare=source)
+
+
 @pytest.fixture
 def project(tmp_path):
     """A fresh synthetic project per test (updates republish ``CURRENT``)."""
@@ -704,6 +771,29 @@ def test_update_marks_clean_cross_confirmed_cash_dividend_verified(project):
     # ... and, with nothing quarantined, the window reads VERIFIED, reason None.
     row = coverage.loc[coverage["symbol"] == "600036.SH"].iloc[0]
     assert row["status"] == "VERIFIED"
+    assert pd.isna(row["reason"])
+
+
+def test_update_events_only_outside_window_read_verified_empty(project):
+    """Raw rows whose events fall outside the window must not mark the window
+    as holding events.
+
+    Both endpoints answer successfully but carry ONLY an implemented dividend
+    ex-dated after the window (2021-12-17 > 2021-11-30).  Nothing survives the
+    window filter, so each endpoint's recorded outcome must read empty and the
+    symbol/window publishes ``VERIFIED_EMPTY`` -- not ``FACTS_INCOMPLETE``
+    inferred from raw-response row presence.
+    """
+    result = DataPipeline(
+        project.root, sources=_out_of_window_cash_sources()
+    ).update(_request())
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        facts = context.read("corporate_action")
+        coverage = context.read("corporate_action_coverage")
+    assert facts.loc[facts["symbol"] == "600036.SH"].empty
+    row = coverage.loc[coverage["symbol"] == "600036.SH"].iloc[0]
+    assert row["status"] == "VERIFIED_EMPTY"
     assert pd.isna(row["reason"])
 
 
