@@ -147,8 +147,9 @@ def filter_corporate_actions_to_window(
 ) -> pd.DataFrame:
     """Exclude dated events outside the requested backtest window.
 
-    Missing ex-dates remain in the frame so the reconciliation layer can flag a
-    genuinely incomplete in-window record instead of silently discarding it.
+    A supplier's unimplemented plan without an ex-date cannot affect a completed
+    historical window, so it is excluded too.  An implemented record with a
+    missing ex-date remains for reconciliation to flag as a genuine defect.
     """
     if frame.empty:
         return frame.copy()
@@ -159,7 +160,15 @@ def filter_corporate_actions_to_window(
         return frame.copy()
     dates = pd.to_datetime(frame[ex_column], errors="coerce")
     in_window = (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))
-    keep = dates.isna() | in_window
+    progress_column = next(
+        (name for name in ("进度", "方案进度") if name in frame.columns), None
+    )
+    implemented = (
+        frame[progress_column].fillna("").astype(str).str.contains(_IMPLEMENTED_MARKER)
+        if progress_column is not None
+        else pd.Series(True, index=frame.index)
+    )
+    keep = in_window | (dates.isna() & implemented)
     return frame.loc[keep].reset_index(drop=True)
 
 
