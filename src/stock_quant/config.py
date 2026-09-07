@@ -3,6 +3,7 @@
 from datetime import date
 from datetime import time as dt_time
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -35,6 +36,21 @@ class CostConfig(BaseModel):
     scenarios: list[CostScenario] = Field(default_factory=list)
 
 
+class CorporateActionReviewConfig(BaseModel):
+    """A reviewed resolution for one otherwise-conflicting action event."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    ex_date: date
+    selected_source: Literal["cninfo", "eastmoney"]
+    record_date: date
+    cash_dividend_per_share: float = Field(ge=0)
+    bonus_share_ratio: float = Field(default=0, ge=0)
+    capitalization_ratio: float = Field(default=0, ge=0)
+    rationale: str = Field(min_length=1)
+
+
 class ProjectConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -44,6 +60,9 @@ class ProjectConfig(BaseModel):
     benchmark_symbols: list[str]
     sources: dict[str, SourceConfig] = Field(default_factory=dict)
     costs: CostConfig = Field(default_factory=CostConfig)
+    corporate_action_reviews: list[CorporateActionReviewConfig] = Field(
+        default_factory=list
+    )
     publication_time: dt_time = Field(
         default=dt_time(15, 0),
         description=(
@@ -69,4 +88,8 @@ def load_project_config(root: Path) -> ProjectConfig:
     project = read("project.yml")
     project["sources"] = read("sources.yml")
     project["costs"] = read("costs.yml")
+    review_path = root / "configs" / "corporate_action_reviews.yml"
+    project["corporate_action_reviews"] = (
+        yaml.safe_load(review_path.read_text()) or [] if review_path.exists() else []
+    )
     return ProjectConfig.model_validate(project)
