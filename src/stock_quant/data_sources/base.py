@@ -147,11 +147,12 @@ def validate_supplier_frame(
     date_columns: tuple[str, ...],
     require_symbol: bool = True,
     require_date: bool = True,
+    allow_empty: bool = False,
 ) -> None:
     """Validate a response without renaming, filtering, or coercing its columns."""
     if not isinstance(frame, pd.DataFrame):
         raise ContractError("supplier response is not a pandas DataFrame")
-    if frame.empty:
+    if frame.empty and not allow_empty:
         raise ContractError("supplier returned an empty response")
     if frame.attrs.get("truncated"):
         raise ContractError("supplier marked its response as truncated")

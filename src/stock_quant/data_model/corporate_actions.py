@@ -57,6 +57,18 @@ _UNSUPPORTED_KEYWORDS = ("配股", "配售", "吸收合并", "换股")
 _IMPLEMENTED_MARKER = "实施"
 _BOTH_SOURCES = "cninfo+eastmoney"
 
+# AKShare 1.18.23 exposes CNINFO's historical dividend endpoint as
+# ``stock_dividend_cninfo``.  Its supplier-native labels differ from the older
+# frame consumed below and omit the security code (the request identifies it).
+_CNINFO_DIVIDEND_COLUMNS = {
+    "实施方案公告日期": "公告日期",
+    "送股比例": "送股(股/10股)",
+    "转增比例": "转增(股/10股)",
+    "派息比例": "派息(税前)(元/10股)",
+    "除权日": "除权除息日",
+    "实施方案分红说明": "方案",
+}
+
 # Ordered native column candidates per canonical input field. The first present
 # column is used; ``plan`` is optional and only needed for unsupported tagging.
 _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
@@ -91,6 +103,32 @@ class CorporateActionResult:
 
     accepted: pd.DataFrame
     quarantined: pd.DataFrame
+
+
+def prepare_cninfo_dividend_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Adapt AKShare's ``stock_dividend_cninfo`` response for reconciliation.
+
+    The raw supplier frame is persisted before this conversion.  CNINFO's
+    historical-dividend response consists of implemented events, so the
+    compatibility frame marks each row as implemented and supplies the symbol
+    from the symbol-scoped request.
+    """
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("cninfo dividend response must be a DataFrame")
+    if frame.empty:
+        return frame.copy()
+    if {"证券代码", "公告日期"}.issubset(frame.columns):
+        return frame.copy()
+    missing = sorted(set(_CNINFO_DIVIDEND_COLUMNS) - set(frame.columns))
+    if missing:
+        raise ValueError(
+            "cninfo dividend response is missing required columns: "
+            + ", ".join(missing)
+        )
+    prepared = frame.rename(columns=_CNINFO_DIVIDEND_COLUMNS).copy()
+    prepared["证券代码"] = symbol.split(".", maxsplit=1)[0]
+    prepared["进度"] = "实施"
+    return prepared
 
 
 def normalize_corporate_actions(
@@ -159,10 +197,8 @@ def _standardize_source(
             continue
         key = (event["symbol"], event["ex_date"])
         if key in candidates:
-            raise ValueError(
-                f"{source} reports more than one implemented supported action for "
-                f"{event['symbol']} on {event['ex_date'].isoformat()}"
-            )
+            candidates[key] = _combine_same_day_events(candidates[key], event, source)
+            continue
         candidates[key] = event
     return candidates, quarantine
 
@@ -246,6 +282,30 @@ def _same_facts(left: dict[str, Any], right: dict[str, Any]) -> bool:
         and _zeroed(left["bonus"]) == _zeroed(right["bonus"])
         and _zeroed(left["capitalization"]) == _zeroed(right["capitalization"])
     )
+
+
+def _combine_same_day_events(
+    existing: dict[str, Any], incoming: dict[str, Any], source: str
+) -> dict[str, Any]:
+    """Combine supplier distributions that settle on the same ex/record date.
+
+    Multiple implemented distributions on one ex date (for example an annual
+    and a special dividend) have the same account effect as one summed event.
+    Different record dates remain ambiguous and are rejected rather than
+    silently selecting one.
+    """
+    if existing["record_date"] != incoming["record_date"]:
+        raise ValueError(
+            f"{source} reports more than one implemented supported action for "
+            f"{incoming['symbol']} on {incoming['ex_date'].isoformat()}"
+        )
+    combined = dict(existing)
+    for field in ("cash", "bonus", "capitalization"):
+        combined[field] = _zeroed(existing[field]) + _zeroed(incoming[field])
+    combined["announcement_date"] = min(
+        existing["announcement_date"], incoming["announcement_date"]
+    )
+    return combined
 
 
 def _zeroed(value: Decimal | None) -> Decimal:
