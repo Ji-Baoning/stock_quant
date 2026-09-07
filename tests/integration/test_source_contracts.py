@@ -104,6 +104,17 @@ class EmptyCninfoDividendClient:
         raise KeyError("实施方案公告日期")
 
 
+class EastmoneyDividendClient:
+    """Capture the symbol shape passed to Eastmoney's dividend endpoint."""
+
+    def __init__(self) -> None:
+        self.symbol: str | None = None
+
+    def stock_fhps_detail_em(self, *, symbol: str) -> pd.DataFrame:
+        self.symbol = symbol
+        return pd.DataFrame({"最新公告日期": ["2024-05-20"]})
+
+
 class BaoResponse:
     def __init__(self, frame: pd.DataFrame) -> None:
         self.error_code = "0"
@@ -330,6 +341,17 @@ def test_akshare_treats_empty_cninfo_dividend_response_as_empty_data():
     )
 
     assert result.frame.empty
+
+
+def test_akshare_uses_bare_symbol_for_eastmoney_corporate_actions():
+    """Eastmoney's share-bonus endpoint rejects exchange-suffixed symbols."""
+    client = EastmoneyDividendClient()
+
+    AkShareSource(SourceConfig(), client).fetch(
+        _request("eastmoney_corporate_actions", "000333.SZ")
+    )
+
+    assert client.symbol == "000333"
 
 
 def _source_for(
