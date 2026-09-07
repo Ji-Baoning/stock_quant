@@ -76,6 +76,34 @@ class CurrentAkShareClient:
         return self.frame
 
 
+class AkShare11823DividendClient:
+    """Recorded public surface of AKShare 1.18.23's CNINFO dividend API."""
+
+    __version__ = "1.18.23"
+
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+        self.symbol: str | None = None
+
+    def stock_dividend_cninfo(self, *, symbol: str) -> pd.DataFrame:
+        self.symbol = symbol
+        return self.frame
+
+
+class EastmoneyNullResultClient:
+    """AKShare's observed failure when Eastmoney returns ``result: null``."""
+
+    def stock_fhps_detail_em(self, *, symbol: str) -> pd.DataFrame:
+        raise TypeError("'NoneType' object is not subscriptable")
+
+
+class EmptyCninfoDividendClient:
+    """AKShare's empty CNINFO result fails while sorting a missing date column."""
+
+    def stock_dividend_cninfo(self, *, symbol: str) -> pd.DataFrame:
+        raise KeyError("实施方案公告日期")
+
+
 class BaoResponse:
     def __init__(self, frame: pd.DataFrame) -> None:
         self.error_code = "0"
@@ -271,6 +299,37 @@ def test_akshare_returns_recorded_stock_metadata_without_symbol_set_equality():
     assert result.endpoint == "stock_metadata"
     assert result.frame.columns.tolist() == ["code", "name"]
     assert result.frame["code"].tolist() == ["000001", "600000"]
+
+
+def test_akshare_uses_11823_cninfo_dividend_endpoint():
+    """CNINFO fetches must use the API actually exported by AKShare 1.18.23."""
+    frame = pd.DataFrame({"实施方案公告日期": ["2024-05-20"]})
+    client = AkShare11823DividendClient(frame)
+
+    result = AkShareSource(SourceConfig(), client).fetch(
+        _request("cninfo_corporate_actions", "000333.SZ")
+    )
+
+    assert client.symbol == "000333"
+    assert result.frame.equals(frame)
+    assert result.metadata["supplier_endpoint"] == "akshare.stock_dividend_cninfo"
+
+
+def test_akshare_classifies_eastmoney_null_result_as_retryable_server_error():
+    """A null Eastmoney result is an upstream outage, not a caller error."""
+    source = AkShareSource(SourceConfig(), EastmoneyNullResultClient())
+
+    with pytest.raises(ServerError, match="Eastmoney returned an empty result"):
+        source.fetch(_request("eastmoney_corporate_actions", "000333.SZ"))
+
+
+def test_akshare_treats_empty_cninfo_dividend_response_as_empty_data():
+    """A known AKShare empty-response bug must not mark coverage as a failure."""
+    result = AkShareSource(SourceConfig(), EmptyCninfoDividendClient()).fetch(
+        _request("cninfo_corporate_actions", "688981.SH")
+    )
+
+    assert result.frame.empty
 
 
 def _source_for(
