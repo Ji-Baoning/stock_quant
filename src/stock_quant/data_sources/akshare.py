@@ -10,7 +10,6 @@ from stock_quant.config import SourceConfig
 from stock_quant.data_sources.base import (
     DataRequest,
     FetchResult,
-    ServerError,
     _utc_timestamp,
     request_key,
     request_metadata,
@@ -85,6 +84,9 @@ class AkShareSource:
                 frame, supplier_endpoint = self._index_history(request)
             else:
                 frame = handler(request)
+                supplier_endpoint = frame.attrs.get(
+                    "supplier_endpoint", supplier_endpoint
+                )
         except Exception as error:
             translated = translate_supplier_error(error)
             if translated is error:
@@ -208,7 +210,9 @@ class AkShareSource:
         except TypeError as error:
             if "'NoneType' object is not subscriptable" not in str(error):
                 raise
-            raise ServerError("Eastmoney returned an empty result") from None
+            frame = self._client.stock_fhps_detail_ths(symbol=symbol)
+            frame.attrs["supplier_endpoint"] = "akshare.stock_fhps_detail_ths"
+            return frame
 
 
 def _eastmoney_index_symbol(symbol: str) -> str:

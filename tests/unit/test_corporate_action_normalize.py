@@ -18,6 +18,7 @@ from stock_quant.data_model.corporate_actions import (
     filter_corporate_actions_to_window,
     normalize_corporate_actions,
     prepare_cninfo_dividend_frame,
+    prepare_eastmoney_dividend_frame,
 )
 
 # Documented supplier-native column names (CNINFO primary, Eastmoney cross).
@@ -100,6 +101,27 @@ def test_filter_corporate_actions_to_window_excludes_future_events():
     )
 
     assert filtered["派息(税前)(元/10股)"].tolist() == [1.0, 4.0]
+
+
+def test_prepare_eastmoney_dividend_frame_maps_ths_fallback():
+    frame = pd.DataFrame(
+        {
+            "实施公告日": ["2024-05-20"],
+            "分红方案说明": ["10送2转3派1元(含税)"],
+            "A股股权登记日": ["2024-06-10"],
+            "A股除权除息日": ["2024-06-11"],
+            "方案进度": ["实施分配"],
+        }
+    )
+
+    prepared = prepare_eastmoney_dividend_frame(frame, "000333.SZ")
+    result = normalize_corporate_actions(None, prepared)
+
+    row = result.accepted.iloc[0]
+    assert row["symbol"] == "000333.SZ"
+    assert row["cash_dividend_per_share"] == pytest.approx(0.1)
+    assert row["bonus_share_ratio"] == pytest.approx(0.2)
+    assert row["capitalization_ratio"] == pytest.approx(0.3)
 
 
 def test_prepare_cninfo_dividend_frame_preserves_legacy_cninfo_schema():

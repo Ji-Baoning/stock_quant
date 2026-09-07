@@ -132,14 +132,55 @@ def prepare_cninfo_dividend_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFr
 
 
 def prepare_eastmoney_dividend_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """Supply the request symbol omitted by AKShare's Eastmoney result frame."""
+    """Adapt Eastmoney or its THS fallback to the reconciliation layout."""
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("eastmoney dividend response must be a DataFrame")
-    if frame.empty or "代码" in frame.columns:
+    if frame.empty:
+        return frame.copy()
+    if "分红方案说明" in frame.columns:
+        return _prepare_ths_dividend_frame(frame, symbol)
+    if "代码" in frame.columns:
         return frame.copy()
     prepared = frame.copy()
     prepared["代码"] = symbol.split(".", maxsplit=1)[0]
     return prepared
+
+
+def _prepare_ths_dividend_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Map AKShare's ``stock_fhps_detail_ths`` frame to Eastmoney labels."""
+    required = {
+        "实施公告日",
+        "分红方案说明",
+        "A股股权登记日",
+        "A股除权除息日",
+        "方案进度",
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError("ths dividend response is missing: " + ", ".join(missing))
+    plan = frame["分红方案说明"].fillna("").astype(str)
+    prepared = pd.DataFrame(
+        {
+            "代码": symbol.split(".", maxsplit=1)[0],
+            "最新公告日期": frame["实施公告日"],
+            "股权登记日": frame["A股股权登记日"],
+            "除权除息日": frame["A股除权除息日"],
+            "现金分红-现金分红比例": _ths_plan_ratio(plan, "派"),
+            "送转股份-送股比例": _ths_plan_ratio(plan, "送"),
+            "送转股份-转股比例": _ths_plan_ratio(plan, "转"),
+            "方案进度": frame["方案进度"],
+            "方案": plan,
+        }
+    )
+    return prepared
+
+
+def _ths_plan_ratio(plan: pd.Series, marker: str) -> pd.Series:
+    """Extract a per-ten-share THS plan component, leaving absent values null."""
+    return pd.to_numeric(
+        plan.str.extract(rf"{marker}([0-9]+(?:\\.[0-9]+)?)", expand=False),
+        errors="coerce",
+    )
 
 
 def filter_corporate_actions_to_window(
