@@ -11,7 +11,7 @@ dependencies:
   - typer
   - pyyaml
   - tushare
-  - akshare
+  - akshare=1.18.23
   - baostock
   - jinja2
   - plotly

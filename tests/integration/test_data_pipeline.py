@@ -340,6 +340,40 @@ def _cninfo_single_cash(symbol: str) -> pd.DataFrame:
     return _cninfo_cash_and_rights_issue(symbol).head(1).reset_index(drop=True)
 
 
+def _cninfo_dividend_11823(symbol: str) -> pd.DataFrame:
+    """Recorded shape of AKShare 1.18.23 ``stock_dividend_cninfo`` output."""
+    return pd.DataFrame(
+        [
+            {
+                "实施方案公告日期": "2021-11-02",
+                "分红类型": "现金分红",
+                "送股比例": 0.0,
+                "转增比例": 0.0,
+                "派息比例": 4.6,
+                "股权登记日": "2021-11-10",
+                "除权日": "2021-11-11",
+                "派息日": "2021-11-11",
+                "股份到账日": "2021-11-11",
+                "实施方案分红说明": "10派4.6元(含税)",
+                "报告时间": "2021-09-30",
+            }
+        ]
+    )
+
+
+def _akshare_11823_cninfo_sources() -> dict[str, DataSource]:
+    """One recorded 1.18.23 CNINFO dividend; other requests are empty."""
+    source = StubAdapter(
+        "akshare",
+        action_frames={
+            "000333.SZ": {
+                "cninfo_corporate_actions": _cninfo_dividend_11823("000333.SZ")
+            }
+        },
+    )
+    return _all_stubs(akshare=source)
+
+
 def _verified_cash_dividend_sources() -> dict[str, DataSource]:
     """``600036.SH`` reports a cross-confirmed cash dividend (accepted) with
     nothing unsupported; every other symbol answers no events."""
@@ -671,6 +705,20 @@ def test_update_marks_clean_cross_confirmed_cash_dividend_verified(project):
     row = coverage.loc[coverage["symbol"] == "600036.SH"].iloc[0]
     assert row["status"] == "VERIFIED"
     assert pd.isna(row["reason"])
+
+
+def test_update_publishes_akshare_11823_cninfo_dividend(project):
+    """The current CNINFO response shape must produce a bookable dividend."""
+    result = DataPipeline(
+        project.root, sources=_akshare_11823_cninfo_sources()
+    ).update(_request())
+
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        facts = context.read("corporate_action")
+    booked = facts.loc[facts["symbol"] == "000333.SZ"]
+    assert len(booked) == 1
+    assert booked.iloc[0]["cash_dividend_per_share"] == pytest.approx(0.46)
 
 
 def test_update_blocked_records_raw_responses(project):
