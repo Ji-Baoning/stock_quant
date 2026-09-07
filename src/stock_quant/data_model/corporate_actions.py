@@ -131,6 +131,17 @@ def prepare_cninfo_dividend_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFr
     return prepared
 
 
+def prepare_eastmoney_dividend_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Supply the request symbol omitted by AKShare's Eastmoney result frame."""
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("eastmoney dividend response must be a DataFrame")
+    if frame.empty or "代码" in frame.columns:
+        return frame.copy()
+    prepared = frame.copy()
+    prepared["代码"] = symbol.split(".", maxsplit=1)[0]
+    return prepared
+
+
 def normalize_corporate_actions(
     cninfo: pd.DataFrame | None,
     eastmoney: pd.DataFrame | None,
