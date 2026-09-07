@@ -14,6 +14,7 @@ from stock_quant.data_model.corporate_actions import (
     REASON_INCOMPLETE,
     REASON_NOT_IMPLEMENTED,
     REASON_UNSUPPORTED_CORPORATE_ACTION,
+    filter_corporate_actions_to_window,
     normalize_corporate_actions,
     prepare_cninfo_dividend_frame,
 )
@@ -81,6 +82,22 @@ def test_prepare_cninfo_dividend_frame_maps_akshare_11823_schema():
     assert row["capitalization_ratio"] == 0.3
     assert row["status"] == "implemented"
     assert row["confirmed_by"] == "cninfo"
+
+
+def test_filter_corporate_actions_to_window_excludes_future_events():
+    """Future plans must not make a historical backtest window untrusted."""
+    frame = pd.DataFrame(
+        {
+            "除权除息日": ["2026-08-28", "2026-08-29", None],
+            "派息(税前)(元/10股)": [1.0, 2.0, 3.0],
+        }
+    )
+
+    filtered = filter_corporate_actions_to_window(
+        frame, pd.Timestamp("2021-01-08"), pd.Timestamp("2026-08-28")
+    )
+
+    assert filtered["派息(税前)(元/10股)"].tolist() == [1.0, 3.0]
 
 
 def test_prepare_cninfo_dividend_frame_preserves_legacy_cninfo_schema():
