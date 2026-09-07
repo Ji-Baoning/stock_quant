@@ -215,6 +215,69 @@ def normalize_corporate_actions(
     )
 
 
+def apply_corporate_action_reviews(
+    result: CorporateActionResult, reviews: list[dict[str, object]]
+) -> CorporateActionResult:
+    """Resolve explicitly reviewed cross-source conflicts without guessing.
+
+    Each review pins the selected source and economic facts. A changed supplier
+    response therefore fails closed instead of silently reusing a stale review.
+    """
+    accepted = result.accepted.to_dict("records")
+    quarantined = result.quarantined.to_dict("records")
+    for review in reviews:
+        symbol = str(review["symbol"])
+        ex_date = parse_trade_date(review["ex_date"])
+        selected_source = str(review["selected_source"])
+        matched = [
+            row
+            for row in quarantined
+            if row.get("reason") == REASON_CROSS_SOURCE_CONFLICT
+            and row.get("symbol") == symbol
+            and row.get("ex_date") == ex_date
+            and row.get("confirmed_by") == selected_source
+        ]
+        if len(matched) != 1:
+            raise ValueError(
+                f"reviewed corporate action {symbol}#{ex_date} has "
+                f"{len(matched)} matching {selected_source} conflicts"
+            )
+        selected = matched[0]
+        for field in (
+            "record_date",
+            "cash_dividend_per_share",
+            "bonus_share_ratio",
+            "capitalization_ratio",
+        ):
+            if not _review_value_matches(selected.get(field), review[field]):
+                raise ValueError(
+                    f"reviewed corporate action {symbol}#{ex_date} differs in {field}"
+                )
+        selected = dict(selected)
+        selected["confirmed_by"] = f"{selected_source}+reviewed"
+        selected.pop("reason", None)
+        accepted.append(selected)
+        quarantined = [
+            row
+            for row in quarantined
+            if not (
+                row.get("reason") == REASON_CROSS_SOURCE_CONFLICT
+                and row.get("symbol") == symbol
+                and row.get("ex_date") == ex_date
+            )
+        ]
+    return CorporateActionResult(
+        accepted=_finalize(accepted, RECONCILED_COLUMNS),
+        quarantined=_finalize(quarantined, QUARANTINE_COLUMNS),
+    )
+
+
+def _review_value_matches(actual: object, expected: object) -> bool:
+    if isinstance(expected, (float, int)):
+        return actual is not None and abs(float(actual) - float(expected)) < 1e-12
+    return parse_trade_date(actual) == parse_trade_date(expected)
+
+
 def _standardize_source(
     frame: pd.DataFrame | None, source: str
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]]]:

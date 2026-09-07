@@ -61,6 +61,8 @@ from stock_quant.data_model.corporate_actions import (
     REASON_CROSS_SOURCE_CONFLICT,
     REASON_UNSUPPORTED_CORPORATE_ACTION,
     RECONCILED_COLUMNS,
+    CorporateActionResult,
+    apply_corporate_action_reviews,
     filter_corporate_actions_to_window,
     normalize_corporate_actions,
     prepare_cninfo_dividend_frame,
@@ -1104,6 +1106,15 @@ class DataPipeline:
         quarantined = _concat(quarantined_frames)
         if quarantined is None:
             quarantined = pd.DataFrame()
+        reviewed = apply_corporate_action_reviews(
+            CorporateActionResult(accepted=accepted, quarantined=quarantined),
+            [
+                review.model_dump()
+                for review in self._project_config.corporate_action_reviews
+            ],
+        )
+        accepted = reviewed.accepted
+        quarantined = reviewed.quarantined
         coverage = coverage_frame(
             [
                 _coverage_record_for(

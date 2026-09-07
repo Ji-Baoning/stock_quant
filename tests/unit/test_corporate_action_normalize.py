@@ -14,6 +14,7 @@ from stock_quant.data_model.corporate_actions import (
     REASON_INCOMPLETE,
     REASON_NOT_IMPLEMENTED,
     REASON_UNSUPPORTED_CORPORATE_ACTION,
+    apply_corporate_action_reviews,
     filter_corporate_actions_to_window,
     normalize_corporate_actions,
     prepare_cninfo_dividend_frame,
@@ -281,6 +282,28 @@ def test_conflicting_actions_preserve_both_source_records():
     assert len(result.quarantined) == 2
     assert set(result.quarantined["confirmed_by"]) == {"cninfo", "eastmoney"}
     assert (result.quarantined["reason"] == REASON_CROSS_SOURCE_CONFLICT).all()
+
+
+def test_reviewed_conflict_accepts_pinned_source_and_facts():
+    conflict = normalize_corporate_actions(cninfo_cash(0.1), eastmoney_cash(0.2))
+
+    reviewed = apply_corporate_action_reviews(
+        conflict,
+        [
+            {
+                "symbol": "600519.SH",
+                "ex_date": "2020-06-11",
+                "selected_source": "cninfo",
+                "record_date": "2020-06-10",
+                "cash_dividend_per_share": 0.1,
+                "bonus_share_ratio": 0.0,
+                "capitalization_ratio": 0.0,
+            }
+        ],
+    )
+
+    assert reviewed.quarantined.empty
+    assert reviewed.accepted.iloc[0]["confirmed_by"] == "cninfo+reviewed"
 
 
 def test_equal_cninfo_and_eastmoney_facts_cross_confirm_to_one_row():
