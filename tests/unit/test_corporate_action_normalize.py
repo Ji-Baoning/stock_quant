@@ -88,8 +88,9 @@ def test_filter_corporate_actions_to_window_excludes_future_events():
     """Future plans must not make a historical backtest window untrusted."""
     frame = pd.DataFrame(
         {
-            "除权除息日": ["2026-08-28", "2026-08-29", None],
-            "派息(税前)(元/10股)": [1.0, 2.0, 3.0],
+            "除权除息日": ["2026-08-28", "2026-08-29", None, None],
+            "方案进度": ["实施", "实施", "预案", "实施"],
+            "派息(税前)(元/10股)": [1.0, 2.0, 3.0, 4.0],
         }
     )
 
@@ -97,7 +98,7 @@ def test_filter_corporate_actions_to_window_excludes_future_events():
         frame, pd.Timestamp("2021-01-08"), pd.Timestamp("2026-08-28")
     )
 
-    assert filtered["派息(税前)(元/10股)"].tolist() == [1.0, 3.0]
+    assert filtered["派息(税前)(元/10股)"].tolist() == [1.0, 4.0]
 
 
 def test_prepare_cninfo_dividend_frame_preserves_legacy_cninfo_schema():
