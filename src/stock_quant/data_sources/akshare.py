@@ -202,8 +202,9 @@ class AkShareSource:
             return pd.DataFrame()
 
     def _eastmoney_corporate_actions(self, request: DataRequest) -> pd.DataFrame:
+        symbol = request.symbols[0].split(".", maxsplit=1)[0]
         try:
-            return self._client.stock_fhps_detail_em(symbol=request.symbols[0])
+            return self._client.stock_fhps_detail_em(symbol=symbol)
         except TypeError as error:
             if "'NoneType' object is not subscriptable" not in str(error):
                 raise
