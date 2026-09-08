@@ -20,13 +20,13 @@ the price-limit book.  No future price is ever inspected.
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Mapping
 
 import pandas as pd
 
 from stock_quant.backtest.account import Account
-from stock_quant.backtest.costs import CostModel
+from stock_quant.backtest.costs import CENT, CostModel
 from stock_quant.backtest.models import (
     BUY,
     LOT_SIZE,
@@ -263,7 +263,7 @@ class ExecutionSimulator:
             return
         open_price = _optional_decimal(rows[order.symbol]["open"])
         quote = self._cost.calculate(SELL, order.quantity, open_price, trade_date)
-        self._apply(order, quote, account, fills, trade_date)
+        self._apply(order, quote, open_price, account, fills, trade_date)
 
     def _execute_buy(
         self,
@@ -292,7 +292,7 @@ class ExecutionSimulator:
             )
             return
         quote = self._cost.calculate(BUY, affordable, open_price, trade_date)
-        self._apply(order, quote, account, fills, trade_date)
+        self._apply(order, quote, open_price, account, fills, trade_date)
         if affordable < order.quantity:
             rejections.append(
                 RejectedOrder(
@@ -324,6 +324,7 @@ class ExecutionSimulator:
         self,
         order: Order,
         quote: FeeBreakdown,
+        reference_price: Decimal,
         account: Account,
         fills: list[Fill],
         trade_date: date,
@@ -339,6 +340,11 @@ class ExecutionSimulator:
             price=quote.price,
             commission=quote.commission,
             stamp_tax=quote.stamp_tax,
+            # Record the reference at its tick value: fills are cent-quantized
+            # while execution-bar opens may carry float noise or sub-cent
+            # adjustment digits, so an unquantized reference would report a
+            # phantom sliver even at zero slippage.
+            reference_price=reference_price.quantize(CENT, rounding=ROUND_HALF_UP),
         )
         account.apply_fill(fill)
         fills.append(fill)

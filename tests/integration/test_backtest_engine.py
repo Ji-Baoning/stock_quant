@@ -477,7 +477,7 @@ def _reference_run(spec: _Spec, market: _SyntheticMarket) -> dict[str, pd.DataFr
 
     def record_fill(order: Order, day_session: int, price: Decimal,
                     quantity_: int, commission: Decimal,
-                    stamp_tax: Decimal) -> None:
+                    stamp_tax: Decimal, reference_price: Decimal) -> None:
         nonlocal fill_seq
         fill_seq += 1
         fills.append(
@@ -491,6 +491,7 @@ def _reference_run(spec: _Spec, market: _SyntheticMarket) -> dict[str, pd.DataFr
                 "price": float(price),
                 "commission": float(commission),
                 "stamp_tax": float(stamp_tax),
+                "reference_price": float(reference_price),
             }
         )
 
@@ -540,7 +541,7 @@ def _reference_run(spec: _Spec, market: _SyntheticMarket) -> dict[str, pd.DataFr
             cash += gross - commission - stamp_tax
             consume(order.symbol, order.quantity, day_session)
             record_fill(order, day_session, price, order.quantity,
-                        commission, stamp_tax)
+                        commission, stamp_tax, _round2(open_value))
             return
         # A buy is filled at the largest affordable whole 100-share lot.
         affordable = 0
@@ -567,7 +568,7 @@ def _reference_run(spec: _Spec, market: _SyntheticMarket) -> dict[str, pd.DataFr
             }
         )
         record_fill(order, day_session, quote_price, affordable,
-                    quote_commission, Decimal("0"))
+                    quote_commission, Decimal("0"), _round2(open_value))
         if affordable < order.quantity:
             record_rejection(order, day_session, "insufficient_cash",
                              filled=affordable)
@@ -663,6 +664,7 @@ def _reference_run(spec: _Spec, market: _SyntheticMarket) -> dict[str, pd.DataFr
             columns=[
                 "trade_date", "fill_id", "order_id", "side", "symbol",
                 "quantity", "price", "commission", "stamp_tax",
+                "reference_price",
             ],
         ),
         "rejections": pd.DataFrame(

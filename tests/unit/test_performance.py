@@ -114,6 +114,26 @@ def test_drawdown_turnover_and_cost_decomposition():
     assert metrics.total_commission == 10
     assert metrics.total_stamp_tax == pytest.approx(0.5)
     assert metrics.turnover >= 0
+    # The fixture predates ``reference_price`` (legacy 9-column ledger): the
+    # missing column defaults to ``price`` and so contributes zero slippage.
+    assert metrics.slippage_estimate == 0.0
+
+
+def test_legacy_fills_without_reference_price_report_zero_slippage():
+    frame = fills_fixture().copy()
+    assert "reference_price" not in frame.columns
+    metrics = compute_metrics(equity_fixture(), frame, benchmark_fixture())
+    assert metrics.slippage_estimate == 0.0
+
+
+def test_slippage_is_realized_price_minus_reference_summed_over_fills():
+    # A buy fills 0.02 above its raw open and a sell 0.02 below it: slippage
+    # must be (10.02 - 10.00) * 1000 + (10.00 - 9.98) * 100 == 22.
+    fills = fills_fixture().copy()
+    fills.loc[0, ["price", "reference_price"]] = [10.02, 10.00]
+    fills.loc[1, ["price", "reference_price"]] = [9.98, 10.00]
+    metrics = compute_metrics(equity_fixture(), fills, benchmark_fixture())
+    assert metrics.slippage_estimate == pytest.approx(22.0)
 
 
 # --------------------------------------------------------------------------- #

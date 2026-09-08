@@ -153,6 +153,13 @@ class Fill:
     price: Decimal
     commission: Decimal
     stamp_tax: Decimal
+    #: The tick price of the unadjusted execution open the executor priced
+    #: from (cent-quantized so a zero-slippage fill equals its reference).
+    #: ``price`` is the slippage-adjusted fill, so ``|price - reference_price|``
+    #: is the realized slippage per share.  ``None`` when reconstructed from
+    #: legacy ledgers that never recorded it (metrics then report zero
+    #: slippage).
+    reference_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         require_side(self.side)
@@ -167,6 +174,10 @@ class Fill:
             raise ValueError("fees must be non-negative")
         if self.side == BUY and self.stamp_tax != 0:
             raise ValueError("stamp tax is only charged on sells")
+        if self.reference_price is not None and self.reference_price <= 0:
+            raise ValueError(
+                f"reference price must be positive: {self.reference_price}"
+            )
 
     @property
     def gross(self) -> Decimal:

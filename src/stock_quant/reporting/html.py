@@ -489,11 +489,15 @@ def _drawdown_figure(experiment: ExperimentReportInput) -> go.Figure:
 
 
 def _cost_rows(metrics: PerformanceMetrics) -> list[list[str]]:
-    total = metrics.total_commission + metrics.total_stamp_tax
+    total = (
+        metrics.total_commission
+        + metrics.total_stamp_tax
+        + metrics.slippage_estimate
+    )
     return [
         ["佣金总额", _money(metrics.total_commission)],
         ["印花税总额", _money(metrics.total_stamp_tax)],
-        ["滑点估计", _money(metrics.slippage_estimate)],
+        ["滑点成本", _money(metrics.slippage_estimate)],
         ["成本合计（佣金+印花税+滑点）", _money(total)],
     ]
 
