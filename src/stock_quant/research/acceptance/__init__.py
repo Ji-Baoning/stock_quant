@@ -1,4 +1,4 @@
-"""Strict real-data acceptance contracts and canonical record identity."""
+"""Strict real-data acceptance contracts and immutable registry."""
 
 from stock_quant.research.acceptance.models import (
     AUTOMATED_CHECK_CODES,
@@ -16,6 +16,13 @@ from stock_quant.research.acceptance.models import (
     canonical_record_json,
     compute_acceptance_id,
 )
+from stock_quant.research.acceptance.registry import (
+    AcceptanceIdentityConflict,
+    AcceptanceIntegrityError,
+    AcceptanceNotFound,
+    AcceptanceRegistry,
+    NoValidAcceptance,
+)
 
 __all__ = [
     "AUTOMATED_CHECK_CODES",
@@ -25,10 +32,15 @@ __all__ = [
     "SCHEMA_VERSION",
     "AcceptanceChecklist",
     "AcceptanceDecision",
+    "AcceptanceIdentityConflict",
+    "AcceptanceIntegrityError",
+    "AcceptanceNotFound",
     "AcceptanceRecord",
+    "AcceptanceRegistry",
     "CheckResult",
     "CheckStatus",
     "EvidenceReference",
+    "NoValidAcceptance",
     "RawSnapshotBinding",
     "canonical_record_json",
     "compute_acceptance_id",
