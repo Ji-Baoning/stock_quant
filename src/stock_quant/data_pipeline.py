@@ -39,11 +39,11 @@ from __future__ import annotations
 import json
 import time as _sleep_module
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date
 from datetime import datetime as _datetime
 from datetime import time as dt_time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
@@ -123,7 +123,11 @@ from stock_quant.data_sources.base import (
     fetch_with_retry,
     translate_supplier_error,
 )
-from stock_quant.data_sources.raw_store import RawStore
+from stock_quant.data_sources.raw_store import (
+    RawSnapshot,
+    RawSnapshotEvidence,
+    RawStore,
+)
 
 # --------------------------------------------------------------------------- #
 # Pipeline-level issue codes (kept out of the shared neutral-gate vocabulary:
@@ -144,6 +148,10 @@ CODE_ADJUSTED_BAR_MISSING_FROM_DATASET = "adjusted_bar_missing_from_dataset"
 #: Canonical standardized table holding untrusted corporate-action rows.
 TABLE_CORPORATE_ACTION_QUARANTINE = "corporate_action_quarantine"
 
+#: Contract version of the sanitized ``build_config`` this pipeline writes into
+#: every published dataset manifest (and which is hashed into the version id).
+DATASET_BUILD_CONTRACT_VERSION = 1
+
 _CONFIGURED_SOURCES = ("tushare", "akshare", "baostock")
 _REQUIRED_ROLE = {"tushare": True, "akshare": True, "baostock": False}
 
@@ -155,12 +163,17 @@ _REQUIRED_ROLE = {"tushare": True, "akshare": True, "baostock": False}
 
 @dataclass(frozen=True)
 class SourceStatus:
-    """Outcome of one configured source within an update."""
+    """Outcome of one configured source within an update.
+
+    ``reason`` is free operator-facing prose; ``reason_code`` is the stable,
+    sanitized code that (and only that) travels into dataset build evidence.
+    """
 
     source: str
     required: bool
     ok: bool
     reason: str | None = None
+    reason_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +224,78 @@ class DataUpdateResult:
     source_status: tuple[SourceStatus, ...]
     raw_snapshots: tuple[str, ...]
     resolved_end_is_fallback: bool = False
+
+
+def _source_evidence(
+    statuses: Mapping[str, SourceStatus],
+) -> list[dict[str, object]]:
+    """Sanitized per-source rows: identifiers and stable codes only.
+
+    ``reason`` prose never enters build evidence -- a missing code falls back
+    to ``ok`` / ``unspecified_failure`` so the row stays diagnosable without
+    leaking exception text.  Rows are sorted by source so identical builds
+    render identical evidence.
+    """
+    return [
+        {
+            "source": status.source,
+            "required": status.required,
+            "ok": status.ok,
+            "reason_code": status.reason_code
+            or ("ok" if status.ok else "unspecified_failure"),
+        }
+        for status in sorted(statuses.values(), key=lambda row: row.source)
+    ]
+
+
+def _raw_snapshot_evidence_rows(
+    snapshots: Sequence[RawSnapshot],
+) -> list[dict[str, str]]:
+    """Sanitized raw-snapshot rows, deduplicated and deterministically sorted."""
+    unique: dict[tuple[str, str, str, str], dict[str, str]] = {}
+    for snapshot in snapshots:
+        evidence = RawSnapshotEvidence.from_snapshot(snapshot)
+        row = asdict(evidence)
+        key = (
+            evidence.source,
+            evidence.endpoint,
+            evidence.request_key,
+            evidence.file_sha256,
+        )
+        unique[key] = row
+    return [unique[key] for key in sorted(unique)]
+
+
+def dataset_build_config(
+    *,
+    run_id: str,
+    request: DataUpdateRequest,
+    resolved_end_date: date,
+    resolved_end_is_fallback: bool,
+    statuses: Mapping[str, SourceStatus],
+    raw_snapshots: Sequence[RawSnapshot],
+) -> dict[str, object]:
+    """The exact sanitized payload hashed into a published dataset version.
+
+    Carries hashes, identifiers, dates and stable status codes only -- never
+    exception text, URLs, local paths or reason prose -- so the dataset
+    version is bound to the raw evidence it was built from.
+    """
+    return {
+        "origin": "data_update",
+        "pipeline_contract_version": DATASET_BUILD_CONTRACT_VERSION,
+        "run_id": run_id,
+        "requested_start_date": (
+            request.start_date.isoformat() if request.start_date else None
+        ),
+        "requested_end_date": (
+            request.end_date.isoformat() if request.end_date else None
+        ),
+        "resolved_end_date": resolved_end_date.isoformat(),
+        "resolved_end_is_fallback": bool(resolved_end_is_fallback),
+        "source_status": _source_evidence(statuses),
+        "raw_snapshots": _raw_snapshot_evidence_rows(raw_snapshots),
+    }
 
 
 def _nominal_candidate(
@@ -397,7 +482,7 @@ class DataPipeline:
         run_id = f"data_update_{uuid.uuid4().hex[:12]}"
         statuses: dict[str, SourceStatus] = {}
         issues: list[QualityIssue] = []
-        raw_snapshots: list[str] = []
+        raw_snapshots: list[RawSnapshot] = []
 
         enabled = self._enabled_names(request)
         for name in _CONFIGURED_SOURCES:
@@ -406,6 +491,7 @@ class DataPipeline:
                 required=_REQUIRED_ROLE[name],
                 ok=False,
                 reason="not_run",
+                reason_code="not_run",
             )
 
         # ---- the carried, immutable baseline --------------------------- #
@@ -647,7 +733,16 @@ class DataPipeline:
         }
         try:
             dataset_ref = DatasetPublisher(self._project_root).publish(
-                tables, report, build_config={"run_id": run_id}
+                tables,
+                report,
+                build_config=dataset_build_config(
+                    run_id=run_id,
+                    request=request,
+                    resolved_end_date=end,
+                    resolved_end_is_fallback=end_fallback,
+                    statuses=statuses,
+                    raw_snapshots=raw_snapshots,
+                ),
             )
         except PublicationBlocked as error:
             issues.append(
@@ -920,6 +1015,7 @@ class DataPipeline:
                     required=True,
                     ok=False,
                     reason=f"required source {name!r} is not enabled in config",
+                    reason_code="required_source_disabled",
                 )
                 issues.append(
                     _issue(
@@ -957,6 +1053,7 @@ class DataPipeline:
                 statuses["tushare"] = SourceStatus(
                     "tushare", True, False,
                     reason=f"required fetch failed for {symbol}",
+                    reason_code="source_fetch_failed",
                 )
                 return True
             raw_snapshots.append(self._record_raw(result))
@@ -965,7 +1062,9 @@ class DataPipeline:
             )
             primary_rows.append(clean.valid)
             primary_dates.update(clean.valid["trade_date"].dt.date)
-        statuses["tushare"] = SourceStatus("tushare", True, True)
+        statuses["tushare"] = SourceStatus(
+            "tushare", True, True, reason_code="ok"
+        )
         return False
 
     def _fetch_benchmarks(
@@ -994,6 +1093,7 @@ class DataPipeline:
                 statuses["akshare"] = SourceStatus(
                     "akshare", True, False,
                     reason=f"required fetch failed for {symbol}",
+                    reason_code="source_fetch_failed",
                 )
                 return True
             raw_snapshots.append(self._record_raw(result))
@@ -1013,12 +1113,15 @@ class DataPipeline:
                     )
                 )
                 statuses["akshare"] = SourceStatus(
-                    "akshare", True, False, reason=str(error)
+                    "akshare", True, False, reason=str(error),
+                    reason_code="source_fetch_failed",
                 )
                 return True
             benchmark_rows.append(clean)
             benchmark_dates.update(clean["trade_date"].dt.date)
-        statuses["akshare"] = SourceStatus("akshare", True, True)
+        statuses["akshare"] = SourceStatus(
+            "akshare", True, True, reason_code="ok"
+        )
         return False
 
     def _refresh_security_master(
@@ -1083,14 +1186,15 @@ class DataPipeline:
             statuses["tushare"] = SourceStatus(
                 "tushare", True, False,
                 reason=f"stock_basic fetch failed: {error}",
+                reason_code="source_fetch_failed",
             )
             return None, None
-        snapshot_sha256 = self._record_raw(result)
-        raw_snapshots.append(snapshot_sha256)
+        snapshot = self._record_raw(result)
+        raw_snapshots.append(snapshot)
         applied = _apply_stock_basic(
             master,
             result.frame,
-            snapshot_sha256,
+            snapshot.sha256,
             sdk_version=str(result.metadata.get("sdk_version", "unknown")),
             checked_at=_ingest_time(result.metadata),
         )
@@ -1112,9 +1216,12 @@ class DataPipeline:
             statuses["tushare"] = SourceStatus(
                 "tushare", True, False,
                 reason="stock_basic snapshot incomplete",
+                reason_code="partial_fetch_failure",
             )
             return None, None
-        statuses["tushare"] = SourceStatus("tushare", True, True)
+        statuses["tushare"] = SourceStatus(
+            "tushare", True, True, reason_code="ok"
+        )
         return applied
 
     def _refresh_corporate_actions(
@@ -1157,8 +1264,8 @@ class DataPipeline:
                         source,
                         DataRequest(endpoint, (symbol,), start, end, {}),
                     )
-                    snapshot_sha256 = self._record_raw(result)
-                    raw_snapshots.append(snapshot_sha256)
+                    snapshot = self._record_raw(result)
+                    raw_snapshots.append(snapshot)
                     frame = result.frame
                     if not frame.empty:
                         if endpoint == "cninfo_corporate_actions":
@@ -1170,7 +1277,7 @@ class DataPipeline:
                     symbol_outcomes[endpoint] = {
                         "ok": True,
                         "empty": bool(frame.empty),
-                        "snapshot_sha256": snapshot_sha256,
+                        "snapshot_sha256": snapshot.sha256,
                         "checked_at": _ingest_time(result.metadata),
                     }
                 except Exception as error:  # noqa: BLE001 - best-effort role
@@ -1287,6 +1394,7 @@ class DataPipeline:
             statuses["baostock"] = SourceStatus(
                 "baostock", False, False,
                 reason="optional source unavailable",
+                reason_code="optional_source_unavailable",
             )
             return
         failures = 0
@@ -1308,9 +1416,12 @@ class DataPipeline:
             statuses["baostock"] = SourceStatus(
                 "baostock", False, False,
                 reason=f"{failures} of {len(symbols)} validation requests failed",
+                reason_code="partial_fetch_failure",
             )
         else:
-            statuses["baostock"] = SourceStatus("baostock", False, True)
+            statuses["baostock"] = SourceStatus(
+                "baostock", False, True, reason_code="ok"
+            )
 
     def _adapter_or_fail(self, name, statuses):
         try:
@@ -1321,6 +1432,7 @@ class DataPipeline:
                 required=True,
                 ok=False,
                 reason=str(error),
+                reason_code="source_unavailable",
             )
             return None
 
@@ -1403,9 +1515,14 @@ class DataPipeline:
         )
         return fetch_with_retry(source, request, policy, sleeper=self._sleeper)
 
-    def _record_raw(self, result) -> str:
-        snapshot = self._raw_store.save(result)
-        return snapshot.sha256
+    def _record_raw(self, result) -> RawSnapshot:
+        """Persist one adapter response and hand back the full raw snapshot.
+
+        The public ``DataUpdateResult.raw_snapshots`` contract stays a tuple of
+        content hashes -- the conversion to ``snapshot.sha256`` happens inside
+        ``_result``, so no caller ever receives local paths or manifests.
+        """
+        return self._raw_store.save(result)
 
     def _merge_daily(
         self,
@@ -1558,7 +1675,9 @@ class DataPipeline:
             source_status=tuple(
                 statuses[name] for name in _CONFIGURED_SOURCES
             ),
-            raw_snapshots=tuple(raw_snapshots),
+            raw_snapshots=tuple(
+                snapshot.sha256 for snapshot in raw_snapshots
+            ),
             resolved_end_is_fallback=resolved_end_is_fallback,
         )
 

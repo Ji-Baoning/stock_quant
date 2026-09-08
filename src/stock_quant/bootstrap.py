@@ -20,6 +20,7 @@ from stock_quant.data_model.schemas import (
 )
 from stock_quant.data_model.security_master import ListStatus
 from stock_quant.data_model.universe import Universe
+from stock_quant.data_pipeline import DATASET_BUILD_CONTRACT_VERSION
 from stock_quant.data_quality.models import QualityReport
 
 
@@ -59,7 +60,14 @@ def bootstrap_dataset(
         "corporate_action_quarantine": _empty_quarantine(),
         "trading_calendar": _trading_calendar(days),
     }
-    version = DatasetPublisher(root).publish(tables, QualityReport()).version
+    version = DatasetPublisher(root).publish(
+        tables,
+        QualityReport(),
+        build_config={
+            "origin": "bootstrap",
+            "pipeline_contract_version": DATASET_BUILD_CONTRACT_VERSION,
+        },
+    ).version
     return BootstrapResult(version, len(universe.entries), len(days), start, end)
 
 

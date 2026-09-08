@@ -11,6 +11,7 @@ share the session dataset used by the CLI / end-to-end modules).
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -649,6 +650,45 @@ def test_update_with_explicit_end_publishes_merged_dataset(project):
     assert result.dataset_ref.version != project.version
     assert result.resolved_end_date == _WINDOW_END
     assert all(status.ok for status in result.source_status)
+
+
+def test_successful_update_binds_sanitized_build_evidence(project):
+    """The dataset manifest must carry sanitized, identity-bearing evidence.
+
+    ``build_config`` records where every byte came from: hashes, stable reason
+    codes and the request window -- never exception text, URLs, local paths or
+    reason prose, so identical builds stay byte-identical apart from run_id.
+    """
+    result = DataPipeline(project.root, sources=_all_stubs()).update(_request())
+    manifest = json.loads(
+        (result.dataset_ref.path / "dataset_manifest.json").read_text()
+    )
+    build = manifest["build_config"]
+    assert build["origin"] == "data_update"
+    assert build["pipeline_contract_version"] == 1
+    assert build["run_id"] == result.run_id
+    assert build["requested_start_date"] == _WINDOW_START.isoformat()
+    assert build["requested_end_date"] == _WINDOW_END.isoformat()
+    assert build["resolved_end_date"] == _WINDOW_END.isoformat()
+    assert isinstance(build["resolved_end_is_fallback"], bool)
+    assert build["resolved_end_is_fallback"] is False
+    assert build["raw_snapshots"] == sorted(
+        build["raw_snapshots"],
+        key=lambda row: (
+            row["source"], row["endpoint"], row["request_key"], row["file_sha256"]
+        ),
+    )
+    assert all(
+        set(row)
+        == {"source", "endpoint", "request_key", "file_sha256", "manifest_sha256"}
+        for row in build["raw_snapshots"]
+    )
+    assert all(
+        set(row) == {"source", "required", "ok", "reason_code"}
+        for row in build["source_status"]
+    )
+    assert all(row["reason_code"] == "ok" for row in build["source_status"])
+    assert "token" not in json.dumps(build).lower()
 
 
 def test_update_refreshes_master_and_publishes_master_coverage(project):

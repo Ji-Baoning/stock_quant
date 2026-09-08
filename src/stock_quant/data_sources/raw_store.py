@@ -23,6 +23,33 @@ class RawSnapshot:
     manifest: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class RawSnapshotEvidence:
+    """Sanitized, re-resolvable pointer to one stored raw snapshot.
+
+    Carries path-safe identifiers plus the content and manifest hashes only --
+    never local paths, supplier metadata or reason prose -- so it can travel
+    through dataset build evidence and later be verified back to the exact
+    stored bytes via :meth:`RawStore.verify_evidence`.
+    """
+
+    source: str
+    endpoint: str
+    request_key: str
+    file_sha256: str
+    manifest_sha256: str
+
+    @classmethod
+    def from_snapshot(cls, snapshot: RawSnapshot) -> "RawSnapshotEvidence":
+        return cls(
+            source=str(snapshot.manifest["source"]),
+            endpoint=str(snapshot.manifest["endpoint"]),
+            request_key=str(snapshot.manifest["request_key"]),
+            file_sha256=snapshot.sha256,
+            manifest_sha256=_sha256_file(snapshot.path / "manifest.json"),
+        )
+
+
 class RawStore:
     """Persist immutable Parquet responses below one project's ``data/raw`` tree."""
 
@@ -58,6 +85,36 @@ class RawStore:
                 shutil.rmtree(temporary)
             raise
         return RawSnapshot(path=snapshot_path, sha256=file_sha256, manifest=manifest)
+
+    def verify_evidence(self, evidence: RawSnapshotEvidence) -> RawSnapshot:
+        """Re-resolve sanitized evidence to the exact stored raw snapshot.
+
+        Read-only content verification: the evidence's path-safe identifiers
+        locate the content-addressed snapshot, its hashes must match the
+        stored bytes and manifest, and the manifest must agree field by field.
+        Any mismatch (or a path-escaping identifier) raises ``ValueError``.
+        """
+        source = _path_component(evidence.source, "source")
+        endpoint = _path_component(evidence.endpoint, "endpoint")
+        request_key = _path_component(evidence.request_key, "request key")
+        file_sha256 = _sha256_value(evidence.file_sha256)
+        path = self._root / source / endpoint / request_key / file_sha256
+        data_path = path / "data.parquet"
+        manifest_path = path / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if _sha256_file(data_path) != file_sha256:
+            raise ValueError("raw data hash mismatch")
+        if _sha256_file(manifest_path) != evidence.manifest_sha256:
+            raise ValueError("raw manifest hash mismatch")
+        for key, expected in (
+            ("source", source),
+            ("endpoint", endpoint),
+            ("request_key", request_key),
+            ("file_sha256", file_sha256),
+        ):
+            if manifest.get(key) != expected:
+                raise ValueError(f"raw manifest {key} mismatch")
+        return RawSnapshot(path=path, sha256=file_sha256, manifest=manifest)
 
 
 def _manifest_for(
@@ -114,6 +171,16 @@ def _path_component(value: str, label: str) -> str:
     if not value or value in {".", ".."} or "/" in value or "\\" in value:
         raise ValueError(f"invalid {label}")
     return value
+
+
+def _sha256_value(value: str) -> str:
+    """Normalise and validate one hex-encoded SHA-256 digest."""
+    text = str(value).strip().lower()
+    if len(text) != 64 or any(
+        character not in "0123456789abcdef" for character in text
+    ):
+        raise ValueError("invalid sha256 digest")
+    return text
 
 
 def _sha256_file(path: Path) -> str:

@@ -201,6 +201,28 @@ def test_new_content_yields_new_version_and_old_version_is_intact(tmp_path):
     assert {p.name: p.read_bytes() for p in first.path.iterdir()} == old_bytes
 
 
+def test_raw_snapshot_hashes_change_dataset_identity(tmp_path):
+    """Raw build evidence is identity-bearing: it is hashed into the version."""
+    tables = valid_tables()
+    first = DatasetPublisher(tmp_path).publish(
+        tables,
+        QualityReport(),
+        build_config={"raw_snapshots": [{
+            "source": "tushare", "endpoint": "daily", "request_key": "first",
+            "file_sha256": "a" * 64, "manifest_sha256": "c" * 64,
+        }]},
+    )
+    second = DatasetPublisher(tmp_path).publish(
+        tables,
+        QualityReport(),
+        build_config={"raw_snapshots": [{
+            "source": "tushare", "endpoint": "daily", "request_key": "second",
+            "file_sha256": "b" * 64, "manifest_sha256": "d" * 64,
+        }]},
+    )
+    assert first.version != second.version
+
+
 def test_current_tracks_the_latest_publish(tmp_path):
     publisher = DatasetPublisher(tmp_path)
     first = publisher.publish(valid_tables(), passing_report())
