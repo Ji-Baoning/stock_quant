@@ -204,7 +204,7 @@ def test_spec_rejects_blank_hypothesis_or_cost_scenarios():
 
 def test_committed_example_spec_is_coherent_and_loadable():
     loaded = load_experiment_spec(_EXAMPLE_SPEC)
-    assert loaded.factor_versions == {"momentum_60d": "1.0.0"}
+    assert loaded.factor_versions == {"momentum_60d": "2.0.0"}
     assert loaded.date_range.start_date == date(2020, 1, 1)
     assert loaded.date_range.start_date <= loaded.date_range.end_date
     assert (

@@ -30,6 +30,7 @@ import json
 import platform
 import shutil
 import subprocess
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -43,6 +44,7 @@ from stock_quant.backtest.costs import CostModel
 from stock_quant.backtest.engine import BacktestEngine, BacktestRequest, OrderDay
 from stock_quant.backtest.models import BUY, SELL, Fill, Order
 from stock_quant.config import load_project_config
+from stock_quant.data_model.adjusted_bar import ADJUSTMENT_NAME
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.corporate_action_coverage import CoverageReason
 from stock_quant.data_model.dataset import (
@@ -1597,11 +1599,15 @@ class _MarketFrames:
 class _DatasetFactorAdapter:
     """A :class:`FactorDataset` read surface over one pinned dataset version.
 
-    The canonical ``daily_bar`` table carries no quality annotation, so the
-    adapter annotates every clean bar with ``INFO`` quality and derives
-    ``listed_trading_days`` from the pinned trading calendar and the security
-    master's listing dates.  Rows are restricted to the securities named by the
-    master so index/benchmark series never enter factor observations.
+    The adapter reads *only* the canonical ``adjusted_bar`` table: research
+    factor prices are the point-in-time total-return series derived from
+    unadjusted closes and verified corporate actions, never a disguised
+    ``daily_bar.close``.  A pinned dataset without that table, without rows for
+    the universe, or carrying any other adjustment basis fails loudly instead
+    of falling back.  ``listed_trading_days`` is derived from the pinned
+    trading calendar and the security master's listing dates; rows are
+    restricted to the universe symbols so index/benchmark series never enter
+    factor observations.
     """
 
     def __init__(
@@ -1614,18 +1620,36 @@ class _DatasetFactorAdapter:
         self._universe_symbols = set(universe_symbols)
 
     def factor_input(self) -> pd.DataFrame:
-        daily = self._context.read("daily_bar")
-        rows = daily[daily["symbol"].isin(self._universe_symbols)].copy()
+        if "adjusted_bar" not in self._context.tables:
+            raise ValueError(
+                f"dataset {self._context.version} has no adjusted_bar; "
+                f"research factors require {ADJUSTMENT_NAME}"
+            )
+        adjusted = self._context.read("adjusted_bar")
+        rows = adjusted[adjusted["symbol"].isin(self._universe_symbols)].copy()
         if rows.empty:
-            return pd.DataFrame(
-                columns=[
-                    "trade_date", "symbol", "source", "adjustment",
-                    "adjusted_close", "quality_severity", "listed_trading_days",
-                ]
+            raise ValueError(
+                f"dataset {self._context.version} has no adjusted rows for "
+                "the universe"
+            )
+        if set(rows["adjustment"].astype(str)) != {ADJUSTMENT_NAME}:
+            raise ValueError(
+                f"factor input must use only {ADJUSTMENT_NAME}, got "
+                + ", ".join(sorted(set(rows["adjustment"].astype(str))))
             )
         # DuckDB surfaces DATE as datetime64; factors compare ``trade_date``
         # against plain ``date`` objects, so normalize to real dates up front.
         rows["trade_date"] = rows["trade_date"].map(_as_date)
+        rows["listed_trading_days"] = self._listed_trading_days(rows)
+        return rows[[
+            "trade_date", "symbol", "source", "adjustment", "adjusted_close",
+            "quality_severity", "listed_trading_days",
+        ]].sort_values(["symbol", "trade_date"], kind="stable").reset_index(
+            drop=True
+        )
+
+    def _listed_trading_days(self, rows: pd.DataFrame) -> list[int]:
+        """Sessions listed as of each row's trade date (seasoning input)."""
         master = self._context.read("security_master")
         list_date = {
             str(row["symbol"]): _as_date(row["list_date"])
@@ -1639,11 +1663,6 @@ class _DatasetFactorAdapter:
             if bool(open_flag)
         )
         open_ordinals = [_to_ordinal(day) for day in open_days]
-        rows = rows.sort_values(
-            ["symbol", "trade_date"], kind="stable"
-        ).reset_index(drop=True)
-        from bisect import bisect_left
-
         listed_by_ordinal: dict[str, dict[int, int]] = {}
         for symbol in sorted(set(rows["symbol"])):
             mapping: dict[int, int] = {}
@@ -1653,23 +1672,10 @@ class _DatasetFactorAdapter:
                 for index in range(anchor, len(open_days)):
                     mapping[open_days[index].toordinal()] = index - anchor + 1
             listed_by_ordinal[symbol] = mapping
-        listed = [
+        return [
             listed_by_ordinal[symbol].get(_to_ordinal(day), 0)
             for symbol, day in zip(rows["symbol"], rows["trade_date"])
         ]
-        out = pd.DataFrame({
-            "trade_date": rows["trade_date"],
-            "symbol": rows["symbol"],
-            "source": rows["source"],
-            "adjustment": rows["adjustment"],
-            "adjusted_close": rows["close"],
-            # Phase-one ruling (§13.5): the Tushare primary close series is
-            # authoritative for factors; per-bar cross-source close ERROR is
-            # report-only (quality report) and never fed to a factor.
-            "quality_severity": QUALITY_SEVERITY_AUTHORITATIVE,
-            "listed_trading_days": listed,
-        })
-        return out
 
 
 # --------------------------------------------------------------------------- #

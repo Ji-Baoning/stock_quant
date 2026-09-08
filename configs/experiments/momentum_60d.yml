@@ -1,7 +1,7 @@
 # 正式研究示例规格：60 日动量（一期工程验证，非投资建议）。
 #
 # 该文件是 research run（任务 11）消费的配置示例，需与本仓已实现因子
-# momentum_60d / 1.0.0 保持一致，日期范围落在 2020-01-01 至最近完整交易日内。
+# momentum_60d / 2.0.0 保持一致，日期范围落在 2020-01-01 至最近完整交易日内。
 # dataset_version 与 universe_version 用 CURRENT 占位：运行期由 runner 读取
 # 数据层 CURRENT 指针一次、解析为显式版本（ExperimentSpec.freeze）后再计算
 # experiment_id；冻结后写入实验目录的规格只引用显式版本，永不保留 CURRENT。
@@ -9,7 +9,7 @@ hypothesis: >-
   过去 60 个交易日的复权收益在 A 股样本内对随后短期收益存在一定持续性；
   一期仅验证工程链路可复现并跑通全部运行状态，不声称统计有效性，也不构成投资建议。
 factor_versions:
-  momentum_60d: 1.0.0
+  momentum_60d: 2.0.0
 dataset_version: CURRENT
 universe_version: CURRENT
 date_range:

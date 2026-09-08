@@ -28,14 +28,16 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from stock_quant.backtest.models import BUY
 from stock_quant.data_model.adjusted_bar import build_adjusted_bars
 from stock_quant.data_model.corporate_action_coverage import (
+    OUTCOME_SUCCESS_EVENTS,
     CoverageReason,
     CoverageStatus,
     coverage_frame,
     coverage_record,
 )
-from stock_quant.data_model.dataset import DatasetPublisher
+from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COLUMNS,
     CORPORATE_ACTION_QUARANTINE_COLUMNS,
@@ -58,7 +60,7 @@ from stock_quant.research.models import (
     ExperimentEvaluation,
     ResearchRunFailed,
 )
-from stock_quant.research.runner import ResearchRunner
+from stock_quant.research.runner import ResearchRunner, _DatasetFactorAdapter
 from stock_quant.research.trust import DataTrustMode
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -248,24 +250,47 @@ def _coverage(
     reason: CoverageReason | None = None,
     window_start: date = _CAL_START,
     window_end: date = _BARS_END,
+    event_symbols: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """One deterministic coverage row per symbol over a common window.
 
     The default window is the full synthetic calendar, a superset of the
     execution window any momentum spec derives, so a single row per symbol is
-    always enough evidence when the status is trusted.
+    always enough evidence when the status is trusted.  ``event_symbols``
+    names holdings whose evidence is ``VERIFIED`` with
+    ``success_with_events`` endpoints (facts exist and were reconciled)
+    instead of the plain status, so a dataset carrying corporate-action facts
+    never claims an empty-verified provenance for them.
     """
-    records = [
-        coverage_record(
-            symbol,
-            window_start,
-            window_end,
-            status,
-            reason,
-            checked_at=_INGESTED,
-        )
-        for symbol in sorted(symbols)
-    ]
+    endpoints = ("cninfo_corporate_actions", "eastmoney_corporate_actions")
+    records = []
+    for symbol in sorted(symbols):
+        if symbol in event_symbols:
+            records.append(
+                coverage_record(
+                    symbol,
+                    window_start,
+                    window_end,
+                    CoverageStatus.VERIFIED,
+                    None,
+                    sources=[
+                        {"endpoint": endpoint, "outcome": OUTCOME_SUCCESS_EVENTS}
+                        for endpoint in endpoints
+                    ],
+                    checked_at=_INGESTED,
+                )
+            )
+        else:
+            records.append(
+                coverage_record(
+                    symbol,
+                    window_start,
+                    window_end,
+                    status,
+                    reason,
+                    checked_at=_INGESTED,
+                )
+            )
     return coverage_frame(records)
 
 
@@ -286,6 +311,30 @@ def _master_coverage(symbols: tuple[str, ...]) -> pd.DataFrame:
     return master_coverage_frame(records)
 
 
+def _cash_action(symbol: str, ex_date: date) -> pd.DataFrame:
+    """One verified, implemented 0.5/share cash dividend at ``ex_date``.
+
+    Complete point-in-time facts (announcement two weeks before, record the
+    day before, no rights issue), so the adjusted-bar builder accepts it and
+    applies it exactly once on the ``ex_date``.
+    """
+    return pd.DataFrame(
+        {
+            "symbol": [symbol],
+            "announcement_date": [ex_date - timedelta(days=14)],
+            "record_date": [ex_date - timedelta(days=1)],
+            "ex_date": [ex_date],
+            "cash_dividend_per_share": [0.5],
+            "bonus_share_ratio": [0.0],
+            "capitalization_ratio": [0.0],
+            "rights_issue_ratio": [0.0],
+            "rights_issue_price": [0.0],
+            "source": ["synthetic"],
+            "status": ["implemented"],
+        }
+    )[CORPORATE_ACTION_COLUMNS]
+
+
 def _publish_synthetic_dataset(
     project_root: Path,
     *,
@@ -294,6 +343,7 @@ def _publish_synthetic_dataset(
     coverage: pd.DataFrame | None = None,
     master_coverage: pd.DataFrame | None = None,
     fresh: tuple[str, date, float] | None = None,
+    corporate_actions: pd.DataFrame | None = None,
 ) -> str:
     """Publish the synthetic market under ``project_root``; return its version.
 
@@ -303,7 +353,9 @@ def _publish_synthetic_dataset(
     default market.  ``fresh`` optionally adds one recently-listed symbol
     ``(symbol, list_date, growth)`` whose bars begin at its list date (the
     new-IPO acceptance fixture); ``master_coverage`` overrides the evidence
-    (an empty frame publishes an empty table that fails the master gate).
+    (an empty frame publishes an empty table that fails the master gate);
+    ``corporate_actions`` overrides the (empty) facts table, e.g. with
+    ``_cash_action`` for a total-return market.
     """
     master = _security_master(fresh)
     symbols = tuple(master["symbol"])
@@ -317,7 +369,11 @@ def _publish_synthetic_dataset(
         limit_locked_symbols=limit_locked_symbols,
         fresh=fresh,
     )
-    corporate_actions = _corporate_action()
+    corporate_actions = (
+        _corporate_action()
+        if corporate_actions is None
+        else corporate_actions
+    )
     empty_quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
     tables = {
         "daily_bar": daily,
@@ -338,14 +394,24 @@ def _publish_synthetic_dataset(
     return DatasetPublisher(project_root).publish(tables, QualityReport()).version
 
 
+#: A narrow untrusted evidence band: wide enough that the RESEARCH execution
+#: window is not fully trusted, narrow enough that momentum windows opening 61
+#: observations past the band recover, so an ENGINEERING diagnostic can still
+#: replay a real backtest (point-in-time factor rows inside and just after the
+#: band are ERROR-quality and stay invalid).
+_UNTRUSTED_BAND = (date(2020, 6, 1), date(2020, 6, 5))
+
+
 def _publish_dataset_with_untrusted_coverage(project_root: Path) -> str:
-    """Republish CURRENT so every holding's coverage evidence is UNTRUSTED."""
+    """Republish CURRENT with an untrusted evidence band over every holding."""
     return _publish_synthetic_dataset(
         project_root,
         coverage=_coverage(
             _universe_symbols(),
             status=CoverageStatus.UNTRUSTED,
             reason=CoverageReason.SOURCE_FETCH_FAILED,
+            window_start=_UNTRUSTED_BAND[0],
+            window_end=_UNTRUSTED_BAND[1],
         ),
     )
 
@@ -358,6 +424,30 @@ def _publish_dataset_with_verified_empty_coverage(project_root: Path) -> str:
             _universe_symbols(), status=CoverageStatus.VERIFIED_EMPTY
         ),
     )
+
+
+def _publish_legacy_dataset(project_root: Path) -> str:
+    """Republish CURRENT in the pre-adjusted_bar six-table legacy shape.
+
+    The dataset is otherwise healthy (evidence tables, calendar, master), so a
+    research run can only fail because the pinned version has no ``adjusted_bar``
+    table for the factor adapter to read.
+    """
+    master = _security_master()
+    symbols = tuple(master["symbol"])
+    tables = {
+        "daily_bar": _bars(
+            _weekdays(_BARS_START, _BARS_END), index_close=(4000.0, 2000.0)
+        ),
+        "security_master": master,
+        "security_master_coverage": _master_coverage(symbols),
+        "corporate_action": _corporate_action(),
+        "corporate_action_coverage": _coverage(
+            symbols, status=CoverageStatus.VERIFIED_EMPTY
+        ),
+        "trading_calendar": _trading_calendar(),
+    }
+    return DatasetPublisher(project_root).publish(tables, QualityReport()).version
 
 
 def _new_env(tmp_path) -> _Env:
@@ -621,6 +711,53 @@ def test_research_rejects_missing_master_evidence_but_engineering_is_untrusted(
     assert debug.manifest.status == "REJECTED"
 
 
+def test_research_factor_input_uses_adjusted_bar(env):
+    """The factor adapter's input comes from the pinned adjusted_bar table."""
+    with DatasetReader(env.root).open(env.version) as context:
+        adjusted = context.read("adjusted_bar")
+        adapter = _DatasetFactorAdapter(
+            context=context,
+            universe_symbols=tuple(sorted(adjusted["symbol"].unique())),
+        )
+        factor_input = adapter.factor_input()
+    assert set(factor_input["adjustment"]) == {"internal_total_return_v1"}
+    expected = adjusted.sort_values(
+        ["symbol", "trade_date"], kind="stable"
+    ).reset_index(drop=True)
+    assert factor_input["adjusted_close"].tolist() == (
+        expected["adjusted_close"].tolist()
+    )
+
+
+def test_research_rejects_dataset_without_adjusted_bar(env):
+    """A legacy dataset without adjusted_bar fails the run, never falls back."""
+    _publish_legacy_dataset(env.root)
+    runner = ResearchRunner(env.root, config_root=_REPO_ROOT)
+    with pytest.raises(ResearchRunFailed, match="adjusted_bar"):
+        runner.run(_SPEC)
+
+
+def test_research_rejects_spec_requesting_retired_factor_version(env, tmp_path):
+    """A spec pinning momentum_60d/1.0.0 is rejected, never silently upgraded.
+
+    v2 consumes only the internal total-return basis, so a request for the
+    retired v1 must fail the provider's version check instead of recomputing
+    v1 values from unadjusted closes.
+    """
+    spec_text = (
+        _REPO_ROOT / "configs" / "experiments" / "momentum_60d.yml"
+    ).read_text(encoding="utf-8")
+    assert "momentum_60d: 2.0.0" in spec_text
+    spec_path = tmp_path / "momentum_60d_v1.yml"
+    spec_path.write_text(
+        spec_text.replace("momentum_60d: 2.0.0", "momentum_60d: 1.0.0"),
+        encoding="utf-8",
+    )
+    runner = ResearchRunner(env.root, config_root=_REPO_ROOT)
+    with pytest.raises(ResearchRunFailed, match="1.0.0"):
+        runner.run(spec_path)
+
+
 def test_new_stock_excluded_before_120_listed_days(tmp_path):
     """A symbol with a real list_date under 120 sessions before the window end
     never enters a factor candidate set (momentum seasoning)."""
@@ -648,3 +785,93 @@ def test_new_stock_excluded_before_120_listed_days(tmp_path):
         "a symbol with fewer than 120 listed trading days must be kept out of "
         "target positions"
     )
+
+
+def _plain_date(value: object) -> date:
+    """Normalize a parquet-round-tripped Timestamp/date back to a plain date."""
+    return pd.Timestamp(value).date()
+
+
+def test_total_return_factor_does_not_change_fill_or_valuation_prices(tmp_path):
+    """Total-return factor input never leaks into execution or valuation.
+
+    The market carries one verified, implemented cash dividend on the
+    highest-growth holding (always in the weekly top-10), so its pre-ex-date
+    ``adjusted_close`` sits roughly one percent above the unadjusted prices.
+    Every fill must still reference the unadjusted open of its bar, and the
+    persisted daily mark-to-market must equal a valuation recomputed from
+    unadjusted ``daily_bar`` closes.
+    """
+    action_symbol = "601857.SH"
+    sessions = _weekdays(_BARS_START, _BARS_END)
+    ex_date = sessions[len(sessions) // 2]
+    project_root = tmp_path / "project"
+    version = _publish_synthetic_dataset(
+        project_root,
+        corporate_actions=_cash_action(action_symbol, ex_date),
+        coverage=_coverage(
+            _universe_symbols(),
+            status=CoverageStatus.VERIFIED_EMPTY,
+            event_symbols=(action_symbol,),
+        ),
+    )
+    experiment = ResearchRunner(project_root, config_root=_REPO_ROOT).run(_SPEC)
+    with DatasetReader(project_root).open(version) as context:
+        daily = context.read("daily_bar")
+        adjusted = context.read("adjusted_bar")
+    equity = daily[daily["symbol"].isin(_universe_symbols())]
+    day_symbol = [equity["trade_date"].map(_plain_date), "symbol"]
+
+    # Sanity: the dividend really moves the adjusted series away from the raw
+    # one (far beyond the cent-level tolerances below), so a wrongly adjusted
+    # execution/valuation price could never pass this test silently.
+    action_rows = adjusted[adjusted["symbol"] == action_symbol]
+    divergence = (action_rows["adjusted_close"] - action_rows["raw_close"]).abs()
+    assert float(divergence.max()) > 0.1
+
+    fills = pd.read_parquet(experiment.path / "fills.parquet")
+    assert not fills.empty
+    assert action_symbol in set(fills["symbol"])
+    opens = equity.set_index(day_symbol)["open"]
+    for record in fills.itertuples():
+        expected = float(opens.loc[(_plain_date(record.trade_date), record.symbol)])
+        # The executor cent-quantizes the reference, so half a cent is the
+        # largest possible distance from the raw unadjusted open.
+        assert float(record.reference_price) == pytest.approx(expected, abs=0.005)
+
+    # Valuation: the published daily equity is portfolio-level only, so
+    # recompute its market value from unadjusted daily_bar closes over the
+    # per-day quantities the fill ledger implies (a cash dividend changes no
+    # share counts) and require a match within a cent.
+    daily_equity = pd.read_parquet(experiment.path / "daily_equity.parquet")
+    closes = equity.set_index(day_symbol)["close"]
+    held_by_day: dict[date, dict[str, int]] = {}
+    positions: dict[str, int] = {}
+    for record in fills.sort_values("trade_date", kind="stable").itertuples():
+        symbol = str(record.symbol)
+        signed = int(record.quantity) * (1 if record.side == BUY else -1)
+        positions[symbol] = positions.get(symbol, 0) + signed
+        held_by_day[_plain_date(record.trade_date)] = dict(positions)
+    fill_days = sorted(held_by_day)
+
+    def _positions_at(day: date) -> dict[str, int]:
+        previous = None
+        for fill_day in fill_days:
+            if fill_day > day:
+                break
+            previous = fill_day
+        return held_by_day[previous] if previous is not None else {}
+
+    checked = 0
+    for row in daily_equity.itertuples():
+        day = _plain_date(row.trade_date)
+        held = _positions_at(day)
+        if not held:
+            continue  # no holdings yet; nothing to mark
+        expected_value = sum(
+            quantity * float(closes.loc[(day, symbol)])
+            for symbol, quantity in held.items()
+        )
+        assert float(row.market_value) == pytest.approx(expected_value, abs=0.01)
+        checked += 1
+    assert checked > 0

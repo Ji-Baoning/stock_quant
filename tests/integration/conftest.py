@@ -76,7 +76,7 @@ hypothesis: >-
   过去 60 个交易日的复权收益在合成样本内对随后短期收益存在持续性；
   仅验证离线 CLI 工程链路可复现并跑通全部运行状态，不构成投资建议。
 factor_versions:
-  momentum_60d: 1.0.0
+  momentum_60d: 2.0.0
 dataset_version: CURRENT
 universe_version: CURRENT
 date_range:
@@ -99,6 +99,14 @@ code_commit: unversioned
 parent_experiment_ids: []
 agent_id: null
 """
+
+#: A narrow UNTRUSTED evidence band for the ``broken`` fixture: wide enough
+#: that a RESEARCH run's execution window is not fully trusted, narrow enough
+#: that momentum windows opening 61 observations past the band recover, so an
+#: ENGINEERING diagnostic can still replay a real backtest over point-in-time
+#: adjusted bars (rows inside and just after the band are ERROR breaks).
+_BROKEN_COVERAGE_START = date(2020, 6, 1)
+_BROKEN_COVERAGE_END = date(2020, 6, 5)
 
 _CONFIG_NAMES = (
     "project.yml",
@@ -145,8 +153,9 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
     gate, and one ``security_master_coverage`` row per universe symbol (at the
     master's listing facts) so the RESEARCH master-evidence gate accepts the
     dataset too.  ``broken=True`` keeps the (empty) facts table so an
-    ENGINEERING diagnostic can still replay, but marks every coverage row
-    UNTRUSTED (``SOURCE_FETCH_FAILED``) and keeps the security-master coverage
+    ENGINEERING diagnostic can still replay, but marks the coverage evidence
+    UNTRUSTED (``SOURCE_FETCH_FAILED``) over the narrow
+    ``_BROKEN_COVERAGE_*`` band and keeps the security-master coverage
     table *empty*: a RESEARCH run must fail a gate before any backtest while an
     ENGINEERING run may still complete as an UNTRUSTED diagnostic that is never
     accepted as a trusted performance claim.
@@ -194,25 +203,28 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
 
 
 def _coverage_table(universe: Universe, *, trusted: bool) -> pd.DataFrame:
-    """One deterministic coverage row per universe symbol over the full bars.
+    """One deterministic coverage row per universe symbol.
 
     The corporate_action facts table of this fixture is empty; that is only
     trusted when the evidence says so.  ``trusted=True`` publishes a
     ``VERIFIED_EMPTY`` row per symbol over ``BARS_START..BARS_END`` (both action
     endpoints succeeded and found nothing) so the RESEARCH gate accepts the
     dataset; ``trusted=False`` publishes ``UNTRUSTED``/``SOURCE_FETCH_FAILED``
-    rows (the same empty facts are *not* trusted because the sources could not
-    be checked), which the RESEARCH gate rejects.
+    rows over the narrow ``_BROKEN_COVERAGE_*`` band (the same empty facts are
+    *not* trusted because the sources could not be checked), which the RESEARCH
+    gate rejects while an ENGINEERING diagnostic can still replay.
     """
     status = CoverageStatus.VERIFIED_EMPTY if trusted else CoverageStatus.UNTRUSTED
     outcome = "success_empty" if trusted else "failed"
     reason = None if trusted else CoverageReason.SOURCE_FETCH_FAILED
     endpoints = ("cninfo_corporate_actions", "eastmoney_corporate_actions")
+    window_start = BARS_START if trusted else _BROKEN_COVERAGE_START
+    window_end = BARS_END if trusted else _BROKEN_COVERAGE_END
     records = [
         coverage_record(
             entry.symbol,
-            BARS_START,
-            BARS_END,
+            window_start,
+            window_end,
             status,
             reason,
             sources=[
