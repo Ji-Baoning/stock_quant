@@ -1703,6 +1703,7 @@ def _as_date(value: object) -> date:
 
 
 def _as_fill(record: Mapping[str, object]) -> Fill:
+    recorded = record.get("reference_price")
     return Fill(
         fill_id=str(record["fill_id"]),
         order_id=str(record["order_id"]),
@@ -1713,6 +1714,13 @@ def _as_fill(record: Mapping[str, object]) -> Fill:
         price=Decimal(str(record["price"])),
         commission=Decimal(str(record["commission"])),
         stamp_tax=Decimal(str(record["stamp_tax"])),
+        # Legacy ledgers have no reference column; fall back to the fill price
+        # so replayed fills stay consistent with the zero-slippage convention.
+        reference_price=(
+            Decimal(str(recorded))
+            if recorded is not None
+            else Decimal(str(record["price"]))
+        ),
     )
 
 

@@ -29,9 +29,12 @@ Conventions (documented, never silently NaN):
   ``total_equity``: fully replacing the book once reads as ``1.0``.
 - Cash and stale-asset ratios are window-end fractions:
   ``cash / total_equity`` and ``stale_market_value / total_equity``.
-- ``slippage_estimate`` is always ``0.0``: fills record only the
-  slippage-adjusted execution price, so no unadjusted reference price exists to
-  infer slippage from a pure fills ledger.
+- ``slippage_estimate`` is the realized slippage cost summed over fills: a buy
+  pays ``price - reference_price`` per share and a sell loses
+  ``reference_price - price``.  The reference is the cent-quantized execution
+  open (a tick price), so a zero-slippage scenario prices every fill exactly at
+  its reference and reports zero.  Legacy fills recorded without a reference
+  price (no ``reference_price`` column) default to zero slippage.
 - Benchmark excess is measured against the primary index
   (``000300.SH`` when present, else the first symbol in the benchmark frame)
   over the window; an empty benchmark or missing primary symbol reports
@@ -79,7 +82,13 @@ FILL_COLUMNS = (
     "price",
     "commission",
     "stamp_tax",
+    "reference_price",
 )
+
+#: Columns every fill frame must carry, including legacy ledgers recorded
+#: before ``reference_price`` existed (which default to their fill price and
+#: therefore contribute zero slippage).
+FILL_REQUIRED_COLUMNS = FILL_COLUMNS[:-1]
 
 #: Canonical benchmark frame columns (mirrors engine.BENCHMARK_COLUMNS).
 BENCHMARK_COLUMNS = ("symbol", "trade_date", "close")
@@ -92,7 +101,7 @@ BUY = "BUY"
 SELL = "SELL"
 
 _EQUITY_NUMERIC = ("cash", "market_value", "total_equity", "stale_market_value")
-_FILL_NUMERIC = ("quantity", "price", "commission", "stamp_tax")
+_FILL_NUMERIC = ("quantity", "price", "commission", "stamp_tax", "reference_price")
 
 
 @dataclass(frozen=True)
@@ -196,11 +205,25 @@ def compute_metrics(
         sell_notional = float((sell["quantity"] * sell["price"]).sum())
         total_commission = float(fill_data["commission"].sum())
         total_stamp_tax = float(fill_data["stamp_tax"].sum())
+        buy_slippage = (
+            ((buy["price"] - buy["reference_price"]) * buy["quantity"])
+            .clip(lower=0)
+            .sum()
+        )
+        sell_slippage = (
+            ((sell["reference_price"] - sell["price"]) * sell["quantity"])
+            .clip(lower=0)
+            .sum()
+        )
+        # Every term is an integer multiple of a cent, so rounding to cents
+        # only strips the float-accumulation noise from the sums.
+        slippage_estimate = round(float(buy_slippage + sell_slippage), 2)
     else:
         buy_notional = 0.0
         sell_notional = 0.0
         total_commission = 0.0
         total_stamp_tax = 0.0
+        slippage_estimate = 0.0
     mean_equity = float(equity["total_equity"].mean())
     if mean_equity > 0:
         turnover = (buy_notional + sell_notional) / 2.0 / mean_equity
@@ -237,7 +260,7 @@ def compute_metrics(
         turnover=float(turnover),
         total_commission=total_commission,
         total_stamp_tax=total_stamp_tax,
-        slippage_estimate=0.0,
+        slippage_estimate=slippage_estimate,
         cash_ratio_end=float(cash_ratio_end),
         stale_asset_ratio_end=float(stale_ratio_end),
         benchmark_symbol=benchmark_symbol,
@@ -273,11 +296,17 @@ def _prepare_fills(fills: pd.DataFrame) -> pd.DataFrame:
         raise TypeError(
             f"fills must be a pandas DataFrame, got {type(fills).__name__}"
         )
-    _require_columns(fills, FILL_COLUMNS, "fills")
+    _require_columns(fills, FILL_REQUIRED_COLUMNS, "fills")
     if fills.empty:
         return fills
     frame = fills.copy()
     frame["side"] = frame["side"].astype(str).str.strip().str.upper()
+    if "reference_price" not in frame.columns:
+        # Legacy ledger: no unadjusted reference was recorded, so the fill
+        # price is the only evidence and slippage is treated as zero.
+        frame["reference_price"] = frame["price"]
+    else:
+        frame["reference_price"] = frame["reference_price"].fillna(frame["price"])
     for column in _FILL_NUMERIC:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     return frame

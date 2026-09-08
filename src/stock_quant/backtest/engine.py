@@ -66,6 +66,7 @@ FILL_COLUMNS = (
     "price",
     "commission",
     "stamp_tax",
+    "reference_price",
 )
 REJECTION_COLUMNS = (
     "trade_date",
@@ -338,6 +339,7 @@ class BacktestEngine:
                     "price": float(fill.price),
                     "commission": float(fill.commission),
                     "stamp_tax": float(fill.stamp_tax),
+                    "reference_price": float(fill.reference_price),
                 }
             )
         for rejected in result.rejections:

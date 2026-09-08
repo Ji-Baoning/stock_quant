@@ -128,3 +128,22 @@ def test_metrics_are_deterministic_across_cached_runs(fixture_root):
     first_metrics = (first.path / "metrics.json").read_bytes()
     second_metrics = (second.path / "metrics.json").read_bytes()
     assert first_metrics == second_metrics
+
+
+def test_published_metrics_report_realized_slippage_per_scenario(fixture_root):
+    # Regression guard for the report bug where a configured slippage rate
+    # produced no slippage figure: every fill now records its cent-quantized
+    # reference open, so the published performance reflects it.
+    outcome = run_offline_fixture(fixture_root.root)
+    metrics = json.loads(
+        (outcome.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    scenarios = metrics["scenarios"]
+    assert set(scenarios) == {"zero_cost", "commission_tax", "full_cost"}
+    # The zero-rate scenarios fill exactly at each reference open, so the
+    # realized slippage must be exactly zero.
+    for name in ("zero_cost", "commission_tax"):
+        assert scenarios[name]["performance"]["slippage_estimate"] == 0.0
+    # full_cost adds 0.1% around real fixture opens, so its realized slippage
+    # is strictly positive.
+    assert scenarios["full_cost"]["performance"]["slippage_estimate"] > 0
