@@ -29,14 +29,14 @@ export TUSHARE_TOKEN='<你的轮换后token>'      # 只进环境变量，绝不
 ```bash
 cd ~/work/program/stock/.worktrees/phase-one-quant-system
 conda run -n py310 python -m ruff check src tests
-conda run -n py310 python -m pytest -q        # 413 过；external/smoke 默认剔除
+conda run -n py310 python -m pytest -q        # 484 过；external/smoke 默认剔除
 ```
 
 ## 阶段 2 · 引导基线数据集（一次性；让 data update 可启动）
 
 ```bash
 cd ~/work/program/stock/project
-python -m stock_quant data bootstrap --root .   # 发布 security_master + 日历 + 空日线/公司行为
+python -m stock_quant data bootstrap --root .   # 发布 security_master + 日历 + 空日线/公司行为/复权表
 # 等价直调脚本（与上面 CLI 相同效果，额外打印 benchmark_symbols 提示）：
 # python bootstrap_seed.py --root .
 # 官方交易日历（可选，替代周历近似）；CLI 与直调脚本都接受：
@@ -65,8 +65,10 @@ python -m stock_quant data validate --root .
 # BLOCK → 数据集不变；看上方 redacted 原因行（ERROR/FATAL 计数、source 状态）
 ```
 
-- 门禁与策略无关：非正价格/schema 冲突/必需源不可用 → BLOCK；跨源价差、复权缺失
-  只记录不阻断（设计 §13.5）。
+- 门禁与策略无关：非正价格/schema 冲突/必需源不可用 → BLOCK；跨源价差、公司行为
+  隔离断点只记录不阻断（设计 §13.5）。每次成功更新都会重建 `adjusted_bar`
+  （`adjustment=internal_total_return_v1`）并连同 `corporate_action_quarantine`
+  一起发布；不可信公司行为不会阻断发布，但会在 `adjusted_bar` 上留下 ERROR 断点。
 - **`data update` 必须先刷新 tushare `stock_basic` 全市场快照**：该必需步骤刷新
   `security_master` 的上市事实并发布 `security_master_coverage`（每标的一行 = 研究冻结
   的证据）；拉取失败或快照缺某股票池标的 → 阻断发布。
@@ -82,6 +84,13 @@ python -m stock_quant research run --spec configs/experiments/momentum_60d.yml -
 ```
 
 REJECTED 实验也会完整发布并留原因；跑挂只留 `data/runs/` 审计、不发布半成品。
+
+正式研究使用 **`momentum_60d` v2**：它只消费不可变 `adjusted_bar` 表
+（`adjustment=internal_total_return_v1`，由未复权收盘与已核验的现金分红/送股/转增
+事件导出）。在 `adjusted_bar` 发布之前创建的数据集仍可审计，但不能运行 v2 研究
+实验——先跑一次完整 `data update` 发布兼容数据集。动量 v2 的研究输入只来自
+`adjusted_bar`，没有任何回退到未复权收盘的路径；下单、成交、涨跌停判断与账户
+估值继续使用未复权 `daily_bar` 价格。
 
 正式研究受**公司行为可信门禁**约束：执行窗口内每只股票池标的都必须持有
 `VERIFIED` / `VERIFIED_EMPTY` 的公司行为覆盖证据，否则实验在回测前即被 REJECTED
@@ -103,11 +112,11 @@ REJECTED 实验也会完整发布并留原因；跑挂只留 `data/runs/` 审计
 
 ```bash
 python -m stock_quant report build --root .        # 最新实验 HTML + 当前数据质量 HTML
-# 打开 data/reports/*.html 核对：来源/局限、三成本场景、两基准、免责声明
+# 打开 data/reports/*.html 核对：来源/局限、三成本场景、两基准、因子价格口径、免责声明
 ```
 
-按 `docs/operations/phase-one-validation.md` §4 收尾：源行数、跨源最大差、复权抽查、
-公司行为冲突、密钥扫描、无盈利宣称、单次 run 计时（<600s）。
+按 `docs/operations/phase-one-validation.md` §4 收尾：源行数、跨源最大差、复权抽查
+（adjusted_bar 口径）、公司行为冲突、密钥扫描、无盈利宣称、单次 run 计时（<600s）。
 
 ## 已知边界（务必记住，不是 bug）
 
@@ -123,5 +132,10 @@ python -m stock_quant report build --root .        # 最新实验 HTML + 当前�
    改为点明数据 UNTRUSTED 与原因。stdout 的 `trust=` 反映**数据**可信度——可信数据在
    工程模式下仍打印 `trust=TRUSTED`，但该 run 仍非正式结论。仅限排障，永不构成可信
    绩效；正式研究没有该开关。
-4. **复权序列未发布/未消费**：动量跑未复权（adjusted_close=close）。
+4. **复权口径（momentum_60d v2）**：动量只消费不可变 `adjusted_bar` 表
+   （`adjustment=internal_total_return_v1`，由未复权收盘与已核验现金分红/送股/转增
+   事件导出）；订单、成交、涨跌停判断与账户估值继续用未复权 `daily_bar` 价格。
+   在 `adjusted_bar` 之前创建的数据集仍可审计，但不能运行 v2 研究实验——跑一次完整
+   `data update` 发布兼容数据集。不可信公司行为断点使跨越它的每个动量窗口无效；
+   系统绝不静默回退到未复权收盘价。
 5. **无盈利/实盘就绪声明**：本 MVP 是工程链路验收，不是投资建议。

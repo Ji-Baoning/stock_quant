@@ -78,7 +78,9 @@ conda run -n stock-quant python -m pytest -m smoke -v
 - 三个来源 `source_status` 齐全；
 - 门禁结论 ∈ {`PASS`, `BLOCK`}；
 - `dataset_ref is not None` ⇔ 结论为 `PASS`；
-- 若 `PASS`，读取发布的 `daily_bar` 确认窗口内确有该股行。
+- 若 `PASS`，读取发布的 `daily_bar` 确认窗口内确有该股行（`adjusted_bar` 的口径核对
+  见第 4 节第 5 项：发布的 `adjusted_bar` 应只有
+  `adjustment=internal_total_return_v1`）。
 
 **`BLOCK` 是合法诊断结果**（例如 AKShare 端点/符号列漂移、BaoStock 可选来源失败，
 均被管线转为可解释的 issue/status，而不是让测试崩溃）；只有逃逸出管线的 schema 或
@@ -124,8 +126,12 @@ python -m stock_quant report build --root <ROOT>
 4. **跨源最大差异抽查**：同一 (security, trade_date) 的主源与校验源收盘比较；阈值见
    §13.4（绝对差 ≤ ¥0.01 为 INFO，相对差 > 0.05% 为 WARNING，收盘相对差 > 0.20% 为
    ERROR）。阶段一管线不把 BaoStock 行并入 `daily_bar`，抽查时直接从原始库取两帧比对。
-5. **复权抽查**：本阶段只消费未复权 `daily_bar`（见第 5 节限制）；复权核对不适用
-   于现有产物。
+5. **复权抽查（adjusted_bar 口径）**：发布的 `adjusted_bar` 只应有
+   `adjustment=internal_total_return_v1` 一种口径；抽查同 (symbol, trade_date) 的
+   `raw_close` 与 `daily_bar.close` 一致、`applied_action_ids` 能回溯到
+   `corporate_action` 标准记录；隔离/覆盖断点日应为 `quality_severity=ERROR` 且
+   `invalid_reason` 有解释（不可信公司行为使跨越它的动量窗口无效，系统不会静默
+   回退未复权收盘）；口径说明见第 5 节。
 6. **供应商原始帧忠实度**：
    - (c) AKShare EM `index_history` 真实载荷**通常无符号列**——跨源核对须按请求
      顺序映射，而不是按符号列匹配；若当前 akshare 已改名 EM 指数接口
@@ -167,13 +173,20 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
 
 ## 5. 阶段一已知限制（对齐操作者预期）
 
-- **不发布 `adjusted_bar` 表**：阶段一只发布规范化的未复权 `daily_bar`；无复权产物
-  可下载或核对，勿期待 adjusted 制品。
+- **复权口径（momentum_60d v2）**：动量 v2 只消费不可变 `adjusted_bar` 表
+  （`adjustment=internal_total_return_v1`，由未复权收盘与已核验现金分红/送股/转增
+  事件导出）；订单、成交、涨跌停判断与账户估值继续使用未复权 `daily_bar` 价格。
+  在 `adjusted_bar` 之前创建的数据集仍可审计，但不能运行 v2 研究实验——跑一次完整
+  `data update` 发布兼容数据集。不可信公司行为断点使跨越它的每个动量窗口无效；
+  系统绝不静默回退到未复权收盘价。每次成功 `data update` 都会重建并发布
+  `adjusted_bar` 与 `corporate_action_quarantine`。复权/公司行为一致性已实现，
+  等待真实数据验收。
 - **BaoStock 仅为可选校验来源**：因子层不消费 BaoStock *复权*序列；研究运行因子的
-  适配器使用规范未复权 `daily_bar`。BaoStock 失败仅记为 WARNING，不阻断发布。
+  适配器只读数据集内的 `adjusted_bar`。BaoStock 失败仅记为 WARNING，不阻断发布。
 - **`data bootstrap` 发布首个基线；`data update` 只扩展**：见第 1 节，
   `python -m stock_quant data bootstrap` 发布 `security_master`/`trading_calendar`
-  （+空 `daily_bar`/`corporate_action`）基线；`data update` 只扩展已有数据集。
+  （+空 `daily_bar`/`corporate_action`/`adjusted_bar`/`corporate_action_quarantine`）
+  基线；`data update` 只扩展已有数据集。
   `bootstrap_seed.py` 是与该 CLI 等价的直调脚本。
 - **tushare `stock_basic` 快照是默认“仅上市（L）”参照**：universe 若含已退市/长期停牌
   样本，会以 `master_snapshot_incomplete` 形式暴露——本期 30 只固定上市样本下属预期
