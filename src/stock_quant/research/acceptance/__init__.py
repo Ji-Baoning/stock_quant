@@ -23,6 +23,10 @@ from stock_quant.research.acceptance.registry import (
     AcceptanceRegistry,
     NoValidAcceptance,
 )
+from stock_quant.research.acceptance.service import (
+    AcceptanceBindingError,
+    AcceptanceRejected,
+)
 
 __all__ = [
     "AUTOMATED_CHECK_CODES",
@@ -30,12 +34,14 @@ __all__ = [
     "MANUAL_CHECK_CODES",
     "POLICY_VERSION",
     "SCHEMA_VERSION",
+    "AcceptanceBindingError",
     "AcceptanceChecklist",
     "AcceptanceDecision",
     "AcceptanceIdentityConflict",
     "AcceptanceIntegrityError",
     "AcceptanceNotFound",
     "AcceptanceRecord",
+    "AcceptanceRejected",
     "AcceptanceRegistry",
     "CheckResult",
     "CheckStatus",

@@ -146,6 +146,17 @@ def test_checklist_and_record_parse_utc_datetimes(checklist_payload, record):
     assert record.created_at.utcoffset() == timedelta(0)
 
 
+def test_checklist_and_record_reject_naive_datetimes(checklist_payload):
+    """Aware timestamps only: a naive ``prepared_at``/``created_at`` fails."""
+    checklist_payload["prepared_at"] = datetime(2026, 9, 8)
+    with pytest.raises(ValidationError):
+        AcceptanceChecklist.model_validate(checklist_payload)
+    record_payload = _record_payload()
+    record_payload["created_at"] = "2026-09-08T12:00:00"
+    with pytest.raises(ValidationError):
+        AcceptanceRecord.model_validate(record_payload)
+
+
 # --------------------------------------------------------------------------- #
 # Canonical content identity
 # --------------------------------------------------------------------------- #

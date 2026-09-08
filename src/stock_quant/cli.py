@@ -1,10 +1,13 @@
 """Operator-facing command line for the offline quant engineering loop.
 
-Four thin groups over the existing ports, all offline-testable against a
+Five thin groups over the existing ports, all offline-testable against a
 synthetic project and never printing a token or a raw supplier response:
 
 - ``data update`` / ``data validate`` -- drive :class:`DataPipeline`, the only
   writer of the immutable published dataset.
+- ``data acceptance prepare|publish|show`` -- the operator workflow over the
+  real-data acceptance registry: prepare the redacted checklist YAML, publish
+  it (rejections are recorded before the nonzero exit), and inspect history.
 - ``research run`` -- the **only** formal publisher: runs one experiment spec
   end-to-end (freeze -> factor -> portfolio -> backtest -> metrics -> report)
   through :class:`ResearchRunner` and publishes into ``data/experiments``.
@@ -31,9 +34,12 @@ import json
 import os
 from datetime import date
 from pathlib import Path
+from typing import Annotated
 
 import pandas as pd
 import typer
+import yaml
+from pydantic import ValidationError
 
 from stock_quant.analytics.performance import PerformanceMetrics, compute_metrics
 from stock_quant.bootstrap import bootstrap_dataset
@@ -52,6 +58,12 @@ from stock_quant.reporting.html import (
     QualityReportInput,
     render_experiment_report,
     render_quality_report,
+)
+from stock_quant.research.acceptance.service import (
+    AcceptanceRejected,
+    prepare_checklist,
+    publish_checklist,
+    show_acceptances,
 )
 from stock_quant.research.models import ResearchRunFailed
 from stock_quant.research.reconcile import (
@@ -72,11 +84,15 @@ app = typer.Typer(
 )
 
 data_app = typer.Typer(help="Fetch, quality-check and publish one dataset window.")
+acceptance_app = typer.Typer(
+    help="Prepare, publish, and inspect data acceptance records."
+)
 research_app = typer.Typer(help="Run and publish one formal experiment spec.")
 backtest_app = typer.Typer(help="Scratch backtests that never publish experiments.")
 report_app = typer.Typer(help="Render self-contained reports from committed artifacts.")
 
 app.add_typer(data_app, name="data")
+data_app.add_typer(acceptance_app, name="acceptance")
 app.add_typer(research_app, name="research")
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(report_app, name="report")
@@ -257,6 +273,87 @@ def data_validate(
         raise typer.Exit(code=1)
     _echo_failure("quality gate did not pass")
     raise typer.Exit(code=1)
+
+
+# --------------------------------------------------------------------------- #
+# data acceptance group (operator workflows over the registry; read-only
+# except the single append-only registry write done by publish)
+# --------------------------------------------------------------------------- #
+
+
+@acceptance_app.command("prepare")
+def data_acceptance_prepare(
+    version: Annotated[str, typer.Option("--version", help="Dataset version hash.")],
+    operator: Annotated[str, typer.Option("--operator", help="Operator id.")],
+    output: Annotated[
+        Path, typer.Option("--output", help="Destination checklist YAML file.")
+    ],
+    root: Path = typer.Option(".", "--root", help="Project root."),
+) -> None:
+    """Write the redacted checklist YAML for one pinned dataset version.
+
+    Automated rows carry the fresh offline checker verdicts; every manual row
+    starts as an explicit FAIL the operator must turn into PASS with
+    evidence before publishing.
+    """
+    checklist = prepare_checklist(Path(root), version, operator)
+    output.write_text(
+        yaml.safe_dump(
+            checklist.model_dump(mode="json"),
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    typer.echo(f"checklist={output.name}")
+
+
+@acceptance_app.command("publish")
+def data_acceptance_publish(
+    checklist: Annotated[
+        Path, typer.Option("--checklist", help="Checklist YAML file.")
+    ],
+    root: Path = typer.Option(".", "--root", help="Project root."),
+) -> None:
+    """Verify and publish one checklist; rejections are recorded, then fail.
+
+    The decision -- ACCEPTED or REJECTED -- is persisted atomically before
+    this command returns; a rejection prints its id and reason codes and
+    exits nonzero, so the registry history always explains the failure.  An
+    unreadable or schema-invalid checklist is invalid input, not a decision:
+    it fails cleanly without publishing any record.
+    """
+    try:
+        record = publish_checklist(Path(root), checklist)
+    except AcceptanceRejected as error:
+        typer.echo(f"acceptance_id={error.record.acceptance_id}")
+        typer.echo("decision=REJECTED")
+        for reason in error.record.reasons:
+            typer.echo(f"reason={reason}")
+        raise typer.Exit(code=1) from None
+    except (ValidationError, ValueError, OSError) as error:
+        typer.echo("reason=invalid_checklist")
+        typer.echo(f"error={type(error).__name__}")
+        raise typer.Exit(code=1) from None
+    typer.echo(f"acceptance_id={record.acceptance_id}")
+    typer.echo("decision=ACCEPTED")
+
+
+@acceptance_app.command("show")
+def data_acceptance_show(
+    version: Annotated[str, typer.Option("--version", help="Dataset version hash.")],
+    root: Path = typer.Option(".", "--root", help="Project root."),
+) -> None:
+    """List one dataset version's acceptance history, oldest first."""
+    records = show_acceptances(Path(root), version)
+    if not records:
+        typer.echo("UNACCEPTED")
+        return
+    for record in records:
+        typer.echo(
+            f"{record.created_at.isoformat()} {record.acceptance_id} "
+            f"{record.policy_version} {record.decision.value}"
+        )
 
 
 # --------------------------------------------------------------------------- #

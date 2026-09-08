@@ -18,11 +18,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    model_validator,
+)
 
 #: The only acceptance policy vocabulary this package publishes under.
 POLICY_VERSION = "real-data-v1"
@@ -161,7 +167,9 @@ class AcceptanceChecklist(BaseModel):
     dataset_version: str = Field(pattern=r"^[0-9a-f]{64}$")
     dataset_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     quality_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    prepared_at: datetime
+    #: Naive datetimes are rejected at validation time; canonical identity is
+    #: unchanged because the JSON rendering is the same aware ISO instant.
+    prepared_at: AwareDatetime
     operator_id: str = Field(min_length=1)
     automated_checks: tuple[CheckResult, ...]
     manual_checks: tuple[CheckResult, ...]
@@ -194,7 +202,8 @@ class AcceptanceRecord(BaseModel):
     dataset_version: str = Field(pattern=r"^[0-9a-f]{64}$")
     dataset_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     quality_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    created_at: datetime
+    #: See ``AcceptanceChecklist.prepared_at``: aware instants only.
+    created_at: AwareDatetime
     operator_id: str = Field(min_length=1)
     automated_checks: tuple[CheckResult, ...]
     manual_checks: tuple[CheckResult, ...]
