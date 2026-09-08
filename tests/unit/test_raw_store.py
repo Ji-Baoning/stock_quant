@@ -1,3 +1,4 @@
+import hashlib
 import json
 from dataclasses import replace
 
@@ -146,3 +147,34 @@ def test_verify_evidence_rejects_invalid_path_component(tmp_path):
 
     with pytest.raises(ValueError, match="request key"):
         store.verify_evidence(escaped)
+
+
+def test_verify_evidence_rejects_valid_json_non_mapping_manifest(tmp_path):
+    """A non-object manifest fails closed, never with AttributeError.
+
+    The manifest hash in the evidence matches the tampered ``[]`` bytes, so
+    only the mapping guard can reject it: ``json.loads`` happily returns a
+    list and the field comparison would blow up with ``AttributeError``.
+    """
+    store = RawStore(tmp_path)
+    saved = store.save(
+        FetchResult(
+            source="tushare",
+            endpoint="daily",
+            request_key="non-mapping",
+            frame=pd.DataFrame({"x": [1]}),
+            metadata={},
+        )
+    )
+    manifest_path = saved.path / "manifest.json"
+    manifest_path.write_text("[]", encoding="utf-8")
+    evidence = RawSnapshotEvidence(
+        source="tushare",
+        endpoint="daily",
+        request_key="non-mapping",
+        file_sha256=saved.sha256,
+        manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+    )
+
+    with pytest.raises(ValueError, match="not a mapping"):
+        store.verify_evidence(evidence)

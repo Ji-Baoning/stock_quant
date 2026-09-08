@@ -102,6 +102,8 @@ class RawStore:
         data_path = path / "data.parquet"
         manifest_path = path / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict):
+            raise ValueError("raw manifest is not a mapping")
         if _sha256_file(data_path) != file_sha256:
             raise ValueError("raw data hash mismatch")
         if _sha256_file(manifest_path) != evidence.manifest_sha256:
