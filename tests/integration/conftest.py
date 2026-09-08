@@ -4,7 +4,8 @@ Task 13 wires the research runner to a Typer CLI and builds a thin end-to-end
 acceptance over one synthetic project.  A test-support file is justified here
 because *both* ``test_cli.py`` and ``test_end_to_end.py`` need the exact same
 deterministic synthetic project (a ``configs/`` tree copied from the
-repository plus one content-addressed 6-table dataset that also carries
+repository plus one content-addressed 8-table dataset that also carries
+``adjusted_bar``, ``corporate_action_quarantine``,
 ``corporate_action_coverage`` and ``security_master_coverage`` evidence
 tables) and the same two fixtures
 (``cli_runner``, ``fixture_root``).  All fixtures are offline and live
@@ -21,6 +22,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from stock_quant.data_model.adjusted_bar import build_adjusted_bars
 from stock_quant.data_model.corporate_action_coverage import (
     CoverageReason,
     CoverageStatus,
@@ -30,6 +32,7 @@ from stock_quant.data_model.corporate_action_coverage import (
 from stock_quant.data_model.dataset import DatasetPublisher
 from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
@@ -133,8 +136,10 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
 
     Copies the repository ``configs/`` tree (project/sources/costs/rules/
     universe) into ``root/configs/``, authors a short experiment spec, then
-    publishes a deterministic 6-table dataset over the repository's 30-symbol
-    universe plus two benchmark indices, including one ``corporate_action_coverage``
+    publishes a deterministic 8-table dataset over the repository's 30-symbol
+    universe plus two benchmark indices.  The ``adjusted_bar`` rows are
+    generated through the production ``build_adjusted_bars`` over the same
+    synthetic bars, and one ``corporate_action_coverage``
     row per universe symbol over the whole fixture bars window so the default
     RESEARCH runs in the CLI / end-to-end suite pass the corporate-action trust
     gate, and one ``security_master_coverage`` row per universe symbol (at the
@@ -162,14 +167,26 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
 
     universe = Universe.from_yaml(config_dir / "universe.yml")
     sessions = _weekdays(BARS_START, BARS_END)
+    daily = _bars(sessions, universe)
+    corporate_actions = _corporate_action()
+    coverage = _coverage_table(universe, trusted=not broken)
+    empty_quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
     tables = {
-        "daily_bar": _bars(sessions, universe),
+        "daily_bar": daily,
+        "adjusted_bar": build_adjusted_bars(
+            daily,
+            corporate_actions,
+            empty_quarantine,
+            coverage,
+            symbols=tuple(universe.symbols),
+        ),
         "security_master": _security_master(universe),
         "security_master_coverage": _master_coverage_table(
             universe, present=not broken
         ),
-        "corporate_action": _corporate_action(),
-        "corporate_action_coverage": _coverage_table(universe, trusted=not broken),
+        "corporate_action": corporate_actions,
+        "corporate_action_quarantine": empty_quarantine,
+        "corporate_action_coverage": coverage,
         "trading_calendar": _trading_calendar(),
     }
     version = DatasetPublisher(root).publish(tables, QualityReport()).version

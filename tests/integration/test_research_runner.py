@@ -28,6 +28,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from stock_quant.data_model.adjusted_bar import build_adjusted_bars
 from stock_quant.data_model.corporate_action_coverage import (
     CoverageReason,
     CoverageStatus,
@@ -37,6 +38,7 @@ from stock_quant.data_model.corporate_action_coverage import (
 from stock_quant.data_model.dataset import DatasetPublisher
 from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
@@ -309,16 +311,27 @@ def _publish_synthetic_dataset(
         coverage = _coverage(symbols, status=CoverageStatus.VERIFIED_EMPTY)
     if master_coverage is None:
         master_coverage = _master_coverage(symbols)
+    daily = _bars(
+        _weekdays(_BARS_START, _BARS_END),
+        index_close=index_close,
+        limit_locked_symbols=limit_locked_symbols,
+        fresh=fresh,
+    )
+    corporate_actions = _corporate_action()
+    empty_quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
     tables = {
-        "daily_bar": _bars(
-            _weekdays(_BARS_START, _BARS_END),
-            index_close=index_close,
-            limit_locked_symbols=limit_locked_symbols,
-            fresh=fresh,
+        "daily_bar": daily,
+        "adjusted_bar": build_adjusted_bars(
+            daily,
+            corporate_actions,
+            empty_quarantine,
+            coverage,
+            symbols=symbols,
         ),
         "security_master": master,
         "security_master_coverage": master_coverage,
-        "corporate_action": _corporate_action(),
+        "corporate_action": corporate_actions,
+        "corporate_action_quarantine": empty_quarantine,
         "corporate_action_coverage": coverage,
         "trading_calendar": _trading_calendar(),
     }

@@ -27,9 +27,12 @@ import pandas as pd
 import pytest
 import yaml
 
+from stock_quant.data_model.adjusted_bar import build_adjusted_bars
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_COVERAGE_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
@@ -163,10 +166,12 @@ def build_smoke_project(root: Path) -> Path:
 
     The repository ``configs/`` tree is copied so source/cost/rule shapes match
     the real project; ``project.yml`` and ``universe.yml`` are overridden for a
-    one-symbol universe over a recent backfill window.  A synthetic four-table
-    dataset is published so ``DataPipeline.update`` has the carried
-    master/calendar baseline it requires.  No market data or credentials are
-    committed; the project lives under ``tmp_path``.
+    one-symbol universe over a recent backfill window.  A synthetic six-table
+    dataset (including ``adjusted_bar`` and the quarantine table, built with
+    the production adjusted-bar builder) is published so
+    ``DataPipeline.update`` has the carried master/calendar baseline it
+    requires.  No market data or credentials are committed; the project lives
+    under ``tmp_path``.
     """
     root = Path(root)
     config_dir = root / "configs"
@@ -213,10 +218,24 @@ def build_smoke_project(root: Path) -> Path:
     )
 
     sessions = _weekdays(baseline_start, window_end)
+    daily = _bars(sessions)
+    corporate_actions = _corporate_action()
+    empty_quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
     tables = {
-        "daily_bar": _bars(sessions),
+        "daily_bar": daily,
+        "adjusted_bar": build_adjusted_bars(
+            daily,
+            corporate_actions,
+            empty_quarantine,
+            # The synthetic baseline carries no coverage evidence table yet;
+            # an empty frame keeps the adjusted rows at INFO until the live
+            # update republishes real per-window evidence.
+            pd.DataFrame(columns=CORPORATE_ACTION_COVERAGE_COLUMNS),
+            symbols=(_SMOKE_SYMBOL,),
+        ),
         "security_master": _security_master(),
-        "corporate_action": _corporate_action(),
+        "corporate_action": corporate_actions,
+        "corporate_action_quarantine": empty_quarantine,
         "trading_calendar": _trading_calendar(sessions),
     }
     DatasetPublisher(root).publish(tables, QualityReport())

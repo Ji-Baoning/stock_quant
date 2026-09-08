@@ -11,7 +11,9 @@ import yaml
 
 from stock_quant.data_model.dataset import DatasetPublisher
 from stock_quant.data_model.schemas import (
+    ADJUSTED_BAR_COLUMNS,
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
@@ -51,8 +53,10 @@ def bootstrap_dataset(
         raise ValueError("no trading days in range; check --calendar-csv / dates")
     tables = {
         "daily_bar": _empty_daily(),
+        "adjusted_bar": _empty_adjusted_bar(),
         "security_master": _security_master(universe),
         "corporate_action": _empty_corporate_action(),
+        "corporate_action_quarantine": _empty_quarantine(),
         "trading_calendar": _trading_calendar(days),
     }
     version = DatasetPublisher(root).publish(tables, QualityReport()).version
@@ -146,3 +150,13 @@ def _empty_corporate_action() -> pd.DataFrame:
             "status": pd.Series(dtype="object"),
         }
     )[CORPORATE_ACTION_COLUMNS]
+
+
+def _empty_adjusted_bar() -> pd.DataFrame:
+    """The canonical empty total-return table (no bars to adjust yet)."""
+    return pd.DataFrame(columns=ADJUSTED_BAR_COLUMNS)
+
+
+def _empty_quarantine() -> pd.DataFrame:
+    """The canonical empty corporate-action quarantine table."""
+    return pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)

@@ -194,7 +194,7 @@ def _build_symbol(
             )
             total_return *= (raw_close * (1.0 + share_ratio) + cash) / previous_close
             ids = sorted(
-                {_action_id_of(str(item["symbol"]), day) for item in day_actions}
+                {action_id_of(str(item["symbol"]), day) for item in day_actions}
             )
         records.append(
             {
@@ -216,7 +216,7 @@ def _build_symbol(
     return records
 
 
-def _action_id_of(symbol: str, ex_date: date) -> str:
+def action_id_of(symbol: str, ex_date: date) -> str:
     """The deterministic action id ``{symbol}#{ex_date:%Y-%m-%d}``."""
     return f"{symbol}#{ex_date.isoformat()}"
 

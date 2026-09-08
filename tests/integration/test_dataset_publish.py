@@ -179,6 +179,7 @@ def test_publish_persists_adjusted_bar_and_quarantine_schemas(tmp_path):
         assert context.read("adjusted_bar")["adjustment"].unique().tolist() == [
             "internal_total_return_v1"
         ]
+        assert context.read("corporate_action_quarantine").empty
 
 
 def test_identical_publish_is_idempotent_and_never_rewrites(tmp_path):

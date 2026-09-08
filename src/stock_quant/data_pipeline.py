@@ -36,6 +36,7 @@ alpha -- nothing here is investment advice.
 
 from __future__ import annotations
 
+import json
 import time as _sleep_module
 import uuid
 from dataclasses import dataclass
@@ -47,6 +48,11 @@ from typing import Any, Mapping
 import pandas as pd
 
 from stock_quant.config import SourceConfig, load_project_config
+from stock_quant.data_model.adjusted_bar import (
+    ADJUSTMENT_NAME,
+    action_id_of,
+    build_adjusted_bars,
+)
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.corporate_action_coverage import (
     OUTCOME_FAILED,
@@ -76,7 +82,9 @@ from stock_quant.data_model.dataset import (
 )
 from stock_quant.data_model.normalize import normalize_daily
 from stock_quant.data_model.schemas import (
+    ADJUSTED_BAR_SCHEMA,
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     DAILY_SCHEMA,
     SECURITY_MASTER_COLUMNS,
@@ -91,6 +99,10 @@ from stock_quant.data_model.security_master import (
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import (
+    CODE_ADJUSTED_BAR_MISSING_RAW,
+    CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH,
+    CODE_ADJUSTED_BAR_UNKNOWN_ACTION,
+    CODE_ADJUSTED_BAR_WRONG_BASIS,
     TABLE_CORPORATE_ACTION,
     QualityIssue,
     QualityReport,
@@ -127,6 +139,10 @@ CODE_UNIVERSE_MASTER_MISMATCH = "universe_master_mismatch"
 CODE_MASTER_SNAPSHOT_INCOMPLETE = "master_snapshot_incomplete"
 CODE_MASTER_BAR_BOUNDARY = "master_bar_boundary"
 CODE_MASTER_COVERAGE_MISMATCH = "master_coverage_mismatch"
+CODE_ADJUSTED_BAR_MISSING_FROM_DATASET = "adjusted_bar_missing_from_dataset"
+
+#: Canonical standardized table holding untrusted corporate-action rows.
+TABLE_CORPORATE_ACTION_QUARANTINE = "corporate_action_quarantine"
 
 _CONFIGURED_SOURCES = ("tushare", "akshare", "baostock")
 _REQUIRED_ROLE = {"tushare": True, "akshare": True, "baostock": False}
@@ -324,6 +340,53 @@ class DataPipeline:
             coverage = None
             if "security_master_coverage" in context.tables:
                 coverage = context.read("security_master_coverage")
+            missing_tables = [
+                name
+                for name in (
+                    TABLE_CORPORATE_ACTION,
+                    "adjusted_bar",
+                    TABLE_CORPORATE_ACTION_QUARANTINE,
+                )
+                if name not in context.tables
+            ]
+            if missing_tables:
+                # Fail closed: the publisher accepts table subsets silently, so
+                # a legacy (or trimmed) dataset without these canonical tables
+                # must never validate clean -- and reading a missing table
+                # would otherwise crash with a bare ValueError.
+                issues.append(
+                    _issue(
+                        Severity.FATAL,
+                        CODE_ADJUSTED_BAR_MISSING_FROM_DATASET,
+                        table="adjusted_bar",
+                        details={
+                            "message": (
+                                "published dataset is missing required "
+                                "canonical tables; run a full data update to "
+                                "republish"
+                            ),
+                            "missing_tables": missing_tables,
+                        },
+                    )
+                )
+            else:
+                corporate_actions = context.read(TABLE_CORPORATE_ACTION)
+                adjusted = context.read("adjusted_bar")
+                issues.extend(
+                    check_schema(
+                        adjusted, ADJUSTED_BAR_SCHEMA, table="adjusted_bar"
+                    )
+                )
+                issues.extend(
+                    check_primary_key_conflicts(
+                        adjusted, table="adjusted_bar"
+                    )
+                )
+                issues.extend(
+                    check_adjusted_bar_lineage(
+                        adjusted, daily, corporate_actions
+                    )
+                )
         issues.extend(self._universe_master_issues(master))
         issues.extend(self._master_bar_boundary_issues(master, daily))
         issues.extend(self._master_coverage_consistency_issues(master, coverage))
@@ -352,7 +415,9 @@ class DataPipeline:
             return self._result(
                 issues, None, run_id, None, statuses, raw_snapshots
             )
-        master, calendar_open, current_daily, current_ca = baseline
+        master, calendar_open, current_daily, current_ca, current_quarantine = (
+            baseline
+        )
         issues.extend(self._universe_master_issues(master))
 
         # ---- required-source availability gate -------------------------- #
@@ -471,17 +536,21 @@ class DataPipeline:
 
         # ---- best-effort corporate actions ------------------------------ #
         corporate_action = current_ca
+        corporate_action_quarantine = current_quarantine
         coverage = coverage_frame([])
         if "akshare" in enabled:
-            corporate_action, coverage = self._refresh_corporate_actions(
-                enabled,
-                equity_symbols,
-                start,
-                end,
-                issues,
-                statuses,
-                raw_snapshots,
-                current_ca,
+            corporate_action, coverage, corporate_action_quarantine = (
+                self._refresh_corporate_actions(
+                    enabled,
+                    equity_symbols,
+                    start,
+                    end,
+                    issues,
+                    statuses,
+                    raw_snapshots,
+                    current_ca,
+                    current_quarantine,
+                )
             )
 
         # ---- optional validation daily ---------------------------------- #
@@ -528,6 +597,21 @@ class DataPipeline:
         )
         issues.extend(self._master_bar_boundary_issues(master, new_daily))
 
+        # ---- total-return bars over the merged canonical daily ---------- #
+        adjusted = build_adjusted_bars(
+            new_daily,
+            corporate_action,
+            corporate_action_quarantine,
+            coverage,
+            symbols=equity_symbols,
+        )
+        issues.extend(
+            check_schema(adjusted, ADJUSTED_BAR_SCHEMA, table="adjusted_bar")
+        )
+        issues.extend(
+            check_primary_key_conflicts(adjusted, table="adjusted_bar")
+        )
+
         report = QualityReport(issues=tuple(issues))
         decision = evaluate_publication(report)
         fatal_present = any(
@@ -547,10 +631,14 @@ class DataPipeline:
         # ---- publish ---------------------------------------------------- #
         tables = {
             "daily_bar": new_daily,
+            "adjusted_bar": adjusted,
             "security_master": master[list(SECURITY_MASTER_COLUMNS)],
             "security_master_coverage": master_coverage,
             "corporate_action": corporate_action[
                 list(CORPORATE_ACTION_COLUMNS)
+            ],
+            "corporate_action_quarantine": corporate_action_quarantine[
+                list(CORPORATE_ACTION_QUARANTINE_COLUMNS)
             ],
             "corporate_action_coverage": coverage,
             "trading_calendar": _calendar_frame(calendar_open)[
@@ -767,7 +855,13 @@ class DataPipeline:
             ) from None
 
     def _read_baseline(self, issues: list[QualityIssue]):
-        """The carried master/calendar/current tables, or None + fatal issue."""
+        """The carried master/calendar/daily/action/quarantine tables.
+
+        Returns the five carried frames, or ``None`` after a FATAL issue when
+        no dataset exists yet.  A pre-migration dataset without a
+        ``corporate_action_quarantine`` table yields an empty canonical frame
+        so it stays updatable.
+        """
         try:
             ref = DatasetPublisher(self._project_root).current()
         except DatasetNotFoundError:
@@ -790,6 +884,14 @@ class DataPipeline:
             calendar_frame = context.read("trading_calendar")
             daily = context.read("daily_bar")
             ca = context.read(TABLE_CORPORATE_ACTION)
+            if TABLE_CORPORATE_ACTION_QUARANTINE in context.tables:
+                quarantine = context.read(TABLE_CORPORATE_ACTION_QUARANTINE)
+            else:
+                # A pre-migration dataset carries no quarantine table; update
+                # it by seeding the canonical empty frame instead of failing.
+                quarantine = pd.DataFrame(
+                    columns=CORPORATE_ACTION_QUARANTINE_COLUMNS
+                )
         open_days = tuple(
             sorted(
                 day.date()
@@ -800,7 +902,7 @@ class DataPipeline:
                 if bool(flag)
             )
         )
-        return master, open_days, daily, ca
+        return master, open_days, daily, ca, quarantine
 
     def _require_available(
         self,
@@ -1025,19 +1127,22 @@ class DataPipeline:
         statuses,
         raw_snapshots,
         current_ca,
+        current_quarantine,
     ):
         """Reconcile cninfo/eastmoney per held security, best-effort.
 
-        Returns ``(facts, coverage)``: the merged canonical corporate-action
-        facts and one evidence row per symbol/window recording every endpoint's
-        outcome plus the content hash of each successful raw snapshot.  Empty
-        facts are never trusted by default -- only an explicit successful
-        no-event answer from *every* requested endpoint yields ``VERIFIED_EMPTY``,
-        and any endpoint failure leaves the window ``UNTRUSTED``.
+        Returns ``(facts, coverage, quarantine)``: the merged canonical
+        corporate-action facts, one evidence row per symbol/window recording
+        every endpoint's outcome plus the content hash of each successful raw
+        snapshot, and the merged quarantine rows (carried history plus this
+        update's reconciled-and-reviewed untrusted events).  Empty facts are
+        never trusted by default -- only an explicit successful no-event
+        answer from *every* requested endpoint yields ``VERIFIED_EMPTY``, and
+        any endpoint failure leaves the window ``UNTRUSTED``.
         """
         source = self._overrides.get("akshare") or self._build_lazy("akshare")
         if source is None:
-            return current_ca, coverage_frame([])
+            return current_ca, coverage_frame([]), current_quarantine
         frames_by_symbol: dict[str, dict[str, list[pd.DataFrame]]] = {}
         outcomes_by_symbol: dict[str, dict[str, dict[str, object]]] = {}
         for symbol in symbols:
@@ -1115,6 +1220,9 @@ class DataPipeline:
         )
         accepted = reviewed.accepted
         quarantined = reviewed.quarantined
+        merged_quarantine = _merge_corporate_action_quarantine(
+            current_quarantine, quarantined
+        )
         coverage = coverage_frame(
             [
                 _coverage_record_for(
@@ -1129,9 +1237,13 @@ class DataPipeline:
             ]
         )
         if accepted.empty:
-            return current_ca, coverage
+            return current_ca, coverage, merged_quarantine
         canonical = _corporate_actions_canonical(accepted)
-        return _merge_corporate_actions(current_ca, canonical), coverage
+        return (
+            _merge_corporate_actions(current_ca, canonical),
+            coverage,
+            merged_quarantine,
+        )
 
     def _reconcile_action_frames(self, cninfo_frames, eastmoney_frames, issues):
         """Reconcile collected supplier frames; empty defaults on failure."""
@@ -1785,6 +1897,142 @@ def _merge_corporate_actions(
     ]
     merged = pd.concat([kept, fresh], ignore_index=True)
     return merged[list(CORPORATE_ACTION_COLUMNS)]
+
+
+def _merge_corporate_action_quarantine(
+    current: pd.DataFrame, fresh: pd.DataFrame
+) -> pd.DataFrame:
+    """Carry prior quarantine rows and merge this update's reviewed rows.
+
+    Rows key on ``(symbol, ex_date, confirmed_by, reason)``; dates and the
+    string key columns are normalised first so carried (parquet ``NaT``/``None``)
+    and freshly reconciled (object ``NaN``) frames key identically instead of
+    colliding on dtype.  A fresh row replaces a carried row with the same key
+    and the merged frame is ordered by the key columns, so identical inputs
+    publish byte-identical quarantine tables.
+    """
+    current = _normalised_quarantine(current)
+    fresh = _normalised_quarantine(fresh)
+    if current.empty:
+        return _sorted_quarantine(fresh)
+    if fresh.empty:
+        return _sorted_quarantine(current)
+    key = ["symbol", "ex_date", "confirmed_by", "reason"]
+    kept = current.loc[
+        ~current.set_index(key).index.isin(fresh.set_index(key).index)
+    ]
+    merged = pd.concat([kept, fresh], ignore_index=True)
+    return _sorted_quarantine(merged)
+
+
+def _normalised_quarantine(frame: pd.DataFrame | None) -> pd.DataFrame:
+    """The canonical quarantine frame with merge-safe key dtypes.
+
+    ``ex_date`` becomes a timezone-free datetime and ``symbol`` /
+    ``confirmed_by`` / ``reason`` become plain ``str`` so the merge key never
+    compares ``NaN`` against ``NaT`` or ``None``.
+    """
+    columns = list(CORPORATE_ACTION_QUARANTINE_COLUMNS)
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=columns)
+    out = frame[columns].copy()
+    out["ex_date"] = pd.to_datetime(out["ex_date"], errors="coerce")
+    for column in ("symbol", "confirmed_by", "reason"):
+        out[column] = out[column].fillna("").astype(str)
+    return out
+
+
+def _sorted_quarantine(frame: pd.DataFrame) -> pd.DataFrame:
+    """Deterministic quarantine ordering by the merge-key columns."""
+    if frame.empty:
+        return frame
+    return frame.sort_values(
+        ["symbol", "ex_date", "confirmed_by", "reason"], kind="stable"
+    ).reset_index(drop=True)
+
+
+def check_adjusted_bar_lineage(
+    adjusted: pd.DataFrame,
+    daily: pd.DataFrame,
+    corporate_actions: pd.DataFrame,
+) -> list[QualityIssue]:
+    """FATAL lineage breaks between the total-return and raw close series.
+
+    Every ``adjusted_bar`` row must reference an existing ``daily_bar`` close
+    at the identical value, carry the single internal adjustment basis, and
+    list only action ids derivable from the canonical corporate-action facts.
+    A breach means the published series cannot be audited back to its inputs
+    and must never reach (or keep) a dataset version.
+    """
+    issues: list[QualityIssue] = []
+    if adjusted is None or adjusted.empty:
+        return issues
+    raw_closes: dict[tuple[str, date], float] = {}
+    for record in daily.to_dict("records"):
+        day = _as_date(record["trade_date"])
+        if day is not None:
+            raw_closes[(str(record["symbol"]), day)] = float(record["close"])
+    known_action_ids = {
+        action_id_of(str(record["symbol"]), _as_date(record["ex_date"]))
+        for record in corporate_actions.to_dict("records")
+        if _as_date(record.get("ex_date")) is not None
+    }
+    for row in adjusted.to_dict("records"):
+        symbol = str(row["symbol"])
+        day = _as_date(row["trade_date"])
+        key = (symbol, day)
+        if day is None or key not in raw_closes:
+            issues.append(
+                _adjusted_issue(CODE_ADJUSTED_BAR_MISSING_RAW, symbol, day)
+            )
+        elif float(row["raw_close"]) != raw_closes[key]:
+            issues.append(
+                _adjusted_issue(
+                    CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH, symbol, day
+                )
+            )
+        if str(row["adjustment"]) != ADJUSTMENT_NAME:
+            issues.append(
+                _adjusted_issue(CODE_ADJUSTED_BAR_WRONG_BASIS, symbol, day)
+            )
+        for action_id in _applied_action_ids(row):
+            if action_id not in known_action_ids:
+                issues.append(
+                    _adjusted_issue(
+                        CODE_ADJUSTED_BAR_UNKNOWN_ACTION, symbol, day
+                    )
+                )
+    return issues
+
+
+def _applied_action_ids(row: dict) -> list[str]:
+    """The JSON-encoded ``applied_action_ids`` list, tolerating blank cells."""
+    raw = row.get("applied_action_ids")
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        return []
+    return [str(item) for item in decoded] if isinstance(decoded, list) else []
+
+
+def _adjusted_issue(
+    code: str, symbol: str, day: date | None
+) -> QualityIssue:
+    return _issue(
+        Severity.FATAL,
+        code,
+        symbol=symbol,
+        trade_date=day,
+        table="adjusted_bar",
+        details={
+            "message": (
+                f"adjusted_bar lineage check {code!r} failed for {symbol} at "
+                f"{day.isoformat() if day is not None else 'an unknown date'}"
+            ),
+        },
+    )
 
 
 def _calendar_frame(open_days: tuple[date, ...]) -> pd.DataFrame:
