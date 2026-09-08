@@ -462,6 +462,10 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
         # The frozen trust decision persisted in metrics.json; the report reads
         # it and renders trusted or untrusted state from these committed bytes.
         corporate_action_trust=metrics.get("corporate_action_trust"),
+        # The persisted factor-input audit (metrics["factor_input"]) so the
+        # rebuilt report states the same adjustment basis and break counts the
+        # run recorded; older metrics without the key simply omit the section.
+        factor_input_audit=metrics.get("factor_input"),
     )
 
 

@@ -644,6 +644,41 @@ def test_published_metrics_record_execution_rejected_orders(tmp_path):
         assert summary["plan_diverged"] is (int(summary["unfilled_quantity"]) > 0)
 
 
+def test_metrics_records_total_return_input_audit(env):
+    """metrics.json carries a deterministic factor-input provenance audit.
+
+    The audit must describe the pinned dataset version the run actually used:
+    the adjustment basis, the requested factor versions, the adjusted-bar rows
+    the universe consumed, and the ERROR break / invalid-reason counts (zero
+    for the trusted synthetic fixture).
+    """
+    experiment = ResearchRunner(env.root, config_root=_REPO_ROOT).run(_SPEC)
+    metrics = json.loads(
+        (experiment.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    audit = metrics["factor_input"]
+    assert audit["adjustment"] == "internal_total_return_v1"
+    assert audit["factor_versions"] == {"momentum_60d": "2.0.0"}
+    assert audit["row_count"] > 0
+    assert audit["error_break_count"] == 0
+    assert audit["invalid_reason_counts"] == {}
+
+
+def test_run_report_shows_factor_price_basis(env):
+    """The direct ``research run`` report exposes the same adjustment basis and
+    break count the richer rebuilt report renders from metrics.json."""
+    experiment = ResearchRunner(env.root, config_root=_REPO_ROOT).run(_SPEC)
+    html = (experiment.path / "report.html").read_text(encoding="utf-8")
+    assert "因子价格口径" in html
+    assert "调整方法 internal_total_return_v1" in html
+    assert "因子版本 momentum_60d: 2.0.0" in html
+    # Pinned values: every adjusted-bar row of the twelve universe symbols
+    # over the full published session range, and zero trusted-evidence breaks.
+    expected_rows = len(EQUITY_GROWTH) * len(_weekdays(_BARS_START, _BARS_END))
+    assert f"输入行数 {expected_rows}" in html
+    assert "不可信断点 0" in html
+
+
 def test_research_rejects_untrusted_but_engineering_is_untrusted(env):
     _publish_dataset_with_untrusted_coverage(env.root)
     runner = ResearchRunner(env.root, config_root=_REPO_ROOT)

@@ -65,20 +65,18 @@ _PRIMARY_BENCHMARK = "000300.SH"
 _PLOTLY_CONFIG = {"displaylogo": False}
 
 # Phase-one universal limitations, surfaced in every experiment report's
-# 已知限制 section (and the README).  They are report-only boundaries, not
-# defects: cross-source stock-close disagreement above tolerance is recorded as
+# 已知限制 section (and the README).  It is a report-only boundary, not a
+# defect: cross-source stock-close disagreement above tolerance is recorded as
 # ERROR in the quality report but the Tushare primary close series is
 # authoritative for factors and backtests (design §13.5 keeps the publication
-# gate strategy-independent), and no adjusted (复权) daily series is published
-# or consumed at the factor layer in phase one -- momentum runs on the
-# unadjusted series (adjusted_close=close) and BaoStock adjusted data is fetched
-# only for optional continuity/cross-checks, never for factors.
+# gate strategy-independent).  The former "no adjusted series is published or
+# consumed" limitation is obsolete since momentum_60d v2 consumes the project's
+# internal_total_return_v1 ``adjusted_bar`` series; the 因子价格口径 section
+# now reports that basis, factor versions and break counts explicitly.
 _PHASE_ONE_KNOWN_LIMITATIONS = (
     "跨源收盘价差异超过容差时，仅在质量报告中记录为 ERROR，本阶段不阻断发布："
     "因子与回测以 Tushare 主源收盘序列为准（设计 §13.5 令发布门禁与策略输入无关），"
     "跨源收盘差异仅作报告提示。",
-    "本阶段不发布、也不消费复权日线：动量基于未复权序列计算（adjusted_close=close）；"
-    "BaoStock 复权数据仅用于可选的延续性与交叉核对，不参与因子。",
 )
 
 # --------------------------------------------------------------------------- #
@@ -117,6 +115,13 @@ class ExperimentReportInput:
     primary_benchmark_symbol: str = _PRIMARY_BENCHMARK
     known_limitations: tuple[str, ...] = ()
     generated_at: str = ""
+    #: The persisted ``metrics["factor_input"]`` audit of the pinned
+    #: ``adjusted_bar`` rows the factor actually consumed: ``{"adjustment",
+    #: "factor_versions", "row_count", "error_break_count",
+    #: "invalid_reason_counts"}``.  ``None`` (report inputs that predate the
+    #: audit) simply omits the 因子价格口径 section instead of rendering
+    #: empty provenance claims.
+    factor_input_audit: dict | None = None
     #: The frozen corporate-action trust decision recorded on the run
     #: (``metrics["corporate_action_trust"]``): ``{"trusted", "reasons",
     #: "mode", "dataset_version", "window_start", "window_end"}``.  ``None``
@@ -261,6 +266,38 @@ def _trust_block(corporate_action_trust: dict | None) -> dict[str, object]:
         "trusted": trusted,
         "reasons": reasons,
         "window_text": window_text,
+    }
+
+
+def _factor_input_block(factor_input_audit: dict | None) -> dict | None:
+    """Normalize the persisted factor-input audit for the template.
+
+    Returns ``None`` when no audit is supplied so the 因子价格口径 section is
+    omitted rather than rendered with empty claims.  Factor versions and break
+    reasons become sorted ``key: value`` strings (reason strings are attacker-
+    controllable data, so they stay plain values that only Jinja's autoescape
+    ever renders, never markup).
+    """
+    if not isinstance(factor_input_audit, dict):
+        return None
+    versions = factor_input_audit.get("factor_versions")
+    version_items = (
+        sorted(versions.items()) if isinstance(versions, dict) else []
+    )
+    reasons = factor_input_audit.get("invalid_reason_counts")
+    reason_items = sorted(reasons.items()) if isinstance(reasons, dict) else []
+    return {
+        "adjustment": str(factor_input_audit.get("adjustment", "")),
+        "version_text": "、".join(
+            f"{name}: {version}" for name, version in version_items
+        ),
+        "row_count": _int_text(factor_input_audit.get("row_count")),
+        "error_break_count": _int_text(
+            factor_input_audit.get("error_break_count")
+        ),
+        "reason_text": "、".join(
+            f"{reason}: {count}" for reason, count in reason_items
+        ),
     }
 
 
@@ -722,6 +759,7 @@ def render_experiment_report(
             _pct(benchmark_excess) if benchmark_excess is not None else "—"
         ),
         trust=_trust_block(experiment.corporate_action_trust),
+        factor_input=_factor_input_block(experiment.factor_input_audit),
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(body, encoding="utf-8")

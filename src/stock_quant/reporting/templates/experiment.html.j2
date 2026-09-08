@@ -70,6 +70,16 @@
     {% endif %}
   </section>
 
+  {% if factor_input %}
+  <section>
+    <h2>因子价格口径</h2>
+    <p>调整方法：{{ factor_input.adjustment }}</p>
+    <p>因子版本：{{ factor_input.version_text }}</p>
+    <p>输入行数：{{ factor_input.row_count }}；不可信断点：{{ factor_input.error_break_count }}</p>
+    {% if factor_input.reason_text %}<p>断点原因：{{ factor_input.reason_text }}</p>{% endif %}
+  </section>
+  {% endif %}
+
   <section>
     <h2>版本与配置</h2>
     <table class="kv">

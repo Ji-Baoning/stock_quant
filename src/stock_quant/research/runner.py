@@ -324,12 +324,40 @@ class _DefaultReport:
             "<title>experiment report</title></head><body>"
             f"<h1>{_html(experiment_id)}</h1>"
             f"<p>evaluation: {_html(status)}</p><p>{reason}</p>"
-            "<table><thead><tr><th>scenario</th><th>start</th><th>end</th>"
+            + _factor_input_paragraph(metrics)
+            + "<table><thead><tr><th>scenario</th><th>start</th><th>end</th>"
             "<th>periods</th><th>end_equity</th><th>total_return</th>"
             "</tr></thead><tbody>"
             + "".join(rows)
             + "</tbody></table></body></html>\n"
         )
+
+
+def _factor_input_paragraph(metrics: dict[str, object]) -> str:
+    """An escaped 因子价格口径 line over the persisted factor-input audit.
+
+    The rebuilt rich report renders ``metrics["factor_input"]`` as a full
+    section; this paragraph keeps the lightweight report produced directly by
+    ``research run`` aligned on the same adjustment basis, factor versions and
+    break count.  Every interpolated value goes through ``_html`` because
+    invalid-reason strings are data, not markup.
+    """
+    audit = metrics.get("factor_input")
+    if not isinstance(audit, Mapping):
+        return ""
+    versions = audit.get("factor_versions")
+    version_text = ""
+    if isinstance(versions, Mapping):
+        version_text = ", ".join(
+            f"{name}: {versions[name]}" for name in sorted(versions)
+        )
+    return (
+        "<p>因子价格口径: "
+        f"调整方法 {_html(audit.get('adjustment'))}；"
+        f"因子版本 {_html(version_text)}；"
+        f"输入行数 {_html(audit.get('row_count'))}；"
+        f"不可信断点 {_html(audit.get('error_break_count'))}</p>"
+    )
 
 
 class _DefaultEvaluator:
@@ -1500,6 +1528,36 @@ class ResearchRunner:
             )
         return ledger
 
+    def _factor_input_audit(self, frozen: ExperimentSpec) -> dict[str, object]:
+        """The deterministic provenance audit of the factor's price input.
+
+        Reads ``adjusted_bar`` from the *frozen* dataset version (never
+        ``CURRENT``), restricted to the universe symbols this run can hold, and
+        counts ERROR quality breaks plus their ``invalid_reason`` distribution
+        sorted by reason.  Every key is sorted before encoding so identical
+        runs publish byte-identical ``metrics.json`` ``factor_input`` sections;
+        the evaluator and both reports consume exactly these persisted facts.
+        """
+        context = self._open_context(frozen.dataset_version)
+        if "adjusted_bar" not in context.tables:
+            raise ValueError(
+                f"dataset {frozen.dataset_version} has no adjusted_bar; "
+                f"research factors require {ADJUSTMENT_NAME}"
+            )
+        adjusted = context.read("adjusted_bar")
+        universe = adjusted[adjusted["symbol"].isin(set(self._universe_symbols))]
+        errors = universe[universe["quality_severity"] == "ERROR"]
+        counts = errors["invalid_reason"].value_counts().sort_index()
+        return {
+            "adjustment": ADJUSTMENT_NAME,
+            "factor_versions": dict(sorted(frozen.factor_versions.items())),
+            "row_count": int(len(universe)),
+            "error_break_count": int(len(errors)),
+            "invalid_reason_counts": {
+                str(reason): int(count) for reason, count in counts.items()
+            },
+        }
+
     def _produce_report(self, state: RunState, frozen: ExperimentSpec) -> dict:
         """Compute metrics, record the evaluation and render the report."""
         canonical = self._canonical_scenario(list(frozen.cost_scenarios))
@@ -1539,6 +1597,10 @@ class ResearchRunner:
             "canonical_scenario": canonical,
         }
         metrics: dict[str, object] = {"meta": meta, **analytics_out}
+        # Persist the factor-input provenance before evaluation and report
+        # rendering so the evaluator, the direct-run report and any later
+        # rebuild from metrics.json all consume the same committed facts.
+        metrics["factor_input"] = self._factor_input_audit(frozen)
         evaluation = self._evaluator(metrics)
         if not isinstance(evaluation, Evaluation):
             raise TypeError(
