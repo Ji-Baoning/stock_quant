@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 from stock_quant.cli import (
     app,  # noqa: F401  (imported before the CLI exists to gate Step 2)
@@ -65,6 +66,27 @@ def test_cached_end_to_end_run_is_reproducible(fixture_root):
     second = run_offline_fixture(fixture_root.root)
     assert first.experiment_id == second.experiment_id
     assert first.manifest["artifacts"] == second.manifest["artifacts"]
+
+
+def test_published_manifest_records_the_accepted_data_identity(fixture_root):
+    """The formal CLI run pins the fixture's ACCEPTED record everywhere: the
+    frozen spec, the experiment manifest and metrics.json carry the same
+    concrete acceptance id -- never the CURRENT_ACCEPTED placeholder."""
+    outcome = run_offline_fixture(fixture_root.root)
+    assert fixture_root.acceptance_id is not None
+    assert outcome.manifest["data_acceptance_id"] == fixture_root.acceptance_id
+    spec = yaml.safe_load(
+        (outcome.path / "experiment_spec.yml").read_text(encoding="utf-8")
+    )
+    assert spec["data_acceptance_id"] == fixture_root.acceptance_id
+    metrics = json.loads(
+        (outcome.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    audit = metrics["data_acceptance"]
+    assert audit["acceptance_id"] == fixture_root.acceptance_id
+    assert audit["policy_version"] == "real-data-v1"
+    assert audit["decision"] == "ACCEPTED"
+    assert audit["operator_id"] == "integration-fixture"
 
 
 def test_published_experiment_holds_complete_immutable_artifact_contract(

@@ -30,6 +30,7 @@ import json
 import platform
 import shutil
 import subprocess
+import uuid
 from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -59,6 +60,18 @@ from stock_quant.factors.base import Factor, FactorContext
 from stock_quant.factors.models import FactorResult
 from stock_quant.logging import StructuredLogger, redact_text
 from stock_quant.portfolio.equal_weight import TopNEqualWeight
+from stock_quant.research.acceptance.models import CURRENT_ACCEPTED, AcceptanceRecord
+from stock_quant.research.acceptance.registry import (
+    AcceptanceIntegrityError,
+    AcceptanceNotFound,
+    AcceptanceRegistry,
+    NoValidAcceptance,
+)
+from stock_quant.research.acceptance.service import (
+    AcceptanceBindingError,
+    acceptance_audit_dict,
+    verify_acceptance_bindings,
+)
 from stock_quant.research.models import (
     CANONICAL_SCENARIO,
     MANIFESTED_ARTIFACTS,
@@ -441,6 +454,9 @@ class ResearchRunner:
         self._active_stage: str | None = None
         self._context: DatasetContext | None = None
         self._digest: str = ""
+        # The sanitized audit of the acceptance record resolved in ``_freeze``
+        # (before identity work); ``None`` when no acceptance was pinned.
+        self._data_acceptance: dict[str, object] | None = None
 
     # ------------------------------------------------------------------ #
     # Public entry point
@@ -561,13 +577,110 @@ class ResearchRunner:
             universe = Universe.from_yaml(self._config_root / "configs"
                                           / "universe.yml")
             universe_version = universe.version
+        # The real-data acceptance gate runs after dataset pinning and before
+        # experiment identity/factor work: a RESEARCH run must resolve (and
+        # re-verify) its acceptance record here, and any failure leaves only a
+        # FAILED preflight manifest -- no factor provider, portfolio builder
+        # or backtest engine is ever invoked.
+        acceptance_id = spec.data_acceptance_id
+        self._data_acceptance = None
+        if (
+            trust_mode is DataTrustMode.RESEARCH
+            or acceptance_id not in (None, CURRENT_ACCEPTED)
+        ):
+            selected = self._resolve_acceptance(
+                dataset_version, acceptance_id or CURRENT_ACCEPTED,
+                universe_version=universe_version,
+                trust_mode=trust_mode,
+            )
+            acceptance_id = selected.acceptance_id
+            self._data_acceptance = acceptance_audit_dict(selected)
+        elif trust_mode is DataTrustMode.ENGINEERING:
+            acceptance_id = None
         code_commit = self._detect_code_commit() or spec.code_commit
         return spec.freeze(
             dataset_version=dataset_version,
             universe_version=universe_version,
+            data_acceptance_id=acceptance_id,
             code_commit=code_commit,
             trust_mode=trust_mode,
         )
+
+    def _resolve_acceptance(
+        self,
+        dataset_version: str,
+        requested_id: str,
+        *,
+        universe_version: str,
+        trust_mode: DataTrustMode,
+    ) -> AcceptanceRecord:
+        """Select and re-verify the pinned acceptance record (read-only)."""
+        try:
+            selected = AcceptanceRegistry(self._project_root).select(
+                dataset_version, requested_id
+            )
+            verify_acceptance_bindings(self._project_root, selected)
+        except (
+            NoValidAcceptance,
+            AcceptanceNotFound,
+            AcceptanceIntegrityError,
+            AcceptanceBindingError,
+            ValueError,
+        ) as error:
+            self._record_acceptance_preflight_failure(
+                dataset_version=dataset_version,
+                universe_version=universe_version,
+                trust_mode=trust_mode,
+                error=error,
+            )
+            raise ResearchRunFailed(
+                "no valid real-data-v1 acceptance for dataset "
+                f"{dataset_version}: {type(error).__name__}: "
+                f"{redact_text(error, self._secrets)}",
+                run_id=self._run_id,
+                failed_stage="acceptance",
+                retriable=False,
+            ) from error
+        return selected
+
+    def _record_acceptance_preflight_failure(
+        self,
+        *,
+        dataset_version: str,
+        universe_version: str,
+        trust_mode: DataTrustMode,
+        error: Exception,
+    ) -> None:
+        """Persist the FAILED preflight manifest for an acceptance-gate stop.
+
+        No experiment identity exists yet, so the run id is a fresh
+        ``preflight_acceptance_<uuid>`` and the recorded ``experiment_id`` is
+        ``None``; the resolved ``trust_mode`` is stamped so an ENGINEERING run
+        that pinned a concrete-but-invalid acceptance is not mislabelled with
+        the default research mode.  The redacted error keeps the failure
+        auditable without ever carrying secrets or absolute paths.
+        """
+        run_id = f"preflight_acceptance_{uuid.uuid4().hex}"
+        run_dir = self._project_root / "data" / "runs" / run_id
+        state = RunState(
+            run_id=run_id,
+            experiment_id=None,
+            status=RunStatus.FAILED,
+            stage=DataStage.FAILED,
+            dataset_version=dataset_version,
+            universe_version=universe_version,
+            trust_mode=trust_mode.value,
+            failed_stage="acceptance",
+            error={
+                "stage": "acceptance",
+                "exception_class": type(error).__name__,
+                "message": redact_text(str(error), self._secrets),
+                "retriable": False,
+            },
+        )
+        write_run_manifest(run_dir, state)
+        self._run_id = run_id
+        self._run_dir = run_dir
 
     def _detect_code_commit(self) -> str | None:
         """The repository HEAD when ``config_root`` is inside a git work tree."""
@@ -603,6 +716,7 @@ class ResearchRunner:
             stage=DataStage.CREATED,
             dataset_version=frozen.dataset_version,
             universe_version=frozen.universe_version,
+            data_acceptance=self._data_acceptance,
             code_commit=frozen.code_commit,
             factor_versions=dict(frozen.factor_versions),
             cost_scenarios=list(frozen.cost_scenarios),
@@ -783,11 +897,18 @@ class ResearchRunner:
                 "experiment requires an explicit reason in metrics.json "
                 "evaluation"
             )
+        if state.experiment_id is None:
+            raise ValueError(
+                f"cannot publish run {self._run_id}: the run state carries no "
+                "experiment identity; a completed run must publish under the "
+                "frozen experiment id"
+            )
         manifest = {
             "experiment_id": state.experiment_id,
             "status": rejected if status == untrusted else status,
             "dataset_version": frozen.dataset_version,
             "universe_version": frozen.universe_version,
+            "data_acceptance_id": frozen.data_acceptance_id,
             "code_commit": frozen.code_commit,
             "evaluation_reason": reason,
             "artifacts": artifacts,
@@ -1601,6 +1722,12 @@ class ResearchRunner:
         # rendering so the evaluator, the direct-run report and any later
         # rebuild from metrics.json all consume the same committed facts.
         metrics["factor_input"] = self._factor_input_audit(frozen)
+        # Persist the pinned real-data acceptance audit next to it: a run
+        # without one is recorded as explicitly UNVERIFIED, never as trusted.
+        metrics["data_acceptance"] = self._data_acceptance or {
+            "acceptance_id": None,
+            "status": "UNVERIFIED",
+        }
         evaluation = self._evaluator(metrics)
         if not isinstance(evaluation, Evaluation):
             raise TypeError(

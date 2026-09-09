@@ -33,7 +33,11 @@ from typing import Literal
 import pandas as pd
 from pydantic import BaseModel, Field, ValidationError
 
-from stock_quant.research.spec import ExperimentSpec, compute_experiment_id
+from stock_quant.research.spec import (
+    ExperimentSpec,
+    compute_experiment_id,
+    load_experiment_spec,
+)
 
 _MANIFEST_NAME = "experiment_manifest.json"
 _RUN_MANIFEST_NAME = "run_manifest.json"
@@ -88,6 +92,9 @@ class ExperimentManifest(BaseModel):
     status: Literal["ACCEPTED", "REJECTED"]
     dataset_version: str
     universe_version: str
+    #: The pinned real-data acceptance of the frozen spec (``None`` for an
+    #: ENGINEERING diagnostic).  Validated against the frozen spec itself.
+    data_acceptance_id: str | None = None
     code_commit: str | None = None
     evaluation_reason: str | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
@@ -208,6 +215,9 @@ class ExperimentRegistry:
                     f"staged experiment {manifest.experiment_id} does not match "
                     f"identity {identity.experiment_id}"
                 )
+            _assert_manifest_acceptance_binding(
+                staged, manifest, InvalidExperimentManifest
+            )
             if destination.exists():
                 if _declared_files_match(staged, destination, manifest.artifacts):
                     return PublishedExperiment(
@@ -278,11 +288,21 @@ class ExperimentRegistry:
                 f"staging has no valid {_MANIFEST_NAME} under {staged}"
             ) from error
         try:
-            return ExperimentManifest.model_validate(raw)
+            manifest = ExperimentManifest.model_validate(raw)
         except ValidationError as error:
             raise InvalidExperimentManifest(
                 f"{_MANIFEST_NAME} under {staged} is invalid: {error}"
             ) from error
+        if not isinstance(manifest.experiment_id, str) or (
+            not manifest.experiment_id
+        ):
+            # A published experiment must always carry its frozen identity; a
+            # null experiment id belongs only to a FAILED preflight run
+            # manifest, which can never reach publication.
+            raise InvalidExperimentManifest(
+                f"{_MANIFEST_NAME} under {staged} carries no experiment id"
+            )
+        return manifest
 
     def _rebuild_unlocked(self) -> Path:
         self.experiments_root.mkdir(parents=True, exist_ok=True)
@@ -303,6 +323,10 @@ class ExperimentRegistry:
                     f"experiment directory {name} disagrees with its manifest "
                     f"experiment_id {raw.get('experiment_id')!r}"
                 )
+            manifest = self._read_manifest(directory)
+            _assert_manifest_acceptance_binding(
+                directory, manifest, RegistryIntegrityError
+            )
             records.append(
                 {
                     "experiment_id": name,
@@ -327,6 +351,32 @@ class ExperimentRegistry:
         finally:
             temporary.unlink(missing_ok=True)
         return destination
+
+
+def _assert_manifest_acceptance_binding(
+    directory: Path,
+    manifest: ExperimentManifest,
+    error_class: type[ExperimentRegistryError],
+) -> None:
+    """Require the manifest to carry exactly its frozen spec's acceptance id.
+
+    The frozen ``experiment_spec.yml`` stored beside the manifest is the
+    authority: a manifest whose ``data_acceptance_id`` disagrees with it (or a
+    spec whose acceptance was never resolved) cannot be published or indexed.
+    """
+    spec_path = directory / "experiment_spec.yml"
+    try:
+        spec = load_experiment_spec(spec_path)
+    except (OSError, ValueError) as error:
+        raise error_class(
+            f"{spec_path} is not a valid frozen experiment spec: {error}"
+        ) from error
+    if spec.data_acceptance_id != manifest.data_acceptance_id:
+        raise error_class(
+            f"experiment {manifest.experiment_id} manifest records "
+            f"data_acceptance_id {manifest.data_acceptance_id!r} but its "
+            f"frozen spec pins {spec.data_acceptance_id!r}"
+        )
 
 
 def _declared_files_match(

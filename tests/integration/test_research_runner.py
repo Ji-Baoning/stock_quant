@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import yaml
+from conftest import fixture_build_config, publish_fixture_acceptance  # noqa: E402
 
 from stock_quant.backtest.models import BUY
 from stock_quant.data_model.adjusted_bar import build_adjusted_bars
@@ -54,6 +56,8 @@ from stock_quant.data_model.security_master import (
 from stock_quant.data_model.trading_rules import REASON_SELL_AT_LOWER_LIMIT
 from stock_quant.data_quality.models import QualityReport
 from stock_quant.factors.momentum import Momentum60
+from stock_quant.research.acceptance.models import CURRENT_ACCEPTED
+from stock_quant.research.acceptance.registry import AcceptanceRegistry
 from stock_quant.research.models import (
     REQUIRED_ARTIFACTS,
     Evaluation,
@@ -91,6 +95,59 @@ EQUITY_GROWTH = (
 
 _INGESTED = pd.Timestamp("2026-09-04T08:00:00Z")
 
+#: The repository config files the offline acceptance checker reads from the
+#: project root (project.yml benchmarks, sources).  The runner keeps
+#: ``config_root=_REPO_ROOT``; the copy only satisfies the checker.
+_CONFIG_NAMES = (
+    "project.yml",
+    "sources.yml",
+    "costs.yml",
+    "trading_rules.yml",
+)
+
+#: Fixed ``selected_as_of`` for the generated fixture universe (inside the
+#: synthetic calendar) so the written YAML is deterministic.
+_UNIVERSE_AS_OF = date(2022, 1, 7)
+
+
+def _ensure_fixture_configs(project_root: Path, master: pd.DataFrame) -> None:
+    """Write the project configs the offline acceptance checker reads.
+
+    The checker re-runs the publication gate and the semantic evidence checks
+    against ``configs/`` in the *project* root, so the synthetic project
+    carries a fixture-local ``universe.yml`` listing exactly the dataset's
+    securities (the publication gate is FATAL on any universe/master
+    disagreement); the remaining config files are copied from the repository.
+    """
+    config_dir = project_root / "configs"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    for name in _CONFIG_NAMES:
+        target = config_dir / name
+        if not target.is_file():
+            target.write_text(
+                (_REPO_ROOT / "configs" / name).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+    entries = [
+        {
+            "symbol": str(symbol),
+            "name_at_selection": f"synth_{symbol}",
+            "exchange": "SH",
+            "board": "sh_main",
+            "selected_as_of": _UNIVERSE_AS_OF,
+            "boundary_tags": ["fixture"],
+            "selection_reason": (
+                "synthetic research-runner fixture sample; not a recommendation"
+            ),
+        }
+        for symbol in sorted(str(value) for value in master["symbol"])
+    ]
+    document = {"selected_as_of": _UNIVERSE_AS_OF, "entries": entries}
+    (config_dir / "universe.yml").write_text(
+        yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
 
 @dataclass(frozen=True)
 class _Env:
@@ -98,6 +155,13 @@ class _Env:
 
     root: Path
     version: str
+
+
+@dataclass(frozen=True)
+class _AcceptedEnv(_Env):
+    """A synthetic project whose pinned dataset carries a valid acceptance."""
+
+    acceptance_id: str
 
 
 def _weekdays(start: date, end: date) -> list[date]:
@@ -134,12 +198,20 @@ def _bars(
                   for index in range(n)]
         if symbol in limit_locked_symbols:
             opens = list(closes)
+            lows: list[float] | None = None
             for index in range(1, n):
                 if sessions[index].weekday() == 0:  # Monday == execution day
                     opens[index] = 0.5 * closes[index - 1]
-            frames.append(_instrument_frame(sessions, symbol, closes, opens))
+            # Keep the bar OHLC-valid: the limit-locked Monday open sits far
+            # below the close, so the low follows it down on those sessions.
+            lows = [min(open_, close_) for open_, close_ in zip(opens, closes)]
+            frames.append(_instrument_frame(
+                sessions, symbol, closes, opens, source="tushare", lows=lows
+            ))
         else:
-            frames.append(_instrument_frame(sessions, symbol, closes))
+            frames.append(_instrument_frame(
+                sessions, symbol, closes, source="tushare"
+            ))
     if fresh is not None:
         symbol, list_date, growth = fresh
         start_at = next(
@@ -149,9 +221,13 @@ def _bars(
             _BASE_PRICE * math.exp(growth * (index - (n - 1)))
             for index in range(start_at, n)
         ]
-        frames.append(_instrument_frame(sessions[start_at:], symbol, closes))
+        frames.append(_instrument_frame(
+            sessions[start_at:], symbol, closes, source="tushare"
+        ))
     for symbol, level in zip(_BENCHMARK_SYMBOLS, index_close):
-        frames.append(_instrument_frame(sessions, symbol, [level] * n))
+        frames.append(_instrument_frame(
+            sessions, symbol, [level] * n, source="akshare"
+        ))
     return pd.concat(frames, ignore_index=True)[DAILY_COLUMNS]
 
 
@@ -160,21 +236,26 @@ def _instrument_frame(
     symbol: str,
     closes: list[float],
     opens: list[float] | None = None,
+    *,
+    source: str,
+    lows: list[float] | None = None,
 ) -> pd.DataFrame:
+    """One deterministic daily-bar frame (``source`` is a known supplier)."""
     n = len(sessions)
     opens = closes if opens is None else opens
+    lows = closes if lows is None else lows
     return pd.DataFrame(
         {
             "trade_date": pd.to_datetime(sessions),
             "symbol": symbol,
             "open": opens,
             "high": closes,
-            "low": closes,
+            "low": lows,
             "close": closes,
             "volume": [0] * n,
             "amount": [0.0] * n,
             "adjustment": "unadjusted",
-            "source": "synthetic",
+            "source": source,
             "ingested_at": [_INGESTED] * n,
         }
     )
@@ -294,19 +375,24 @@ def _coverage(
     return coverage_frame(records)
 
 
-def _master_coverage(symbols: tuple[str, ...]) -> pd.DataFrame:
-    """One deterministic security_master_coverage row per symbol."""
+def _master_coverage(master: pd.DataFrame) -> pd.DataFrame:
+    """One deterministic security_master_coverage row per security_master row.
+
+    Each coverage row carries the master's own listing facts, so the coverage
+    evidence always agrees with the master (a freshly-listed fixture symbol
+    keeps its real late ``list_date``).
+    """
     records = [
         master_coverage_record(
-            symbol,
-            list_date=_LIST_DATE,
+            str(row["symbol"]),
+            list_date=pd.Timestamp(row["list_date"]).date(),
             list_status=ListStatus.L,
             source=MASTER_SOURCE_STOCK_BASIC,
             snapshot_sha256="f" * 64,
             sdk_version="fixture",
             checked_at=_INGESTED,
         )
-        for symbol in sorted(symbols)
+        for row in master.to_dict("records")
     ]
     return master_coverage_frame(records)
 
@@ -344,13 +430,23 @@ def _publish_synthetic_dataset(
     master_coverage: pd.DataFrame | None = None,
     fresh: tuple[str, date, float] | None = None,
     corporate_actions: pd.DataFrame | None = None,
+    accept: bool = True,
 ) -> str:
     """Publish the synthetic market under ``project_root``; return its version.
 
     The default dataset carries an explicit ``VERIFIED_EMPTY`` corporate-action
     coverage row per symbol AND a ``security_master_coverage`` row per symbol
     (both evidence tables), so the ResearchRunner's RESEARCH gates pass over the
-    default market.  ``fresh`` optionally adds one recently-listed symbol
+    default market.  Trusted datasets are published exactly the way the data
+    pipeline publishes an update: deterministic raw snapshots are saved through
+    ``RawStore`` and the sanitized ``build_config`` binds them with
+    ``origin=data_update`` and healthy required-source statuses.  With
+    ``accept=True`` (the default) the real offline checker must pass every
+    ``real-data-v1`` check and one fixed ACCEPTED record is published for the
+    version, so formal RESEARCH runs pass the acceptance gate; datasets whose
+    evidence is intentionally broken pass ``accept=False`` -- they publish no
+    acceptance, so a RESEARCH run over them must fail the gate.
+    ``fresh`` optionally adds one recently-listed symbol
     ``(symbol, list_date, growth)`` whose bars begin at its list date (the
     new-IPO acceptance fixture); ``master_coverage`` overrides the evidence
     (an empty frame publishes an empty table that fails the master gate);
@@ -358,11 +454,12 @@ def _publish_synthetic_dataset(
     ``_cash_action`` for a total-return market.
     """
     master = _security_master(fresh)
+    _ensure_fixture_configs(project_root, master)
     symbols = tuple(master["symbol"])
     if coverage is None:
         coverage = _coverage(symbols, status=CoverageStatus.VERIFIED_EMPTY)
     if master_coverage is None:
-        master_coverage = _master_coverage(symbols)
+        master_coverage = _master_coverage(master)
     daily = _bars(
         _weekdays(_BARS_START, _BARS_END),
         index_close=index_close,
@@ -391,7 +488,12 @@ def _publish_synthetic_dataset(
         "corporate_action_coverage": coverage,
         "trading_calendar": _trading_calendar(),
     }
-    return DatasetPublisher(project_root).publish(tables, QualityReport()).version
+    version = DatasetPublisher(project_root).publish(
+        tables, QualityReport(), build_config=fixture_build_config(project_root)
+    ).version
+    if accept:
+        publish_fixture_acceptance(project_root, version)
+    return version
 
 
 #: A narrow untrusted evidence band: wide enough that the RESEARCH execution
@@ -403,7 +505,12 @@ _UNTRUSTED_BAND = (date(2020, 6, 1), date(2020, 6, 5))
 
 
 def _publish_dataset_with_untrusted_coverage(project_root: Path) -> str:
-    """Republish CURRENT with an untrusted evidence band over every holding."""
+    """Republish CURRENT with an untrusted evidence band over every holding.
+
+    The untrusted coverage fails the real ``corporate_action_evidence`` check,
+    so this dataset publishes no ACCEPTED record: a RESEARCH run over it must
+    fail the acceptance gate before any corporate-action or factor work.
+    """
     return _publish_synthetic_dataset(
         project_root,
         coverage=_coverage(
@@ -413,6 +520,7 @@ def _publish_dataset_with_untrusted_coverage(project_root: Path) -> str:
             window_start=_UNTRUSTED_BAND[0],
             window_end=_UNTRUSTED_BAND[1],
         ),
+        accept=False,
     )
 
 
@@ -429,9 +537,10 @@ def _publish_dataset_with_verified_empty_coverage(project_root: Path) -> str:
 def _publish_legacy_dataset(project_root: Path) -> str:
     """Republish CURRENT in the pre-adjusted_bar six-table legacy shape.
 
-    The dataset is otherwise healthy (evidence tables, calendar, master), so a
-    research run can only fail because the pinned version has no ``adjusted_bar``
-    table for the factor adapter to read.
+    The dataset keeps its pre-provenance shape (no ``build_config`` evidence)
+    and publishes no acceptance record, so a RESEARCH run over it fails the
+    acceptance gate; the missing-``adjusted_bar`` no-fallback contract of the
+    factor adapter is exercised by an ENGINEERING diagnostic instead.
     """
     master = _security_master()
     symbols = tuple(master["symbol"])
@@ -440,7 +549,7 @@ def _publish_legacy_dataset(project_root: Path) -> str:
             _weekdays(_BARS_START, _BARS_END), index_close=(4000.0, 2000.0)
         ),
         "security_master": master,
-        "security_master_coverage": _master_coverage(symbols),
+        "security_master_coverage": _master_coverage(master),
         "corporate_action": _corporate_action(),
         "corporate_action_coverage": _coverage(
             symbols, status=CoverageStatus.VERIFIED_EMPTY
@@ -528,6 +637,26 @@ def current_switcher(env: _Env) -> _CurrentSwitcher:
 @pytest.fixture
 def failing_runner(env: _Env) -> ResearchRunner:
     return ResearchRunner(env.root, config_root=_REPO_ROOT)
+
+
+@pytest.fixture
+def accepted_project(tmp_path) -> _AcceptedEnv:
+    """A project whose CURRENT dataset passed every real-data-v1 check and
+    whose registry holds one fixed ACCEPTED record for it."""
+    root = tmp_path / "project"
+    version = _publish_synthetic_dataset(root)
+    selected = AcceptanceRegistry(root).select(version, CURRENT_ACCEPTED)
+    return _AcceptedEnv(
+        root=root, version=version, acceptance_id=selected.acceptance_id
+    )
+
+
+@pytest.fixture
+def unaccepted_project(tmp_path) -> _Env:
+    """A healthy-trust project whose registry holds no acceptance record."""
+    root = tmp_path / "project"
+    version = _publish_synthetic_dataset(root, accept=False)
+    return _Env(root=root, version=version)
 
 
 # --------------------------------------------------------------------------- #
@@ -680,9 +809,15 @@ def test_run_report_shows_factor_price_basis(env):
 
 
 def test_research_rejects_untrusted_but_engineering_is_untrusted(env):
+    """Untrusted corporate-action evidence cannot earn an ACCEPTED record, so
+    the formal research run fails at the acceptance gate (before any
+    corporate-action or factor work); the ENGINEERING diagnostic still replays
+    the full pipeline and is stamped UNTRUSTED."""
     _publish_dataset_with_untrusted_coverage(env.root)
     runner = ResearchRunner(env.root, config_root=_REPO_ROOT)
-    with pytest.raises(ResearchRunFailed, match="corporate action trust"):
+    with pytest.raises(
+        ResearchRunFailed, match="no valid real-data-v1 acceptance"
+    ):
         runner.run(_SPEC)
     debug = runner.run(_SPEC, trust_mode=DataTrustMode.ENGINEERING)
     assert json.loads(
@@ -715,28 +850,115 @@ def test_engineering_never_publishes_accepted_even_with_trusted_evidence(env):
     assert debug.manifest.status == "REJECTED"
 
 
+# --------------------------------------------------------------------------- #
+# The real-data acceptance gate (plan Task 6 Steps 4-6)
+# --------------------------------------------------------------------------- #
+
+
+def test_research_without_acceptance_fails_before_factor(unaccepted_project):
+    """A RESEARCH run over a project without an ACCEPTED record fails closed.
+
+    The gate runs inside the freeze (before any run workspace, factor provider,
+    portfolio builder or backtest engine work) and persists a FAILED preflight
+    manifest whose experiment_id is still ``None`` because no experiment
+    identity can exist without a pinned acceptance.
+    """
+    provider = _CountingFactorProvider()
+    runner = ResearchRunner(
+        unaccepted_project.root,
+        config_root=_REPO_ROOT,
+        factor_provider=provider.provide,
+    )
+    with pytest.raises(
+        ResearchRunFailed, match="no valid real-data-v1 acceptance"
+    ):
+        runner.run(_SPEC)
+    assert provider.calls == 0
+    state = runner.latest_run_manifest()
+    assert state.experiment_id is None
+    assert state.failed_stage == "acceptance"
+    assert state.status == "FAILED"
+    assert state.trust_mode == "research"
+    assert state.run_id.startswith("preflight_acceptance_")
+
+
+def test_engineering_preflight_stamps_resolved_trust_mode(unaccepted_project):
+    """An ENGINEERING run that explicitly pins a concrete-but-missing
+    acceptance id still fails the gate, and its preflight manifest stamps the
+    resolved engineering mode instead of the RunState ``research`` default."""
+    spec_text = (_REPO_ROOT / _SPEC).read_text(encoding="utf-8")
+    assert "data_acceptance_id: CURRENT_ACCEPTED" in spec_text
+    spec_dir = unaccepted_project.root / "configs" / "experiments"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    pinned = spec_dir / "pinned_missing_acceptance.yml"
+    pinned.write_text(
+        spec_text.replace(
+            "data_acceptance_id: CURRENT_ACCEPTED",
+            f"data_acceptance_id: {'e' * 64}",
+        ),
+        encoding="utf-8",
+    )
+    runner = ResearchRunner(unaccepted_project.root, config_root=_REPO_ROOT)
+    with pytest.raises(
+        ResearchRunFailed, match="no valid real-data-v1 acceptance"
+    ):
+        runner.run(pinned, trust_mode=DataTrustMode.ENGINEERING)
+    state = runner.latest_run_manifest()
+    assert state.experiment_id is None
+    assert state.failed_stage == "acceptance"
+    assert state.trust_mode == "engineering"
+    assert state.run_id.startswith("preflight_acceptance_")
+
+
+def test_research_pins_accepted_identity(accepted_project):
+    """The frozen spec stored with the published experiment carries the
+    concrete resolved acceptance id, never the CURRENT_ACCEPTED placeholder."""
+    published = ResearchRunner(
+        accepted_project.root, config_root=_REPO_ROOT
+    ).run(_SPEC)
+    frozen = yaml.safe_load(
+        (published.path / "experiment_spec.yml").read_text(encoding="utf-8")
+    )
+    assert frozen["data_acceptance_id"] == accepted_project.acceptance_id
+    assert frozen["data_acceptance_id"] != "CURRENT_ACCEPTED"
+    assert published.manifest.data_acceptance_id == accepted_project.acceptance_id
+    metrics = json.loads(
+        (published.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics["data_acceptance"]["acceptance_id"] == (
+        accepted_project.acceptance_id
+    )
+    assert metrics["data_acceptance"]["decision"] == "ACCEPTED"
+
+
 def _publish_dataset_without_master_evidence(project_root: Path) -> str:
-    """Republish CURRENT with an empty security_master_coverage table."""
+    """Republish CURRENT with an empty security_master_coverage table.
+
+    The missing master evidence fails the real ``security_master_evidence``
+    check, so this dataset publishes no ACCEPTED record: a RESEARCH run over
+    it must fail the acceptance gate before any factor work.
+    """
     from stock_quant.data_model.security_master import master_coverage_frame
 
     return _publish_synthetic_dataset(
         project_root,
         master_coverage=master_coverage_frame([]),
+        accept=False,
     )
 
 
 def test_research_rejects_missing_master_evidence_but_engineering_is_untrusted(
     env,
 ):
-    """Empty master evidence freezes RESEARCH; ENGINEERING still diagnoses.
-
-    The rejection must name the security-master evidence and happen before any
-    backtest; the ENGINEERING run proceeds as an UNTRUSTED diagnostic that can
-    never be accepted as a trusted performance claim.
-    """
+    """Missing master evidence cannot earn an ACCEPTED record, so the formal
+    research run fails at the acceptance gate; the ENGINEERING diagnostic
+    still replays as an UNTRUSTED run that can never be accepted as a trusted
+    performance claim."""
     _publish_dataset_without_master_evidence(env.root)
     runner = ResearchRunner(env.root, config_root=_REPO_ROOT)
-    with pytest.raises(ResearchRunFailed, match="security master evidence"):
+    with pytest.raises(
+        ResearchRunFailed, match="no valid real-data-v1 acceptance"
+    ):
         runner.run(_SPEC)
     debug = runner.run(_SPEC, trust_mode=DataTrustMode.ENGINEERING)
     metrics = json.loads(
@@ -765,11 +987,18 @@ def test_research_factor_input_uses_adjusted_bar(env):
 
 
 def test_research_rejects_dataset_without_adjusted_bar(env):
-    """A legacy dataset without adjusted_bar fails the run, never falls back."""
+    """A legacy dataset fails closed: it has no build evidence, so a RESEARCH
+    run cannot even accept it, and an ENGINEERING diagnostic that does reach
+    the factor adapter never falls back to an unadjusted close series."""
     _publish_legacy_dataset(env.root)
     runner = ResearchRunner(env.root, config_root=_REPO_ROOT)
-    with pytest.raises(ResearchRunFailed, match="adjusted_bar"):
+    with pytest.raises(
+        ResearchRunFailed, match="no valid real-data-v1 acceptance"
+    ):
         runner.run(_SPEC)
+    debug = ResearchRunner(env.root, config_root=_REPO_ROOT)
+    with pytest.raises(ResearchRunFailed, match="adjusted_bar"):
+        debug.run(_SPEC, trust_mode=DataTrustMode.ENGINEERING)
 
 
 def test_research_rejects_spec_requesting_retired_factor_version(env, tmp_path):

@@ -8,15 +8,22 @@ repository plus one content-addressed 8-table dataset that also carries
 ``adjusted_bar``, ``corporate_action_quarantine``,
 ``corporate_action_coverage`` and ``security_master_coverage`` evidence
 tables) and the same two fixtures
-(``cli_runner``, ``fixture_root``).  All fixtures are offline and live
-under ``tmp_path_factory``; nothing here touches the network or a token, and no
-real market data is committed.
+(``cli_runner``, ``fixture_root``).  Trusted fixture datasets are published
+with genuine data-update provenance -- deterministic raw snapshots under
+``data/raw`` and the sanitized ``build_config`` the pipeline itself writes --
+and carry one fixed ACCEPTED real-data record (created 2022-01-08, operator
+``integration-fixture``) whose automated checks come from the real offline
+checker, so formal RESEARCH runs pass the acceptance gate exactly like an
+operator dataset would.  Broken/untrusted fixtures publish no ACCEPTED record.
+All fixtures are offline and live under ``tmp_path_factory``; nothing here
+touches the network or a token, and no real market data is committed.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -44,7 +51,29 @@ from stock_quant.data_model.security_master import (
     master_coverage_record,
 )
 from stock_quant.data_model.universe import Universe
+from stock_quant.data_pipeline import (
+    DataUpdateRequest,
+    SourceStatus,
+    dataset_build_config,
+)
 from stock_quant.data_quality.models import QualityReport
+from stock_quant.data_sources.base import DataRequest, FetchResult, request_key
+from stock_quant.data_sources.raw_store import RawStore
+from stock_quant.research.acceptance.checks import (
+    AcceptanceCheckInput,
+    dataset_evidence,
+    run_automated_checks,
+)
+from stock_quant.research.acceptance.models import (
+    MANUAL_CHECK_CODES,
+    AcceptanceDecision,
+    AcceptanceRecord,
+    CheckResult,
+    CheckStatus,
+    EvidenceReference,
+    compute_acceptance_id,
+)
+from stock_quant.research.acceptance.registry import AcceptanceRegistry
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -79,6 +108,7 @@ factor_versions:
   momentum_60d: 2.0.0
 dataset_version: CURRENT
 universe_version: CURRENT
+data_acceptance_id: CURRENT_ACCEPTED
 date_range:
   start_date: 2020-01-01
   end_date: 2021-12-31
@@ -108,6 +138,23 @@ agent_id: null
 _BROKEN_COVERAGE_START = date(2020, 6, 1)
 _BROKEN_COVERAGE_END = date(2020, 6, 5)
 
+#: The data-update window every trusted fixture dataset's sanitized build
+#: evidence binds.  It sits inside the fixture calendar/bars span and ends on
+#: an open day, so the real offline checks can fully verify it.
+_UPDATE_WINDOW_START = date(2021, 11, 1)
+_UPDATE_WINDOW_END = date(2021, 11, 30)
+_UPDATE_RUN_ID = "fixture-data-update-0001"
+
+#: The fixed acceptance identity of the trusted fixture record: a constant
+#: creation instant and operator keep the content-derived ``acceptance_id``
+#: stable within one fixture build (and identical reruns against it).  Across
+#: independent builds the id differs because the dataset manifest itself
+#: carries a wall-clock ``created_at`` that stays outside the dataset version
+#: hash; nothing depends on cross-build stability.
+_ACCEPTANCE_OPERATOR = "integration-fixture"
+_ACCEPTANCE_CREATED_AT = datetime(2022, 1, 8, tzinfo=timezone.utc)
+_EVIDENCE_DIR = Path("data") / "acceptance_evidence"
+
 _CONFIG_NAMES = (
     "project.yml",
     "sources.yml",
@@ -123,6 +170,9 @@ class FixtureProject:
 
     root: Path
     version: str
+    #: The acceptance id of the published ACCEPTED record, or ``None`` when
+    #: the fixture is broken/untrusted and publishes no acceptance.
+    acceptance_id: str | None = None
 
     @property
     def experiment_spec(self) -> str:
@@ -152,13 +202,22 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
     RESEARCH runs in the CLI / end-to-end suite pass the corporate-action trust
     gate, and one ``security_master_coverage`` row per universe symbol (at the
     master's listing facts) so the RESEARCH master-evidence gate accepts the
-    dataset too.  ``broken=True`` keeps the (empty) facts table so an
-    ENGINEERING diagnostic can still replay, but marks the coverage evidence
-    UNTRUSTED (``SOURCE_FETCH_FAILED``) over the narrow
-    ``_BROKEN_COVERAGE_*`` band and keeps the security-master coverage
-    table *empty*: a RESEARCH run must fail a gate before any backtest while an
-    ENGINEERING run may still complete as an UNTRUSTED diagnostic that is never
-    accepted as a trusted performance claim.
+    dataset too.
+
+    A trusted dataset (``broken=False``) is published exactly the way the data
+    pipeline publishes an update: deterministic raw snapshots are saved through
+    ``RawStore`` for every required source role and the sanitized
+    ``build_config`` binds them with ``origin=data_update`` and healthy
+    required-source statuses.  The real offline checker must pass every
+    ``real-data-v1`` check and one fixed ACCEPTED record is published, so
+    formal RESEARCH runs pass the acceptance gate.  ``broken=True`` keeps the
+    (empty) facts table so an ENGINEERING diagnostic can still replay, but
+    marks the coverage evidence UNTRUSTED (``SOURCE_FETCH_FAILED``) over the
+    narrow ``_BROKEN_COVERAGE_*`` band, keeps the security-master coverage
+    table *empty*, and publishes neither build evidence nor an ACCEPTED
+    record: a RESEARCH run must fail the acceptance gate before any backtest
+    while an ENGINEERING run may still complete as an UNTRUSTED diagnostic
+    that is never accepted as a trusted performance claim.
     """
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -198,8 +257,193 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
         "corporate_action_coverage": coverage,
         "trading_calendar": _trading_calendar(),
     }
-    version = DatasetPublisher(root).publish(tables, QualityReport()).version
-    return FixtureProject(root=root, version=version)
+    if broken:
+        version = DatasetPublisher(root).publish(tables, QualityReport()).version
+        return FixtureProject(root=root, version=version, acceptance_id=None)
+    version = DatasetPublisher(root).publish(
+        tables, QualityReport(), build_config=fixture_build_config(root)
+    ).version
+    acceptance_id = publish_fixture_acceptance(root, version)
+    return FixtureProject(
+        root=root, version=version, acceptance_id=acceptance_id
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Synthetic data-update provenance and the fixed fixture acceptance record
+# --------------------------------------------------------------------------- #
+
+
+def fixture_build_config(project_root: Path) -> dict[str, object]:
+    """The sanitized data-update build evidence bound into trusted fixtures.
+
+    Saves deterministic ``FetchResult`` frames for every required source role
+    (tushare primary daily + security master, akshare benchmark) through the
+    real ``RawStore`` and assembles the payload through the pipeline's own
+    ``dataset_build_config`` primitive, so fixture datasets carry exactly the
+    provenance shape an operator update produces.
+    """
+    store = RawStore(project_root)
+    snapshots = tuple(
+        store.save(result) for result in _fixture_fetch_results()
+    )
+    return dataset_build_config(
+        run_id=_UPDATE_RUN_ID,
+        request=DataUpdateRequest(
+            start_date=_UPDATE_WINDOW_START, end_date=_UPDATE_WINDOW_END
+        ),
+        resolved_end_date=_UPDATE_WINDOW_END,
+        resolved_end_is_fallback=False,
+        statuses=_fixture_source_statuses(),
+        raw_snapshots=snapshots,
+    )
+
+
+def publish_fixture_acceptance(project_root: Path, dataset_version: str) -> str:
+    """Run the real offline checker and publish the fixed ACCEPTED record.
+
+    Every ``real-data-v1`` automated check must PASS (fixture sanity); the
+    manual checks are all PASS with fixture-local, deterministically-byteed
+    evidence files under the project; ``created_at`` and the operator are
+    fixed constants, so the content-derived acceptance id stays stable for
+    identical evidence.  Returns the acceptance id.  Broken/untrusted fixture
+    datasets never call this -- their research runs must fail the gate.
+    """
+    root = Path(project_root)
+    value = AcceptanceCheckInput(root, dataset_version)
+    automated = run_automated_checks(value)
+    failed = [row.code for row in automated if row.status is not CheckStatus.PASS]
+    assert not failed, f"fixture dataset failed automated checks: {failed}"
+    evidence = dataset_evidence(value)
+    manual = tuple(
+        CheckResult(
+            code=code,
+            status=CheckStatus.PASS,
+            summary="integration fixture operator sample verified",
+            evidence=(_fixture_evidence_reference(root, code),),
+        )
+        for code in MANUAL_CHECK_CODES
+    )
+    provisional = AcceptanceRecord(
+        acceptance_id="0" * 64,
+        dataset_version=dataset_version,
+        dataset_manifest_sha256=evidence.dataset_manifest_sha256,
+        quality_report_sha256=evidence.quality_report_sha256,
+        created_at=_ACCEPTANCE_CREATED_AT,
+        operator_id=_ACCEPTANCE_OPERATOR,
+        automated_checks=automated,
+        manual_checks=manual,
+        raw_snapshot_evidence=evidence.raw_snapshot_evidence,
+        decision=AcceptanceDecision.ACCEPTED,
+        reasons=(),
+    )
+    record = provisional.model_copy(
+        update={"acceptance_id": compute_acceptance_id(provisional)}
+    )
+    AcceptanceRegistry(root).publish(record)
+    return record.acceptance_id
+
+
+def _fixture_evidence_reference(root: Path, code: str) -> EvidenceReference:
+    """One local evidence file with deterministic bytes per manual check."""
+    relative = (_EVIDENCE_DIR / f"{code}.txt").as_posix()
+    summary = f"{code}: integration fixture operator sample verified"
+    payload = (summary + "\n").encode("utf-8")
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return EvidenceReference(
+        kind="local",
+        reference=relative,
+        sha256=hashlib.sha256(payload).hexdigest(),
+        summary=summary,
+    )
+
+
+def _fixture_source_statuses() -> dict[str, SourceStatus]:
+    """Required sources ok; the optional validation source was not fetched."""
+    return {
+        "tushare": SourceStatus(
+            source="tushare", required=True, ok=True,
+            reason="ok", reason_code="ok",
+        ),
+        "akshare": SourceStatus(
+            source="akshare", required=True, ok=True,
+            reason="ok", reason_code="ok",
+        ),
+        "baostock": SourceStatus(
+            source="baostock", required=False, ok=False,
+            reason="validation series not fetched by the fixture",
+            reason_code="optional_source_unavailable",
+        ),
+    }
+
+
+def _fixture_fetch_results() -> tuple[FetchResult, ...]:
+    """Deterministic raw responses for every required source role."""
+    sessions = _weekdays(_UPDATE_WINDOW_START, _UPDATE_WINDOW_END)
+    daily_request = DataRequest(
+        endpoint="daily",
+        symbols=("000001.SZ",),
+        start_date=_UPDATE_WINDOW_START,
+        end_date=_UPDATE_WINDOW_END,
+    )
+    daily = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"] * len(sessions),
+            "trade_date": [day.strftime("%Y%m%d") for day in sessions],
+            "open": [55.0] * len(sessions),
+            "high": [55.0] * len(sessions),
+            "low": [55.0] * len(sessions),
+            "close": [55.0] * len(sessions),
+            "volume": [1000] * len(sessions),
+            "amount": [55000.0] * len(sessions),
+        }
+    )
+    basic_request = DataRequest(
+        endpoint="stock_basic",
+        symbols=("000001.SZ",),
+        start_date=_UPDATE_WINDOW_START,
+        end_date=_UPDATE_WINDOW_END,
+    )
+    stock_basic = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "name": ["fixture_security"],
+            "list_date": ["20180102"],
+            "delist_date": [""],
+            "list_status": ["L"],
+        }
+    )
+    index_request = DataRequest(
+        endpoint="index_history",
+        symbols=("000300.SH",),
+        start_date=_UPDATE_WINDOW_START,
+        end_date=_UPDATE_WINDOW_END,
+    )
+    index_history = pd.DataFrame(
+        {
+            "日期": sessions,
+            "收盘": [4000.0] * len(sessions),
+        }
+    )
+    return (
+        FetchResult(
+            source="tushare", endpoint="daily",
+            request_key=request_key(daily_request), frame=daily,
+            metadata={"source": "tushare", "sdk_version": "fixture"},
+        ),
+        FetchResult(
+            source="tushare", endpoint="stock_basic",
+            request_key=request_key(basic_request), frame=stock_basic,
+            metadata={"source": "tushare", "sdk_version": "fixture"},
+        ),
+        FetchResult(
+            source="akshare", endpoint="index_history",
+            request_key=request_key(index_request), frame=index_history,
+            metadata={"source": "akshare", "sdk_version": "fixture"},
+        ),
+    )
 
 
 def _coverage_table(universe: Universe, *, trusted: bool) -> pd.DataFrame:

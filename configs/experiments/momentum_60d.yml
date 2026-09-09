@@ -5,6 +5,8 @@
 # dataset_version 与 universe_version 用 CURRENT 占位：运行期由 runner 读取
 # 数据层 CURRENT 指针一次、解析为显式版本（ExperimentSpec.freeze）后再计算
 # experiment_id；冻结后写入实验目录的规格只引用显式版本，永不保留 CURRENT。
+# data_acceptance_id 同理：CURRENT_ACCEPTED 请求当前有效的真实数据验收记录，
+# runner 在计算实验身份前解析并冻结为显式验收 id（正式 RESEARCH 必需）。
 hypothesis: >-
   过去 60 个交易日的复权收益在 A 股样本内对随后短期收益存在一定持续性；
   一期仅验证工程链路可复现并跑通全部运行状态，不声称统计有效性，也不构成投资建议。
@@ -12,6 +14,7 @@ factor_versions:
   momentum_60d: 2.0.0
 dataset_version: CURRENT
 universe_version: CURRENT
+data_acceptance_id: CURRENT_ACCEPTED
 date_range:
   start_date: 2020-01-01
   end_date: 2026-09-02
