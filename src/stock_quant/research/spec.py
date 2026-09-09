@@ -6,7 +6,11 @@ Every official study is described by an immutable :class:`ExperimentSpec`
 ``CURRENT`` is allowed only as a pre-freeze placeholder.  The research runner
 resolves ``CURRENT`` once against the data layer and writes the explicit
 resolved version into the *frozen* spec via :meth:`ExperimentSpec.freeze`, so a
-stored spec never references the token.
+stored spec never references the token.  The same holds for
+``data_acceptance_id``: a spec requests the ``CURRENT_ACCEPTED`` placeholder
+and the runner pins the resolved real-data acceptance record id before the
+spec may freeze (a RESEARCH spec can never freeze without one; an
+ENGINEERING diagnostic may freeze with ``None``).
 
 A formal spec additionally names a frozen universe ``universe_definition``
 (e.g. ``csi300``): the runner validates that definition against the pinned
@@ -19,9 +23,9 @@ Identity (:func:`compute_experiment_id`) hashes the frozen spec with
 RFC-8785-style canonical JSON semantics implemented as sorted UTF-8 JSON with
 compact separators.  Dates are already normalized to ISO strings by
 ``model_dump(mode="json")``; ``allow_nan=False`` refuses any non-finite float.
-Every field of the spec is hashed, so code and data versions plus every input
-that can affect execution change the id, and ``model_copy(deep=True)`` of the
-same spec hashes identically.
+Every field of the spec is hashed, so code and data versions, the pinned
+data acceptance and every other input that can affect execution change the
+id, and ``model_copy(deep=True)`` of the same spec hashes identically.
 """
 
 from __future__ import annotations
@@ -35,11 +39,16 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from stock_quant.research.acceptance.models import CURRENT_ACCEPTED
 from stock_quant.research.trust import DataTrustMode
 
 #: Reserved dataset/universe version placeholder; resolved to an explicit
 #: version by :meth:`ExperimentSpec.freeze` before an identity may be computed.
 _CURRENT = "CURRENT"
+
+#: Internal freeze() sentinel distinguishing "argument not supplied" from the
+#: legitimate ``data_acceptance_id=None`` (an ENGINEERING diagnostic).
+_ACCEPTANCE_UNSET = object()
 
 #: Scheme version embedded in the canonical hash payload so a future change of
 #: the serialization semantics deliberately invalidates all prior identities.
@@ -97,6 +106,11 @@ class ExperimentSpec(BaseModel):
     #: version.  ``None`` keeps the legacy engineering ``configs/universe.yml``
     #: path, which formal runs never take.
     universe_definition: str | None = None
+    #: The real-data acceptance this study consumes.  ``CURRENT_ACCEPTED``
+    #: requests the newest valid ACCEPTED record and is resolved by the runner
+    #: before freezing; ``None`` is only ever valid for an ENGINEERING
+    #: diagnostic (its performance decision stays UNTRUSTED).
+    data_acceptance_id: str | None = CURRENT_ACCEPTED
     date_range: DateRange
     train_validation_holdout_policy: Literal["not_applicable_engineering_mvp"]
     preprocessing: Preprocessing
@@ -139,16 +153,28 @@ class ExperimentSpec(BaseModel):
 
     @property
     def is_frozen(self) -> bool:
-        """True when both data versions are explicit (not the ``CURRENT`` token)."""
-        return (
+        """True when both data versions and the acceptance id are explicit.
+
+        A RESEARCH spec additionally requires a concrete (non-``None``)
+        acceptance id: formal research without a pinned real-data acceptance
+        has no identity and can never run.
+        """
+        versions_fixed = (
             self.dataset_version != _CURRENT and self.universe_version != _CURRENT
         )
+        acceptance_fixed = self.data_acceptance_id != CURRENT_ACCEPTED
+        if self.trust_mode is DataTrustMode.RESEARCH:
+            acceptance_fixed = (
+                acceptance_fixed and self.data_acceptance_id is not None
+            )
+        return versions_fixed and acceptance_fixed
 
     def freeze(
         self,
         *,
         dataset_version: str | None = None,
         universe_version: str | None = None,
+        data_acceptance_id: str | None | object = _ACCEPTANCE_UNSET,
         code_commit: str | None = None,
         trust_mode: DataTrustMode | None = None,
     ) -> "ExperimentSpec":
@@ -158,8 +184,12 @@ class ExperimentSpec(BaseModel):
         explicit, so a requested ``CURRENT`` with no supplied explicit version
         is an error rather than a silently unresolved spec.  Supplying an
         explicit version for an already-explicit field overrides it.  The
-        corporate-action ``trust_mode`` is pinned the same way, so a stored
-        frozen spec never loses which evidence bar the run applied.
+        pinned ``data_acceptance_id`` resolves the same way (``None`` must be
+        passed explicitly because it is a legitimate resolved value for an
+        ENGINEERING diagnostic), and a RESEARCH spec can never freeze without
+        an explicit acceptance id.  The corporate-action ``trust_mode`` is
+        pinned the same way, so a stored frozen spec never loses which
+        evidence bar the run applied.
         """
         updates: dict[str, object] = {}
         if dataset_version is not None:
@@ -175,6 +205,21 @@ class ExperimentSpec(BaseModel):
             raise ValueError(
                 "universe_version requests CURRENT but freeze() was not given "
                 "an explicit universe_version"
+            )
+        if data_acceptance_id is not _ACCEPTANCE_UNSET:
+            updates["data_acceptance_id"] = data_acceptance_id
+        elif self.data_acceptance_id == CURRENT_ACCEPTED:
+            raise ValueError(
+                "data_acceptance_id requests CURRENT_ACCEPTED but freeze() was "
+                "not given a resolved acceptance id"
+            )
+        resolved_acceptance = updates.get(
+            "data_acceptance_id", self.data_acceptance_id
+        )
+        resolved_mode = trust_mode or self.trust_mode
+        if resolved_mode is DataTrustMode.RESEARCH and resolved_acceptance is None:
+            raise ValueError(
+                "research specs require an explicit data_acceptance_id"
             )
         if code_commit is not None:
             updates["code_commit"] = code_commit
@@ -214,9 +259,10 @@ def compute_experiment_id(spec: ExperimentSpec) -> str:
         )
     if not spec.is_frozen:
         raise ExperimentNotFrozenError(
-            "a spec that still requests CURRENT has no identity; resolve "
-            "dataset_version and universe_version with ExperimentSpec.freeze() "
-            "before computing an experiment_id"
+            "a spec that still requests CURRENT or CURRENT_ACCEPTED has no "
+            "identity; resolve dataset_version, universe_version and "
+            "data_acceptance_id with ExperimentSpec.freeze() before computing "
+            "an experiment_id"
         )
     payload = {
         "experiment_spec_scheme_version": _IDENTITY_SCHEME_VERSION,

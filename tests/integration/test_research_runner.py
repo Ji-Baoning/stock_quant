@@ -19,24 +19,39 @@ preflight manifest and never produces factor artifacts.  A passing run freezes
 identity plus the per-signal-day member snapshot map into the run/experiment
 manifests, metrics and config snapshot.
 
+The real-data acceptance layer (plan 2026-09-08) pins the dataset-side
+acceptance gate: a RESEARCH run over a project whose pinned dataset carries
+no valid ACCEPTED record fails closed at the ``acceptance`` stage before any
+factor work; an ENGINEERING diagnostic that explicitly pins a missing record
+fails the same gate; and an accepted run freezes the concrete acceptance id
+into the frozen spec, the experiment manifest and ``metrics.json``.  Trusted
+fixture datasets are therefore published exactly the way the data pipeline
+publishes an update -- deterministic raw snapshots under ``data/raw`` and the
+sanitized ``build_config`` the pipeline itself writes -- and carry one fixed
+ACCEPTED record produced by the real offline ``real-data-v1`` checker, so the
+universe preflight and the acceptance gate are exercised together exactly
+like an operator dataset would.  Broken/untrusted fixtures publish no
+ACCEPTED record.
+
 Every test publishes a deterministic synthetic market -- twelve SH main-board
 equities with bars (whose closes follow ``55 * exp(growth * (session - (n-1)))``
 plus two flat benchmark index rows), a security master that also carries the
-300 synthetic ``csi300`` constituents without bars, and an evidence-backed
-``universe_membership`` table whose 300 constituents include every traded
-equity (so the membership-first factor filter leaves the tradable candidate
-pool intact) -- under a temporary project root, then runs the
-repository's real ``momentum_60d`` spec (``configs/experiments/
-momentum_60d.yml``) from a temporary config tree whose ``csi300`` definition is
-pinned to exactly those facts (the repository's ``configs/universes/csi300.yml``
-is a placeholder template that formal runs must reject).  The growth vector
-ranks are distinct and time-stable, so the weekly top-10 of the 12 is the ten
-largest ``growth`` values on every signal date and the weekly net rebalance
-keeps every name on at most one order side per execution day.
+300 synthetic ``csi300`` constituents (with bars over the bound data-update
+window, so the acceptance checker's date-window completeness sees no
+unexplained gaps), an evidence-backed ``universe_membership`` table whose 300
+constituents include every traded equity (so the membership-first factor
+filter leaves the tradable candidate pool intact), the immutable
+``adjusted_bar`` total-return table and its corporate-action evidence --
+under a temporary project root, then runs the repository's real
+``momentum_60d`` spec from a temporary config tree whose ``csi300``
+definition is real rather than the repository placeholder.  All fixtures are
+offline; nothing here touches the network or a token, and no real market
+data is committed.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import shutil
@@ -47,16 +62,26 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import yaml
+from conftest import (
+    _UPDATE_WINDOW_END,
+    _UPDATE_WINDOW_START,
+    fixture_build_config,
+    publish_fixture_acceptance,
+)
 
+from stock_quant.backtest.models import BUY
+from stock_quant.data_model.adjusted_bar import build_adjusted_bars
 from stock_quant.data_model.corporate_action_coverage import (
+    OUTCOME_SUCCESS_EVENTS,
     CoverageReason,
     CoverageStatus,
     coverage_frame,
     coverage_record,
 )
-from stock_quant.data_model.dataset import DatasetPublisher
+from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
@@ -68,21 +93,23 @@ from stock_quant.data_model.security_master import (
     master_coverage_frame,
     master_coverage_record,
 )
-from stock_quant.data_model.trading_rules import REASON_SELL_AT_LOWER_LIMIT
 from stock_quant.data_model.universe_membership import (
     membership_content_hash,
     membership_frame,
     resolve_memberships,
 )
 from stock_quant.data_quality.models import QualityReport
+from stock_quant.data_model.trading_rules import REASON_SELL_AT_LOWER_LIMIT
 from stock_quant.factors.momentum import Momentum60
+from stock_quant.research.acceptance.models import CURRENT_ACCEPTED
+from stock_quant.research.acceptance.registry import AcceptanceRegistry
 from stock_quant.research.models import (
     REQUIRED_ARTIFACTS,
     Evaluation,
     ExperimentEvaluation,
     ResearchRunFailed,
 )
-from stock_quant.research.runner import ResearchRunner
+from stock_quant.research.runner import ResearchRunner, _DatasetFactorAdapter
 from stock_quant.research.trust import DataTrustMode
 from stock_quant.research.universe import UniverseDefinition, UniverseResolver
 
@@ -122,6 +149,62 @@ EQUITY_GROWTH = (
 
 _INGESTED = pd.Timestamp("2026-09-04T08:00:00Z")
 
+#: The repository config files the offline acceptance checker reads from the
+#: *project* root (``configs/`` in ``project_root``, not ``config_root``):
+#: the checker re-runs the publication gate and the evidence checks against
+#: the project's own configs, so the fixture writes a ``universe.yml`` listing
+#: exactly the dataset's securities (the publication gate is FATAL on any
+#: universe/master disagreement) and copies the remaining files.
+_CONFIG_NAMES = (
+    "project.yml",
+    "sources.yml",
+    "costs.yml",
+    "trading_rules.yml",
+)
+
+#: Fixed ``selected_as_of`` for the generated fixture universe (inside the
+#: synthetic calendar) so the written YAML is deterministic.
+_UNIVERSE_AS_OF = date(2022, 1, 7)
+
+
+def _ensure_fixture_configs(project_root: Path, master: pd.DataFrame) -> None:
+    """Write the project configs the offline acceptance checker reads.
+
+    The checker re-runs the publication gate and the semantic evidence checks
+    against ``configs/`` in the *project* root, so the synthetic project
+    carries a fixture-local ``universe.yml`` listing exactly the dataset's
+    securities (the publication gate is FATAL on any universe/master
+    disagreement); the remaining config files are copied from the repository.
+    """
+    config_dir = project_root / "configs"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    for name in _CONFIG_NAMES:
+        target = config_dir / name
+        if not target.is_file():
+            target.write_text(
+                (_REPO_ROOT / "configs" / name).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+    entries = [
+        {
+            "symbol": str(symbol),
+            "name_at_selection": f"synth_{symbol}",
+            "exchange": "SH",
+            "board": "sh_main",
+            "selected_as_of": _UNIVERSE_AS_OF,
+            "boundary_tags": ["fixture"],
+            "selection_reason": (
+                "synthetic research-runner fixture sample; not a recommendation"
+            ),
+        }
+        for symbol in sorted(str(value) for value in master["symbol"])
+    ]
+    document = {"selected_as_of": _UNIVERSE_AS_OF, "entries": entries}
+    (config_dir / "universe.yml").write_text(
+        yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
 
 @dataclass(frozen=True)
 class _Env:
@@ -140,6 +223,13 @@ class _Env:
             .read_text(encoding="utf-8")
         )
         return UniverseDefinition.model_validate(document)
+
+
+@dataclass(frozen=True)
+class _AcceptedEnv(_Env):
+    """A synthetic project whose pinned dataset carries a valid acceptance."""
+
+    acceptance_id: str = ""
 
 
 def _weekdays(start: date, end: date) -> list[date]:
@@ -195,7 +285,6 @@ def _fact_payload(symbol: str) -> dict:
 def _fact_payloads(count: int = _CSI300_SIZE) -> tuple[dict, ...]:
     return tuple(_fact_payload(symbol) for symbol in _member_symbols(count))
 
-
 def _bars(
     sessions: list[date],
     *,
@@ -212,6 +301,8 @@ def _bars(
     price-limit-blocked by the engine -- a rejection, not a hard error.
     ``fresh`` is ``(symbol, list_date, growth)`` for a recently-listed symbol
     whose bars begin at its list date (the new-IPO acceptance fixture).
+    Equity rows carry a known supplier source so the publication gate's
+    provenance rules accept them.
     """
     n = len(sessions)
     frames: list[pd.DataFrame] = []
@@ -223,9 +314,16 @@ def _bars(
             for index in range(1, n):
                 if sessions[index].weekday() == 0:  # Monday == execution day
                     opens[index] = 0.5 * closes[index - 1]
-            frames.append(_instrument_frame(sessions, symbol, closes, opens))
+            # Keep the bar OHLC-valid: the limit-locked Monday open sits far
+            # below the close, so the low follows it down on those sessions.
+            lows = [min(open_, close_) for open_, close_ in zip(opens, closes)]
+            frames.append(_instrument_frame(
+                sessions, symbol, closes, opens, lows=lows, source="tushare"
+            ))
         else:
-            frames.append(_instrument_frame(sessions, symbol, closes))
+            frames.append(_instrument_frame(
+                sessions, symbol, closes, source="tushare"
+            ))
     if fresh is not None:
         symbol, list_date, growth = fresh
         start_at = next(
@@ -235,9 +333,34 @@ def _bars(
             _BASE_PRICE * math.exp(growth * (index - (n - 1)))
             for index in range(start_at, n)
         ]
-        frames.append(_instrument_frame(sessions[start_at:], symbol, closes))
+        frames.append(_instrument_frame(
+            sessions[start_at:], symbol, closes, source="tushare"
+        ))
     for symbol, level in zip(_BENCHMARK_SYMBOLS, index_close):
-        frames.append(_instrument_frame(sessions, symbol, [level] * n))
+        frames.append(_instrument_frame(
+            sessions, symbol, [level] * n, source="akshare"
+        ))
+    return pd.concat(frames, ignore_index=True)[DAILY_COLUMNS]
+
+
+def _window_filler_bars(symbols: tuple[str, ...] | list[str]) -> pd.DataFrame:
+    """Flat bars for the non-traded master symbols over the data-update window.
+
+    The acceptance checker's ``date_window_completeness`` treats a *listed*
+    symbol without a bar inside the bound update window as an unexplained
+    suspension, so the csi300 filler constituents (which the membership
+    cardinality requires in the security master) carry real bars over exactly
+    that window.  Their flat closes never produce a valid momentum row (61
+    observations are required), so the tradable candidate pool is unchanged.
+    """
+    sessions = _weekdays(_UPDATE_WINDOW_START, _UPDATE_WINDOW_END)
+    frames = [
+        _instrument_frame(sessions, symbol, [_BASE_PRICE] * len(sessions),
+                          source="tushare")
+        for symbol in symbols
+    ]
+    if not frames:
+        return pd.DataFrame(columns=DAILY_COLUMNS)
     return pd.concat(frames, ignore_index=True)[DAILY_COLUMNS]
 
 
@@ -246,21 +369,26 @@ def _instrument_frame(
     symbol: str,
     closes: list[float],
     opens: list[float] | None = None,
+    *,
+    source: str,
+    lows: list[float] | None = None,
 ) -> pd.DataFrame:
+    """One deterministic daily-bar frame (``source`` is a known supplier)."""
     n = len(sessions)
     opens = closes if opens is None else opens
+    lows = closes if lows is None else lows
     return pd.DataFrame(
         {
             "trade_date": pd.to_datetime(sessions),
             "symbol": symbol,
             "open": opens,
             "high": closes,
-            "low": closes,
+            "low": lows,
             "close": closes,
             "volume": [0] * n,
             "amount": [0.0] * n,
             "adjustment": "unadjusted",
-            "source": "synthetic",
+            "source": source,
             "ingested_at": [_INGESTED] * n,
         }
     )
@@ -272,7 +400,8 @@ def _master_symbols(fresh: tuple[str, date, float] | None = None) -> list[str]:
     The synthetic csi300 membership facts must intersect the master (the
     acceptance gate validates fact symbols against it), so the master carries
     the 300 constituents alongside the twelve tradable equities; only the
-    tradable names (and the optional fresh listing) have daily bars.
+    tradable names (and the optional fresh listing) have bars over the full
+    session range.
     """
     symbols = [symbol for symbol, _ in EQUITY_GROWTH]
     symbols += [symbol for symbol in _csi300_symbols()
@@ -330,6 +459,30 @@ def _corporate_action() -> pd.DataFrame:
     return frame[CORPORATE_ACTION_COLUMNS]
 
 
+def _cash_action(symbol: str, ex_date: date) -> pd.DataFrame:
+    """One verified, implemented 0.5/share cash dividend at ``ex_date``.
+
+    Complete point-in-time facts (announcement two weeks before, record the
+    day before, no rights issue), so the adjusted-bar builder accepts it and
+    applies it exactly once on the ``ex_date``.
+    """
+    return pd.DataFrame(
+        {
+            "symbol": [symbol],
+            "announcement_date": [ex_date - timedelta(days=14)],
+            "record_date": [ex_date - timedelta(days=1)],
+            "ex_date": [ex_date],
+            "cash_dividend_per_share": [0.5],
+            "bonus_share_ratio": [0.0],
+            "capitalization_ratio": [0.0],
+            "rights_issue_ratio": [0.0],
+            "rights_issue_price": [0.0],
+            "source": ["synthetic"],
+            "status": ["implemented"],
+        }
+    )[CORPORATE_ACTION_COLUMNS]
+
+
 def _trading_calendar() -> pd.DataFrame:
     days = _weekdays(_CAL_START, _BARS_END)
     return pd.DataFrame(
@@ -351,43 +504,70 @@ def _coverage(
     reason: CoverageReason | None = None,
     window_start: date = _CAL_START,
     window_end: date = _BARS_END,
+    event_symbols: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """One deterministic coverage row per symbol over a common window.
 
     The default window is the full synthetic calendar, a superset of the
     execution window any momentum spec derives, so a single row per symbol is
-    always enough evidence when the status is trusted.
+    always enough evidence when the status is trusted.  ``event_symbols``
+    names holdings whose evidence is ``VERIFIED`` with ``success_with_events``
+    endpoints (facts exist and were reconciled) instead of the plain status,
+    so a dataset carrying corporate-action facts never claims an
+    empty-verified provenance for them.
     """
-    records = [
-        coverage_record(
-            symbol,
-            window_start,
-            window_end,
-            status,
-            reason,
-            checked_at=_INGESTED,
-        )
-        for symbol in sorted(symbols)
-    ]
+    endpoints = ("cninfo_corporate_actions", "eastmoney_corporate_actions")
+    records = []
+    for symbol in sorted(symbols):
+        if symbol in event_symbols:
+            records.append(
+                coverage_record(
+                    symbol,
+                    window_start,
+                    window_end,
+                    CoverageStatus.VERIFIED,
+                    None,
+                    sources=[
+                        {"endpoint": endpoint, "outcome": OUTCOME_SUCCESS_EVENTS}
+                        for endpoint in endpoints
+                    ],
+                    checked_at=_INGESTED,
+                )
+            )
+        else:
+            records.append(
+                coverage_record(
+                    symbol,
+                    window_start,
+                    window_end,
+                    status,
+                    reason,
+                    checked_at=_INGESTED,
+                )
+            )
     return coverage_frame(records)
 
 
-def _master_coverage(symbols: tuple[str, ...]) -> pd.DataFrame:
-    """One deterministic security_master_coverage row per symbol."""
+def _master_coverage(master: pd.DataFrame) -> pd.DataFrame:
+    """One deterministic security_master_coverage row per master row.
+
+    Each coverage row carries the master's own listing facts, so the coverage
+    evidence always agrees with the master (a freshly-listed fixture symbol
+    keeps its real late ``list_date``).
+    """
     records = [
         master_coverage_record(
-            symbol,
-            list_date=_LIST_DATE,
+            str(row["symbol"]),
+            list_date=pd.Timestamp(row["list_date"]).date(),
             list_status=ListStatus.L,
             source=MASTER_SOURCE_STOCK_BASIC,
             snapshot_sha256="f" * 64,
             sdk_version="fixture",
             checked_at=_INGESTED,
         )
-        for symbol in sorted(symbols)
+        for row in master.to_dict("records")
     ]
     return master_coverage_frame(records)
-
 
 def _publish_synthetic_dataset(
     project_root: Path,
@@ -397,8 +577,10 @@ def _publish_synthetic_dataset(
     coverage: pd.DataFrame | None = None,
     master_coverage: pd.DataFrame | None = None,
     fresh: tuple[str, date, float] | None = None,
+    corporate_actions: pd.DataFrame | None = None,
     membership_facts: tuple[dict, ...] | None = None,
     with_membership: bool = True,
+    accept: bool = True,
 ) -> str:
     """Publish the synthetic market under ``project_root``; return its version.
 
@@ -407,27 +589,60 @@ def _publish_synthetic_dataset(
     master symbol (both evidence tables), so the ResearchRunner's RESEARCH
     gates pass over the default market.  It also carries the immutable
     ``universe_membership`` table with the 300 evidenced csi300 facts the
-    temporary definition pins.  ``membership_facts`` overrides the fact rows
-    (a wrong row count fails the acceptance gate's cardinality check);
-    ``with_membership=False`` drops the table entirely.
+    temporary definition pins, the ``adjusted_bar`` total-return table built
+    by the production builder, and the ``corporate_action_quarantine`` table.
+    ``corporate_actions`` overrides the (empty) facts table, e.g. with
+    ``_cash_action`` for a total-return market; its coverage evidence must
+    then name the affected symbols (see ``_coverage`` ``event_symbols``).
+    Trusted datasets are published exactly the way the data pipeline publishes
+    an update: deterministic raw snapshots are saved through ``RawStore`` and
+    the sanitized ``build_config`` binds them with ``origin=data_update`` and
+    healthy required-source statuses.  With ``accept=True`` (the default) the
+    real offline checker must pass every ``real-data-v1`` check and one fixed
+    ACCEPTED record is published for the version, so formal RESEARCH runs pass
+    the acceptance gate; datasets whose evidence is intentionally broken pass
+    ``accept=False`` -- they publish no acceptance, so a RESEARCH run over them
+    must fail the gate.
     """
     master = _security_master(fresh)
+    _ensure_fixture_configs(project_root, master)
     symbols = tuple(master["symbol"])
     if coverage is None:
         coverage = _coverage(symbols, status=CoverageStatus.VERIFIED_EMPTY)
     if master_coverage is None:
-        master_coverage = _master_coverage(symbols)
+        master_coverage = _master_coverage(master)
     facts = _fact_payloads() if membership_facts is None else membership_facts
+    traded = [symbol for symbol, _ in EQUITY_GROWTH]
+    filler_symbols = tuple(symbol for symbol in symbols if symbol not in set(traded))
+    daily = pd.concat(
+        [
+            _bars(
+                _weekdays(_BARS_START, _BARS_END),
+                index_close=index_close,
+                limit_locked_symbols=limit_locked_symbols,
+                fresh=fresh,
+            ),
+            _window_filler_bars(filler_symbols),
+        ],
+        ignore_index=True,
+    )[DAILY_COLUMNS]
+    corporate_actions = (
+        _corporate_action() if corporate_actions is None else corporate_actions
+    )
+    empty_quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
     tables = {
-        "daily_bar": _bars(
-            _weekdays(_BARS_START, _BARS_END),
-            index_close=index_close,
-            limit_locked_symbols=limit_locked_symbols,
-            fresh=fresh,
+        "daily_bar": daily,
+        "adjusted_bar": build_adjusted_bars(
+            daily,
+            corporate_actions,
+            empty_quarantine,
+            coverage,
+            symbols=symbols,
         ),
         "security_master": master,
         "security_master_coverage": master_coverage,
-        "corporate_action": _corporate_action(),
+        "corporate_action": corporate_actions,
+        "corporate_action_quarantine": empty_quarantine,
         "corporate_action_coverage": coverage,
         "trading_calendar": _trading_calendar(),
     }
@@ -435,7 +650,12 @@ def _publish_synthetic_dataset(
         tables["universe_membership"] = membership_frame(list(facts))[
             UNIVERSE_MEMBERSHIP_COLUMNS
         ]
-    return DatasetPublisher(project_root).publish(tables, QualityReport()).version
+    version = DatasetPublisher(project_root).publish(
+        tables, QualityReport(), build_config=fixture_build_config(project_root)
+    ).version
+    if accept:
+        publish_fixture_acceptance(project_root, version)
+    return version
 
 
 def _write_config_tree(
@@ -485,7 +705,12 @@ def _write_config_tree(
 
 
 def _publish_dataset_with_untrusted_coverage(project_root: Path) -> str:
-    """Republish CURRENT so every holding's coverage evidence is UNTRUSTED."""
+    """Republish CURRENT so every holding's coverage evidence is UNTRUSTED.
+
+    The untrusted coverage fails the real ``corporate_action_evidence`` check,
+    so this dataset publishes no ACCEPTED record: a RESEARCH run over it must
+    fail the acceptance gate before any corporate-action or factor work.
+    """
     return _publish_synthetic_dataset(
         project_root,
         coverage=_coverage(
@@ -493,6 +718,7 @@ def _publish_dataset_with_untrusted_coverage(project_root: Path) -> str:
             status=CoverageStatus.UNTRUSTED,
             reason=CoverageReason.SOURCE_FETCH_FAILED,
         ),
+        accept=False,
     )
 
 
@@ -506,6 +732,60 @@ def _publish_dataset_with_verified_empty_coverage(project_root: Path) -> str:
     )
 
 
+def _publish_dataset_without_master_evidence(project_root: Path) -> str:
+    """Republish CURRENT with an empty security_master_coverage table.
+
+    The missing master evidence fails the real ``security_master_evidence``
+    check, so this dataset publishes no ACCEPTED record: a RESEARCH run over
+    it must fail the acceptance gate before any factor work.
+    """
+    return _publish_synthetic_dataset(
+        project_root,
+        master_coverage=master_coverage_frame([]),
+        accept=False,
+    )
+
+
+def _publish_legacy_dataset(project_root: Path) -> str:
+    """Republish CURRENT in the pre-adjusted_bar legacy shape (with membership).
+
+    The dataset keeps its pre-provenance shape (no ``build_config`` evidence,
+    no ``adjusted_bar``) and publishes no acceptance record, so a RESEARCH run
+    over it fails the acceptance gate; the membership table is present so the
+    universe preflight passes and the acceptance gate is what stops the run.
+    The missing-``adjusted_bar`` no-fallback contract of the factor adapter is
+    exercised by an ENGINEERING diagnostic instead.
+    """
+    master = _security_master()
+    _ensure_fixture_configs(project_root, master)
+    symbols = tuple(master["symbol"])
+    traded = [symbol for symbol, _ in EQUITY_GROWTH]
+    filler_symbols = tuple(symbol for symbol in symbols if symbol not in set(traded))
+    tables = {
+        "daily_bar": pd.concat(
+            [
+                _bars(
+                    _weekdays(_BARS_START, _BARS_END),
+                    index_close=(4000.0, 2000.0),
+                ),
+                _window_filler_bars(filler_symbols),
+            ],
+            ignore_index=True,
+        )[DAILY_COLUMNS],
+        "security_master": master,
+        "security_master_coverage": _master_coverage(master),
+        "corporate_action": _corporate_action(),
+        "corporate_action_coverage": _coverage(
+            symbols, status=CoverageStatus.VERIFIED_EMPTY
+        ),
+        "trading_calendar": _trading_calendar(),
+        "universe_membership": membership_frame(list(_fact_payloads()))[
+            UNIVERSE_MEMBERSHIP_COLUMNS
+        ],
+    }
+    return DatasetPublisher(project_root).publish(tables, QualityReport()).version
+
+
 def _new_env(tmp_path) -> _Env:
     project_root = tmp_path / "project"
     version = _publish_synthetic_dataset(project_root)
@@ -515,7 +795,6 @@ def _new_env(tmp_path) -> _Env:
         config_root=_write_config_tree(tmp_path),
         facts=_fact_payloads(),
     )
-
 
 # --------------------------------------------------------------------------- #
 # Injected observers / evaluators / providers
@@ -589,6 +868,7 @@ def current_switcher(env: _Env) -> _CurrentSwitcher:
 @pytest.fixture
 def failing_runner(env: _Env) -> ResearchRunner:
     return ResearchRunner(env.root, config_root=env.config_root)
+
 
 
 # --------------------------------------------------------------------------- #
@@ -687,10 +967,17 @@ def test_published_metrics_record_execution_rejected_orders(tmp_path):
         ) > 0
 
 
+
 def test_research_rejects_untrusted_but_engineering_is_untrusted(env):
+    """Untrusted corporate-action evidence cannot earn an ACCEPTED record, so
+    the formal research run fails at the acceptance gate (before any
+    corporate-action or factor work); the ENGINEERING diagnostic still replays
+    the full pipeline and is stamped UNTRUSTED."""
     _publish_dataset_with_untrusted_coverage(env.root)
     runner = ResearchRunner(env.root, config_root=env.config_root)
-    with pytest.raises(ResearchRunFailed, match="corporate action trust"):
+    with pytest.raises(
+        ResearchRunFailed, match="no valid real-data-v1 acceptance"
+    ):
         runner.run(_SPEC)
     debug = runner.run(_SPEC, trust_mode=DataTrustMode.ENGINEERING)
     assert json.loads(
@@ -723,28 +1010,232 @@ def test_engineering_never_publishes_accepted_even_with_trusted_evidence(env):
     assert debug.manifest.status == "REJECTED"
 
 
-def _publish_dataset_without_master_evidence(project_root: Path) -> str:
-    """Republish CURRENT with an empty security_master_coverage table."""
-    from stock_quant.data_model.security_master import master_coverage_frame
 
-    return _publish_synthetic_dataset(
-        project_root,
-        master_coverage=master_coverage_frame([]),
+# --------------------------------------------------------------------------- #
+# The real-data acceptance gate (plan Task 6 Steps 4-6)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def accepted_project(tmp_path) -> _AcceptedEnv:
+    """A project whose CURRENT dataset passed every real-data-v1 check and
+    whose registry holds one fixed ACCEPTED record for it."""
+    root = tmp_path / "project"
+    version = _publish_synthetic_dataset(root)
+    selected = AcceptanceRegistry(root).select(version, CURRENT_ACCEPTED)
+    return _AcceptedEnv(
+        root=root,
+        version=version,
+        config_root=_write_config_tree(tmp_path),
+        facts=_fact_payloads(),
+        acceptance_id=selected.acceptance_id,
     )
+
+
+@pytest.fixture
+def unaccepted_project(tmp_path) -> _Env:
+    """A healthy-trust project whose registry holds no acceptance record."""
+    root = tmp_path / "project"
+    version = _publish_synthetic_dataset(root, accept=False)
+    return _Env(
+        root=root,
+        version=version,
+        config_root=_write_config_tree(tmp_path),
+        facts=_fact_payloads(),
+    )
+
+
+def test_research_without_acceptance_fails_before_factor(unaccepted_project):
+    """A RESEARCH run over a project without an ACCEPTED record fails closed.
+
+    The universe preflight passes first (the membership evidence is intact),
+    then the acceptance gate stops the run before any run workspace, factor
+    provider, portfolio builder or backtest engine work and persists a FAILED
+    preflight manifest whose experiment_id is still ``None`` because no
+    experiment identity can exist without a pinned acceptance.
+    """
+    provider = _CountingFactorProvider()
+    runner = ResearchRunner(
+        unaccepted_project.root,
+        config_root=unaccepted_project.config_root,
+        factor_provider=provider.provide,
+    )
+    with pytest.raises(
+        ResearchRunFailed, match="no valid real-data-v1 acceptance"
+    ):
+        runner.run(_SPEC)
+    assert provider.calls == 0
+    state = runner.latest_run_manifest()
+    assert state.experiment_id is None
+    assert state.failed_stage == "acceptance"
+    assert state.status == "FAILED"
+    assert state.trust_mode == "research"
+    assert state.run_id.startswith("preflight_acceptance_")
+
+
+def test_engineering_preflight_stamps_resolved_trust_mode(unaccepted_project):
+    """An ENGINEERING run that explicitly pins a concrete-but-missing
+    acceptance id still fails the gate, and its preflight manifest stamps the
+    resolved engineering mode instead of the RunState ``research`` default."""
+    spec_text = (
+        unaccepted_project.config_root / _SPEC
+    ).read_text(encoding="utf-8")
+    assert "data_acceptance_id: CURRENT_ACCEPTED" in spec_text
+    spec_dir = unaccepted_project.root / "configs" / "experiments"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    pinned = spec_dir / "pinned_missing_acceptance.yml"
+    pinned.write_text(
+        spec_text.replace(
+            "data_acceptance_id: CURRENT_ACCEPTED",
+            f"data_acceptance_id: {'e' * 64}",
+        ),
+        encoding="utf-8",
+    )
+    runner = ResearchRunner(
+        unaccepted_project.root, config_root=unaccepted_project.config_root
+    )
+    with pytest.raises(
+        ResearchRunFailed, match="no valid real-data-v1 acceptance"
+    ):
+        runner.run(pinned, trust_mode=DataTrustMode.ENGINEERING)
+    state = runner.latest_run_manifest()
+    assert state.experiment_id is None
+    assert state.failed_stage == "acceptance"
+    assert state.trust_mode == "engineering"
+    assert state.run_id.startswith("preflight_acceptance_")
+
+
+def test_research_pins_accepted_identity(accepted_project):
+    """The frozen spec stored with the published experiment carries the
+    concrete resolved acceptance id, never the CURRENT_ACCEPTED placeholder."""
+    published = ResearchRunner(
+        accepted_project.root, config_root=accepted_project.config_root
+    ).run(_SPEC)
+    frozen = yaml.safe_load(
+        (published.path / "experiment_spec.yml").read_text(encoding="utf-8")
+    )
+    assert frozen["data_acceptance_id"] == accepted_project.acceptance_id
+    assert frozen["data_acceptance_id"] != "CURRENT_ACCEPTED"
+    assert published.manifest.data_acceptance_id == (
+        accepted_project.acceptance_id
+    )
+    metrics = json.loads(
+        (published.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics["data_acceptance"]["acceptance_id"] == (
+        accepted_project.acceptance_id
+    )
+    assert metrics["data_acceptance"]["decision"] == "ACCEPTED"
+
+
+def test_research_factor_input_uses_adjusted_bar(env):
+    """The factor adapter's input comes from the pinned adjusted_bar table."""
+    with DatasetReader(env.root).open(env.version) as context:
+        adjusted = context.read("adjusted_bar")
+        adapter = _DatasetFactorAdapter(
+            context=context,
+            universe_symbols=tuple(sorted(adjusted["symbol"].unique())),
+        )
+        factor_input = adapter.factor_input()
+    assert set(factor_input["adjustment"]) == {"internal_total_return_v1"}
+    expected = adjusted.sort_values(
+        ["symbol", "trade_date"], kind="stable"
+    ).reset_index(drop=True)
+    assert factor_input["adjusted_close"].tolist() == (
+        expected["adjusted_close"].tolist()
+    )
+
+
+def test_research_rejects_dataset_without_adjusted_bar(env):
+    """A legacy dataset fails closed: it has no build evidence, so a RESEARCH
+    run cannot even accept it, and an ENGINEERING diagnostic that does reach
+    the factor adapter never falls back to an unadjusted close series."""
+    _publish_legacy_dataset(env.root)
+    runner = ResearchRunner(env.root, config_root=env.config_root)
+    with pytest.raises(
+        ResearchRunFailed, match="no valid real-data-v1 acceptance"
+    ):
+        runner.run(_SPEC)
+    debug = ResearchRunner(env.root, config_root=env.config_root)
+    with pytest.raises(ResearchRunFailed, match="adjusted_bar"):
+        debug.run(_SPEC, trust_mode=DataTrustMode.ENGINEERING)
+
+
+def test_research_rejects_spec_requesting_retired_factor_version(env, tmp_path):
+    """A spec pinning momentum_60d/1.0.0 is rejected, never silently upgraded.
+
+    v2 consumes only the internal total-return basis, so a request for the
+    retired v1 must fail the provider's version check instead of recomputing
+    v1 values from unadjusted closes.
+    """
+    spec_text = (env.config_root / _SPEC).read_text(encoding="utf-8")
+    assert "momentum_60d: 2.0.0" in spec_text
+    spec_path = tmp_path / "momentum_60d_v1.yml"
+    spec_path.write_text(
+        spec_text.replace("momentum_60d: 2.0.0", "momentum_60d: 1.0.0"),
+        encoding="utf-8",
+    )
+    runner = ResearchRunner(env.root, config_root=env.config_root)
+    with pytest.raises(ResearchRunFailed, match="1.0.0"):
+        runner.run(spec_path)
+
+
+def test_metrics_records_total_return_input_audit(env):
+    """metrics.json carries a deterministic factor-input provenance audit.
+
+    The audit must describe the pinned dataset version the run actually used:
+    the adjustment basis, the requested factor versions, the adjusted-bar rows
+    the universe consumed, and the ERROR break / invalid-reason counts (zero
+    for the trusted synthetic fixture).
+    """
+    experiment = ResearchRunner(
+        env.root, config_root=env.config_root
+    ).run(_SPEC)
+    metrics = json.loads(
+        (experiment.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    audit = metrics["factor_input"]
+    assert audit["adjustment"] == "internal_total_return_v1"
+    assert audit["factor_versions"] == {"momentum_60d": "2.0.0"}
+    assert audit["row_count"] > 0
+    assert audit["error_break_count"] == 0
+    assert audit["invalid_reason_counts"] == {}
+
+
+def test_run_report_shows_factor_price_basis(env):
+    """The direct ``research run`` report exposes the same adjustment basis and
+    break count the richer rebuilt report renders from metrics.json."""
+    experiment = ResearchRunner(
+        env.root, config_root=env.config_root
+    ).run(_SPEC)
+    html = (experiment.path / "report.html").read_text(encoding="utf-8")
+    assert "因子价格口径" in html
+    assert "调整方法 internal_total_return_v1" in html
+    assert "因子版本 momentum_60d: 2.0.0" in html
+    # Pinned values: every adjusted-bar row of the master symbols over the
+    # published session range (traded equities) plus the data-update window
+    # (the filler constituents), and zero trusted-evidence breaks.
+    full_sessions = len(_weekdays(_BARS_START, _BARS_END))
+    window_sessions = len(_weekdays(_UPDATE_WINDOW_START, _UPDATE_WINDOW_END))
+    fillers = len(_master_symbols()) - len(EQUITY_GROWTH)
+    expected_rows = len(EQUITY_GROWTH) * full_sessions + fillers * window_sessions
+    assert f"输入行数 {expected_rows}" in html
+    assert "不可信断点 0" in html
+
 
 
 def test_research_rejects_missing_master_evidence_but_engineering_is_untrusted(
     env,
 ):
-    """Empty master evidence freezes RESEARCH; ENGINEERING still diagnoses.
-
-    The rejection must name the security-master evidence and happen before any
-    backtest; the ENGINEERING run proceeds as an UNTRUSTED diagnostic that can
-    never be accepted as a trusted performance claim.
-    """
+    """Missing master evidence cannot earn an ACCEPTED record, so the formal
+    research run fails at the acceptance gate; the ENGINEERING diagnostic
+    still replays as an UNTRUSTED run that can never be accepted as a trusted
+    performance claim."""
     _publish_dataset_without_master_evidence(env.root)
     runner = ResearchRunner(env.root, config_root=env.config_root)
-    with pytest.raises(ResearchRunFailed, match="security master evidence"):
+    with pytest.raises(
+        ResearchRunFailed, match="no valid real-data-v1 acceptance"
+    ):
         runner.run(_SPEC)
     debug = runner.run(_SPEC, trust_mode=DataTrustMode.ENGINEERING)
     metrics = json.loads(
@@ -752,6 +1243,7 @@ def test_research_rejects_missing_master_evidence_but_engineering_is_untrusted(
     )
     assert metrics["evaluation"]["status"] == "UNTRUSTED"
     assert debug.manifest.status == "REJECTED"
+
 
 
 def test_new_stock_excluded_before_120_listed_days(tmp_path):
@@ -837,8 +1329,16 @@ def test_invalid_membership_fails_before_factor_artifact(env, tmp_path):
 
 
 def test_missing_membership_table_fails_at_universe_acceptance(env):
-    """A dataset without a membership table cannot start a formal run."""
-    _publish_synthetic_dataset(env.root, with_membership=False)
+    """An empty membership table cannot start a formal run.
+
+    Publish acceptance requires the ``universe_membership`` table to exist
+    (``required_table_coverage`` enforces presence only), so a membership-less
+    dataset can no longer be acceptance-published.  The universe evidence
+    check still treats a present-but-empty table as missing, so a dataset
+    carrying an empty membership table passes the acceptance gate and then
+    fails the formal run at ``universe_acceptance``.
+    """
+    _publish_synthetic_dataset(env.root, membership_facts=())
     runner = ResearchRunner(env.root, config_root=env.config_root)
     with pytest.raises(ResearchRunFailed) as excinfo:
         runner.run(_SPEC)
@@ -985,3 +1485,95 @@ def test_stable_membership_rerun_reproduces_the_same_snapshot_map(tmp_path):
     second = ResearchRunner(env.root, config_root=env.config_root).run(_SPEC)
     assert second.experiment_id == first.experiment_id
     assert _signal_snapshot_map(second.path) == _signal_snapshot_map(first.path)
+
+
+def _plain_date(value: object) -> date:
+    """Normalize a parquet-round-tripped Timestamp/date back to a plain date."""
+    return pd.Timestamp(value).date()
+
+
+def test_total_return_factor_does_not_change_fill_or_valuation_prices(tmp_path):
+    """Total-return factor input never leaks into execution or valuation.
+
+    The market carries one verified, implemented cash dividend on the
+    highest-growth holding (always in the weekly top-10), so its ``adjusted``
+    total-return series diverges from the unadjusted prices.  Every fill must
+    still reference the unadjusted open of its bar, and the persisted daily
+    mark-to-market must equal a valuation recomputed from unadjusted
+    ``daily_bar`` closes.
+    """
+    action_symbol = "601857.SH"
+    sessions = _weekdays(_BARS_START, _BARS_END)
+    ex_date = sessions[len(sessions) // 2]
+    project_root = tmp_path / "project"
+    version = _publish_synthetic_dataset(
+        project_root,
+        corporate_actions=_cash_action(action_symbol, ex_date),
+        coverage=_coverage(
+            _master_symbols(),
+            status=CoverageStatus.VERIFIED_EMPTY,
+            event_symbols=(action_symbol,),
+        ),
+    )
+    experiment = ResearchRunner(
+        project_root, config_root=_write_config_tree(tmp_path)
+    ).run(_SPEC)
+    with DatasetReader(project_root).open(version) as context:
+        daily = context.read("daily_bar")
+        adjusted = context.read("adjusted_bar")
+    equity = daily[daily["symbol"].isin(_universe_symbols())]
+    day_symbol = [equity["trade_date"].map(_plain_date), "symbol"]
+
+    # Sanity: the dividend really moves the adjusted series away from the raw
+    # one (far beyond the cent-level tolerances below), so a wrongly adjusted
+    # execution/valuation price could never pass this test silently.
+    action_rows = adjusted[adjusted["symbol"] == action_symbol]
+    divergence = (action_rows["adjusted_close"] - action_rows["raw_close"]).abs()
+    assert float(divergence.max()) > 0.1
+
+    fills = pd.read_parquet(experiment.path / "fills.parquet")
+    assert not fills.empty
+    assert action_symbol in set(fills["symbol"])
+    opens = equity.set_index(day_symbol)["open"]
+    for record in fills.itertuples():
+        expected = float(opens.loc[(_plain_date(record.trade_date), record.symbol)])
+        # The executor cent-quantizes the reference, so half a cent is the
+        # largest possible distance from the raw unadjusted open.
+        assert float(record.reference_price) == pytest.approx(expected, abs=0.005)
+
+    # Valuation: the published daily equity is portfolio-level only, so
+    # recompute its market value from unadjusted daily_bar closes over the
+    # per-day quantities the fill ledger implies (a cash dividend changes no
+    # share counts) and require a match within a cent.
+    daily_equity = pd.read_parquet(experiment.path / "daily_equity.parquet")
+    closes = equity.set_index(day_symbol)["close"]
+    held_by_day: dict[date, dict[str, int]] = {}
+    positions: dict[str, int] = {}
+    for record in fills.sort_values("trade_date", kind="stable").itertuples():
+        symbol = str(record.symbol)
+        signed = int(record.quantity) * (1 if record.side == BUY else -1)
+        positions[symbol] = positions.get(symbol, 0) + signed
+        held_by_day[_plain_date(record.trade_date)] = dict(positions)
+    fill_days = sorted(held_by_day)
+
+    def _positions_at(day: date) -> dict[str, int]:
+        previous = None
+        for fill_day in fill_days:
+            if fill_day > day:
+                break
+            previous = fill_day
+        return held_by_day[previous] if previous is not None else {}
+
+    checked = 0
+    for row in daily_equity.itertuples():
+        day = _plain_date(row.trade_date)
+        held = _positions_at(day)
+        if not held:
+            continue  # no holdings yet; nothing to mark
+        expected_value = sum(
+            quantity * float(closes.loc[(day, symbol)])
+            for symbol, quantity in held.items()
+        )
+        assert float(row.market_value) == pytest.approx(expected_value, abs=0.01)
+        checked += 1
+    assert checked > 0

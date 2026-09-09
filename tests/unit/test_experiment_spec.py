@@ -27,6 +27,7 @@ from stock_quant.research.spec import (
     compute_experiment_id,
     load_experiment_spec,
 )
+from stock_quant.research.trust import DataTrustMode
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _EXAMPLE_SPEC = _REPO_ROOT / "configs" / "experiments" / "momentum_60d.yml"
@@ -42,6 +43,9 @@ def spec_kwargs(**overrides):
         factor_versions={"momentum_60d": "1.0.0"},
         dataset_version="d" * 64,
         universe_version="u" * 64,
+        # An explicit acceptance id keeps the default helper spec frozen; the
+        # CURRENT_ACCEPTED placeholder tests override it explicitly.
+        data_acceptance_id="a" * 64,
         date_range={"start_date": date(2020, 1, 1), "end_date": date(2026, 9, 2)},
         train_validation_holdout_policy="not_applicable_engineering_mvp",
         preprocessing={"winsorization": "none", "standardization": "none"},
@@ -83,6 +87,7 @@ def test_experiment_id_survives_a_serialization_round_trip(spec):
     [
         {"dataset_version": "e" * 64},
         {"universe_version": "v" * 64},
+        {"data_acceptance_id": "c" * 64},
         {"code_commit": "another-commit"},
         {"factor_versions": {"momentum_60d": "2.0.0"}},
         {"random_seed": 7},
@@ -194,6 +199,33 @@ def test_spec_rejects_blank_or_padded_universe_definition(bad):
         make_spec(universe_definition=bad)
 
 
+def test_research_spec_is_not_frozen_with_current_accepted():
+    spec = make_spec(data_acceptance_id="CURRENT_ACCEPTED")
+    assert not spec.is_frozen
+    frozen = spec.freeze(data_acceptance_id="a" * 64)
+    assert frozen.data_acceptance_id == "a" * 64
+    assert frozen.is_frozen
+
+
+def test_acceptance_id_changes_experiment_identity():
+    first = make_spec(data_acceptance_id="a" * 64)
+    second = make_spec(data_acceptance_id="b" * 64)
+    assert compute_experiment_id(first) != compute_experiment_id(second)
+
+
+def test_engineering_spec_may_freeze_without_acceptance():
+    spec = make_spec(data_acceptance_id=None, trust_mode=DataTrustMode.ENGINEERING)
+    assert spec.is_frozen
+
+
+def test_freeze_rejects_research_spec_without_acceptance():
+    with pytest.raises(
+        ValueError,
+        match="research specs require an explicit data_acceptance_id",
+    ):
+        make_spec().freeze(data_acceptance_id=None)
+
+
 def test_spec_forbids_extra_fields():
     with pytest.raises(ValidationError):
         make_spec(unexpected_key="not part of the spec")
@@ -246,7 +278,7 @@ def test_spec_rejects_blank_hypothesis_or_cost_scenarios():
 
 def test_committed_example_spec_is_coherent_and_loadable():
     loaded = load_experiment_spec(_EXAMPLE_SPEC)
-    assert loaded.factor_versions == {"momentum_60d": "1.0.0"}
+    assert loaded.factor_versions == {"momentum_60d": "2.0.0"}
     assert loaded.date_range.start_date == date(2020, 1, 1)
     assert loaded.date_range.start_date <= loaded.date_range.end_date
     assert (
@@ -257,19 +289,30 @@ def test_committed_example_spec_is_coherent_and_loadable():
     # Formal research resolves the universe through the frozen csi300
     # definition (never the legacy engineering universe.yml).
     assert loaded.universe_definition == "csi300"
+    # The committed example requests the newest valid acceptance record and is
+    # therefore not frozen until the runner resolves it.
+    assert loaded.data_acceptance_id == "CURRENT_ACCEPTED"
+    assert not loaded.is_frozen
     # resolve-to-explicit semantics: freezing the same example twice with the
-    # same explicit versions yields one stable id; a different data version
-    # yields a different id.
+    # same explicit versions and acceptance yields one stable id; a different
+    # data version or a different acceptance yields a different id.
     frozen_once = loaded.freeze(
         dataset_version="aa" * 32,
         universe_version="bb" * 32,
+        data_acceptance_id="ac" * 32,
         code_commit="example-head",
     )
     frozen_twice = load_experiment_spec(_EXAMPLE_SPEC).freeze(
         dataset_version="aa" * 32,
         universe_version="bb" * 32,
+        data_acceptance_id="ac" * 32,
         code_commit="example-head",
     )
+    assert frozen_once.is_frozen
     assert compute_experiment_id(frozen_once) == compute_experiment_id(frozen_twice)
     other_data = frozen_once.freeze(dataset_version="cc" * 32)
     assert compute_experiment_id(frozen_once) != compute_experiment_id(other_data)
+    other_acceptance = frozen_once.freeze(data_acceptance_id="ad" * 32)
+    assert compute_experiment_id(frozen_once) != compute_experiment_id(
+        other_acceptance
+    )

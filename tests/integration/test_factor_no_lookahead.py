@@ -18,15 +18,32 @@ import hashlib
 import json
 from datetime import date, timedelta
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 import pytest
 from test_research_runner import _SPEC, _new_env
 
+from stock_quant.data_model.adjusted_bar import build_adjusted_bars
+from stock_quant.data_model.corporate_action_coverage import (
+    OUTCOME_SUCCESS_EVENTS,
+    CoverageStatus,
+    coverage_frame,
+    coverage_record,
+)
+from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+from stock_quant.data_model.schemas import (
+    CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_COLUMNS,
+    DAILY_COLUMNS,
+    SECURITY_MASTER_COLUMNS,
+    TRADING_CALENDAR_COLUMNS,
+)
 from stock_quant.data_model.universe_membership import resolve_memberships
+from stock_quant.data_quality.models import QualityReport
 from stock_quant.factors.base import FactorContext
 from stock_quant.factors.momentum import Momentum60
-from stock_quant.research.runner import ResearchRunner
+from stock_quant.research.runner import ResearchRunner, _DatasetFactorAdapter
 from stock_quant.research.universe import UniverseResolver
 
 _SYMBOL = "600000.SH"
@@ -268,3 +285,185 @@ def test_factor_stage_metadata_carries_daily_snapshot_hash(tmp_path):
     )
     for day_text, snapshot in metadata["daily_snapshots"].items():
         assert snapshot == resolver.snapshot_for(date.fromisoformat(day_text))
+
+
+# --------------------------------------------------------------------------- #
+# Dataset-boundary pinning: a future action cannot rewrite prior factor rows
+# --------------------------------------------------------------------------- #
+
+_CALENDAR_START = date(2018, 1, 1)
+_LIST_DATE = date(2018, 1, 2)
+_INGESTED = pd.Timestamp("2026-09-04T08:00:00Z")
+_SESSION_COUNT = 100
+_ACTION_EX_INDEX = 90  # inside the published bars, after every signal date
+
+
+def _weekdays(start: date, end: date) -> list[date]:
+    days: list[date] = []
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            days.append(current)
+        current += timedelta(days=1)
+    return days
+
+
+def _daily_bar(sessions: list[date]) -> pd.DataFrame:
+    n = len(sessions)
+    closes = [100.0 + index for index in range(n)]
+    return pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(sessions),
+            "symbol": _SYMBOL,
+            "open": closes,
+            "high": closes,
+            "low": closes,
+            "close": closes,
+            "volume": [0] * n,
+            "amount": [0.0] * n,
+            "adjustment": "unadjusted",
+            "source": "synthetic",
+            "ingested_at": [_INGESTED] * n,
+        }
+    )[DAILY_COLUMNS]
+
+
+def _corporate_actions(ex_date: date | None) -> pd.DataFrame:
+    """No facts, or one verified implemented cash dividend at ``ex_date``."""
+    if ex_date is None:
+        return pd.DataFrame(columns=CORPORATE_ACTION_COLUMNS)
+    return pd.DataFrame(
+        {
+            "symbol": [_SYMBOL],
+            "announcement_date": [ex_date - timedelta(days=14)],
+            "record_date": [ex_date - timedelta(days=1)],
+            "ex_date": [ex_date],
+            "cash_dividend_per_share": [0.5],
+            "bonus_share_ratio": [0.0],
+            "capitalization_ratio": [0.0],
+            "rights_issue_ratio": [0.0],
+            "rights_issue_price": [0.0],
+            "source": ["synthetic"],
+            "status": ["implemented"],
+        }
+    )[CORPORATE_ACTION_COLUMNS]
+
+
+def _security_master() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "symbol": [_SYMBOL],
+            "name": [f"synth_{_SYMBOL}"],
+            "exchange": ["SH"],
+            "board": ["sh_main"],
+            "list_date": pd.to_datetime([_LIST_DATE]),
+            "delist_date": pd.Series(pd.NaT, index=range(1),
+                                     dtype="datetime64[ns]"),
+            "list_status": ["L"],
+        }
+    )[SECURITY_MASTER_COLUMNS]
+
+
+def _coverage(sessions: list[date], *, with_events: bool) -> pd.DataFrame:
+    """Trusted evidence matching the facts table: ``VERIFIED_EMPTY`` when no
+    action exists, ``VERIFIED`` with event-bearing endpoint outcomes when one
+    does, so the published provenance never claims an empty check over facts.
+    """
+    endpoints = ("cninfo_corporate_actions", "eastmoney_corporate_actions")
+    if with_events:
+        record = coverage_record(
+            _SYMBOL,
+            sessions[0],
+            sessions[-1],
+            CoverageStatus.VERIFIED,
+            None,
+            sources=[
+                {"endpoint": endpoint, "outcome": OUTCOME_SUCCESS_EVENTS}
+                for endpoint in endpoints
+            ],
+            checked_at=_INGESTED,
+        )
+    else:
+        record = coverage_record(
+            _SYMBOL,
+            sessions[0],
+            sessions[-1],
+            CoverageStatus.VERIFIED_EMPTY,
+            None,
+            checked_at=_INGESTED,
+        )
+    return coverage_frame([record])
+
+
+def _trading_calendar(sessions: list[date]) -> pd.DataFrame:
+    days = _weekdays(_CALENDAR_START, sessions[-1])
+    return pd.DataFrame(
+        {
+            "calendar_date": pd.to_datetime(days),
+            "is_trading_day": [True] * len(days),
+        }
+    )[TRADING_CALENDAR_COLUMNS]
+
+
+def _publish_market(root: Path, ex_date: date | None) -> str:
+    """Publish one deterministic market version; ``ex_date=None`` has no actions."""
+    sessions = _sessions(_SESSION_COUNT)
+    daily = _daily_bar(sessions)
+    actions = _corporate_actions(ex_date)
+    empty_quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
+    coverage = _coverage(sessions, with_events=ex_date is not None)
+    tables = {
+        "daily_bar": daily,
+        "adjusted_bar": build_adjusted_bars(
+            daily, actions, empty_quarantine, coverage, symbols=(_SYMBOL,),
+        ),
+        "security_master": _security_master(),
+        "corporate_action": actions,
+        "corporate_action_quarantine": empty_quarantine,
+        "corporate_action_coverage": coverage,
+        "trading_calendar": _trading_calendar(sessions),
+    }
+    return DatasetPublisher(root).publish(tables, QualityReport()).version
+
+
+def _factor_frame(root: Path, version: str, sessions: list[date]) -> pd.DataFrame:
+    signal_dates = tuple(sessions[index] for index in _BASE_SIGNAL_INDEXES)
+    with DatasetReader(root).open(version) as context:
+        adapter = _DatasetFactorAdapter(context=context, universe_symbols=(_SYMBOL,))
+        factor_context = FactorContext(
+            dataset=adapter,
+            universe_version="universe-v1",
+            start_date=sessions[0],
+            end_date=sessions[-1],
+            signal_dates=signal_dates,
+        )
+        return Momentum60().compute(factor_context).frame
+
+
+def test_future_corporate_action_cannot_change_prior_factor_results(tmp_path):
+    """v1 (no actions) vs v2 (one future verified cash dividend), both pinned.
+
+    The dividend acts for the first time on its ``ex_date`` -- inside the
+    published bars but after every signal date -- so every factor row computed
+    before that date must be bit-identical across the two pinned versions.
+    """
+    sessions = _sessions(_SESSION_COUNT)
+    ex_date = sessions[_ACTION_EX_INDEX]
+    before_version = _publish_market(tmp_path, ex_date=None)
+    after_version = _publish_market(tmp_path, ex_date=ex_date)
+    # Sanity: the action really does move the series on and after its ex_date.
+    with DatasetReader(tmp_path).open(before_version) as context:
+        before_adjusted = context.read("adjusted_bar")
+    with DatasetReader(tmp_path).open(after_version) as context:
+        after_adjusted = context.read("adjusted_bar")
+    at_ex = after_adjusted["trade_date"] == pd.Timestamp(ex_date)
+    assert (
+        after_adjusted.loc[at_ex, "adjusted_close"].tolist()
+        != before_adjusted.loc[at_ex, "adjusted_close"].tolist()
+    )
+    before = _factor_frame(tmp_path, before_version, sessions)
+    after = _factor_frame(tmp_path, after_version, sessions)
+    pd.testing.assert_frame_equal(
+        before[before["trade_date"] < ex_date].reset_index(drop=True),
+        after[after["trade_date"] < ex_date].reset_index(drop=True),
+    )

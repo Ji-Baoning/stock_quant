@@ -65,20 +65,18 @@ _PRIMARY_BENCHMARK = "000300.SH"
 _PLOTLY_CONFIG = {"displaylogo": False}
 
 # Phase-one universal limitations, surfaced in every experiment report's
-# 已知限制 section (and the README).  They are report-only boundaries, not
-# defects: cross-source stock-close disagreement above tolerance is recorded as
+# 已知限制 section (and the README).  It is a report-only boundary, not a
+# defect: cross-source stock-close disagreement above tolerance is recorded as
 # ERROR in the quality report but the Tushare primary close series is
 # authoritative for factors and backtests (design §13.5 keeps the publication
-# gate strategy-independent), and no adjusted (复权) daily series is published
-# or consumed at the factor layer in phase one -- momentum runs on the
-# unadjusted series (adjusted_close=close) and BaoStock adjusted data is fetched
-# only for optional continuity/cross-checks, never for factors.
+# gate strategy-independent).  The former "no adjusted series is published or
+# consumed" limitation is obsolete since momentum_60d v2 consumes the project's
+# internal_total_return_v1 ``adjusted_bar`` series; the 因子价格口径 section
+# now reports that basis, factor versions and break counts explicitly.
 _PHASE_ONE_KNOWN_LIMITATIONS = (
     "跨源收盘价差异超过容差时，仅在质量报告中记录为 ERROR，本阶段不阻断发布："
     "因子与回测以 Tushare 主源收盘序列为准（设计 §13.5 令发布门禁与策略输入无关），"
     "跨源收盘差异仅作报告提示。",
-    "本阶段不发布、也不消费复权日线：动量基于未复权序列计算（adjusted_close=close）；"
-    "BaoStock 复权数据仅用于可选的延续性与交叉核对，不参与因子。",
 )
 
 # --------------------------------------------------------------------------- #
@@ -117,6 +115,13 @@ class ExperimentReportInput:
     primary_benchmark_symbol: str = _PRIMARY_BENCHMARK
     known_limitations: tuple[str, ...] = ()
     generated_at: str = ""
+    #: The persisted ``metrics["factor_input"]`` audit of the pinned
+    #: ``adjusted_bar`` rows the factor actually consumed: ``{"adjustment",
+    #: "factor_versions", "row_count", "error_break_count",
+    #: "invalid_reason_counts"}``.  ``None`` (report inputs that predate the
+    #: audit) simply omits the 因子价格口径 section instead of rendering
+    #: empty provenance claims.
+    factor_input_audit: dict | None = None
     #: The frozen corporate-action trust decision recorded on the run
     #: (``metrics["corporate_action_trust"]``): ``{"trusted", "reasons",
     #: "mode", "dataset_version", "window_start", "window_end"}``.  ``None``
@@ -132,6 +137,13 @@ class ExperimentReportInput:
     #: ``None``/empty (legacy runs resolved through the engineering universe)
     #: hides the frozen-universe section entirely.
     universe: dict | None = None
+    #: The pinned real-data acceptance audit persisted with the run
+    #: (``metrics["data_acceptance"]``): ``{"acceptance_id", "policy_version",
+    #: "operator_id", "created_at", "decision"}``.  ``None`` -- or the
+    #: engineering ``{"acceptance_id": None, "status": "UNVERIFIED"}`` shape
+    #: that carries no decision -- renders the prominent UNVERIFIED alert: a
+    #: report never infers ACCEPTED from missing data.
+    data_acceptance: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -311,6 +323,62 @@ def _universe_block(universe: dict | None) -> dict | None:
         "coverage_text": coverage_text,
         "expected_size": universe.get("expected_size"),
         "daily_rows": daily_rows,
+    }
+
+
+def _factor_input_block(factor_input_audit: dict | None) -> dict | None:
+    """Normalize the persisted factor-input audit for the template.
+
+    Returns ``None`` when no audit is supplied so the 因子价格口径 section is
+    omitted rather than rendered with empty claims.  Factor versions and break
+    reasons become sorted ``key: value`` strings (reason strings are attacker-
+    controllable data, so they stay plain values that only Jinja's autoescape
+    ever renders, never markup).
+    """
+    if not isinstance(factor_input_audit, dict):
+        return None
+    versions = factor_input_audit.get("factor_versions")
+    version_items = (
+        sorted(versions.items()) if isinstance(versions, dict) else []
+    )
+    reasons = factor_input_audit.get("invalid_reason_counts")
+    reason_items = sorted(reasons.items()) if isinstance(reasons, dict) else []
+    return {
+        "adjustment": str(factor_input_audit.get("adjustment", "")),
+        "version_text": "、".join(
+            f"{name}: {version}" for name, version in version_items
+        ),
+        "row_count": _int_text(factor_input_audit.get("row_count")),
+        "error_break_count": _int_text(
+            factor_input_audit.get("error_break_count")
+        ),
+        "reason_text": "、".join(
+            f"{reason}: {count}" for reason, count in reason_items
+        ),
+    }
+
+
+def _data_acceptance_block(data_acceptance: dict[str, object] | None) -> dict | None:
+    """Normalize the persisted real-data acceptance audit for the template.
+
+    Returns ``None`` when no audit is supplied -- or when the mapping carries
+    no concrete ``decision`` (the engineering ``{"acceptance_id": None,
+    "status": "UNVERIFIED"}`` shape) -- so the 真实数据验收 section renders its
+    prominent UNVERIFIED alert instead of an empty claim: a report never
+    infers ACCEPTED from missing data.  Every field stays a plain string that
+    only Jinja's autoescape ever renders, never markup.
+    """
+    if not isinstance(data_acceptance, dict):
+        return None
+    decision = data_acceptance.get("decision")
+    if not decision:
+        return None
+    return {
+        "decision": str(decision),
+        "policy_version": str(data_acceptance.get("policy_version", "")),
+        "acceptance_id": str(data_acceptance.get("acceptance_id") or ""),
+        "operator_id": str(data_acceptance.get("operator_id", "")),
+        "created_at": str(data_acceptance.get("created_at", "")),
     }
 
 
@@ -774,6 +842,8 @@ def render_experiment_report(
         ),
         trust=_trust_block(experiment.corporate_action_trust),
         universe=universe,
+        factor_input=_factor_input_block(experiment.factor_input_audit),
+        data_acceptance=_data_acceptance_block(experiment.data_acceptance),
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(body, encoding="utf-8")

@@ -27,8 +27,12 @@ in configuration files.
 - A **dataset** is immutable and content-addressed. One update fetches a window
   into the raw-store, normalizes and quality-checks it, merges it over the
   carried master/calendar tables, and only publishes when the quality gate
-  passes. Reads are pinned to a version hash; `CURRENT` points at the latest
-  fully gated version. Data and experiments live under `data/`.
+  passes. Every successful update also rebuilds the point-in-time total-return
+  series `adjusted_bar` (`adjustment=internal_total_return_v1`) from unadjusted
+  closes and verified corporate actions, and republishes the
+  `corporate_action_quarantine` audit table. Reads are pinned to a version
+  hash; `CURRENT` points at the latest fully gated version. Data and
+  experiments live under `data/`.
 - An **experiment** is identified by a content hash of its frozen spec. The
   same spec run twice publishes the same experiment id and byte-identical
   artifacts (`metrics.json`, `report.html`, factor/portfolio/backtest frames).
@@ -119,6 +123,80 @@ python -m stock_quant research run --spec configs/experiments/momentum_60d.yml -
 # The experiment_id printed by both runs is identical (content-addressed identity).
 ```
 
+## Factor price basis
+
+- `momentum_60d` v2 consumes the immutable `adjusted_bar` table with
+  `adjustment=internal_total_return_v1`. The table is derived from unadjusted
+  closes and verified cash-dividend/bonus/capitalization events.
+- Orders, fills, price-limit checks and account valuation continue to use
+  unadjusted `daily_bar` prices.
+- Datasets created before `adjusted_bar` remain auditable but cannot run a v2
+  Research experiment. Run a full data update to publish a compatible dataset.
+- An untrusted corporate-action transition invalidates every momentum window
+  that crosses it; the system never substitutes unadjusted close silently.
+
+Every published experiment records this basis in `metrics.json`
+(`metrics["factor_input"]`) and renders it in the report's 因子价格口径
+section, including the ERROR break count of the pinned dataset.
+
+Status: 复权/公司行为一致性已实现，等待真实数据验收。
+
+## Real data acceptance (数据验收)
+
+Formal `research run` is gated by a **real data acceptance** record
+(`policy_version=real-data-v1`): a content-addressed, immutable, operator
+signed verdict that one pinned dataset version's supply quality was verified.
+It is a *data supply* quality gate, not a strategy verdict: a published
+experiment's performance credibility stays diagnostic-only (`UNTRUSTED`) in
+engineering mode regardless of any acceptance record. Data acceptance and
+strategy acceptance (绩效可信度) are separate decisions.
+
+Operator flow (offline except the data itself; details in
+`docs/operations/phase-one-validation.md`):
+
+```bash
+# 1. Prepare the checklist: fresh automated check verdicts; every manual row
+#    starts as an explicit FAIL the operator must turn into PASS.
+python -m stock_quant data acceptance prepare --version <VERSION_HASH> \
+  --operator <OPERATOR_ID> --output checklist.yml --root <PROJECT_ROOT>
+
+# 2. Edit the checklist by hand: flip each manual row to PASS with evidence.
+#    Evidence files live inside the project (project-relative `reference` +
+#    `sha256`); `external` references are never fetched -- their sha256 pins
+#    the stored UTF-8 summary text.
+
+# 3. Publish: re-runs every automated check and re-hashes all bound evidence.
+#    All PASS -> ACCEPTED, exit 0.  Anything else -> the REJECTED record is
+#    persisted first (immutable audit), reasons printed, exit 1.
+python -m stock_quant data acceptance publish --checklist checklist.yml --root <PROJECT_ROOT>
+
+# 4. Inspect the version's history (oldest first, with reason= lines; a
+#    corrupted record prints corrupt acceptance_id=<id> and exits nonzero).
+python -m stock_quant data acceptance show --version <VERSION_HASH> --root <PROJECT_ROOT>
+```
+
+Semantics formal research relies on:
+
+- A spec's `data_acceptance_id` may be the placeholder `CURRENT_ACCEPTED`
+  (resolves to the newest valid ACCEPTED record for the pinned dataset at run
+  time, re-verified against the live evidence every run) or an explicit
+  64-hex id (pins exactly one record). A frozen spec always carries the
+  concrete resolved id, never the placeholder.
+- REJECTED records are persisted and immutable but never selectable: with no
+  valid ACCEPTED record the research run fails before any factor or backtest
+  work and leaves a FAILED preflight manifest.
+- Datasets published before the acceptance evidence existed (bootstrap seeds,
+  legacy versions) fail the automated checks that need `build_config`
+  provenance — run a full `data update` to publish a compatible dataset.
+  Old experiments stay readable; engineering-mode runs need no acceptance but
+  are recorded `UNVERIFIED` and stay `UNTRUSTED`.
+- Every experiment report renders the 真实数据验收 section from
+  `metrics.json["data_acceptance"]`; a run without an accepted record shows a
+  prominent `UNVERIFIED` alert and the report never infers `ACCEPTED`.
+
+The mechanism is implemented and offline-tested, but no operator has yet run
+the acceptance flow on real data.
+
 ## Notebook
 
 `notebooks/01_momentum_baseline.ipynb` is a thin, fully offline walkthrough over
@@ -146,9 +224,3 @@ experiment report's 已知限制 section.
   gate does not depend on strategy inputs (design §13.5).
   跨源收盘价差异超过容差时，仅在质量报告中记录为 ERROR，本阶段不阻断发布：因子与
   回测以 Tushare 主源收盘序列为准，发布门禁与策略输入无关（设计 §13.5）。
-- No adjusted (复权) daily series is published or consumed at the factor layer
-  in phase one; momentum runs on the unadjusted series (adjusted_close=close).
-  BaoStock adjusted data is fetched only for optional continuity/cross-checks,
-  never for factors.
-  本阶段不发布、也不消费复权日线：动量基于未复权序列计算（adjusted_close=close）；
-  BaoStock 复权数据仅用于可选的延续性与交叉核对，不参与因子。

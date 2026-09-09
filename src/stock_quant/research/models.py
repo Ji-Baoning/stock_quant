@@ -134,7 +134,9 @@ class RunState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run_id: str
-    experiment_id: str
+    #: ``None`` only for a preflight failure that happened before an
+    #: experiment identity could be formed (e.g. the data-acceptance gate).
+    experiment_id: str | None
     status: RunStatus = RunStatus.CREATED
     stage: DataStage = DataStage.CREATED
     dataset_version: str
@@ -146,6 +148,10 @@ class RunState(BaseModel):
     #: status and the per-signal-day member counts / snapshot-hash maps.
     #: ``None`` for runs resolved through the legacy engineering universe.
     universe: dict[str, Any] | None = None
+    #: Sanitized audit of the pinned real-data acceptance record
+    #: (:func:`acceptance_audit_dict`), or ``None`` when no acceptance was
+    #: resolved (an ENGINEERING diagnostic or a preflight failure).
+    data_acceptance: dict[str, Any] | None = None
     code_commit: str = "unversioned"
     factor_versions: dict[str, str] = Field(default_factory=dict)
     cost_scenarios: list[str] = Field(default_factory=list)

@@ -46,6 +46,8 @@ import json
 import platform
 import shutil
 import subprocess
+import uuid
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -60,6 +62,7 @@ from stock_quant.backtest.engine import BacktestEngine, BacktestRequest, OrderDa
 from stock_quant.backtest.models import BUY, SELL, Fill, Order
 from stock_quant.backtest.rebalancer import AccountAwareWeeklyRebalancer
 from stock_quant.config import load_project_config
+from stock_quant.data_model.adjusted_bar import ADJUSTMENT_NAME
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.corporate_action_coverage import CoverageReason
 from stock_quant.data_model.dataset import (
@@ -85,6 +88,21 @@ from stock_quant.research.acceptance import (
     enforce_required_results,
     evaluate_index_membership_evidence,
     read_membership_table,
+)
+from stock_quant.research.acceptance.models import (
+    CURRENT_ACCEPTED,
+    AcceptanceRecord,
+)
+from stock_quant.research.acceptance.registry import (
+    AcceptanceIntegrityError,
+    AcceptanceNotFound,
+    AcceptanceRegistry,
+    NoValidAcceptance,
+)
+from stock_quant.research.acceptance.service import (
+    AcceptanceBindingError,
+    acceptance_audit_dict,
+    verify_acceptance_bindings,
 )
 from stock_quant.research.models import (
     CANONICAL_SCENARIO,
@@ -415,12 +433,64 @@ class _DefaultReport:
             "<title>experiment report</title></head><body>"
             f"<h1>{_html(experiment_id)}</h1>"
             f"<p>evaluation: {_html(status)}</p><p>{reason}</p>"
-            "<table><thead><tr><th>scenario</th><th>start</th><th>end</th>"
+            + _factor_input_paragraph(metrics)
+            + _data_acceptance_paragraph(metrics)
+            + "<table><thead><tr><th>scenario</th><th>start</th><th>end</th>"
             "<th>periods</th><th>end_equity</th><th>total_return</th>"
             "</tr></thead><tbody>"
             + "".join(rows)
             + "</tbody></table></body></html>\n"
         )
+
+
+def _factor_input_paragraph(metrics: dict[str, object]) -> str:
+    """An escaped 因子价格口径 line over the persisted factor-input audit.
+
+    The rebuilt rich report renders ``metrics["factor_input"]`` as a full
+    section; this paragraph keeps the lightweight report produced directly by
+    ``research run`` aligned on the same adjustment basis, factor versions and
+    break count.  Every interpolated value goes through ``_html`` because
+    invalid-reason strings are data, not markup.
+    """
+    audit = metrics.get("factor_input")
+    if not isinstance(audit, Mapping):
+        return ""
+    versions = audit.get("factor_versions")
+    version_text = ""
+    if isinstance(versions, Mapping):
+        version_text = ", ".join(
+            f"{name}: {versions[name]}" for name in sorted(versions)
+        )
+    return (
+        "<p>因子价格口径: "
+        f"调整方法 {_html(audit.get('adjustment'))}；"
+        f"因子版本 {_html(version_text)}；"
+        f"输入行数 {_html(audit.get('row_count'))}；"
+        f"不可信断点 {_html(audit.get('error_break_count'))}</p>"
+    )
+
+
+def _data_acceptance_paragraph(metrics: dict[str, object]) -> str:
+    """An escaped 真实数据验收 status line over the pinned acceptance audit.
+
+    The rebuilt rich report renders ``metrics["data_acceptance"]`` as a full
+    section; this one line keeps the lightweight report produced directly by
+    ``research run`` aligned on the same acceptance identity.  A run without a
+    concrete accepted decision -- engineering runs and older metrics alike --
+    prints UNVERIFIED: the lightweight report never infers ACCEPTED from
+    missing data.
+    """
+    audit = metrics.get("data_acceptance")
+    if isinstance(audit, Mapping) and audit.get("decision"):
+        return (
+            "<p>真实数据验收: "
+            f"{_html(audit.get('decision'))}；"
+            f"规则 {_html(audit.get('policy_version'))}；"
+            f"验收 ID {_html(audit.get('acceptance_id'))}；"
+            f"操作者 {_html(audit.get('operator_id'))}；"
+            f"时间 {_html(audit.get('created_at'))}</p>"
+        )
+    return "<p>真实数据验收: UNVERIFIED（没有绑定真实数据验收记录）</p>"
 
 
 class _DefaultEvaluator:
@@ -505,6 +575,10 @@ class ResearchRunner:
         self._context: DatasetContext | None = None
         self._digest: str = ""
         self._universe_preflight: UniversePreflight | None = None
+        # The sanitized audit of the acceptance record resolved before the
+        # experiment identity is frozen; ``None`` when no acceptance was
+        # pinned (an ENGINEERING diagnostic or a preflight failure).
+        self._data_acceptance: dict[str, object] | None = None
 
     # ------------------------------------------------------------------ #
     # Public entry point
@@ -555,9 +629,31 @@ class ResearchRunner:
             if preflight is not None
             else self._legacy_universe_version(spec)
         )
+        # The real-data acceptance gate runs after dataset pinning and the
+        # universe preflight, but before experiment identity/factor work: a
+        # RESEARCH run must resolve (and re-verify) its acceptance record
+        # here, and any failure leaves only a FAILED preflight manifest -- no
+        # factor provider, portfolio builder or backtest engine is ever
+        # invoked.
+        acceptance_id = spec.data_acceptance_id
+        self._data_acceptance = None
+        if (
+            mode is DataTrustMode.RESEARCH
+            or acceptance_id not in (None, CURRENT_ACCEPTED)
+        ):
+            selected = self._resolve_acceptance(
+                dataset_version, acceptance_id or CURRENT_ACCEPTED,
+                universe_version=universe_version,
+                trust_mode=mode,
+            )
+            acceptance_id = selected.acceptance_id
+            self._data_acceptance = acceptance_audit_dict(selected)
+        elif mode is DataTrustMode.ENGINEERING:
+            acceptance_id = None
         frozen = spec.freeze(
             dataset_version=dataset_version,
             universe_version=universe_version,
+            data_acceptance_id=acceptance_id,
             code_commit=self._detect_code_commit() or spec.code_commit,
             trust_mode=mode,
         )
@@ -857,6 +953,86 @@ class ResearchRunner:
             event="universe_preflight_failed",
         )
 
+    def _resolve_acceptance(
+        self,
+        dataset_version: str,
+        requested_id: str,
+        *,
+        universe_version: str,
+        trust_mode: DataTrustMode,
+    ) -> AcceptanceRecord:
+        """Select and re-verify the pinned acceptance record (read-only)."""
+        try:
+            selected = AcceptanceRegistry(self._project_root).select(
+                dataset_version, requested_id
+            )
+            verify_acceptance_bindings(self._project_root, selected)
+        except (
+            NoValidAcceptance,
+            AcceptanceNotFound,
+            AcceptanceIntegrityError,
+            AcceptanceBindingError,
+            ValueError,
+        ) as error:
+            # The universe preflight may have opened the pinned dataset
+            # context; a rejected acceptance stops the run here, so release
+            # it before auditing the failure.
+            self._close_context()
+            self._record_acceptance_preflight_failure(
+                dataset_version=dataset_version,
+                universe_version=universe_version,
+                trust_mode=trust_mode,
+                error=error,
+            )
+            raise ResearchRunFailed(
+                "no valid real-data-v1 acceptance for dataset "
+                f"{dataset_version}: {type(error).__name__}: "
+                f"{redact_text(error, self._secrets)}",
+                run_id=self._run_id,
+                failed_stage="acceptance",
+                retriable=False,
+            ) from error
+        return selected
+
+    def _record_acceptance_preflight_failure(
+        self,
+        *,
+        dataset_version: str,
+        universe_version: str,
+        trust_mode: DataTrustMode,
+        error: Exception,
+    ) -> None:
+        """Persist the FAILED preflight manifest for an acceptance-gate stop.
+
+        No experiment identity exists yet, so the run id is a fresh
+        ``preflight_acceptance_<uuid>`` and the recorded ``experiment_id`` is
+        ``None``; the resolved ``trust_mode`` is stamped so an ENGINEERING run
+        that pinned a concrete-but-invalid acceptance is not mislabelled with
+        the default research mode.  The redacted error keeps the failure
+        auditable without ever carrying secrets or absolute paths.
+        """
+        run_id = f"preflight_acceptance_{uuid.uuid4().hex}"
+        run_dir = self._project_root / "data" / "runs" / run_id
+        state = RunState(
+            run_id=run_id,
+            experiment_id=None,
+            status=RunStatus.FAILED,
+            stage=DataStage.FAILED,
+            dataset_version=dataset_version,
+            universe_version=universe_version,
+            trust_mode=trust_mode.value,
+            failed_stage="acceptance",
+            error={
+                "stage": "acceptance",
+                "exception_class": type(error).__name__,
+                "message": redact_text(str(error), self._secrets),
+                "retriable": False,
+            },
+        )
+        write_run_manifest(run_dir, state)
+        self._run_id = run_id
+        self._run_dir = run_dir
+
     def _detect_code_commit(self) -> str | None:
         """The repository HEAD when ``config_root`` is inside a git work tree."""
         try:
@@ -892,6 +1068,7 @@ class ResearchRunner:
             dataset_version=frozen.dataset_version,
             universe_version=frozen.universe_version,
             universe=self._universe_record(frozen),
+            data_acceptance=self._data_acceptance,
             code_commit=frozen.code_commit,
             factor_versions=dict(frozen.factor_versions),
             cost_scenarios=list(frozen.cost_scenarios),
@@ -1131,11 +1308,18 @@ class ResearchRunner:
                 "experiment requires an explicit reason in metrics.json "
                 "evaluation"
             )
+        if state.experiment_id is None:
+            raise ValueError(
+                f"cannot publish run {self._run_id}: the run state carries no "
+                "experiment identity; a completed run must publish under the "
+                "frozen experiment id"
+            )
         manifest = {
             "experiment_id": state.experiment_id,
             "status": rejected if status == untrusted else status,
             "dataset_version": frozen.dataset_version,
             "universe_version": frozen.universe_version,
+            "data_acceptance_id": frozen.data_acceptance_id,
             "code_commit": frozen.code_commit,
             "evaluation_reason": reason,
             "artifacts": artifacts,
@@ -2034,6 +2218,36 @@ class ResearchRunner:
             )
         return ledger
 
+    def _factor_input_audit(self, frozen: ExperimentSpec) -> dict[str, object]:
+        """The deterministic provenance audit of the factor's price input.
+
+        Reads ``adjusted_bar`` from the *frozen* dataset version (never
+        ``CURRENT``), restricted to the universe symbols this run can hold, and
+        counts ERROR quality breaks plus their ``invalid_reason`` distribution
+        sorted by reason.  Every key is sorted before encoding so identical
+        runs publish byte-identical ``metrics.json`` ``factor_input`` sections;
+        the evaluator and both reports consume exactly these persisted facts.
+        """
+        context = self._open_context(frozen.dataset_version)
+        if "adjusted_bar" not in context.tables:
+            raise ValueError(
+                f"dataset {frozen.dataset_version} has no adjusted_bar; "
+                f"research factors require {ADJUSTMENT_NAME}"
+            )
+        adjusted = context.read("adjusted_bar")
+        universe = adjusted[adjusted["symbol"].isin(set(self._universe_symbols))]
+        errors = universe[universe["quality_severity"] == "ERROR"]
+        counts = errors["invalid_reason"].value_counts().sort_index()
+        return {
+            "adjustment": ADJUSTMENT_NAME,
+            "factor_versions": dict(sorted(frozen.factor_versions.items())),
+            "row_count": int(len(universe)),
+            "error_break_count": int(len(errors)),
+            "invalid_reason_counts": {
+                str(reason): int(count) for reason, count in counts.items()
+            },
+        }
+
     def _produce_report(self, state: RunState, frozen: ExperimentSpec) -> dict:
         """Compute metrics, record the evaluation and render the report."""
         canonical = self._canonical_scenario(list(frozen.cost_scenarios))
@@ -2084,6 +2298,16 @@ class ResearchRunner:
             "canonical_scenario": canonical,
         }
         metrics: dict[str, object] = {"meta": meta, **analytics_out}
+        # Persist the factor-input provenance before evaluation and report
+        # rendering so the evaluator, the direct-run report and any later
+        # rebuild from metrics.json all consume the same committed facts.
+        metrics["factor_input"] = self._factor_input_audit(frozen)
+        # Persist the pinned real-data acceptance audit next to it: a run
+        # without one is recorded as explicitly UNVERIFIED, never as trusted.
+        metrics["data_acceptance"] = self._data_acceptance or {
+            "acceptance_id": None,
+            "status": "UNVERIFIED",
+        }
         evaluation = self._evaluator(metrics)
         if not isinstance(evaluation, Evaluation):
             raise TypeError(
@@ -2144,11 +2368,15 @@ class _MarketFrames:
 class _DatasetFactorAdapter:
     """A :class:`FactorDataset` read surface over one pinned dataset version.
 
-    The canonical ``daily_bar`` table carries no quality annotation, so the
-    adapter annotates every clean bar with ``INFO`` quality and derives
-    ``listed_trading_days`` from the pinned trading calendar and the security
-    master's listing dates.  Rows are restricted to the securities named by the
-    master so index/benchmark series never enter factor observations.
+    The adapter reads *only* the canonical ``adjusted_bar`` table: research
+    factor prices are the point-in-time total-return series derived from
+    unadjusted closes and verified corporate actions, never a disguised
+    ``daily_bar.close``.  A pinned dataset without that table, without rows for
+    the universe, or carrying any other adjustment basis fails loudly instead
+    of falling back.  ``listed_trading_days`` is derived from the pinned
+    trading calendar and the security master's listing dates; rows are
+    restricted to the universe symbols so index/benchmark series never enter
+    factor observations.
     """
 
     def __init__(
@@ -2161,18 +2389,36 @@ class _DatasetFactorAdapter:
         self._universe_symbols = set(universe_symbols)
 
     def factor_input(self) -> pd.DataFrame:
-        daily = self._context.read("daily_bar")
-        rows = daily[daily["symbol"].isin(self._universe_symbols)].copy()
+        if "adjusted_bar" not in self._context.tables:
+            raise ValueError(
+                f"dataset {self._context.version} has no adjusted_bar; "
+                f"research factors require {ADJUSTMENT_NAME}"
+            )
+        adjusted = self._context.read("adjusted_bar")
+        rows = adjusted[adjusted["symbol"].isin(self._universe_symbols)].copy()
         if rows.empty:
-            return pd.DataFrame(
-                columns=[
-                    "trade_date", "symbol", "source", "adjustment",
-                    "adjusted_close", "quality_severity", "listed_trading_days",
-                ]
+            raise ValueError(
+                f"dataset {self._context.version} has no adjusted rows for "
+                "the universe"
+            )
+        if set(rows["adjustment"].astype(str)) != {ADJUSTMENT_NAME}:
+            raise ValueError(
+                f"factor input must use only {ADJUSTMENT_NAME}, got "
+                + ", ".join(sorted(set(rows["adjustment"].astype(str))))
             )
         # DuckDB surfaces DATE as datetime64; factors compare ``trade_date``
         # against plain ``date`` objects, so normalize to real dates up front.
         rows["trade_date"] = rows["trade_date"].map(_as_date)
+        rows["listed_trading_days"] = self._listed_trading_days(rows)
+        return rows[[
+            "trade_date", "symbol", "source", "adjustment", "adjusted_close",
+            "quality_severity", "listed_trading_days",
+        ]].sort_values(["symbol", "trade_date"], kind="stable").reset_index(
+            drop=True
+        )
+
+    def _listed_trading_days(self, rows: pd.DataFrame) -> list[int]:
+        """Sessions listed as of each row's trade date (seasoning input)."""
         master = self._context.read("security_master")
         list_date = {
             str(row["symbol"]): _as_date(row["list_date"])
@@ -2186,11 +2432,6 @@ class _DatasetFactorAdapter:
             if bool(open_flag)
         )
         open_ordinals = [_to_ordinal(day) for day in open_days]
-        rows = rows.sort_values(
-            ["symbol", "trade_date"], kind="stable"
-        ).reset_index(drop=True)
-        from bisect import bisect_left
-
         listed_by_ordinal: dict[str, dict[int, int]] = {}
         for symbol in sorted(set(rows["symbol"])):
             mapping: dict[int, int] = {}
@@ -2200,23 +2441,10 @@ class _DatasetFactorAdapter:
                 for index in range(anchor, len(open_days)):
                     mapping[open_days[index].toordinal()] = index - anchor + 1
             listed_by_ordinal[symbol] = mapping
-        listed = [
+        return [
             listed_by_ordinal[symbol].get(_to_ordinal(day), 0)
             for symbol, day in zip(rows["symbol"], rows["trade_date"])
         ]
-        out = pd.DataFrame({
-            "trade_date": rows["trade_date"],
-            "symbol": rows["symbol"],
-            "source": rows["source"],
-            "adjustment": rows["adjustment"],
-            "adjusted_close": rows["close"],
-            # Phase-one ruling (§13.5): the Tushare primary close series is
-            # authoritative for factors; per-bar cross-source close ERROR is
-            # report-only (quality report) and never fed to a factor.
-            "quality_severity": QUALITY_SEVERITY_AUTHORITATIVE,
-            "listed_trading_days": listed,
-        })
-        return out
 
 
 # --------------------------------------------------------------------------- #

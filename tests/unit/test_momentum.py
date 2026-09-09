@@ -153,6 +153,28 @@ def _single_symbol_context(
     )
 
 
+def factor_input_with_error_at(index: int, rows: int) -> pd.DataFrame:
+    """A single-symbol ``rows``-session frame with one ERROR break at ``index``."""
+    sessions = _sessions(rows)
+    return pd.DataFrame(
+        _symbol_rows(_SYMBOL, sessions, error_index=index),
+        columns=_FACTOR_INPUT_COLUMNS,
+    )
+
+
+def _context_at(
+    frame: pd.DataFrame, sessions: list[date], *, signal_index: int
+) -> FactorContext:
+    """A context over ``frame`` whose only signal date is ``sessions[signal_index]``."""
+    return FactorContext(
+        dataset=_FrameDataset(frame),
+        universe_version="universe-v1",
+        start_date=sessions[0],
+        end_date=sessions[-1],
+        signal_dates=(sessions[signal_index],),
+    )
+
+
 @pytest.fixture
 def context_with_61_rows() -> FactorContext:
     """Exactly 61 sessions; signal date is the last session.
@@ -172,7 +194,7 @@ def test_momentum_contract_metadata():
     factor = Momentum60()
     assert (factor.name, factor.version, factor.lookback, factor.frequency) == (
         "momentum_60d",
-        "1.0.0",
+        "2.0.0",
         60,
         "weekly",
     )
@@ -184,10 +206,10 @@ def test_momentum_contract_metadata():
 def test_momentum_output_uses_standardized_schema(context_with_61_rows):
     result = Momentum60().compute(context_with_61_rows)
     assert result.factor_name == "momentum_60d"
-    assert result.factor_version == "1.0.0"
+    assert result.factor_version == "2.0.0"
     assert list(result.frame.columns) == list(FACTOR_RESULT_COLUMNS)
     assert set(result.frame["factor_name"]) == {"momentum_60d"}
-    assert set(result.frame["factor_version"]) == {"1.0.0"}
+    assert set(result.frame["factor_version"]) == {"2.0.0"}
 
 
 # --------------------------------------------------------------------------- #
@@ -228,6 +250,26 @@ def test_momentum_ignores_quality_error_outside_lookback():
     row = Momentum60().compute(context).frame.iloc[0]
     assert row.is_valid
     assert row.invalid_reason == ""
+
+
+def test_momentum_is_invalid_until_error_break_leaves_61_row_window():
+    # 72 sessions with an ERROR-quality break at index 10.  The signal at
+    # index 70 still looks back over rows 10..70, so the break is inside the
+    # 61-row window and the factor is invalid with "quality_error"; one
+    # session later the trailing window starts at row 11 and the factor
+    # recovers -- the series is never silently patched from raw closes.
+    sessions = _sessions(72)
+    frame = factor_input_with_error_at(index=10, rows=72)
+    crossed = Momentum60().compute(
+        _context_at(frame, sessions, signal_index=70)
+    ).frame.iloc[0]
+    recovered = Momentum60().compute(
+        _context_at(frame, sessions, signal_index=71)
+    ).frame.iloc[0]
+    assert not crossed["is_valid"]
+    assert crossed["invalid_reason"] == "quality_error"
+    assert recovered["is_valid"]
+    assert recovered["invalid_reason"] == ""
 
 
 def test_momentum_invalidates_when_seasoning_below_120():

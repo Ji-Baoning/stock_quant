@@ -217,6 +217,13 @@ def test_report_build_renders_quality_html_with_markers_and_no_external_refs(
         project.root / "data" / "reports" / f"{outcome.experiment_id}.html"
     )
     assert experiment_path.is_file()
+    # The rebuilt rich report renders the persisted factor-input audit from
+    # metrics.json: the run consumed the internal total-return series with no
+    # trusted-evidence breaks, exactly like the direct `research run` report.
+    experiment_html = experiment_path.read_text(encoding="utf-8")
+    assert "因子价格口径" in experiment_html
+    assert "internal_total_return_v1" in experiment_html
+    assert "不可信断点：0" in experiment_html
 
 
 def test_report_build_fails_when_backtest_workspace_pruned(

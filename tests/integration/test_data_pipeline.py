@@ -11,6 +11,7 @@ share the session dataset used by the CLI / end-to-end modules).
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -26,6 +27,7 @@ from stock_quant.data_model.security_master import master_coverage_frame
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_model.universe_membership import membership_frame
 from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
+    CODE_ADJUSTED_BAR_MISSING_FROM_DATASET,
     CODE_MASTER_BAR_BOUNDARY,
     CODE_MASTER_COVERAGE_MISMATCH,
     CODE_MASTER_SNAPSHOT_INCOMPLETE,
@@ -65,6 +67,9 @@ def _weekdays(start: date, end: date) -> list[date]:
 
 _WINDOW_START = date(2021, 11, 1)
 _WINDOW_END = date(2021, 11, 30)
+
+#: The ex-date baked into the stub cross-confirmed cash-dividend frames.
+_EVENT_DAY = date(2021, 11, 11)
 
 
 #: The repository fixture universe every stub project is built from (30 symbols
@@ -649,6 +654,45 @@ def test_update_with_explicit_end_publishes_merged_dataset(project):
     assert all(status.ok for status in result.source_status)
 
 
+def test_successful_update_binds_sanitized_build_evidence(project):
+    """The dataset manifest must carry sanitized, identity-bearing evidence.
+
+    ``build_config`` records where every byte came from: hashes, stable reason
+    codes and the request window -- never exception text, URLs, local paths or
+    reason prose, so identical builds stay byte-identical apart from run_id.
+    """
+    result = DataPipeline(project.root, sources=_all_stubs()).update(_request())
+    manifest = json.loads(
+        (result.dataset_ref.path / "dataset_manifest.json").read_text()
+    )
+    build = manifest["build_config"]
+    assert build["origin"] == "data_update"
+    assert build["pipeline_contract_version"] == 1
+    assert build["run_id"] == result.run_id
+    assert build["requested_start_date"] == _WINDOW_START.isoformat()
+    assert build["requested_end_date"] == _WINDOW_END.isoformat()
+    assert build["resolved_end_date"] == _WINDOW_END.isoformat()
+    assert isinstance(build["resolved_end_is_fallback"], bool)
+    assert build["resolved_end_is_fallback"] is False
+    assert build["raw_snapshots"] == sorted(
+        build["raw_snapshots"],
+        key=lambda row: (
+            row["source"], row["endpoint"], row["request_key"], row["file_sha256"]
+        ),
+    )
+    assert all(
+        set(row)
+        == {"source", "endpoint", "request_key", "file_sha256", "manifest_sha256"}
+        for row in build["raw_snapshots"]
+    )
+    assert all(
+        set(row) == {"source", "required", "ok", "reason_code"}
+        for row in build["source_status"]
+    )
+    assert all(row["reason_code"] == "ok" for row in build["source_status"])
+    assert "token" not in json.dumps(build).lower()
+
+
 def test_update_refreshes_master_and_publishes_master_coverage(project):
     """A successful update applies stock_basic facts and records per-symbol
     evidence rows, so the published master is traceable to the snapshot."""
@@ -665,6 +709,62 @@ def test_update_refreshes_master_and_publishes_master_coverage(project):
     assert set(coverage["list_status"]) == {"L"}
     assert set(coverage["source"]) == {"tushare.stock_basic"}
     assert coverage["snapshot_sha256"].str.len().eq(64).all()
+
+
+def test_update_publishes_internal_total_return_rows(project):
+    """A successful update publishes the total-return bars and quarantine.
+
+    Every published ``adjusted_bar`` row carries the single internal
+    ``internal_total_return_v1`` basis over the whole pinned universe, and the
+    quarantine table ships alongside it so trust breaks stay auditable.
+    """
+    result = DataPipeline(project.root, sources=_all_stubs()).update(_request())
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        adjusted = context.read("adjusted_bar")
+        assert set(adjusted["adjustment"]) == {"internal_total_return_v1"}
+        assert set(adjusted["symbol"]) == set(_FIXTURE_UNIVERSE_SYMBOLS)
+        assert "corporate_action_quarantine" in context.tables
+
+
+def _run_update_with_actions(project, action_symbols):
+    """One full update; each named symbol cross-reports one cash dividend."""
+    frames = {
+        symbol: {
+            "cninfo_corporate_actions": _cninfo_single_cash(symbol),
+            "eastmoney_corporate_actions": _eastmoney_cash(symbol),
+        }
+        for symbol in action_symbols
+    }
+    sources = _all_stubs(akshare=StubAdapter("akshare", action_frames=frames))
+    return DataPipeline(project.root, sources=sources).update(_request())
+
+
+def _read_adjusted(root, version: str) -> pd.DataFrame:
+    with DatasetReader(root).open(version) as context:
+        return context.read("adjusted_bar")
+
+
+def test_later_action_does_not_rewrite_pre_ex_date_adjusted_rows(project):
+    """A newly discovered event only affects rows from its ex_date onward.
+
+    Two sequential updates over the same window; the second learns one
+    cross-confirmed cash dividend ex-dated 2021-11-11.  Every adjusted row
+    strictly before that ex_date must be frame-equal across both published
+    versions -- a later action can never rewrite past total-return values.
+    """
+    first = _run_update_with_actions(project, [])
+    assert first.dataset_ref is not None
+    before = _read_adjusted(project.root, first.dataset_ref.version)
+    second = _run_update_with_actions(project, ["600036.SH"])
+    assert second.dataset_ref is not None
+    after = _read_adjusted(project.root, second.dataset_ref.version)
+    cutoff = before["trade_date"] < pd.Timestamp(_EVENT_DAY)
+    assert cutoff.any()
+    pd.testing.assert_frame_equal(
+        before.loc[cutoff].reset_index(drop=True),
+        after.loc[cutoff].reset_index(drop=True),
+    )
 
 
 def test_stock_basic_fetch_failure_blocks_update(project):
@@ -1003,11 +1103,13 @@ def _republish_current_tables(
     *,
     master_coverage: pd.DataFrame | None = None,
     include_master_coverage: bool = True,
+    include_corporate_action: bool = True,
 ) -> str:
-    """Republish CURRENT with an optional security_master_coverage variant.
+    """Republish CURRENT with optional canonical-table variants.
 
     ``master_coverage`` replaces the published table; ``include_master_coverage
-    = False`` omits it entirely (the "older dataset" shape).  Used only to stage
+    = False`` omits it entirely, and ``include_corporate_action=False`` omits
+    the facts table (the "older dataset" shapes).  Used only to stage
     validate-only audit breaches the pipeline itself can never write.
     """
     publisher = DatasetPublisher(root)
@@ -1017,12 +1119,13 @@ def _republish_current_tables(
         tables = {
             "daily_bar": context.read("daily_bar"),
             "security_master": context.read("security_master"),
-            "corporate_action": context.read("corporate_action"),
             "corporate_action_coverage": context.read(
                 "corporate_action_coverage"
             ),
             "trading_calendar": context.read("trading_calendar"),
         }
+        if include_corporate_action:
+            tables["corporate_action"] = context.read("corporate_action")
         if include_master_coverage:
             tables["security_master_coverage"] = (
                 master_coverage
@@ -1030,6 +1133,55 @@ def _republish_current_tables(
                 else context.read("security_master_coverage")
             )
     return publisher.publish(tables, QualityReport()).version
+
+
+def test_validate_fails_closed_without_total_return_tables(project):
+    """A dataset manifest without adjusted_bar can never validate clean.
+
+    The publisher accepts table subsets silently, so ``validate`` must fail
+    closed on the missing total-return tables instead of waving a legacy (or
+    trimmed) dataset through as trusted.
+    """
+    pipeline, result = _update_and_validate(project)
+    assert result.dataset_ref is not None
+    # Republish CURRENT from an update-published dataset minus both new
+    # tables -- the exact shape a pre-migration or trimmed dataset has.
+    _republish_current_tables(project.root)
+    report = pipeline.validate()
+    issue = next(
+        item
+        for item in report.issues
+        if item.code == CODE_ADJUSTED_BAR_MISSING_FROM_DATASET
+    )
+    assert issue.severity is Severity.FATAL
+    assert issue.table == "adjusted_bar"
+    assert issue.details["missing_tables"] == [
+        "adjusted_bar",
+        "corporate_action_quarantine",
+    ]
+
+
+def test_validate_fails_closed_without_corporate_action(project):
+    """The same coded FATAL guards the facts the lineage checks read.
+
+    A dataset without ``corporate_action`` could not have its adjusted rows
+    audited, so it must fail closed too -- never crash on the bare read.
+    """
+    pipeline, _ = _update_and_validate(project)
+    _republish_current_tables(project.root, include_corporate_action=False)
+    report = pipeline.validate()
+    issue = next(
+        item
+        for item in report.issues
+        if item.code == CODE_ADJUSTED_BAR_MISSING_FROM_DATASET
+    )
+    assert issue.severity is Severity.FATAL
+    assert issue.table == "adjusted_bar"
+    assert issue.details["missing_tables"] == [
+        "corporate_action",
+        "adjusted_bar",
+        "corporate_action_quarantine",
+    ]
 
 
 def _update_and_validate(project, **tushare_overrides):

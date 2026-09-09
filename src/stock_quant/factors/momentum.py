@@ -22,6 +22,11 @@ membership day and simply makes no new signal afterwards.  Removal is an
 input gate, not a trading instruction.  A context without ``members_on``
 (the legacy engineering path) applies no membership gate.
 
+Version 2.0.0 permanently isolates the total-return input basis
+(``adjusted_bar`` / ``internal_total_return_v1``) from the pre-2.0 unadjusted
+results: a spec that still requests 1.0.0 is rejected by the provider instead
+of being silently upgraded.
+
 Only the signal dates given in ``FactorContext.signal_dates`` produce rows;
 rows are sorted by trade date then symbol, so identical inputs yield
 byte-stable Parquet.
@@ -49,7 +54,7 @@ class Momentum60:
     """Sixty-trading-session price momentum over one adjusted-close series."""
 
     name = "momentum_60d"
-    version = "1.0.0"
+    version = "2.0.0"
     lookback = 60
     frequency = "weekly"
     required_fields = frozenset(

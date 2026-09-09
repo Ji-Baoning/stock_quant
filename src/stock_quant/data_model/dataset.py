@@ -35,7 +35,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from stock_quant.data_model.schemas import (
+    ADJUSTED_BAR_SCHEMA,
     CORPORATE_ACTION_COVERAGE_SCHEMA,
+    CORPORATE_ACTION_QUARANTINE_SCHEMA,
     CORPORATE_ACTION_SCHEMA,
     DAILY_SCHEMA,
     SECURITY_MASTER_COVERAGE_SCHEMA,
@@ -51,9 +53,11 @@ from stock_quant.data_quality.models import QualityReport, issue_dict_dumps
 #: be registered here before they can be published.
 STANDARDIZED_SCHEMAS: dict[str, pa.Schema] = {
     "daily_bar": DAILY_SCHEMA,
+    "adjusted_bar": ADJUSTED_BAR_SCHEMA,
     "security_master": SECURITY_MASTER_SCHEMA,
     "security_master_coverage": SECURITY_MASTER_COVERAGE_SCHEMA,
     "corporate_action": CORPORATE_ACTION_SCHEMA,
+    "corporate_action_quarantine": CORPORATE_ACTION_QUARANTINE_SCHEMA,
     "corporate_action_coverage": CORPORATE_ACTION_COVERAGE_SCHEMA,
     "trading_calendar": TRADING_CALENDAR_SCHEMA,
     "universe_membership": UNIVERSE_MEMBERSHIP_SCHEMA,

@@ -1,10 +1,10 @@
 """Strategy-neutral data-publication gate.
 
 The gate checks only schema conformance, key uniqueness, illegal OHLC,
-provenance, quarantine reasons and report generation. Issues whose codes fall
-outside the gate domain — for example cross-source close ``ERROR`` records, momentum
-lookback or execution-date gaps — never block publication; they belong to
-``evaluate_backtest_readiness`` in a later task.
+provenance, quarantine reasons, report generation and adjusted-bar lineage.
+Issues whose codes fall outside the gate domain — for example cross-source
+close ``ERROR`` records, momentum lookback or execution-date gaps — never block
+publication; they belong to ``evaluate_backtest_readiness`` in a later task.
 """
 
 from __future__ import annotations
@@ -12,6 +12,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from stock_quant.data_quality.models import (
+    CODE_ADJUSTED_BAR_MISSING_RAW,
+    CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH,
+    CODE_ADJUSTED_BAR_UNKNOWN_ACTION,
+    CODE_ADJUSTED_BAR_WRONG_BASIS,
     CODE_DUPLICATE_CONFLICT,
     CODE_INVALID_OHLC,
     CODE_NEGATIVE_AMOUNT,
@@ -26,8 +30,11 @@ from stock_quant.data_quality.models import (
 )
 
 #: The only issue codes that block a dataset from being published. Kept as an
-#: explicit allow-list of the six gate conditions so that backtest-readiness
+#: explicit allow-list of the gate conditions so that backtest-readiness
 #: issues (momentum lookback, execution dates) can never block publication.
+#: The adjusted-bar lineage codes are included: a total-return series that
+#: cannot be reconciled with ``daily_bar`` / the canonical actions must never
+#: reach the immutable dataset.
 PUBLICATION_BLOCKING_CODES = frozenset(
     {
         CODE_SCHEMA_MISMATCH,
@@ -40,6 +47,10 @@ PUBLICATION_BLOCKING_CODES = frozenset(
         CODE_UNKNOWN_ADJUSTMENT,
         CODE_QUARANTINE_MISSING_REASON,
         CODE_REPORT_GENERATION_FAILED,
+        CODE_ADJUSTED_BAR_MISSING_RAW,
+        CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH,
+        CODE_ADJUSTED_BAR_WRONG_BASIS,
+        CODE_ADJUSTED_BAR_UNKNOWN_ACTION,
     }
 )
 

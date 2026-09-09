@@ -50,6 +50,14 @@ CODE_WITHIN_TOLERANCE = "within_tolerance"
 CODE_PRICE_DIFFERENCE = "price_difference"
 CODE_CLOSE_DIFFERENCE = "close_difference"
 
+# Adjusted-bar lineage codes: a published ``adjusted_bar`` that cannot be
+# reconciled row-by-row against ``daily_bar`` and the canonical corporate
+# actions is untrusted end to end (all four block publication).
+CODE_ADJUSTED_BAR_MISSING_RAW = "adjusted_bar_missing_raw"
+CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH = "adjusted_bar_raw_close_mismatch"
+CODE_ADJUSTED_BAR_WRONG_BASIS = "adjusted_bar_wrong_basis"
+CODE_ADJUSTED_BAR_UNKNOWN_ACTION = "adjusted_bar_unknown_action"
+
 # Missing-row classification labels, in classification precedence order.
 MISSING_NOT_LISTED = "not_listed"
 MISSING_DELISTED = "delisted"

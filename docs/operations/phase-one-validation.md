@@ -39,7 +39,10 @@ export TUSHARE_TOKEN=<your_rotated_token>   # 仅环境变量，绝不入库
 | 数据更新 | `python -m stock_quant data update --start 2024-01-01 --end 2024-12-31 --root <ROOT>` | 拉取并入原始库→清洗→门禁→发布；打印 `run_id`、`resolved_end_date`、`resolved_end_is_fallback`、来源状态、`dataset_version`，发布成功打印 `PASS` |
 | 数据校验 | `python -m stock_quant data validate [--version <VERSION>] --root <ROOT>` | 对指定/当前数据集重跑共享质检；打印摘要与 `PASS` |
 | 指数成分导入（离线） | `python -m stock_quant data index-membership prepare --universe-id csi300 --input <快照文件> --snapshot-sha256 <64HEX> --source-document-sha256 <64HEX> --source <来源> --source-url <无凭证URL> --effective-date <ISO> --announcement-date <ISO> --output <帧文件>` | 把已存储的官方成分快照规范化为带证据哈希的不可变 `universe_membership` 事实帧；打印 `membership_table_sha256=`（冻结定义必须钉住的哈希）。缺任一证据哈希 = usage error；无网络、无绕过 |
-| 正式研究（唯一发布者） | `python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root <ROOT>` | 冻结规格端到端运行并内容寻址发布；打印 `experiment_id=`；运行前先做 `universe_acceptance` 成分证据预检（见步骤 E） |
+| 验收准备 | `python -m stock_quant data acceptance prepare --version <VERSION> --operator <OPERATOR> --output <YML> --root <ROOT>` | 为指定数据版本生成脱敏清单：自动项当场离线重跑，人工项全部初始 FAIL（见 §7） |
+| 验收发布 | `python -m stock_quant data acceptance publish --checklist <YML> --root <ROOT>` | 重跑自动检查并重算全部哈希后落盘 ACCEPTED/REJECTED；拒绝先落盘再以非零退出并打印 `reason=`（见 §7） |
+| 验收查询 | `python -m stock_quant data acceptance show --version <VERSION> --root <ROOT>` | 按时间升序列出验收历史与失败原因；无记录打印 `UNACCEPTED`；损坏记录命名并以非零退出（见 §7） |
+| 正式研究（唯一发布者） | `python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root <ROOT>` | 冻结规格端到端运行并内容寻址发布；打印 `experiment_id=`；运行前先做 `universe_acceptance` 成分证据预检（见步骤 E），且前置要求该数据版本持有有效 ACCEPTED 验收记录（见 §7） |
 | 报表 | `python -m stock_quant report build [--experiment <ID>] --root <ROOT>` | 渲染实验 HTML 与当前数据质量 HTML（实验默认取最新发布；`data/reports/<experiment_id>.html`、`data/reports/quality-<version>.html`） |
 
 `data update` / `data validate` 任一失败路径以非零退出并打印 `FAILED: ...`；被门禁
@@ -79,7 +82,9 @@ conda run -n stock-quant python -m pytest -m smoke -v
 - 三个来源 `source_status` 齐全；
 - 门禁结论 ∈ {`PASS`, `BLOCK`}；
 - `dataset_ref is not None` ⇔ 结论为 `PASS`；
-- 若 `PASS`，读取发布的 `daily_bar` 确认窗口内确有该股行。
+- 若 `PASS`，读取发布的 `daily_bar` 确认窗口内确有该股行（`adjusted_bar` 的口径核对
+  见第 4 节第 5 项：发布的 `adjusted_bar` 应只有
+  `adjustment=internal_total_return_v1`）。
 
 **`BLOCK` 是合法诊断结果**（例如 AKShare 端点/符号列漂移、BaoStock 可选来源失败，
 均被管线转为可解释的 issue/status，而不是让测试崩溃）；只有逃逸出管线的 schema 或
@@ -153,8 +158,12 @@ python -m stock_quant report build --root <ROOT>
 4. **跨源最大差异抽查**：同一 (security, trade_date) 的主源与校验源收盘比较；阈值见
    §13.4（绝对差 ≤ ¥0.01 为 INFO，相对差 > 0.05% 为 WARNING，收盘相对差 > 0.20% 为
    ERROR）。阶段一管线不把 BaoStock 行并入 `daily_bar`，抽查时直接从原始库取两帧比对。
-5. **复权抽查**：本阶段只消费未复权 `daily_bar`（见第 5 节限制）；复权核对不适用
-   于现有产物。
+5. **复权抽查（adjusted_bar 口径）**：发布的 `adjusted_bar` 只应有
+   `adjustment=internal_total_return_v1` 一种口径；抽查同 (symbol, trade_date) 的
+   `raw_close` 与 `daily_bar.close` 一致、`applied_action_ids` 能回溯到
+   `corporate_action` 标准记录；隔离/覆盖断点日应为 `quality_severity=ERROR` 且
+   `invalid_reason` 有解释（不可信公司行为使跨越它的动量窗口无效，系统不会静默
+   回退未复权收盘）；口径说明见第 5 节。
 6. **供应商原始帧忠实度**：
    - (c) AKShare EM `index_history` 真实载荷**通常无符号列**——跨源核对须按请求
      顺序映射，而不是按符号列匹配；若当前 akshare 已改名 EM 指数接口
@@ -205,13 +214,20 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
 
 ## 5. 阶段一已知限制（对齐操作者预期）
 
-- **不发布 `adjusted_bar` 表**：阶段一只发布规范化的未复权 `daily_bar`；无复权产物
-  可下载或核对，勿期待 adjusted 制品。
+- **复权口径（momentum_60d v2）**：动量 v2 只消费不可变 `adjusted_bar` 表
+  （`adjustment=internal_total_return_v1`，由未复权收盘与已核验现金分红/送股/转增
+  事件导出）；订单、成交、涨跌停判断与账户估值继续使用未复权 `daily_bar` 价格。
+  在 `adjusted_bar` 之前创建的数据集仍可审计，但不能运行 v2 研究实验——跑一次完整
+  `data update` 发布兼容数据集。不可信公司行为断点使跨越它的每个动量窗口无效；
+  系统绝不静默回退到未复权收盘价。每次成功 `data update` 都会重建并发布
+  `adjusted_bar` 与 `corporate_action_quarantine`。复权/公司行为一致性已实现，
+  等待真实数据验收。
 - **BaoStock 仅为可选校验来源**：因子层不消费 BaoStock *复权*序列；研究运行因子的
-  适配器使用规范未复权 `daily_bar`。BaoStock 失败仅记为 WARNING，不阻断发布。
+  适配器只读数据集内的 `adjusted_bar`。BaoStock 失败仅记为 WARNING，不阻断发布。
 - **`data bootstrap` 发布首个基线；`data update` 只扩展**：见第 1 节，
   `python -m stock_quant data bootstrap` 发布 `security_master`/`trading_calendar`
-  （+空 `daily_bar`/`corporate_action`）基线；`data update` 只扩展已有数据集。
+  （+空 `daily_bar`/`corporate_action`/`adjusted_bar`/`corporate_action_quarantine`）
+  基线；`data update` 只扩展已有数据集。
   `bootstrap_seed.py` 是与该 CLI 等价的直调脚本。
 - **tushare `stock_basic` 快照是默认“仅上市（L）”参照**：universe 若含已退市/长期停牌
   样本，会以 `master_snapshot_incomplete` 形式暴露——本期 30 只固定上市样本下属预期
@@ -226,6 +242,11 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
   在操作者用真实证据哈希与实际覆盖区间填写之前不可用，正式运行会在
   `universe_acceptance` 处失败（这是设计而非缺陷）。指数成分证据链（步骤 E）必须在
   首次正式研究前完成；证据缺失、数量不对、退市边界不确定一律停止工作，无绕过开关。
+- **真实数据验收（§7）针对数据供给，不针对策略**：验收记录证明“当时该数据
+  版本在 `real-data-v1` 规则下证据齐全、检查全过”，是正式研究的**数据供给侧
+  质量门禁**；它不构成策略有效性或绩效可信度结论——工程模式即使引用有效
+  ACCEPTED 记录，实验评价仍恒为 UNTRUSTED（diagnostic-only）。数据验收与
+  策略验收（绩效可信度）是两个独立决定，永不互相替代。
 - 无任何策略盈利或实盘就绪声明。
 
 ## 6. 记录模板（按数据集/实验 ID 留存，不入库）
@@ -236,3 +257,70 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
 
 验收结论记录在本项目之外或 `.superpowers` 文档区；`data/`、`reports/` 等市场数据
 产物永远由 `.gitignore` 排除。
+
+## 7. 真实数据验收操作流（data acceptance，规则版本 real-data-v1）
+
+正式 `research run` 只接受**已验收**的数据集版本：实验规格的
+`data_acceptance_id` 解析为一条有效 ACCEPTED 记录，验收身份随后写入 run
+manifest、`metrics.json["data_acceptance"]`、实验 manifest 与实验报告的
+**真实数据验收**小节（结论/规则/验收 ID/操作者/UTC 时间）。没有验收的 run
+（工程模式诊断）在报告中显示 UNVERIFIED 警示——报告绝不把缺失数据推断为
+ACCEPTED。
+
+**状态声明**：验收机制已实现并全部离线测试覆盖；截至本文档更新，**尚无操作者
+在真实数据上执行过完整验收流程**——首次真实验收仍待执行。
+
+### 7.1 prepare → 操作者编辑 → publish → show
+
+```bash
+# (1) 准备：自动项按 real-data-v1 当场离线重跑（数据集清单/质量报告哈希、
+#     必需表覆盖、日期窗口完整性、证券主数据证据、公司行为证据、原始快照
+#     可追溯、来源角色健康）；人工项全部初始为显式 FAIL。
+python -m stock_quant data acceptance prepare \
+  --version <数据版本哈希> --operator <操作者ID> \
+  --output acceptance-<数据版本哈希>.yml --root <ROOT>
+
+# (2) 操作者手工编辑清单：把 9 条人工项逐条改为 PASS，并附证据。
+#     local 证据 = 项目内的相对路径 + 该文件 sha256 + 一句话摘要；
+#     external 证据永不抓取：sha256 只钉住清单内 UTF-8 摘要文本本身。
+
+# (3) 发布：发布时不信任 (1) 的结果——自动检查与数据集/质量报告/原始快照/
+#     人工证据哈希全部当场重算。全部通过 → decision=ACCEPTED，退出码 0；
+#     任一绑定漂移/人工未过 → 先原子落盘 REJECTED 记录（不可变留档），
+#     打印 acceptance_id 与逐条 reason=，再以退出码 1 结束。
+python -m stock_quant data acceptance publish \
+  --checklist acceptance-<数据版本哈希>.yml --root <ROOT>
+
+# (4) 查询：按 created_at、acceptance_id 稳定升序列出全部记录、结论、规则
+#     版本与 reason= 行；无记录明确打印 UNACCEPTED（缺失绝不解释为通过）。
+python -m stock_quant data acceptance show \
+  --version <数据版本哈希> --root <ROOT>
+```
+
+人工项清单（每条都必须有证据，参见 §4 的核对要点）：
+`exchange_calendar_sample`、`source_row_count_sample`、`missing_reason_sample`、
+`cross_source_price_sample`、`corporate_action_sample`、`benchmark_sample`、
+`trading_rule_effective_dates`、`security_master_sample`、`secret_scan`。
+
+### 7.2 语义与边界（务必记住）
+
+- **CURRENT_ACCEPTED 冻结行为**：可编辑规格可写 `CURRENT_ACCEPTED`（运行时
+  解析为该数据版本最新的有效 ACCEPTED 记录，并**每次运行重新复核**全部绑定
+  哈希与人工证据，复核失败即门禁失败、不回退更早记录），也可显式写 64 位
+  十六进制 id（只验证该条记录）。冻结规格回写解析后的具体 id，绝不保留占位
+  符；`data_acceptance_id` 参与实验身份计算。
+- **REJECTED 记录语义**：先原子持久化、后非零退出；记录不可变、永久留档，
+  但**永不可被研究选中**。只有 REJECTED 记录时正式研究在任何计算前失败，仅
+  留 `data/runs/preflight_acceptance_<uuid>/` 的 FAILED preflight（脱敏原因）。
+- **bootstrap/legacy 迁移**：bootstrap 空种子与在 `build_config` 验收证据出现
+  之前发布的数据集，其自动检查（如 `raw_snapshot_traceability`）必然 FAIL——
+  跑一次完整 `data update` 重新生成溯源后再走验收；旧数据集与旧实验仍可读取
+  审计。工程模式无需验收即可运行，但产物恒记 UNVERIFIED/UNTRUSTED。
+- **证据路径限制**：local 证据只允许项目根内的相对路径；绝对路径、目录穿越、
+  软链越界一律 FAIL（`evidence_path_outside_project` 等）；无法安全持久化的
+  引用在记录中以稳定占位符存储，记录绝不携带操作者路径；external 证据永不
+  抓取。
+- **损坏记录**：`show` 对哈希不匹配/损坏的记录打印
+  `corrupt acceptance_id=<id>`、照常列出其余记录，但以非零退出——损坏绝不
+  解释为通过，也不输出 traceback/路径/载荷。
+- CLI 输出不含 Token、原始供应商载荷或本机绝对路径。

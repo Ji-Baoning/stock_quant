@@ -32,6 +32,7 @@
   .trust-ok { color: #2e7d32; font-weight: 600; }
   .banner.trust-fail { border-color: #c62828; background: #fdecea; }
   .banner.trust-fail strong { color: #b71c1c; }
+  .alert { color: #b71c1c; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -67,6 +68,28 @@
         </tbody>
       </table>
       {% else %}<p class="empty">不可信结论未携带逐标的原因。</p>{% endif %}
+    {% endif %}
+  </section>
+
+  {% if factor_input %}
+  <section>
+    <h2>因子价格口径</h2>
+    <p>调整方法：{{ factor_input.adjustment }}</p>
+    <p>因子版本：{{ factor_input.version_text }}</p>
+    <p>输入行数：{{ factor_input.row_count }}；不可信断点：{{ factor_input.error_break_count }}</p>
+    {% if factor_input.reason_text %}<p>断点原因：{{ factor_input.reason_text }}</p>{% endif %}
+  </section>
+  {% endif %}
+
+  <section class="data-acceptance">
+    <h2>真实数据验收</h2>
+    {% if data_acceptance %}
+    <p>结论：{{ data_acceptance.decision }}</p>
+    <p>规则：{{ data_acceptance.policy_version }}</p>
+    <p>验收 ID：<code>{{ data_acceptance.acceptance_id }}</code></p>
+    <p>操作者：{{ data_acceptance.operator_id }}；时间：{{ data_acceptance.created_at }}</p>
+    {% else %}
+    <p class="alert">UNVERIFIED：没有绑定真实数据验收记录。</p>
     {% endif %}
   </section>
 

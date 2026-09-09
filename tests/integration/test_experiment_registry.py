@@ -51,6 +51,7 @@ def _spec_kwargs(**overrides) -> dict:
         factor_versions={"momentum_60d": "1.0.0"},
         dataset_version="d" * 64,
         universe_version="u" * 64,
+        data_acceptance_id="a" * 64,
         date_range={"start_date": date(2020, 1, 1), "end_date": date(2026, 9, 2)},
         train_validation_holdout_policy="not_applicable_engineering_mvp",
         preprocessing={"winsorization": "none", "standardization": "none"},
@@ -110,6 +111,7 @@ def _stage_publish(
         "status": evaluation,
         "dataset_version": spec.dataset_version,
         "universe_version": spec.universe_version,
+        "data_acceptance_id": spec.data_acceptance_id,
         "code_commit": spec.code_commit,
         "evaluation_reason": evaluation_reason,
         "artifacts": artifacts,
@@ -284,6 +286,47 @@ def test_publish_validates_declared_artifact_hashes_before_renaming(
     with pytest.raises(ArtifactHashMismatch):
         registry.publish(run_dir, identity)
     assert not (_experiments_root(tmp_path) / identity.experiment_id).exists()
+
+
+def test_publish_rejects_acceptance_drift_from_the_frozen_spec(
+    tmp_path, identity, frozen_spec
+):
+    """A manifest whose data_acceptance_id disagrees with the frozen spec
+    stored beside it can never be published."""
+    registry = ExperimentRegistry(tmp_path)
+    run_dir = tmp_path / "data" / "runs" / "run_drift"
+    _stage_publish(run_dir, frozen_spec, identity)
+    manifest_path = run_dir / "publish" / "experiment_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["data_acceptance_id"] = "f" * 64
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    with pytest.raises(ExperimentRegistryError):
+        registry.publish(run_dir, identity)
+    assert not (_experiments_root(tmp_path) / identity.experiment_id).exists()
+
+
+def test_rebuild_rejects_acceptance_drift_from_the_frozen_spec(
+    tmp_path, identity, frozen_spec
+):
+    """The rebuilt index re-checks every manifest against its frozen spec."""
+    registry = ExperimentRegistry(tmp_path)
+    run_dir = _stage_publish(
+        tmp_path / "data" / "runs" / "run_ok", frozen_spec, identity
+    )
+    registry.publish(run_dir, identity)
+    manifest_path = (
+        _experiments_root(tmp_path) / identity.experiment_id
+        / "experiment_manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["data_acceptance_id"] = None
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    with pytest.raises(ExperimentRegistryError):
+        registry.rebuild()
 
 
 def test_rebuild_reconstructs_registry_from_immutable_manifests(tmp_path):

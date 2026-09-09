@@ -224,6 +224,8 @@ def _holdings() -> pd.DataFrame:
 def _experiment_input(
     known_limitations: tuple[str, ...] | None = None,
     corporate_action_trust: dict | None = None,
+    factor_input_audit: dict | None = None,
+    data_acceptance: dict | None = None,
 ) -> ExperimentReportInput:
     benchmark = _benchmark()
     scenarios: list[ExperimentScenario] = []
@@ -263,6 +265,8 @@ def _experiment_input(
         generated_at="2024-01-09T09:00:00",
         known_limitations=known_limitations,
         corporate_action_trust=corporate_action_trust,
+        factor_input_audit=factor_input_audit,
+        data_acceptance=data_acceptance,
     )
 
 
@@ -517,15 +521,17 @@ def test_experiment_html_is_self_contained(tmp_path):
 
 def test_experiment_html_always_surfaces_phase_one_known_limitations(tmp_path):
     # The CLI report build path supplies no run-specific known limitations; the
-    # two phase-one boundaries must still render in the 已知限制 section.
+    # remaining phase-one boundary must still render in the 已知限制 section.
+    # The obsolete "no adjusted series is consumed" limitation is gone: the
+    # 因子价格口径 section now states the consumed basis explicitly.
     path = render_experiment_report(
         _experiment_input(known_limitations=()), tmp_path / "report.html"
     )
     html = path.read_text(encoding="utf-8")
     assert "跨源收盘价差异超过容差" in html
     assert "Tushare 主源收盘序列为准" in html
-    assert "不发布、也不消费复权日线" in html
-    assert "adjusted_close=close" in html
+    assert "不发布、也不消费复权日线" not in html
+    assert "adjusted_close=close" not in html
     # Run-specific limitations still follow the phase-one boundaries when given.
     with_extra = _experiment_input(
         known_limitations=("自定义实验限制：示例。",)
@@ -536,6 +542,106 @@ def test_experiment_html_always_surfaces_phase_one_known_limitations(tmp_path):
     phase_one_pos = combined.index("跨源收盘价差异超过容差")
     extra_pos = combined.index("自定义实验限制：示例。")
     assert phase_one_pos < extra_pos
+
+
+def test_experiment_html_shows_factor_price_basis(tmp_path):
+    audit = {
+        "adjustment": "internal_total_return_v1",
+        "factor_versions": {"momentum_60d": "2.0.0"},
+        "row_count": 100,
+        "error_break_count": 2,
+        "invalid_reason_counts": {"cross_source_conflict": 2},
+    }
+    path = render_experiment_report(
+        _experiment_input(factor_input_audit=audit), tmp_path / "report.html"
+    )
+    html = path.read_text(encoding="utf-8")
+    assert "因子价格口径" in html
+    assert "internal_total_return_v1" in html
+    assert "momentum_60d: 2.0.0" in html
+    assert "cross_source_conflict" in html
+    assert "100" in html  # 输入行数
+    assert "不可信断点" in html
+
+
+def test_experiment_html_omits_factor_price_basis_without_audit(tmp_path):
+    # Reports rebuilt before the audit existed render no empty claims.
+    html = render_experiment_report(
+        _experiment_input(), tmp_path / "report.html"
+    ).read_text(encoding="utf-8")
+    assert "因子价格口径" not in html
+
+
+def test_experiment_html_escapes_factor_audit_reasons(tmp_path):
+    audit = {
+        "adjustment": "internal_total_return_v1",
+        "factor_versions": {"momentum_60d": "2.0.0"},
+        "row_count": 1,
+        "error_break_count": 1,
+        "invalid_reason_counts": {"<script>alert(1)</script>": 1},
+    }
+    html = render_experiment_report(
+        _experiment_input(factor_input_audit=audit), tmp_path / "report.html"
+    ).read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+
+
+# --------------------------------------------------------------------------- #
+# Real-data acceptance audit section (plan Task 7)
+# --------------------------------------------------------------------------- #
+
+
+def test_experiment_report_shows_data_acceptance(tmp_path):
+    report = _experiment_input(
+        data_acceptance={
+            "acceptance_id": "a" * 64,
+            "policy_version": "real-data-v1",
+            "operator_id": "operator-a",
+            "created_at": "2026-09-08T12:00:00+00:00",
+            "decision": "ACCEPTED",
+        }
+    )
+    path = render_experiment_report(report, tmp_path / "report.html")
+    html = path.read_text(encoding="utf-8")
+    assert "真实数据验收" in html
+    assert "real-data-v1" in html
+    assert "operator-a" in html
+    assert "a" * 64 in html
+    assert "ACCEPTED" in html
+    assert "2026-09-08T12:00:00+00:00" in html
+    # The audit section leads the performance presentation, never follows it.
+    assert html.index("真实数据验收") < html.index("绩效汇总")
+    assert html.index("真实数据验收") < html.index("净值与回撤")
+
+
+def test_experiment_html_flags_unverified_without_acceptance(tmp_path):
+    # No acceptance audit (or the engineering {"acceptance_id": None,
+    # "status": "UNVERIFIED"} shape) must render the prominent UNVERIFIED
+    # alert and never an inferred ACCEPTED claim.
+    for missing in (None, {"acceptance_id": None, "status": "UNVERIFIED"}):
+        html = render_experiment_report(
+            _experiment_input(data_acceptance=missing), tmp_path / "r.html"
+        ).read_text(encoding="utf-8")
+        assert "真实数据验收" in html
+        assert "UNVERIFIED" in html
+        assert "ACCEPTED" not in html
+        assert "real-data-v1" not in html
+
+
+def test_experiment_html_escapes_data_acceptance_fields(tmp_path):
+    audit = {
+        "acceptance_id": "b" * 64,
+        "policy_version": "real-data-v1",
+        "operator_id": "<script>alert(1)</script>",
+        "created_at": "2026-09-08T12:00:00+00:00",
+        "decision": "ACCEPTED",
+    }
+    html = render_experiment_report(
+        _experiment_input(data_acceptance=audit), tmp_path / "report.html"
+    ).read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
 
 
 # --------------------------------------------------------------------------- #
