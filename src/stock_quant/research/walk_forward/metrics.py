@@ -103,37 +103,52 @@ class SamePathCostMetrics(_StrictFrozen):
 
 
 class FoldMetrics(_StrictFrozen):
-    """Every auditable metric of one executed fold under one cost scenario."""
+    """Every auditable metric of one executed fold under one cost scenario.
 
-    fold_id: str
-    scenario: str
-    first_trading_day: date | None
-    last_trading_day: date | None
-    observation_count: int
-    fold_calendar_return: float
-    annualized_volatility: float | None
-    sharpe_zero_rf: float | None
-    per_fold_max_drawdown: float
+    A fold executes once per predeclared cost scenario, so one record is
+    inherently scenario-bound; :class:`ScenarioMetrics` is the evaluation-side
+    name of this record.
+    """
+
+    fold_id: str = ""
+    scenario: str = ""
+    #: ``False`` only when the fold's scenario artifacts are incomplete; the
+    #: stability evaluation must treat that as a terminal FAILED, never as
+    #: evidence about performance.
+    artifact_complete: bool = True
+    first_trading_day: date | None = None
+    last_trading_day: date | None = None
+    observation_count: int = 0
+    fold_calendar_return: float | None = 0.0
+    annualized_volatility: float | None = None
+    sharpe_zero_rf: float | None = None
+    per_fold_max_drawdown: float = 0.0
     # Same-path cost decomposition.
-    gross_return_before_explicit_cost: float
-    net_return: float
-    explicit_cost_drag: float
-    slippage_impact: float
-    total_explicit_cost: float
-    initial_equity: float
-    explicit_cost_ratio: float
+    gross_return_before_explicit_cost: float = 0.0
+    net_return: float = 0.0
+    explicit_cost_drag: float = 0.0
+    slippage_impact: float = 0.0
+    total_explicit_cost: float = 0.0
+    initial_equity: float = 0.0
+    explicit_cost_ratio: float = 0.0
     # Execution quality.
-    submitted_order_count: int
-    reject_rate: float | None
-    fully_rejected_order_count: int
-    partially_filled_order_count: int
-    unfilled_quantity_rate: float | None
-    slippage_estimate: float
+    submitted_order_count: int = 0
+    reject_rate: float | None = None
+    fully_rejected_order_count: int = 0
+    partially_filled_order_count: int = 0
+    unfilled_quantity_rate: float | None = None
+    slippage_estimate: float = 0.0
     # Versioned turnover with both operands persisted beside the ratio.
-    turnover: float | None
+    turnover: float | None = None
     turnover_version: Literal["turnover-v1"] = TURNOVER_VERSION
     turnover_numerator: float = 0.0
     turnover_denominator: float = 0.0
+
+
+#: The evaluation-side name of one (fold, scenario) metric record: every fold
+#: executes once per predeclared cost scenario, so a scenario's metrics are a
+#: sequence of per-fold records.
+ScenarioMetrics = FoldMetrics
 
 
 class AggregateOOSMetrics(_StrictFrozen):
