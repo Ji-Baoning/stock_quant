@@ -41,12 +41,14 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from stock_quant.portfolio.buffered_models import BufferedRiskWeightedPolicy
 from stock_quant.research.acceptance.models import CURRENT_ACCEPTED
 from stock_quant.research.trust import DataTrustMode
 from stock_quant.research.walk_forward.snapshots import SnapshotBundle
@@ -92,12 +94,61 @@ class Preprocessing(BaseModel):
     standardization: Literal["none"] = "none"
 
 
-class PortfolioRule(BaseModel):
+class EqualWeightPortfolioRule(BaseModel):
+    """The legacy fixed-slot equal-weight rule (baseline / engineering specs)."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: Literal["top_n_equal_weight"] = "top_n_equal_weight"
     top_n: int = Field(default=10, ge=1, le=500)
     lot_size: int = Field(default=100, ge=100, multiple_of=100)
+
+
+class BufferedRiskWeightedPortfolioRule(BaseModel):
+    """The pre-registered buffered, inverse-volatility-weighted rule.
+
+    The rule carries exactly the frozen policy parameters; its canonical JSON
+    content is the ``portfolio_rule_version`` and part of the strategy
+    snapshot, so any explicit parameter change is a new strategy identity.
+    Validation is delegated to :class:`~stock_quant.portfolio.buffered_models.
+    BufferedRiskWeightedPolicy` -- one source of truth for the contract.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Literal["buffered_risk_weighted"] = "buffered_risk_weighted"
+    target_count: int = Field(default=10, ge=1)
+    entry_rank: int = Field(default=10, ge=1)
+    hold_rank: int = Field(default=15, ge=1)
+    risk_lookback_days: int = Field(default=60, ge=2)
+    min_risk_observations: int = Field(default=40, ge=2)
+    volatility_floor_annualized: Decimal = Decimal("0.10")
+    max_single_weight: Decimal = Decimal("0.15")
+    rebalance_band_absolute: Decimal = Decimal("0.02")
+    gross_exposure: Decimal = Decimal("1.00")
+    long_only: bool = True
+    leverage: bool = False
+    weight_quantum: Decimal = Decimal("0.000000000001")
+
+    def policy(self) -> "BufferedRiskWeightedPolicy":
+        """The frozen policy implied by this rule's parameters."""
+        payload = {key: value for key, value in self.model_dump().items()
+                   if key != "name"}
+        return BufferedRiskWeightedPolicy.model_validate(payload)
+
+    @model_validator(mode="after")
+    def _enforce_policy_contract(self) -> "BufferedRiskWeightedPortfolioRule":
+        self.policy()  # raises ValidationError on any contract breach
+        return self
+
+
+#: The discriminated portfolio-rule union: ``name`` selects the member, so a
+#: buffered spec and an equal-weight spec are both strictly typed and both
+#: hash their full canonical parameter content into the experiment identity.
+PortfolioRule = Annotated[
+    EqualWeightPortfolioRule | BufferedRiskWeightedPortfolioRule,
+    Field(discriminator="name"),
+]
 
 
 class ExperimentSpec(BaseModel):
