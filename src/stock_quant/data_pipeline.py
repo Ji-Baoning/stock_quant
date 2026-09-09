@@ -81,6 +81,7 @@ from stock_quant.data_model.schemas import (
     DAILY_SCHEMA,
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
+    UNIVERSE_MEMBERSHIP_COLUMNS,
 )
 from stock_quant.data_model.security_master import (
     MASTER_SOURCE_STOCK_BASIC,
@@ -97,11 +98,13 @@ from stock_quant.data_quality.models import (
     Severity,
 )
 from stock_quant.data_quality.raw_checks import (
+    TABLE_UNIVERSE_MEMBERSHIP,
     check_daily_values,
     check_primary_key_conflicts,
     check_provenance,
     check_schema,
     classify_missing_row,
+    validate_membership_facts,
 )
 from stock_quant.data_sources.base import (
     AuthenticationError,
@@ -321,10 +324,15 @@ class DataPipeline:
             issues.extend(check_daily_values(daily, table="daily_bar"))
             issues.extend(check_provenance(daily, table="daily_bar"))
             master = context.read("security_master")
+            calendar_frame = context.read("trading_calendar")
+            membership = None
+            if TABLE_UNIVERSE_MEMBERSHIP in context.tables:
+                membership = context.read(TABLE_UNIVERSE_MEMBERSHIP)
             coverage = None
             if "security_master_coverage" in context.tables:
                 coverage = context.read("security_master_coverage")
         issues.extend(self._universe_master_issues(master))
+        issues.extend(self._membership_issues(membership, calendar_frame))
         issues.extend(self._master_bar_boundary_issues(master, daily))
         issues.extend(self._master_coverage_consistency_issues(master, coverage))
         return QualityReport(issues=tuple(issues))
@@ -352,7 +360,7 @@ class DataPipeline:
             return self._result(
                 issues, None, run_id, None, statuses, raw_snapshots
             )
-        master, calendar_open, current_daily, current_ca = baseline
+        master, calendar_open, current_daily, current_ca, membership = baseline
         issues.extend(self._universe_master_issues(master))
 
         # ---- required-source availability gate -------------------------- #
@@ -557,6 +565,15 @@ class DataPipeline:
                 list(TRADING_CALENDAR_COLUMNS)
             ],
         }
+        if membership is not None:
+            # Membership facts are immutable qualification records: an update
+            # never rewrites them, it carries the registered raw table
+            # unchanged so every published dataset keeps one auditable
+            # membership version (appends happen only through the explicit
+            # membership refresh workflow).
+            tables[TABLE_UNIVERSE_MEMBERSHIP] = membership[
+                list(UNIVERSE_MEMBERSHIP_COLUMNS)
+            ]
         try:
             dataset_ref = DatasetPublisher(self._project_root).publish(
                 tables, report, build_config={"run_id": run_id}
@@ -750,6 +767,39 @@ class DataPipeline:
             )
         ]
 
+    def _membership_issues(
+        self,
+        membership: pd.DataFrame | None,
+        calendar_frame: pd.DataFrame,
+    ) -> list[QualityIssue]:
+        """Audit the carried ``universe_membership`` table, when present.
+
+        Row-level fact checks run through ``validate_membership_facts`` with
+        an empty ``expected_sizes`` mapping: evidence, symbols, intervals,
+        overlap, announcement visibility and (with no master snapshot in this
+        context) convention checks only. Cardinality acceptance belongs to the
+        research-facing membership acceptance gate, which pins expected sizes,
+        master boundaries and official exceptions. Datasets predating the
+        membership table carry no rows and therefore raise nothing here.
+        """
+        if membership is None:
+            return []
+        open_days = tuple(
+            sorted(
+                day.date()
+                for day, flag in zip(
+                    calendar_frame["calendar_date"],
+                    calendar_frame["is_trading_day"],
+                )
+                if bool(flag)
+            )
+        )
+        return validate_membership_facts(
+            membership,
+            calendar=TradingCalendar.from_open_days(open_days),
+            expected_sizes={},
+        )
+
     def _source(self, name: str) -> DataSource:
         override = self._overrides.get(name)
         if override is not None:
@@ -767,7 +817,12 @@ class DataPipeline:
             ) from None
 
     def _read_baseline(self, issues: list[QualityIssue]):
-        """The carried master/calendar/current tables, or None + fatal issue."""
+        """The carried master/calendar/current tables, or None + fatal issue.
+
+        The immutable ``universe_membership`` raw table is carried too when the
+        baseline dataset already has one; older datasets simply publish
+        without it.
+        """
         try:
             ref = DatasetPublisher(self._project_root).current()
         except DatasetNotFoundError:
@@ -790,6 +845,11 @@ class DataPipeline:
             calendar_frame = context.read("trading_calendar")
             daily = context.read("daily_bar")
             ca = context.read(TABLE_CORPORATE_ACTION)
+            membership = (
+                context.read(TABLE_UNIVERSE_MEMBERSHIP)
+                if TABLE_UNIVERSE_MEMBERSHIP in context.tables
+                else None
+            )
         open_days = tuple(
             sorted(
                 day.date()
@@ -800,7 +860,7 @@ class DataPipeline:
                 if bool(flag)
             )
         )
-        return master, open_days, daily, ca
+        return master, open_days, daily, ca, membership
 
     def _require_available(
         self,

@@ -24,6 +24,7 @@ from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.security_master import master_coverage_frame
 from stock_quant.data_model.universe import Universe
+from stock_quant.data_model.universe_membership import membership_frame
 from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
     CODE_MASTER_BAR_BOUNDARY,
     CODE_MASTER_COVERAGE_MISMATCH,
@@ -41,6 +42,7 @@ from stock_quant.data_quality.models import (
     QualityReport,
     Severity,
 )
+from stock_quant.data_quality.raw_checks import UNIVERSE_EVIDENCE_MISSING
 from stock_quant.data_sources.base import (
     AuthenticationError,
     DataRequest,
@@ -1108,3 +1110,87 @@ def test_validate_surfaces_missing_master_coverage_as_fatal(project):
     )
     assert issue.severity is Severity.FATAL
     assert issue.details["missing"]
+
+
+# --------------------------------------------------------------------------- #
+# Carried universe_membership raw table (point-in-time universe task)
+# --------------------------------------------------------------------------- #
+
+
+def _membership_fixture_frame() -> pd.DataFrame:
+    """A small, fully evidenced csi300 fact table over fixture symbols."""
+    return membership_frame(
+        [
+            {
+                "universe_id": "csi300",
+                "symbol": symbol,
+                "raw_effective_from": date(2018, 1, 2),
+                "raw_effective_to": None,
+                "announcement_date": date(2018, 1, 2),
+                "status": "active",
+                "reason": "initial_constituent",
+                "source": "csi_index_announcement",
+                "source_url": "https://www.csindex.com.cn/fixture.pdf",
+                "snapshot_sha256": "a1" * 32,
+                "source_document_sha256": "b2" * 32,
+            }
+            for symbol in ("600000.SH", "000333.SZ")
+        ]
+    )
+
+
+def _publish_baseline_with_membership(root: Path, membership: pd.DataFrame):
+    """Republish CURRENT with the membership table added to its tables."""
+    publisher = DatasetPublisher(root)
+    reader = DatasetReader(root)
+    with reader.open(publisher.current().version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+    tables["universe_membership"] = membership
+    return publisher.publish(tables, QualityReport()).version
+
+
+def test_update_carries_universe_membership_table_unchanged(project):
+    """Membership facts are immutable: an update carries the registered raw
+    table through to the new dataset version byte-for-byte and the auditor
+    stays clean over it."""
+    membership = _membership_fixture_frame()
+    _publish_baseline_with_membership(project.root, membership)
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        _request()
+    )
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        assert "universe_membership" in context.tables
+        carried = context.read("universe_membership")
+    pd.testing.assert_frame_equal(carried, membership, check_dtype=False)
+    report = DataPipeline(project.root).validate()
+    assert report.by_severity()[Severity.FATAL.value] == 0
+    assert report.by_severity()[Severity.ERROR.value] == 0
+
+
+def test_update_publishes_without_membership_table_when_absent(project):
+    """Datasets predating the membership table stay publishable; the update
+    must not invent an empty one."""
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        _request()
+    )
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        assert "universe_membership" not in context.tables
+
+
+def test_validate_surfaces_tampered_membership_evidence_as_fatal(project):
+    """A membership row without evidence cannot pass ``data validate``: the
+    auditor runs the same fatal fact checks the acceptance gate relies on."""
+    membership = _membership_fixture_frame()
+    membership.loc[0, "snapshot_sha256"] = ""
+    _publish_baseline_with_membership(project.root, membership)
+    report = DataPipeline(project.root).validate()
+    assert report.by_code()[UNIVERSE_EVIDENCE_MISSING] == 1
+    issue = next(
+        item
+        for item in report.issues
+        if item.code == UNIVERSE_EVIDENCE_MISSING
+    )
+    assert issue.severity is Severity.FATAL
+    assert issue.table == "universe_membership"
