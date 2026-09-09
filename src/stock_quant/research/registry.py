@@ -132,7 +132,9 @@ class ExperimentIdentity:
     data_environment_snapshot_sha256: str
 
     @classmethod
-    def of(cls, spec: ExperimentSpec, snapshots: "SnapshotBundle") -> "ExperimentIdentity":
+    def of(
+        cls, spec: ExperimentSpec, snapshots: "SnapshotBundle"
+    ) -> "ExperimentIdentity":
         if not isinstance(spec, ExperimentSpec):
             raise TypeError(
                 "ExperimentIdentity.of expects an ExperimentSpec, got "

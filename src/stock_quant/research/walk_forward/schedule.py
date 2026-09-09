@@ -38,6 +38,7 @@ from pydantic_core import InitErrorDetails, PydanticCustomError
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.research.walk_forward.policy import WalkForwardPolicy, canonical_sha256
 
+
 #: The one legal boundary disposition: dates that cannot form a complete
 #: 12-month OOS fold.  They are recorded in the schedule, excluded from OOS
 #: aggregation, and are categorically not ``skipped`` folds.
@@ -208,7 +209,10 @@ class FoldOutcomeLedger(_StrictFrozen):
                 input=list(outcomes),
             )
             raise ValidationError.from_exception_data("FoldOutcomeLedger", [details])
-        return cls(schedule_sha256=canonical_sha256(_payload(schedule)), outcomes=tuple(outcomes))
+        return cls(
+            schedule_sha256=canonical_sha256(_payload(schedule)),
+            outcomes=tuple(outcomes),
+        )
 
 
 def fold_id_for(

@@ -51,7 +51,6 @@ data is committed.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import shutil
@@ -93,13 +92,13 @@ from stock_quant.data_model.security_master import (
     master_coverage_frame,
     master_coverage_record,
 )
+from stock_quant.data_model.trading_rules import REASON_SELL_AT_LOWER_LIMIT
 from stock_quant.data_model.universe_membership import (
     membership_content_hash,
     membership_frame,
     resolve_memberships,
 )
 from stock_quant.data_quality.models import QualityReport
-from stock_quant.data_model.trading_rules import REASON_SELL_AT_LOWER_LIMIT
 from stock_quant.factors.momentum import Momentum60
 from stock_quant.research.acceptance.models import CURRENT_ACCEPTED
 from stock_quant.research.acceptance.registry import AcceptanceRegistry

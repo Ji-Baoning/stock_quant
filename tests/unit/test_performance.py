@@ -108,6 +108,26 @@ def benchmark_fixture() -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 
 
+def test_turnover_is_versioned_with_both_operands_persisted():
+    # turnover-v1: numerator (buy+sell notional)/2 over mean total_equity,
+    # with both operands persisted beside the ratio for recomputation.
+    metrics = compute_metrics(equity_fixture(), fills_fixture(), benchmark_fixture())
+    assert metrics.turnover_version == "turnover-v1"
+    expected_numerator = (1000 * 10.0 + 100 * 10.0) / 2
+    expected_denominator = (
+        sum([100000.0, 125000.0, 100000.0, 125000.0, 100000.0]) / 5
+    )
+    assert metrics.turnover_numerator == pytest.approx(expected_numerator)
+    assert metrics.turnover_denominator == pytest.approx(expected_denominator)
+    assert metrics.turnover == pytest.approx(
+        metrics.turnover_numerator / metrics.turnover_denominator
+    )
+    payload = metrics.to_dict()
+    assert payload["turnover_version"] == "turnover-v1"
+    assert payload["turnover_numerator"] == pytest.approx(expected_numerator)
+    assert payload["turnover_denominator"] == pytest.approx(expected_denominator)
+
+
 def test_drawdown_turnover_and_cost_decomposition():
     metrics = compute_metrics(equity_fixture(), fills_fixture(), benchmark_fixture())
     assert metrics.max_drawdown == pytest.approx(-0.2)
