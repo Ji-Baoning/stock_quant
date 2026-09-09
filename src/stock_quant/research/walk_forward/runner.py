@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -38,12 +39,25 @@ import pandas as pd
 
 from stock_quant.backtest.costs import CostModel
 from stock_quant.backtest.engine import BacktestEngine, BacktestRequest
+from stock_quant.backtest.models import LOT_SIZE
 from stock_quant.backtest.rebalancer import AccountAwareWeeklyRebalancer
+from stock_quant.backtest.weight_rebalancer import WeightTargetRebalancer
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.trading_rules import TradingRuleBook
 from stock_quant.factors.base import Factor, FactorContext
 from stock_quant.factors.models import FactorResult
+from stock_quant.portfolio.buffered_models import (
+    PORTFOLIO_CONSTRUCTION_COLUMNS,
+    REBALANCE_DECISION_COLUMNS,
+    BufferedRiskWeightedPolicy,
+    WeightTargetPeriod,
+)
+from stock_quant.portfolio.buffered_risk_weight import (
+    buffered_portfolio_rule_version,
+    build_buffered_target,
+)
 from stock_quant.portfolio.equal_weight import TopNEqualWeight
+from stock_quant.portfolio.risk_estimation import estimate_risk
 from stock_quant.research.spec import ExperimentSpec
 from stock_quant.research.universe import UniverseResolver
 from stock_quant.research.walk_forward.evaluation import (
@@ -135,7 +149,12 @@ class WalkForwardRequest:
     corporate_actions: pd.DataFrame
     factors: Mapping[str, Factor]
     factor_input_provider: Callable[[], pd.DataFrame]
-    portfolio_builder: TopNEqualWeight
+    #: The equal-weight portfolio builder (the legacy
+    #: ``top_n_equal_weight`` rule).  A buffered
+    #: ``buffered_risk_weighted`` spec builds its own common weight-target
+    #: periods from the frozen policy and leaves this ``None`` -- there is
+    #: deliberately no equal-weight fallback.
+    portfolio_builder: TopNEqualWeight | None
     cost_models: Mapping[str, CostModel]
     universe_resolver: UniverseResolver
     #: The sanitized audit of the pinned real-data acceptance record; a run
@@ -146,6 +165,38 @@ class WalkForwardRequest:
     market_closure_evidence: Mapping[str, Mapping[str, str]] = field(
         default_factory=dict
     )
+
+
+@dataclass(frozen=True)
+class FoldOrderPlan:
+    """One fold's frozen, scenario-independent order intent book.
+
+    ``kind`` selects the rebalancer family: ``equal_weight`` replays the
+    whole-lot ``targets_by_day`` book through
+    :class:`AccountAwareWeeklyRebalancer`; ``buffered_risk_weighted``
+    replays the common :class:`WeightTargetPeriod` book through one fresh
+    :class:`WeightTargetRebalancer` per scenario.  ``construction`` is the
+    common construction audit (empty for the equal-weight rule).
+    """
+
+    kind: str
+    targets_by_day: Mapping[date, tuple[date, Mapping[str, int]]] = field(
+        default_factory=dict
+    )
+    periods: Mapping[date, WeightTargetPeriod] = field(default_factory=dict)
+    possible_held: frozenset[str] = frozenset()
+    policy: BufferedRiskWeightedPolicy | None = None
+    rule_version: str = ""
+    construction: pd.DataFrame = field(default_factory=pd.DataFrame)
+    signal_rows: list[dict] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ScenarioArtifacts:
+    """One declared cost scenario's aggregate audit across executed folds."""
+
+    name: str
+    rebalance_decisions: pd.DataFrame
 
 
 @dataclass(frozen=True)
@@ -163,6 +214,13 @@ class FoldRunResult:
     daily_returns: pd.DataFrame
     metrics: tuple[FoldMetrics, ...]
     artifact_hashes: dict[str, str]
+    #: The fold's common construction audit (empty for the equal-weight rule).
+    construction: pd.DataFrame = field(default_factory=pd.DataFrame)
+    #: One rebalance-decision frame per declared scenario (empty frames for
+    #: the equal-weight rule).
+    per_scenario_decisions: Mapping[str, pd.DataFrame] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -179,6 +237,10 @@ class WalkForwardRunResult:
     scenario_metrics: tuple[FoldMetrics, ...]
     evaluation: StabilityEvaluation
     manifest: dict
+    #: The common construction audit across every executed fold.
+    portfolio_construction: pd.DataFrame = field(default_factory=pd.DataFrame)
+    #: Per-declared-scenario audit artifacts across every executed fold.
+    scenarios: tuple[ScenarioArtifacts, ...] = field(default_factory=tuple)
 
 
 class WalkForwardRunner:
@@ -190,6 +252,8 @@ class WalkForwardRunner:
                 "WalkForwardRunner.run expects a WalkForwardRequest, got "
                 f"{type(request).__name__}"
             )
+        # The cached risk observations are per-run inputs, never per-runner.
+        self._cached_risk_observations = None
         run_dir = Path(request.run_dir)
         run_dir.mkdir(parents=True, exist_ok=True)
         # The schedule is written and hashed before any fold executes and is
@@ -211,6 +275,9 @@ class WalkForwardRunner:
         outcomes: list[FoldOutcome] = []
         executed: list[FoldRunResult] = []
         scenario_metrics: list[FoldMetrics] = []
+        scenario_decisions: dict[str, list[pd.DataFrame]] = {
+            scenario: [] for scenario in scenario_names
+        }
         integrity_failures: list[str] = []
         for fold in request.schedule.folds:
             reason = self._preflight_fold(fold, request)
@@ -273,6 +340,8 @@ class WalkForwardRunner:
                 continue
             executed.append(fold_result)
             scenario_metrics.extend(fold_result.metrics)
+            for scenario, row in fold_result.per_scenario_decisions.items():
+                scenario_decisions.setdefault(scenario, []).append(row)
             outcomes.append(
                 FoldOutcome(fold_id=fold.fold_id, status=FoldOutcomeStatus.EXECUTED)
             )
@@ -327,6 +396,21 @@ class WalkForwardRunner:
             scenario_metrics=tuple(scenario_metrics),
             evaluation=evaluation,
             manifest=manifest,
+            portfolio_construction=_concat_or_empty(
+                [fold.construction for fold in executed],
+                list(PORTFOLIO_CONSTRUCTION_COLUMNS),
+            ),
+            scenarios=tuple(
+                ScenarioArtifacts(
+                    name=scenario,
+                    rebalance_decisions=_concat_or_empty(
+                        scenario_decisions.get(scenario, []),
+                        list(REBALANCE_DECISION_COLUMNS),
+                    ),
+                )
+                # The predeclared scenario order, never a sorted one.
+                for scenario in scenario_names
+            ),
         )
 
     # ------------------------------------------------------------------ #
@@ -422,25 +506,20 @@ class WalkForwardRunner:
         )
         open_days = self._fold_open_days(fold, request.calendar)
         factor_frame = self._compute_factors(fold, request, signals)
-        targets_by_day, signal_rows = self._build_targets(
-            fold, request, factor_frame, signals
-        )
-        possible_held = frozenset(
-            {symbol for _, targets in targets_by_day.values() for symbol in targets}
-        )
+        plan = self._build_order_plan(fold, request, factor_frame, signals)
         scenario_names = list(request.spec.cost_scenarios)
         canonical = "full_cost" if "full_cost" in scenario_names else scenario_names[-1]
         per_scenario: dict[str, dict] = {}
         for scenario in scenario_names:
             per_scenario[scenario] = self._execute_fold_scenario(
-                fold, request, schedule_hash, scenario, targets_by_day,
-                possible_held, open_days,
+                fold, request, schedule_hash, scenario, plan, open_days,
             )
         canonical_row = per_scenario[canonical]
         fold_dir = Path(request.run_dir) / "folds" / fold.fold_id
         fold_dir.mkdir(parents=True, exist_ok=True)
         hashes = self._write_fold_artifacts(
-            fold, request, fold_dir, canonical_row, signal_rows, per_scenario
+            fold, request, fold_dir, canonical_row, plan.signal_rows,
+            per_scenario, plan,
         )
         metrics = tuple(
             per_scenario[scenario]["metrics"] for scenario in scenario_names
@@ -459,7 +538,248 @@ class WalkForwardRunner:
             daily_returns=canonical_row["daily_returns"],
             metrics=metrics,
             artifact_hashes=hashes,
+            construction=plan.construction,
+            per_scenario_decisions={
+                scenario: per_scenario[scenario]["rebalance_decisions"]
+                for scenario in scenario_names
+            },
         )
+
+    # ------------------------------------------------------------------ #
+    # The frozen, scenario-independent order plan of one fold
+    # ------------------------------------------------------------------ #
+
+    def _build_order_plan(
+        self,
+        fold: FoldWindow,
+        request: WalkForwardRequest,
+        factor_frame: pd.DataFrame,
+        signals: tuple[date, ...],
+    ) -> FoldOrderPlan:
+        """Branch on the frozen spec's portfolio rule -- never on results."""
+        rule = request.spec.portfolio_rule
+        if rule.name == "buffered_risk_weighted":
+            return self._build_buffered_plan(
+                fold, request, factor_frame, signals
+            )
+        return self._build_equal_weight_plan(
+            fold, request, factor_frame, signals
+        )
+
+    def _build_equal_weight_plan(
+        self,
+        fold: FoldWindow,
+        request: WalkForwardRequest,
+        factor_frame: pd.DataFrame,
+        signals: tuple[date, ...],
+    ) -> FoldOrderPlan:
+        """The legacy whole-lot target book (``top_n_equal_weight``)."""
+        if request.portfolio_builder is None:
+            raise ValueError(
+                f"fold {fold.fold_id}: the {request.spec.portfolio_rule.name!r} "
+                "rule requires an equal-weight portfolio builder, which the "
+                "run request does not carry"
+            )
+        targets_by_day, signal_rows = self._build_targets(
+            fold, request, factor_frame, signals
+        )
+        possible_held = frozenset(
+            {symbol for _, targets in targets_by_day.values() for symbol in targets}
+        )
+        return FoldOrderPlan(
+            kind="equal_weight",
+            targets_by_day=targets_by_day,
+            possible_held=possible_held,
+            signal_rows=signal_rows.to_dict("records"),
+        )
+
+    def _build_buffered_plan(
+        self,
+        fold: FoldWindow,
+        request: WalkForwardRequest,
+        factor_frame: pd.DataFrame,
+        signals: tuple[date, ...],
+    ) -> FoldOrderPlan:
+        """The common ``WeightTargetPeriod`` book of the buffered rule.
+
+        Membership state crosses signal dates only inside one fold: the
+        first signal receives an empty previous-member tuple, every later
+        signal the prior *common* target members, and every fold starts from
+        scratch.  All periods are materialized before any cost scenario
+        exists, so scenario accounts can never influence member selection.
+        """
+        rule = request.spec.portfolio_rule
+        if rule.name != "buffered_risk_weighted":  # pragma: no cover - guard
+            raise ValueError("buffered plan requires the buffered rule")
+        policy = rule.policy()
+        rule_version = buffered_portfolio_rule_version(policy)
+        observations = self._risk_observations(request)
+        market_sessions = request.calendar.open_days
+        periods: dict[date, WeightTargetPeriod] = {}
+        construction_frames: list[pd.DataFrame] = []
+        signal_rows: list[dict] = []
+        previous_members: tuple[str, ...] = ()
+        possible_held: set[str] = set()
+        for signal in signals:
+            one_signal = factor_frame[factor_frame["trade_date"] == signal]
+            if one_signal.empty:
+                continue
+            factors = FactorResult(
+                factor_name=str(one_signal["factor_name"].iloc[0]),
+                factor_version=str(one_signal["factor_version"].iloc[0]),
+                frame=one_signal.copy(),
+            )
+            valid_rows = one_signal[
+                one_signal["is_valid"].fillna(False).astype(bool)
+            ]
+            candidates = sorted(
+                {str(symbol) for symbol in valid_rows["symbol"]}
+            )
+            if not candidates:
+                continue
+            risks = estimate_risk(
+                signal_date=signal,
+                symbols=candidates,
+                observations=observations,
+                market_sessions=market_sessions,
+                policy=policy,
+            )
+            construction = build_buffered_target(
+                factors=factors,
+                risks=risks,
+                previous_target_members=previous_members,
+                policy=policy,
+            )
+            members = set(request.universe_resolver.members_on(signal))
+            outsiders = sorted(set(construction.target_members) - members)
+            if outsiders:
+                raise ValueError(
+                    f"fold {fold.fold_id}: portfolio targets {outsiders} on "
+                    f"{signal.isoformat()} are not point-in-time members; "
+                    "membership-first factor filtering was violated"
+                )
+            execution_day = request.calendar.next_trading_day(signal)
+            valuation_symbols = (
+                set(construction.target_members) | set(previous_members)
+            )
+            periods[execution_day] = WeightTargetPeriod(
+                signal_date=signal,
+                target_weights=dict(construction.target_weights),
+                net_equity_prices=self._signal_close_prices(
+                    valuation_symbols, observations, signal
+                ),
+                previous_members=frozenset(previous_members),
+                current_members=frozenset(construction.target_members),
+            )
+            possible_held.update(valuation_symbols)
+            audit_frame = construction.audit_frame.copy()
+            # Real Python booleans so audit rows round-trip identity-safe.
+            audit_frame["previous_target_member"] = audit_frame[
+                "previous_target_member"
+            ].astype(object)
+            construction_frames.append(audit_frame)
+            signal_rows.append(
+                {
+                    "signal_date": signal,
+                    "execution_date": execution_day,
+                    "n_targets": len(construction.target_members),
+                    "unallocated_weight": round(
+                        float(construction.cash_weight), 6
+                    ),
+                }
+            )
+            previous_members = construction.target_members
+        construction_frame = _concat_or_empty(
+            construction_frames, list(PORTFOLIO_CONSTRUCTION_COLUMNS)
+        )
+        return FoldOrderPlan(
+            kind="buffered_risk_weighted",
+            periods=periods,
+            possible_held=frozenset(possible_held),
+            policy=policy,
+            rule_version=rule_version,
+            construction=construction_frame,
+            signal_rows=signal_rows,
+        )
+
+    def _risk_observations(self, request: WalkForwardRequest) -> pd.DataFrame:
+        """The frozen adjusted-price frame in the risk-input contract.
+
+        Reads the pinned point-in-time total-return rows and maps them to the
+        exact ``trade_date, symbol, adjusted_close, quality_severity,
+        missing_reason`` input contract.  A session without an adjusted row
+        produces no row at all: ``estimate_risk`` treats that as an unknown
+        gap and invalidates that symbol's risk input, never a fabricated
+        suspension carry.
+        """
+        cached = getattr(self, "_cached_risk_observations", None)
+        if cached is not None:
+            return cached
+        frame = request.factor_input_provider()
+        observations = frame[[
+            "trade_date",
+            "symbol",
+            "adjusted_close",
+            "quality_severity",
+        ]].copy()
+        observations["missing_reason"] = None
+        observations["trade_date"] = [
+            _as_date(day) for day in observations["trade_date"]
+        ]
+        observations = observations[[
+            "trade_date",
+            "symbol",
+            "adjusted_close",
+            "quality_severity",
+            "missing_reason",
+        ]]
+        self._cached_risk_observations = observations
+        return observations
+
+    @staticmethod
+    def _signal_close_prices(
+        symbols: set[str],
+        observations: pd.DataFrame,
+        signal: date,
+    ) -> dict[str, Decimal]:
+        """Signal-close valuation prices, carrying the last trusted close.
+
+        The map covers every current and previous target member so a held
+        suspended name can always be valued at its approved carried mark
+        (valuation only -- execution never reads these prices).
+        """
+        day_rows = observations[
+            (observations["trade_date"] == signal)
+            & (observations["symbol"].isin(set(symbols)))
+        ]
+        prices: dict[str, Decimal] = {}
+        for row in day_rows.to_dict("records"):
+            close = row["adjusted_close"]
+            if close is None or pd.isna(close) or float(close) <= 0:
+                continue
+            if str(row["quality_severity"]) == "ERROR":
+                continue
+            prices[str(row["symbol"])] = Decimal(str(close))
+        missing = sorted(set(symbols) - set(prices))
+        for symbol in missing:
+            history = observations[
+                (observations["symbol"] == symbol)
+                & (observations["trade_date"] <= signal)
+                & (observations["quality_severity"] != "ERROR")
+            ].sort_values("trade_date")
+            carried: Decimal | None = None
+            for row in history.to_dict("records"):
+                close = row["adjusted_close"]
+                if close is None or pd.isna(close) or float(close) <= 0:
+                    continue
+                carried = Decimal(str(close))
+            if carried is None:
+                raise ValueError(
+                    f"no trusted adjusted close exists to value target "
+                    f"member {symbol} at the {signal.isoformat()} signal close"
+                )
+            prices[symbol] = carried
+        return prices
 
     def _compute_factors(
         self,
@@ -568,8 +888,7 @@ class WalkForwardRunner:
         request: WalkForwardRequest,
         schedule_hash: str,
         scenario: str,
-        targets_by_day: dict[date, tuple[date, dict[str, int]]],
-        possible_held: frozenset[str],
+        plan: FoldOrderPlan,
         open_days: tuple[date, ...],
     ) -> dict:
         """One fresh account replayed over the fold's OOS sessions."""
@@ -595,7 +914,8 @@ class WalkForwardRunner:
             Path(request.run_dir), stage.get("outputs", {})
         ):
             return _load_fold_scenario(
-                Path(request.run_dir), fold, request, scenario, open_days, stage
+                Path(request.run_dir), fold, request, scenario, open_days, stage,
+                plan.kind,
             )
         bars = _prepare_bars(request.bars)
         fold_bars = bars[
@@ -614,7 +934,17 @@ class WalkForwardRunner:
             for day, close in sorted(series.items())
             if fold.first_trading_day <= day <= fold.last_trading_day
         ]
-        rebalancer = AccountAwareWeeklyRebalancer(targets_by_day)
+        # One rebalancer instance per scenario: decision state can never
+        # cross accounts, so scenarios sharing the common targets may
+        # diverge freely in quantities, orders, fills and band decisions.
+        if plan.kind == "buffered_risk_weighted":
+            rebalancer: WeightTargetRebalancer | AccountAwareWeeklyRebalancer = (
+                WeightTargetRebalancer(
+                    dict(plan.periods), lot_size=LOT_SIZE, policy=plan.policy
+                )
+            )
+        else:
+            rebalancer = AccountAwareWeeklyRebalancer(plan.targets_by_day)
         # A fresh BacktestRequest (and therefore a fresh account with the
         # identical fixed initial cash) for every fold and every scenario.
         engine_request = BacktestRequest(
@@ -629,9 +959,10 @@ class WalkForwardRunner:
             benchmark_symbols=tuple(str(s) for s in request.benchmark_symbols),
             benchmarks=pd.DataFrame(benchmark_rows),
             order_provider=rebalancer.orders_for,
-            possible_held_symbols=possible_held,
+            possible_held_symbols=plan.possible_held,
         )
         result = BacktestEngine().run(engine_request)
+        decisions = _decisions_frame(rebalancer)
         equity = result.daily_equity.copy()
         equity["trade_date"] = [_as_date(day) for day in equity["trade_date"]]
         equity = equity.sort_values("trade_date").reset_index(drop=True)
@@ -657,16 +988,25 @@ class WalkForwardRunner:
         scenario_dir = Path(request.run_dir) / "backtest" / fold.fold_id / scenario
         scenario_dir.mkdir(parents=True, exist_ok=True)
         outputs: dict[str, str] = {}
-        for name, frame in (
-            ("submitted_orders.parquet", result.submitted_orders),
-            ("fills.parquet", result.fills),
-            ("rejections.parquet", result.rejections),
-            ("equity.parquet", equity),
-            ("daily_returns.parquet", daily_returns),
-            ("order_diffs.parquet", diffs),
-        ):
+        scenario_outputs: dict[str, pd.DataFrame] = {
+            name: frame
+            for name, frame in (
+                ("submitted_orders.parquet", result.submitted_orders),
+                ("fills.parquet", result.fills),
+                ("rejections.parquet", result.rejections),
+                ("equity.parquet", equity),
+                ("daily_returns.parquet", daily_returns),
+                ("order_diffs.parquet", diffs),
+            )
+        }
+        if plan.kind == "buffered_risk_weighted":
+            scenario_outputs["rebalance_decisions.parquet"] = decisions
+        for name, frame in scenario_outputs.items():
             frame.to_parquet(scenario_dir / name, index=False)
-            outputs[name] = sha256_file(scenario_dir / name)
+            # The relative run-workspace key keeps resume checks exact.
+            outputs[f"backtest/{fold.fold_id}/{scenario}/{name}"] = sha256_file(
+                scenario_dir / name
+            )
         stages = _load_stages(Path(request.run_dir))
         stages[stage_key] = {"input_hash": input_hash, "outputs": outputs}
         (Path(request.run_dir) / _STAGES_FILE).write_text(
@@ -679,6 +1019,7 @@ class WalkForwardRunner:
             "equity": equity,
             "daily_returns": daily_returns,
             "order_diffs": diffs,
+            "rebalance_decisions": decisions,
             "metrics": metrics,
         }
 
@@ -688,18 +1029,31 @@ class WalkForwardRunner:
         request: WalkForwardRequest,
         fold_dir: Path,
         canonical: dict,
-        signal_rows: pd.DataFrame,
+        signal_rows: list[dict],
         per_scenario: Mapping[str, dict],
+        plan: FoldOrderPlan,
     ) -> dict[str, str]:
         """Publish the fold's declared artifact set and its manifest."""
         signals_path = fold_dir / "signals.parquet"
-        signal_rows.to_parquet(signals_path, index=False)
+        pd.DataFrame(signal_rows).to_parquet(signals_path, index=False)
         canonical["submitted"].to_parquet(fold_dir / "orders.parquet", index=False)
         canonical["fills"].to_parquet(fold_dir / "fills.parquet", index=False)
         canonical["equity"].to_parquet(fold_dir / "equity.parquet", index=False)
         canonical["daily_returns"].to_parquet(
             fold_dir / "daily_returns.parquet", index=False
         )
+        # The common construction audit publishes for every fold (empty with
+        # the exact columns for the equal-weight rule) beside every
+        # scenario's rebalance decisions.
+        plan.construction.to_parquet(
+            fold_dir / "portfolio_construction.parquet", index=False
+        )
+        for scenario in sorted(per_scenario):
+            scenario_dir = fold_dir / "backtest" / scenario
+            scenario_dir.mkdir(parents=True, exist_ok=True)
+            per_scenario[scenario]["rebalance_decisions"].to_parquet(
+                scenario_dir / "rebalance_decisions.parquet", index=False
+            )
         metrics_payload = {
             "fold_id": fold.fold_id,
             "initial_equity": request.initial_cash,
@@ -717,7 +1071,7 @@ class WalkForwardRunner:
             day: request.universe_resolver.snapshot_for(_as_date(day))
             for day in sorted(fold.membership_snapshot_sha256s)
         } if fold.membership_snapshot_sha256s else {}
-        fold_manifest = {
+        fold_manifest: dict = {
             "fold_id": fold.fold_id,
             "calendar_start": fold.calendar_start.isoformat(),
             "calendar_end": fold.calendar_end.isoformat(),
@@ -735,6 +1089,21 @@ class WalkForwardRunner:
             "initial_cash": request.initial_cash,
             "dataset_version": request.dataset_version,
             "declared_scenarios": list(request.spec.cost_scenarios),
+            "portfolio_rule": {
+                "name": request.spec.portfolio_rule.name,
+                "portfolio_rule_version": (
+                    plan.rule_version
+                    if plan.kind == "buffered_risk_weighted"
+                    else canonical_sha256(
+                        request.spec.portfolio_rule.model_dump(mode="json")
+                    )
+                ),
+                "policy": (
+                    plan.policy.model_dump(mode="json")
+                    if plan.policy is not None
+                    else None
+                ),
+            },
             "status": "executed",
         }
         manifest_path = fold_dir / "fold_manifest.json"
@@ -744,17 +1113,22 @@ class WalkForwardRunner:
             ),
             encoding="utf-8",
         )
-        return {
-            name: sha256_file(fold_dir / name)
-            for name in (
-                "signals.parquet",
-                "orders.parquet",
-                "fills.parquet",
-                "equity.parquet",
-                "daily_returns.parquet",
-                "metrics.json",
-                "fold_manifest.json",
+        artifact_names = [
+            "signals.parquet",
+            "orders.parquet",
+            "fills.parquet",
+            "equity.parquet",
+            "daily_returns.parquet",
+            "portfolio_construction.parquet",
+            "metrics.json",
+            "fold_manifest.json",
+        ]
+        for scenario in sorted(per_scenario):
+            artifact_names.append(
+                f"backtest/{scenario}/rebalance_decisions.parquet"
             )
+        return {
+            name: sha256_file(fold_dir / name) for name in artifact_names
         }
 
 
@@ -903,6 +1277,23 @@ def _outputs_intact(run_dir: Path, outputs: Mapping[str, str]) -> bool:
     return True
 
 
+def _decisions_frame(
+    rebalancer: WeightTargetRebalancer | AccountAwareWeeklyRebalancer,
+) -> pd.DataFrame:
+    """The rebalancer's decision audit (empty frame for equal weight)."""
+    if isinstance(rebalancer, WeightTargetRebalancer):
+        return rebalancer.decision_frame()
+    return pd.DataFrame(columns=list(REBALANCE_DECISION_COLUMNS))
+
+
+def _concat_or_empty(
+    frames: Sequence[pd.DataFrame], columns: list[str]
+) -> pd.DataFrame:
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(frames, ignore_index=True)
+
+
 def _load_fold_scenario(
     run_dir: Path,
     fold: FoldWindow,
@@ -910,6 +1301,7 @@ def _load_fold_scenario(
     scenario: str,
     open_days: tuple[date, ...],
     stage: Mapping,
+    plan_kind: str = "equal_weight",
 ) -> dict:
     """Rebuild one fold-scenario's in-memory rows from its intact artifacts."""
     scenario_dir = run_dir / "backtest" / fold.fold_id / scenario
@@ -919,6 +1311,12 @@ def _load_fold_scenario(
     equity = pd.read_parquet(scenario_dir / "equity.parquet")
     daily_returns = pd.read_parquet(scenario_dir / "daily_returns.parquet")
     diffs = pd.read_parquet(scenario_dir / "order_diffs.parquet")
+    decisions_path = scenario_dir / "rebalance_decisions.parquet"
+    decisions = (
+        pd.read_parquet(decisions_path)
+        if plan_kind == "buffered_risk_weighted" and decisions_path.is_file()
+        else pd.DataFrame(columns=list(REBALANCE_DECISION_COLUMNS))
+    )
     metrics = compute_fold_metrics(
         equity,
         fills,
@@ -936,6 +1334,7 @@ def _load_fold_scenario(
         "equity": equity,
         "daily_returns": daily_returns,
         "order_diffs": diffs,
+        "rebalance_decisions": decisions,
         "metrics": metrics,
     }
 

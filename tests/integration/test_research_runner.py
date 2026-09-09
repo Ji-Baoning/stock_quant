@@ -688,14 +688,20 @@ def _write_config_tree(
         _REPO_ROOT / "configs" / "experiments" / "momentum_60d.yml",
         configs / "experiments" / "momentum_60d.yml",
     )
-    # The repository example spec declares the formal walk-forward policy;
-    # these single-window pipeline tests pin the legacy engineering policy
-    # explicitly (their 2020 start cannot satisfy the 756-session fold-2020
-    # warmup floor of the fixed-calendar contract anyway).
+    # The repository example spec declares the formal walk-forward policy and
+    # the buffered risk-weighted rule; these single-window pipeline tests pin
+    # the legacy engineering policy explicitly (their 2020 start cannot satisfy
+    # the 756-session fold-2020 warmup floor of the fixed-calendar contract
+    # anyway) and pin the equal-weight rule the engineering pipeline executes.
     spec_document = yaml.safe_load(
         (configs / "experiments" / "momentum_60d.yml").read_text(encoding="utf-8")
     )
     spec_document["execution_pipeline"] = "engineering_single_window"
+    spec_document["portfolio_rule"] = {
+        "name": "top_n_equal_weight",
+        "top_n": 10,
+        "lot_size": 100,
+    }
     (configs / "experiments" / "momentum_60d.yml").write_text(
         yaml.safe_dump(spec_document, sort_keys=False, allow_unicode=True),
         encoding="utf-8",

@@ -94,13 +94,25 @@ def spec_kwargs(**overrides):
     return kwargs
 
 
-def make_spec(**overrides) -> ExperimentSpec:
+def spec_factory(**overrides) -> ExperimentSpec:
     return ExperimentSpec.model_validate(spec_kwargs(**overrides))
 
 
 @pytest.fixture
+def make_spec():
+    """The spec factory as a fixture (the buffered plan's test signature)."""
+    return spec_factory
+
+
+@pytest.fixture
+def snapshots_for():
+    """The snapshot-bundle builder bound to a spec (identity v2)."""
+    return bundle_for
+
+
+@pytest.fixture
 def spec() -> ExperimentSpec:
-    return make_spec()
+    return spec_factory()
 
 
 def test_experiment_id_is_deterministic_and_sensitive_to_result_inputs(spec):
@@ -138,13 +150,13 @@ def test_experiment_id_survives_a_serialization_round_trip(spec):
     ],
 )
 def test_experiment_id_changes_when_an_input_changes(change):
-    base = make_spec()
-    changed = make_spec(**change)
+    base = spec_factory()
+    changed = spec_factory(**change)
     assert experiment_id(base) != experiment_id(changed)
 
 
 def test_freeze_resolves_current_placeholders_to_explicit_versions():
-    placeholder = make_spec(dataset_version="CURRENT", universe_version="CURRENT")
+    placeholder = spec_factory(dataset_version="CURRENT", universe_version="CURRENT")
     assert not placeholder.is_frozen
     frozen = placeholder.freeze(
         dataset_version="resolved-dataset", universe_version="resolved-universe"
@@ -152,7 +164,7 @@ def test_freeze_resolves_current_placeholders_to_explicit_versions():
     assert frozen.dataset_version == "resolved-dataset"
     assert frozen.universe_version == "resolved-universe"
     assert frozen.is_frozen
-    identical = make_spec(
+    identical = spec_factory(
         dataset_version="resolved-dataset", universe_version="resolved-universe"
     )
     assert experiment_id(frozen) == experiment_id(identical)
@@ -171,12 +183,12 @@ def test_freeze_can_stamp_the_code_commit(spec):
 
 
 def test_freeze_requires_an_explicit_version_for_each_current_field():
-    dataset_only = make_spec(dataset_version="CURRENT")
+    dataset_only = spec_factory(dataset_version="CURRENT")
     with pytest.raises(ValueError):
         dataset_only.freeze()
     with pytest.raises(ValueError):
         dataset_only.freeze(universe_version="resolved-universe")
-    both = make_spec(dataset_version="CURRENT", universe_version="CURRENT")
+    both = spec_factory(dataset_version="CURRENT", universe_version="CURRENT")
     with pytest.raises(ValueError):
         both.freeze(dataset_version="resolved-dataset")
     frozen = both.freeze(
@@ -186,7 +198,7 @@ def test_freeze_requires_an_explicit_version_for_each_current_field():
 
 
 def test_compute_experiment_id_rejects_unresolved_current_spec():
-    placeholder = make_spec(dataset_version="CURRENT")
+    placeholder = spec_factory(dataset_version="CURRENT")
     with pytest.raises(ExperimentNotFrozenError):
         experiment_id(placeholder)
 
@@ -204,17 +216,63 @@ def test_definition_version_changes_experiment_id():
     point-in-time universe, not just the dataset version.
     """
     assert experiment_id(
-        make_spec(universe_version="a" * 64)
-    ) != experiment_id(make_spec(universe_version="b" * 64))
+        spec_factory(universe_version="a" * 64)
+    ) != experiment_id(spec_factory(universe_version="b" * 64))
+
+
+# ---------------------------------------------------------------------------
+# Buffered risk-weighted rule: canonical content is part of the identity
+# ---------------------------------------------------------------------------
+
+
+def test_portfolio_parameter_change_changes_experiment_identity(
+    make_spec, snapshots_for
+):
+    left = spec_factory(portfolio_rule={"name": "buffered_risk_weighted"})
+    right = spec_factory(
+        portfolio_rule={"name": "buffered_risk_weighted", "hold_rank": 14}
+    )
+    assert compute_experiment_id(left, snapshots_for(left)) != \
+        compute_experiment_id(right, snapshots_for(right))
+
+
+def test_buffered_rule_identity_is_distinct_from_equal_weight_identity():
+    buffered = spec_factory(portfolio_rule={"name": "buffered_risk_weighted"})
+    equal = spec_factory(
+        portfolio_rule={"name": "top_n_equal_weight", "top_n": 10, "lot_size": 100}
+    )
+    assert experiment_id(buffered) != experiment_id(equal)
+
+
+def test_buffered_rule_snapshot_carries_canonical_policy_version():
+    from stock_quant.research.walk_forward.policy import canonical_sha256
+
+    spec = spec_factory(portfolio_rule={"name": "buffered_risk_weighted"})
+    bundle = bundle_for(spec)
+    snapshot = bundle.strategy_snapshot
+    # portfolio_rule_version is the canonical policy JSON hash, never a
+    # handwritten label, and the same canonical content sits in the
+    # parameters hash beside preprocessing and the seed.
+    expected_version = canonical_sha256(
+        spec.portfolio_rule.model_dump(mode="json")
+    )
+    assert snapshot.portfolio_rule_version == expected_version
+    assert snapshot.parameters_hash == canonical_sha256(
+        {
+            "preprocessing": spec.preprocessing.model_dump(mode="json"),
+            "portfolio_rule": spec.portfolio_rule.model_dump(mode="json"),
+            "random_seed": spec.random_seed,
+        }
+    )
 
 
 def test_spec_defaults_to_no_universe_definition():
     """A spec without ``universe_definition`` keeps the legacy path."""
-    assert make_spec().universe_definition is None
+    assert spec_factory().universe_definition is None
 
 
 def test_spec_accepts_a_universe_definition_name_and_freezes_with_it():
-    spec = make_spec(universe_definition="csi300")
+    spec = spec_factory(universe_definition="csi300")
     assert spec.universe_definition == "csi300"
     frozen = spec.freeze(
         dataset_version="d" * 64, universe_version="e" * 64, code_commit="head"
@@ -230,11 +288,11 @@ def test_spec_accepts_a_universe_definition_name_and_freezes_with_it():
 @pytest.mark.parametrize("bad", ["", "   ", " csi300", "csi300 "])
 def test_spec_rejects_blank_or_padded_universe_definition(bad):
     with pytest.raises(ValidationError):
-        make_spec(universe_definition=bad)
+        spec_factory(universe_definition=bad)
 
 
 def test_research_spec_is_not_frozen_with_current_accepted():
-    spec = make_spec(data_acceptance_id="CURRENT_ACCEPTED")
+    spec = spec_factory(data_acceptance_id="CURRENT_ACCEPTED")
     assert not spec.is_frozen
     frozen = spec.freeze(data_acceptance_id="a" * 64)
     assert frozen.data_acceptance_id == "a" * 64
@@ -242,13 +300,13 @@ def test_research_spec_is_not_frozen_with_current_accepted():
 
 
 def test_acceptance_id_changes_experiment_identity():
-    first = make_spec(data_acceptance_id="a" * 64)
-    second = make_spec(data_acceptance_id="b" * 64)
+    first = spec_factory(data_acceptance_id="a" * 64)
+    second = spec_factory(data_acceptance_id="b" * 64)
     assert experiment_id(first) != experiment_id(second)
 
 
 def test_engineering_spec_may_freeze_without_acceptance():
-    spec = make_spec(data_acceptance_id=None, trust_mode=DataTrustMode.ENGINEERING)
+    spec = spec_factory(data_acceptance_id=None, trust_mode=DataTrustMode.ENGINEERING)
     assert spec.is_frozen
 
 
@@ -257,12 +315,12 @@ def test_freeze_rejects_research_spec_without_acceptance():
         ValueError,
         match="research specs require an explicit data_acceptance_id",
     ):
-        make_spec().freeze(data_acceptance_id=None)
+        spec_factory().freeze(data_acceptance_id=None)
 
 
 def test_spec_forbids_extra_fields():
     with pytest.raises(ValidationError):
-        make_spec(unexpected_key="not part of the spec")
+        spec_factory(unexpected_key="not part of the spec")
 
 
 def test_load_experiment_spec_rejects_unknown_top_level_keys(tmp_path):
@@ -276,12 +334,12 @@ def test_load_experiment_spec_rejects_unknown_top_level_keys(tmp_path):
 
 def test_spec_rejects_non_mvp_train_validation_holdout_policy():
     with pytest.raises(ValidationError):
-        make_spec(train_validation_holdout_policy="kfold_time_split")
+        spec_factory(train_validation_holdout_policy="kfold_time_split")
 
 
 def test_spec_rejects_date_range_end_before_start():
     with pytest.raises(ValidationError):
-        make_spec(
+        spec_factory(
             date_range={
                 "start_date": date(2020, 1, 1),
                 "end_date": date(2019, 12, 31),
@@ -300,14 +358,14 @@ def test_spec_rejects_date_range_end_before_start():
 )
 def test_spec_rejects_empty_or_blank_factor_entries(factor_versions):
     with pytest.raises(ValidationError):
-        make_spec(factor_versions=factor_versions)
+        spec_factory(factor_versions=factor_versions)
 
 
 def test_spec_rejects_blank_hypothesis_or_cost_scenarios():
     with pytest.raises(ValidationError):
-        make_spec(hypothesis="   ")
+        spec_factory(hypothesis="   ")
     with pytest.raises(ValidationError):
-        make_spec(cost_scenarios=[])
+        spec_factory(cost_scenarios=[])
 
 
 def test_committed_example_spec_is_coherent_and_loadable():

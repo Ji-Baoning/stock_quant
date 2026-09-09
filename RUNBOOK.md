@@ -245,6 +245,117 @@ python -m stock_quant report build --root .        # 最新实验 HTML + 当前�
 按 `docs/operations/phase-one-validation.md` §4 收尾：源行数、跨源最大差、复权抽查
 （adjusted_bar 口径）、公司行为冲突、密钥扫描、无盈利宣称、单次 run 计时（<600s）。
 
+## 阶段 7b · 缓冲式风险加权组合的运行与审计（buffered_risk_weighted）
+
+`configs/experiments/momentum_60d.yml` 的 `portfolio_rule` 已选择
+`buffered_risk_weighted`（首期唯一一组预注册参数）。它只改变组合构建与账户
+对账：`momentum_60d` 因子与周频调仓不变。本节是操作者核对已发布产物的程序。
+
+### 1. 识别 portfolio_rule_version
+
+```bash
+python - <<'PY'
+import json, pathlib
+manifest = json.loads(pathlib.Path(
+    "data/experiments/<experiment_id>/folds/<fold_id>/fold_manifest.json"
+).read_text())
+print(manifest["portfolio_rule"])
+# {"name": "buffered_risk_weighted", "portfolio_rule_version": "<64-hex>", "policy": {...}}
+PY
+```
+
+`portfolio_rule_version` 是规则参数规范 JSON 的 SHA-256（不是手写标签）。
+核对它等于任意 `portfolio_construction.parquet` 行的 `portfolio_rule_version`
+列，也等于 `metrics.json` 顶层 `meta.spec.portfolio_rule`（与
+`experiment_spec.yml` 的 `portfolio_rule` 同一规范内容）的规范 JSON 哈希；
+同一规范内容还进入策略快照的 `parameters_hash` 与实验 ID。任何参数修改都是
+新的实验身份，必须在运行前重新预注册；**看过 fold 结果之后不允许再改参数**。
+
+### 2. 核对 60/40 风险计数
+
+```python
+import pandas as pd
+frame = pd.read_parquet(
+    "data/experiments/<experiment_id>/folds/<fold_id>/portfolio_construction.parquet"
+)
+# 每行：window_start/window_end（60 个确认交易日的窗口起止）、
+# real_close_observations（真实有效收盘数，有效候选须 >= 40）、
+# suspension_carry_days（可信停牌前值日，零收益且不计入 40）
+signal = frame[frame.signal_date == frame.signal_date.iloc[0]]
+print(signal[["symbol", "window_start", "window_end",
+              "real_close_observations", "suspension_carry_days",
+              "risk_is_valid", "risk_invalid_reason"]])
+```
+
+`risk_invalid_reason` 只会是 `untrusted_missing_observation`（不明缺价、质量
+ERROR、无前值）或 `insufficient_real_close_observations`（窗口内真实收盘不足
+40）。风险无效只淘汰该候选并留原因，不是 fold 失败。
+
+### 3. 检查保留/新入/退出成员
+
+```python
+print(signal[["symbol", "previous_target_member", "raw_momentum_rank",
+              "risk_eligible_rank", "member_status", "member_reason"]])
+```
+
+`member_status` 取值固定为 `retained|entered|exited|not_selected|risk_invalid`。
+保留成员的 `risk_eligible_rank <= 15`，新入成员必须来自 `risk_eligible_rank
+<= 10`，任何成员数不超过 10。fold 的第一个信号日 `previous_target_member`
+全为 False（fold 边界状态完全重置）；fold 内上一期状态只继承冻结目标成员代码。
+
+### 4. 重算封顶权重与现金残余
+
+```python
+from decimal import Decimal
+vol = {row.symbol: Decimal(str(row.applied_annualized_volatility))
+       for row in signal.itertuples() if row.risk_is_valid}
+scores = {s: Decimal(1) / max(v, Decimal("0.10")) for s, v in vol.items()}
+total = sum(scores.values())
+exposure = min(Decimal("1.00"), Decimal(len(scores)) * Decimal("0.15"))
+raw = {s: exposure * w / total for s, w in scores.items()}   # 封顶前
+# 超过 0.15 的固定为 0.15，其余按 score 比例重分；再向下量化到 1e-12
+weights = signal[signal.target_weight > 0].set_index("symbol").target_weight
+cash = signal.cash_weight.iloc[0]
+assert sum(Decimal(str(w)) for w in weights) + Decimal(str(cash)) == Decimal("1.00")
+```
+
+成员数不足 7 只时目标暴露为 `成员数 × 0.15`，差额留作现金；绝不提高上限、
+绝不使用杠杆。
+
+### 5. 比较统一目标与各成本情景
+
+```python
+common = frame[["signal_date", "symbol", "target_weight"]].drop_duplicates()
+for scenario in ("zero_cost", "commission_tax", "full_cost"):
+    decisions = pd.read_parquet(
+        f"data/experiments/<experiment_id>/folds/<fold_id>/backtest/"
+        f"{scenario}/rebalance_decisions.parquet"
+    )
+    ordered = decisions[decisions.order_quantity > 0]
+    assert set(ordered.symbol) <= set(common[common.target_weight > 0].symbol)
+```
+
+三个情景共享完全相同的成员与理论权重；订单、成交、现金与带宽决策可以分化。
+下一期的成员选择只来自统一目标成员，任何情景的拒单都不能改变它。
+
+### 6. 区分四类“没有成交/没有入选”
+
+- `within_rebalance_band`：继续持有且权重差绝对值 < 0.02（恰好 0.02 要调仓），
+  组合决策抑制，记录于 `rebalance_decisions.parquet`；
+- `below_one_lot`：数量差不足一手（100 股），组合决策抑制，同样留档；
+- 执行拒单：涨跌停/停牌/现金不足等执行层结果，只在 `rejections.parquet`
+  与逐 fold `reject_rate` 中，属于策略结果而非系统失败；
+- 风险无效（`risk_invalid` / `risk_invalid_reason`）：候选因 60/40 或数据可信
+  问题被排除在构建层，与上面三者互不相干。
+
+带宽与手数抑制发生在下单之前，**不是执行拒单**。报告的“缓冲式组合构建审计”
+小节分别给出成员变化换手、连续持仓再平衡换手、带宽抑制金额与手数抑制金额。
+
+### 7. 纪律
+
+首期只有这一组预注册参数；不在 fold 之间调整、不依据结果选择参数、成本情景
+或调仓频率。要改任何参数，先写新的预注册规格（新实验身份），再跑新的运行。
+
 ## 已知边界（务必记住，不是 bug）
 
 1. **`data bootstrap` 发布首个基线；`data update` 只扩展**：首个基线由

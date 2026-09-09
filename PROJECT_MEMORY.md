@@ -329,9 +329,13 @@ volume, amount, source, ingested_at
 
 完成判据：在预先约定的样本外区间和压力情景下，净收益、回撤、换手与风险暴露的结论保持可解释，并明确记录失效场景。
 
-### 8.3 交易策略：仅保留基准，最后优化
+### 8.3 交易策略：缓冲式风险加权组合已实现（正式规则），一次性挑战待建，最后优化
 
-当前状态：60日动量、前10等权、周频调仓是用于打通链路的可解释基准，不作为已证实有效的策略；尚未授权以提升回测表现为目标的参数搜索或策略扩展。
+**缓冲式风险加权动量组合（2026-09-10 完成实现并全部离线验证）**：正式规格 `configs/experiments/momentum_60d.yml` 的组合规则已由 `top_n_equal_weight` 切换为预注册的 `buffered_risk_weighted`，首期只有一组冻结参数（target_count=10、entry_rank=10、hold_rank=15、risk_lookback_days=60、min_risk_observations=40、波动率下限 0.10、单票上限 0.15、再平衡带宽 0.02、总暴露 1.00、权重量子 1e-12、仅多头、无杠杆）；`momentum_60d` 因子与周频调仓不变，等权规则仅保留给基线/工程规格。关键边界：全部规范参数进入 `portfolio_rule_version`（规则规范 JSON 的 SHA-256）、策略快照与实验身份，看过 fold 结果之后不得改参数；所有成本情景共享同一成员与理论权重，各情景仅以自己的信号日权益整手化；`within_rebalance_band` 与 `below_one_lot` 是下单前的组合决策抑制而非执行拒单，风险无效只在构建层淘汰候选。发布产物：逐 fold `folds/<fold_id>/portfolio_construction.parquet`（双排名、60/40 风险计数、成员状态、封顶前后与量化后权重、现金残余、规则版本）与逐情景 `folds/<fold_id>/backtest/<scenario>/rebalance_decisions.parquet`，均已纳入 fold manifest 哈希清单。操作与审计程序见 README「Buffered risk-weighted momentum」、RUNBOOK 阶段 7b 与 `docs/operations/phase-one-validation.md` §9 审计清单。
+
+验证命令（全部通过）：`python3 -m pytest tests/unit/test_buffered_portfolio_policy.py tests/unit/test_risk_estimation.py tests/unit/test_buffered_risk_weight.py tests/unit/test_rebalance_band.py tests/unit/test_weight_rebalancer.py tests/integration/test_buffered_strategy_runner.py -q`（103 passed）；全量 `python3 -m pytest -q`（967 passed, 5 deselected）；`ruff check src tests project`。
+
+当前状态：上述缓冲式规则是预注册的正式组合构建实现，不作为已证实有效的策略——它与等权基线的优劣必须由一次性样本外挑战裁决，而该挑战机制（holdout 原子消费、`challenge_id`、`StrategyComparisonPolicy` 配对比较）**尚未实现，保持待办，留待其独立实施计划通过后再标记完成**；在此之前不得声称缓冲组合优于等权基线。同样尚未授权以提升回测表现为目标的参数搜索或策略扩展。
 
 启动条件：只有回测可信性和稳定性达到上述完成判据后，才比较行业/风格中性、波动率或风险预算约束、趋势过滤及多因子组合等改进。任何策略变更必须保持冻结规格、独立样本外评价和完整成本归因，避免把测试集变成训练集。
 

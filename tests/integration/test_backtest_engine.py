@@ -38,6 +38,7 @@ from stock_quant.backtest.engine import (
 )
 from stock_quant.backtest.models import BUY, SELL, Order
 from stock_quant.backtest.rebalancer import AccountAwareWeeklyRebalancer
+from stock_quant.backtest.weight_rebalancer import WeightTargetRebalancer
 from stock_quant.config import CostRate
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.trading_rules import (
@@ -45,6 +46,7 @@ from stock_quant.data_model.trading_rules import (
     REASON_SELL_AT_LOWER_LIMIT,
     TradingRuleBook,
 )
+from stock_quant.portfolio.buffered_models import WeightTargetPeriod
 
 _FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "synthetic_market"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1316,3 +1318,98 @@ def test_provider_without_possible_held_symbols_is_a_config_error():
             schedule=(),
             order_provider=rebalancer.orders_for,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Buffered weight-target provider: execution-data isolation (buffered plan)
+# ---------------------------------------------------------------------------
+
+
+def _buffered_weight_provider_request(
+    bars: pd.DataFrame,
+    *,
+    signal_session: int,
+    execution_session: int,
+) -> BacktestRequest:
+    """A provider-mode request driven by one frozen ``WeightTargetPeriod``.
+
+    The period fixes the signal-close valuation prices (the bars' closes on
+    the signal session) and 50/50 target weights over BETA/DELTA; the
+    rebalancer may read nothing else -- in particular no execution open.
+    """
+    signal_day = _DAYS[signal_session]
+    execution_day = _DAYS[execution_session]
+    prices = {BETA: Decimal("10"), DELTA: Decimal("10")}
+    period = WeightTargetPeriod(
+        signal_date=signal_day,
+        target_weights={BETA: Decimal("0.5"), DELTA: Decimal("0.5")},
+        net_equity_prices=prices,
+        previous_members=frozenset(),
+        current_members=frozenset(prices),
+    )
+    rebalancer = WeightTargetRebalancer({execution_day: period}, lot_size=100)
+    return BacktestRequest(
+        dataset_version=_DATASET_VERSION,
+        initial_cash=_INITIAL_CASH,
+        calendar=TradingCalendar.from_open_days(_MARKET.days),
+        rule_book=TradingRuleBook.from_yaml(
+            _REPO_ROOT / "configs" / "trading_rules.yml"
+        ),
+        cost_model=CostModel(_cost_rate(_SCENARIOS["zero_cost"])),
+        bars=bars,
+        corporate_actions=pd.DataFrame(),
+        benchmarks=_read_fixture("benchmarks.parquet"),
+        schedule=(),
+        order_provider=rebalancer.orders_for,
+        possible_held_symbols=frozenset(prices),
+    )
+
+
+def _bars_with_open(session: int, symbol: str, value: Decimal) -> pd.DataFrame:
+    """The provider bars with one execution-day open replaced."""
+    bars = _provider_bars().copy()
+    mask = (bars["symbol"] == symbol) & (bars["trade_date"] == _DAYS[session])
+    assert mask.any(), "the mutated bar must exist"
+    bars.loc[mask, "open"] = float(value)
+    return bars
+
+
+def test_execution_open_change_does_not_change_submitted_orders():
+    # plan signature: two replays differing ONLY in one execution open must
+    # submit identical orders (the provider cannot read execution data) while
+    # the realized fills diverge.
+    base = _buffered_weight_provider_request(
+        _provider_bars(), signal_session=10, execution_session=11
+    )
+    mutated = _buffered_weight_provider_request(
+        _bars_with_open(11, DELTA, Decimal("12")),
+        signal_session=10,
+        execution_session=11,
+    )
+    left = BacktestEngine().run(base)
+    right = BacktestEngine().run(mutated)
+    assert_frame_equal(left.submitted_orders, right.submitted_orders)
+    assert not left.fills.equals(right.fills)
+    # the identical plan is the 50/50 lot-floored book over 400,000
+    assert sorted(left.submitted_orders["symbol"].tolist()) == [BETA, DELTA]
+    buys = left.submitted_orders[left.submitted_orders["side"] == BUY]
+    assert set(buys["quantity"]) == {20000}
+
+
+def test_buffered_period_prices_stay_the_signal_closes():
+    # mutating the EXECUTION-day close must not move the submitted plan
+    # either: only the signal-session close enters the period's price map.
+    bars = _provider_bars().copy()
+    mask = (bars["symbol"] == DELTA) & (bars["trade_date"] == _DAYS[11])
+    bars.loc[mask, "close"] = 99.0
+    left = BacktestEngine().run(
+        _buffered_weight_provider_request(
+            _provider_bars(), signal_session=10, execution_session=11
+        )
+    )
+    right = BacktestEngine().run(
+        _buffered_weight_provider_request(
+            bars, signal_session=10, execution_session=11
+        )
+    )
+    assert_frame_equal(left.submitted_orders, right.submitted_orders)

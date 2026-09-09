@@ -37,10 +37,16 @@ train_validation_holdout_policy: not_applicable_engineering_mvp
 preprocessing:
   winsorization: none
   standardization: none
+# portfolio_rule 选择 buffered_risk_weighted（缓冲式风险加权动量）。首期只有
+# 这一组预注册参数：target_count=10 / entry_rank=10 / hold_rank=15 /
+# risk_lookback_days=60 / min_risk_observations=40 / volatility_floor=0.10 /
+# max_single_weight=0.15 / rebalance_band_absolute=0.02 / gross_exposure=1.00 /
+# weight_quantum=1e-12、仅多头、无杠杆（省略字段即取冻结默认值）。策略参数的
+# 全部规范 JSON 内容进入 portfolio_rule_version、策略快照与实验 ID：任何显式
+# 参数修改都是新的策略身份，永不改变已注册的运行。等权规则（top_n_equal_weight）
+# 仅保留给基线/工程规格。
 portfolio_rule:
-  name: top_n_equal_weight
-  top_n: 10
-  lot_size: 100
+  name: buffered_risk_weighted
 cost_scenarios:
   - zero_cost
   - commission_tax

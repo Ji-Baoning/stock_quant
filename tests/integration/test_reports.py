@@ -848,3 +848,84 @@ def test_experiment_html_omits_walk_forward_section_without_payload(tmp_path):
     html = destination.read_text(encoding="utf-8")
     assert "stability_policy_hash" not in html
     assert "Walk-Forward" not in html
+
+
+# --------------------------------------------------------------------------- #
+# Buffered construction audit section (buffered plan Task 5)
+# ---------------------------------------------------------------------------
+
+
+def _buffered_walk_forward_payload() -> dict:
+    payload = _walk_forward_payload()
+    payload["buffered"] = {
+        "portfolio_rule_version": "ef" * 32,
+        "folds": [
+            {
+                "fold_id": "fold-0001",
+                "signal_days": 50,
+                "retained": 210,
+                "entered": 42,
+                "exited": 40,
+                "risk_invalid": 7,
+                "achieved_gross_exposure": 0.97,
+                "cash_residue": 0.03,
+            }
+        ],
+        "scenarios": [
+            {
+                "scenario": "full_cost",
+                "band_suppressed_rows": 30,
+                "band_suppressed_amount": 125000.5,
+                "lot_suppressed_rows": 12,
+                "lot_suppressed_amount": 9000.25,
+            }
+        ],
+    }
+    return payload
+
+
+def test_buffered_report_explains_turnover_sources(tmp_path):
+    run_input = _experiment_input()
+    report_input = ExperimentReportInput(
+        experiment_id=run_input.experiment_id,
+        dataset_version=run_input.dataset_version,
+        universe_version=run_input.universe_version,
+        code_commit=run_input.code_commit,
+        scenarios=(),
+        benchmark_closes=run_input.benchmark_closes,
+        benchmark_symbols=run_input.benchmark_symbols,
+        run_id=run_input.run_id,
+        hypothesis=run_input.hypothesis,
+        initial_cash=run_input.initial_cash,
+        walk_forward=_buffered_walk_forward_payload(),
+    )
+    rendered_html = render_experiment_report(
+        report_input, tmp_path / "buffered.html"
+    ).read_text(encoding="utf-8")
+    assert "成员变化换手" in rendered_html
+    assert "连续持仓再平衡换手" in rendered_html
+    assert "带宽抑制金额" in rendered_html
+    assert "手数抑制金额" in rendered_html
+    # the canonical rule version renders, and suppression is never presented
+    # as an execution rejection
+    assert "ef" * 32 in rendered_html
+    assert "不是执行拒单" in rendered_html
+
+
+def test_plain_report_has_no_buffered_section(tmp_path):
+    run_input = _experiment_input()
+    report_input = ExperimentReportInput(
+        experiment_id=run_input.experiment_id,
+        dataset_version=run_input.dataset_version,
+        universe_version=run_input.universe_version,
+        code_commit=run_input.code_commit,
+        scenarios=(),
+        benchmark_closes=run_input.benchmark_closes,
+        benchmark_symbols=run_input.benchmark_symbols,
+        walk_forward=_walk_forward_payload(),
+    )
+    rendered_html = render_experiment_report(
+        report_input, tmp_path / "plain.html"
+    ).read_text(encoding="utf-8")
+    assert "成员变化换手" not in rendered_html
+    assert "带宽抑制金额" not in rendered_html
