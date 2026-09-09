@@ -1301,6 +1301,21 @@ def _publish_baseline_with_membership(root: Path, membership: pd.DataFrame):
     return publisher.publish(tables, QualityReport()).version
 
 
+def _publish_legacy_baseline_without_membership(root: Path):
+    """Republish CURRENT without the membership table (a pre-membership
+    legacy baseline that post-dates bootstrap but predates the membership
+    era and carries no universe_membership table at all)."""
+    publisher = DatasetPublisher(root)
+    reader = DatasetReader(root)
+    with reader.open(publisher.current().version) as context:
+        tables = {
+            name: context.read(name)
+            for name in context.tables
+            if name != "universe_membership"
+        }
+    return publisher.publish(tables, QualityReport()).version
+
+
 def test_update_carries_universe_membership_table_unchanged(project):
     """Membership facts are immutable: an update carries the registered raw
     table through to the new dataset version byte-for-byte and the auditor
@@ -1321,8 +1336,10 @@ def test_update_carries_universe_membership_table_unchanged(project):
 
 
 def test_update_publishes_without_membership_table_when_absent(project):
-    """Datasets predating the membership table stay publishable; the update
-    must not invent an empty one."""
+    """A pre-membership legacy baseline stays publishable; the update must
+    not invent an empty membership table for it (older datasets simply
+    update without the table until an explicit membership refresh)."""
+    _publish_legacy_baseline_without_membership(project.root)
     result = DataPipeline(project.root, sources=_all_stubs()).update(
         _request()
     )

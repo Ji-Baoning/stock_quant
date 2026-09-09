@@ -20,6 +20,7 @@ from stock_quant.data_model.schemas import (
 )
 from stock_quant.data_model.security_master import ListStatus
 from stock_quant.data_model.universe import Universe
+from stock_quant.data_model.universe_membership import membership_frame
 from stock_quant.data_pipeline import DATASET_BUILD_CONTRACT_VERSION
 from stock_quant.data_quality.models import QualityReport
 
@@ -59,6 +60,11 @@ def bootstrap_dataset(
         "corporate_action": _empty_corporate_action(),
         "corporate_action_quarantine": _empty_quarantine(),
         "trading_calendar": _trading_calendar(days),
+        # The canonical schema contract registers universe_membership too; a
+        # fresh project is born with the empty canonical frame so operator
+        # acceptance (required-table coverage) can pass before any membership
+        # refresh workflow appends real facts.
+        "universe_membership": membership_frame([]),
     }
     version = DatasetPublisher(root).publish(
         tables,
