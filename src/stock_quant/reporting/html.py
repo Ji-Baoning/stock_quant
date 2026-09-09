@@ -144,6 +144,14 @@ class ExperimentReportInput:
     #: that carries no decision -- renders the prominent UNVERIFIED alert: a
     #: report never infers ACCEPTED from missing data.
     data_acceptance: dict[str, object] | None = None
+    #: The persisted ``stability_report.json`` payload of a formal
+    #: walk-forward run (schedule coverage, boundary exclusions, fold
+    #: statuses, per-scenario aggregate returns, per-fold metrics, the policy
+    #: hash/thresholds and the final conclusion).  ``None`` (single-window
+    #: engineering runs) omits the entire walk-forward section: such a run
+    #: has no formal stability conclusion to show, and the section would
+    #: never render a global drawdown field.
+    walk_forward: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -795,6 +803,95 @@ def _scenario_sections(
     return sections
 
 
+def _walk_forward_block(payload: dict | None) -> dict | None:
+    """Normalize the stability-report payload for the template.
+
+    ``None`` (a single-window engineering run) omits the walk-forward
+    section entirely.  Every dynamic string stays a plain value that only
+    Jinja's autoescape renders.  The block deliberately carries no global
+    drawdown or Calmar field: cross-fold path metrics are forbidden.
+    """
+    if not isinstance(payload, dict) or not payload.get("stability_policy_hash"):
+        return None
+    schedule = payload.get("schedule") or {}
+    boundaries = [
+        {
+            "calendar_start": str(item.get("calendar_start", "")),
+            "calendar_end": str(item.get("calendar_end", "")),
+            "reason": str(item.get("reason", "")),
+        }
+        for item in schedule.get("boundaries", []) or []
+        if isinstance(item, dict)
+    ]
+    fold_statuses = [
+        {
+            "fold_id": str(item.get("fold_id", "")),
+            "status": str(item.get("status", "")),
+            "reason_code": str(item.get("reason_code") or "—"),
+        }
+        for item in payload.get("fold_statuses", []) or []
+        if isinstance(item, dict)
+    ]
+    scenario_rows = [
+        {
+            "scenario": str(item.get("scenario", "")),
+            "aggregate_return": _pct(item.get("aggregate_return")),
+            "annualized_return": _pct(item.get("annualized_return")),
+            "annualized_volatility": _pct(item.get("annualized_volatility")),
+            "sharpe_zero_rf": (
+                "—" if item.get("sharpe_zero_rf") is None
+                else f"{float(item['sharpe_zero_rf']):.4f}"
+            ),
+            "oos_return_observations": str(item.get("oos_return_observations", 0)),
+            "annualization_observations": str(
+                item.get("annualization_observations", 0)
+            ),
+        }
+        for item in payload.get("scenario_aggregates", []) or []
+        if isinstance(item, dict)
+    ]
+    fold_rows = [
+        {
+            "fold_id": str(item.get("fold_id", "")),
+            "scenario": str(item.get("scenario", "")),
+            "fold_calendar_return": _pct(item.get("fold_calendar_return")),
+            "per_fold_max_drawdown": _pct(item.get("per_fold_max_drawdown")),
+            "observation_count": str(item.get("observation_count", 0)),
+            "reject_rate": _pct(item.get("reject_rate")),
+            "turnover": (
+                "—" if item.get("turnover") is None
+                else f"{float(item['turnover']):.4f}"
+            ),
+            "explicit_cost_ratio": _pct(item.get("explicit_cost_ratio")),
+        }
+        for item in payload.get("fold_metrics", []) or []
+        if isinstance(item, dict)
+    ]
+    thresholds = payload.get("thresholds") or {}
+    return {
+        "research_status": str(payload.get("research_status", "")),
+        "stability_conclusion": str(payload.get("stability_conclusion")),
+        "stability_policy_hash": str(payload["stability_policy_hash"]),
+        "stability_policy_version": str(
+            payload.get("stability_policy_version", "")
+        ),
+        "minimum_executed_folds": str(thresholds.get("minimum_executed_folds", "")),
+        "minimum_positive_fold_ratio": str(
+            thresholds.get("minimum_positive_fold_ratio", "")
+        ),
+        "worst_fold_calendar_return_floor": str(
+            thresholds.get("worst_fold_calendar_return_floor", "")
+        ),
+        "fold_count": str(schedule.get("fold_count", 0)),
+        "boundary_count": str(schedule.get("boundary_count", 0)),
+        "boundaries": boundaries,
+        "fold_statuses": fold_statuses,
+        "scenario_rows": scenario_rows,
+        "fold_rows": fold_rows,
+        "reasons": [str(reason) for reason in payload.get("reasons", []) or []],
+    }
+
+
 def render_experiment_report(
     experiment: ExperimentReportInput,
     destination: Path,
@@ -844,6 +941,7 @@ def render_experiment_report(
         universe=universe,
         factor_input=_factor_input_block(experiment.factor_input_audit),
         data_acceptance=_data_acceptance_block(experiment.data_acceptance),
+        walk_forward=_walk_forward_block(experiment.walk_forward),
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(body, encoding="utf-8")

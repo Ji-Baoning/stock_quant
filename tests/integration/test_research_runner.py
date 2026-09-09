@@ -51,7 +51,6 @@ data is committed.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import shutil
@@ -93,13 +92,13 @@ from stock_quant.data_model.security_master import (
     master_coverage_frame,
     master_coverage_record,
 )
+from stock_quant.data_model.trading_rules import REASON_SELL_AT_LOWER_LIMIT
 from stock_quant.data_model.universe_membership import (
     membership_content_hash,
     membership_frame,
     resolve_memberships,
 )
 from stock_quant.data_quality.models import QualityReport
-from stock_quant.data_model.trading_rules import REASON_SELL_AT_LOWER_LIMIT
 from stock_quant.factors.momentum import Momentum60
 from stock_quant.research.acceptance.models import CURRENT_ACCEPTED
 from stock_quant.research.acceptance.registry import AcceptanceRegistry
@@ -110,6 +109,7 @@ from stock_quant.research.models import (
     ResearchRunFailed,
 )
 from stock_quant.research.runner import ResearchRunner, _DatasetFactorAdapter
+from stock_quant.research.spec import ExperimentSpec
 from stock_quant.research.trust import DataTrustMode
 from stock_quant.research.universe import UniverseDefinition, UniverseResolver
 
@@ -688,6 +688,18 @@ def _write_config_tree(
         _REPO_ROOT / "configs" / "experiments" / "momentum_60d.yml",
         configs / "experiments" / "momentum_60d.yml",
     )
+    # The repository example spec declares the formal walk-forward policy;
+    # these single-window pipeline tests pin the legacy engineering policy
+    # explicitly (their 2020 start cannot satisfy the 756-session fold-2020
+    # warmup floor of the fixed-calendar contract anyway).
+    spec_document = yaml.safe_load(
+        (configs / "experiments" / "momentum_60d.yml").read_text(encoding="utf-8")
+    )
+    spec_document["execution_pipeline"] = "engineering_single_window"
+    (configs / "experiments" / "momentum_60d.yml").write_text(
+        yaml.safe_dump(spec_document, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
     fact_payloads = _fact_payloads() if facts is None else facts
     document = {
         "schema_version": 1,
@@ -795,6 +807,173 @@ def _new_env(tmp_path) -> _Env:
         config_root=_write_config_tree(tmp_path),
         facts=_fact_payloads(),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Task: formal walk-forward publication (audit chain + snapshot boundary)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def walk_forward_spec(env: _Env) -> str:
+    """A formal walk-forward spec over the synthetic csi300 project.
+
+    The requested OOS range is the complete 2021 calendar year: its
+    2018-2020 warmup carries 784 confirmed weekday sessions (above the
+    756-session policy floor) and the pinned bars cover the whole fold.
+    """
+    path = (
+        env.config_root / "configs" / "experiments" / "walk_forward_2021.yml"
+    )
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "hypothesis": "formal walk-forward stability over fold 2021",
+                "execution_pipeline": "walk_forward_oos_v1",
+                "factor_versions": {"momentum_60d": "2.0.0"},
+                "dataset_version": "CURRENT",
+                "universe_version": "CURRENT",
+                "universe_definition": "csi300",
+                "data_acceptance_id": "CURRENT_ACCEPTED",
+                "date_range": {
+                    "start_date": "2021-01-01",
+                    "end_date": "2021-12-31",
+                },
+                "train_validation_holdout_policy":
+                    "not_applicable_engineering_mvp",
+                "preprocessing": {
+                    "winsorization": "none",
+                    "standardization": "none",
+                },
+                "portfolio_rule": {
+                    "name": "top_n_equal_weight",
+                    "top_n": 10,
+                    "lot_size": 100,
+                },
+                "cost_scenarios": ["zero_cost", "full_cost"],
+                "random_seed": 42,
+                "code_commit": "unversioned",
+                "parent_experiment_ids": [],
+                "agent_id": None,
+            },
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    return "configs/experiments/walk_forward_2021.yml"
+
+
+@pytest.fixture
+def snapshot_payload() -> dict:
+    from stock_quant.research.walk_forward.snapshots import build_snapshot_bundle
+
+    bundle = build_snapshot_bundle(
+        spec=ExperimentSpec.model_validate(
+            {
+                "hypothesis": "snapshot payload boundary",
+                "factor_versions": {"momentum_60d": "2.0.0"},
+                "dataset_version": "d" * 64,
+                "universe_version": "u" * 64,
+                "data_acceptance_id": "a" * 64,
+                "date_range": {
+                    "start_date": "2021-01-01",
+                    "end_date": "2021-12-31",
+                },
+                "train_validation_holdout_policy":
+                    "not_applicable_engineering_mvp",
+                "preprocessing": {
+                    "winsorization": "none",
+                    "standardization": "none",
+                },
+                "portfolio_rule": {
+                    "name": "top_n_equal_weight",
+                    "top_n": 10,
+                    "lot_size": 100,
+                },
+                "cost_scenarios": ["full_cost"],
+                "random_seed": 42,
+                "code_commit": "unversioned",
+                "parent_experiment_ids": [],
+                "agent_id": None,
+            }
+        ),
+        dataset_manifest={
+            "tables": {
+                "adjusted_bar": {"sha256": "1" * 64},
+                "daily_bar": {"sha256": "2" * 64},
+                "trading_calendar": {"sha256": "3" * 64},
+                "corporate_action": {"sha256": "4" * 64},
+                "corporate_action_coverage": {"sha256": "5" * 64},
+            }
+        },
+        universe_definition=None,
+        config_hashes={"costs.yml": "c" * 64},
+    )
+    return bundle.model_dump(mode="json")
+
+
+def test_formal_walk_forward_publishes_complete_audit_chain(
+    runner, walk_forward_spec, env, tmp_path
+):
+    published = runner.run(walk_forward_spec)
+    root = published.path
+    assert (root / "fold_schedule.json").is_file()
+    assert (root / "fold_outcomes.json").is_file()
+    assert (root / "walk_forward_manifest.json").is_file()
+    for fold_dir in sorted((root / "folds").iterdir()):
+        for name in (
+            "fold_manifest.json",
+            "signals.parquet",
+            "orders.parquet",
+            "fills.parquet",
+            "equity.parquet",
+            "daily_returns.parquet",
+            "metrics.json",
+        ):
+            assert (fold_dir / name).is_file(), name
+    report = json.loads((root / "stability_report.json").read_text())
+    assert report["stability_policy_hash"]
+    assert "aggregate_max_drawdown" not in report
+    assert report["stability_conclusion"] == "INCONCLUSIVE"
+    assert report["research_status"] == "COMPLETED"
+    # the published experiment manifest binds the two immutable hashes
+    manifest = json.loads(
+        (root / "experiment_manifest.json").read_text(encoding="utf-8")
+    )
+    assert (
+        manifest["fold_schedule_sha256"]
+        == report["schedule"]["fold_schedule_sha256"]
+    )
+    # the rich report renders the complete walk-forward audit section
+    from stock_quant.cli import _experiment_report_input
+    from stock_quant.reporting.html import render_experiment_report
+
+    run_input = _experiment_report_input(env.root, published.experiment_id)
+    destination = tmp_path / "walk_forward.html"
+    render_experiment_report(run_input, destination)
+    html = destination.read_text(encoding="utf-8")
+    schedule = json.loads((root / "fold_schedule.json").read_text())
+    for fold in schedule["folds"]:
+        assert fold["fold_id"] in html
+    for scenario in ("zero_cost", "full_cost"):
+        assert scenario in html
+    assert "stability_policy_hash" in html
+    assert "oos_return_observations" in html
+    assert "per_fold_max_drawdown" in html
+    assert "aggregate_max_drawdown" not in html
+    assert "全局最大回撤" not in html
+
+
+def test_runtime_metadata_is_not_accepted_as_snapshot_content(snapshot_payload):
+    from pydantic import ValidationError
+
+    from stock_quant.research.walk_forward.snapshots import SnapshotBundle
+
+    snapshot_payload["worker_count"] = 4
+    with pytest.raises(ValidationError, match="extra"):
+        SnapshotBundle.model_validate(snapshot_payload)
+
 
 # --------------------------------------------------------------------------- #
 # Injected observers / evaluators / providers

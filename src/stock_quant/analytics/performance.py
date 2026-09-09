@@ -26,7 +26,11 @@ Conventions (documented, never silently NaN):
   (a value in ``[-1, 0]``; ``0`` for a never-declining curve).
 - ``turnover`` is the one-way traded notional
   ``(buy notional + sell notional) / 2`` divided by the window's mean
-  ``total_equity``: fully replacing the book once reads as ``1.0``.
+  ``total_equity`` (the net-equity-after-cost mark of this ledger): fully
+  replacing the book once reads as ``1.0``.  The formula is frozen as
+  ``turnover-v1`` (``turnover_version``) and both operands are persisted
+  beside the ratio as ``turnover_numerator`` / ``turnover_denominator`` so
+  any published ratio can be recomputed from its committed parts.
 - Cash and stale-asset ratios are window-end fractions:
   ``cash / total_equity`` and ``stale_market_value / total_equity``.
 - ``slippage_estimate`` is the realized slippage cost summed over fills: a buy
@@ -60,6 +64,10 @@ import pandas as pd
 
 #: Trading days assumed per calendar year for annualization.
 TRADING_DAYS_PER_YEAR = 252
+
+#: Frozen turnover formula version: numerator ``(buy + sell notional) / 2``
+#: over the mean daily net-equity denominator, both persisted beside the ratio.
+TURNOVER_VERSION = "turnover-v1"
 
 #: Canonical daily-equity ledger columns (mirrors engine.EQUITY_COLUMNS).
 DAILY_EQUITY_COLUMNS = (
@@ -118,6 +126,9 @@ class PerformanceMetrics:
     annualized_volatility: float
     max_drawdown: float
     turnover: float
+    turnover_version: str
+    turnover_numerator: float
+    turnover_denominator: float
     total_commission: float
     total_stamp_tax: float
     slippage_estimate: float
@@ -140,6 +151,9 @@ class PerformanceMetrics:
             "annualized_volatility": self.annualized_volatility,
             "max_drawdown": self.max_drawdown,
             "turnover": self.turnover,
+            "turnover_version": self.turnover_version,
+            "turnover_numerator": self.turnover_numerator,
+            "turnover_denominator": self.turnover_denominator,
             "total_commission": self.total_commission,
             "total_stamp_tax": self.total_stamp_tax,
             "slippage_estimate": self.slippage_estimate,
@@ -225,8 +239,10 @@ def compute_metrics(
         total_stamp_tax = 0.0
         slippage_estimate = 0.0
     mean_equity = float(equity["total_equity"].mean())
+    turnover_numerator = (buy_notional + sell_notional) / 2.0
+    turnover_denominator = mean_equity
     if mean_equity > 0:
-        turnover = (buy_notional + sell_notional) / 2.0 / mean_equity
+        turnover = turnover_numerator / mean_equity
     else:
         turnover = 0.0
 
@@ -258,6 +274,9 @@ def compute_metrics(
         annualized_volatility=annualized_volatility,
         max_drawdown=max_drawdown,
         turnover=float(turnover),
+        turnover_version=TURNOVER_VERSION,
+        turnover_numerator=float(turnover_numerator),
+        turnover_denominator=float(turnover_denominator),
         total_commission=total_commission,
         total_stamp_tax=total_stamp_tax,
         slippage_estimate=slippage_estimate,

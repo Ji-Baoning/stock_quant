@@ -110,8 +110,7 @@
 
   {% if universe %}
   <section>
-    <h2>股票池冻结</h2>
-    <p>本实验的候选股票池由冻结的指数成分定义在任一信号日前解析并通过验收门禁；
+    <h2>股票池冻结</h2>    <p>本实验的候选股票池由冻结的指数成分定义在任一信号日前解析并通过验收门禁；
     逐信号日成员快照哈希使股票池序列可审计、可复现。</p>
     <table class="kv">
       <tr><td>指数池（universe_id）</td><td>{{ universe.universe_id }}</td></tr>
@@ -131,6 +130,58 @@
       </table>
     </details>
     {% endif %}
+  </section>
+  {% endif %}
+
+  {% if walk_forward %}
+  <section class="walk-forward">
+    <h2>Walk-Forward 样本外稳定性</h2>
+    <p>研究状态：{{ walk_forward.research_status }}；稳定性结论：
+    <strong>{{ walk_forward.stability_conclusion }}</strong>（仅在研究 COMPLETED 时存在）。</p>
+    <table class="kv">
+      <tr><td>stability_policy_hash</td><td><code>{{ walk_forward.stability_policy_hash }}</code></td></tr>
+      <tr><td>政策版本</td><td>{{ walk_forward.stability_policy_version }}</td></tr>
+      <tr><td>最少已执行 fold 数（minimum_executed_folds）</td><td>{{ walk_forward.minimum_executed_folds }}</td></tr>
+      <tr><td>正收益 fold 比率阈值（minimum_positive_fold_ratio）</td><td>{{ walk_forward.minimum_positive_fold_ratio }}</td></tr>
+      <tr><td>最差 fold 年度收益下限（worst_fold_calendar_return_floor）</td><td>{{ walk_forward.worst_fold_calendar_return_floor }}</td></tr>
+      <tr><td>计划 fold 数</td><td>{{ walk_forward.fold_count }}</td></tr>
+      <tr><td>边界未评估区间数（not_evaluated_boundary）</td><td>{{ walk_forward.boundary_count }}</td></tr>
+    </table>
+    {% if walk_forward.reasons %}
+    <p>判定理由：</p>
+    <ul>{% for reason in walk_forward.reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+    {% endif %}
+    <h3>边界未评估区间（不计入 OOS 聚合，非 skipped）</h3>
+    {% if walk_forward.boundaries %}
+    <table>
+      <thead><tr><th>起</th><th>止</th><th>原因</th></tr></thead>
+      <tbody>
+        {% for boundary in walk_forward.boundaries %}<tr><td>{{ boundary.calendar_start }}</td><td>{{ boundary.calendar_end }}</td><td>{{ boundary.reason }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="empty">无边界未评估区间。</p>{% endif %}
+    <h3>fold 状态（失败 fold 保留，绝不被删除）</h3>
+    <table>
+      <thead><tr><th>fold</th><th>状态</th><th>原因代码</th></tr></thead>
+      <tbody>
+        {% for row in walk_forward.fold_statuses %}<tr><td>{{ row.fold_id }}</td><td>{{ row.status }}</td><td>{{ row.reason_code }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    <h3>逐成本情景 OOS 聚合（全部预锁定情景逐一展示，不做择优）</h3>
+    <table>
+      <thead><tr><th>情景</th><th>累计收益</th><th>年化收益</th><th>年化波动</th><th>Sharpe（零无风险）</th><th>oos_return_observations</th><th>annualization_observations</th></tr></thead>
+      <tbody>
+        {% for row in walk_forward.scenario_rows %}<tr><td>{{ row.scenario }}</td><td>{{ row.aggregate_return }}</td><td>{{ row.annualized_return }}</td><td>{{ row.annualized_volatility }}</td><td>{{ row.sharpe_zero_rf }}</td><td>{{ row.oos_return_observations }}</td><td>{{ row.annualization_observations }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    <h3>逐 fold 指标（年度收益 / 逐 fold 最大回撤 / 执行质量 / 成本）</h3>
+    <table>
+      <thead><tr><th>fold</th><th>情景</th><th>fold 年度收益</th><th>per_fold_max_drawdown</th><th>观测数</th><th>拒单率</th><th>换手率</th><th>显性成本比率</th></tr></thead>
+      <tbody>
+        {% for row in walk_forward.fold_rows %}<tr><td>{{ row.fold_id }}</td><td>{{ row.scenario }}</td><td>{{ row.fold_calendar_return }}</td><td>{{ row.per_fold_max_drawdown }}</td><td>{{ row.observation_count }}</td><td>{{ row.reject_rate }}</td><td>{{ row.turnover }}</td><td>{{ row.explicit_cost_ratio }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    <p class="empty">跨 fold 拼接的最大回撤与 Calmar 被政策禁止，本报告不含任何全局回撤字段。</p>
   </section>
   {% endif %}
 

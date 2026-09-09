@@ -33,11 +33,13 @@ in configuration files.
   `corporate_action_quarantine` audit table. Reads are pinned to a version
   hash; `CURRENT` points at the latest fully gated version. Data and
   experiments live under `data/`.
-- An **experiment** is identified by a content hash of its frozen spec. The
-  same spec run twice publishes the same experiment id and byte-identical
-  artifacts (`metrics.json`, `report.html`, factor/portfolio/backtest frames).
-  `data/runs/` keeps every run's workspace; `data/experiments/` is the formal,
-  immutable registry.
+- An **experiment** is identified by a content hash of its frozen spec plus
+  three frozen research snapshots (strategy, experiment, data environment;
+  identity scheme v2). The same frozen inputs run twice publish the same
+  experiment id and byte-identical artifacts. `data/runs/` keeps every run's
+  workspace; `data/experiments/` is the formal, immutable registry. Runtime
+  metadata (run id, output paths, timestamps, host, pid, worker count) never
+  enters the identity.
 
 ## Command line
 
@@ -110,6 +112,80 @@ failure with a redacted preflight manifest under `data/runs/`; no factors, no
 fallback to master symbols) and require a correction published as new,
 evidence-backed facts. Removal from the index never force-sells an existing
 holding; it only stops new signals.
+
+## Walk-forward OOS stability (正式研究)
+
+`execution_pipeline: walk_forward_oos_v1` (the committed `momentum_60d.yml`)
+is the formal research workflow: it validates that one **frozen** strategy
+performs stably over consecutive, isolated annual out-of-sample folds. It
+never selects parameters, ranks frequencies, picks a preferred cost scenario
+or drops a poorly performing fold.
+
+**Workflow.** The runner pins the dataset, runs the real-data acceptance gate
+and the point-in-time universe preflight *before* the experiment identity is
+computed, freezes the three research snapshots, materializes the immutable
+`fold_schedule.json` (written and hashed before any fold executes, never
+modified afterwards), then executes each fold in isolation: a fresh account
+with the identical fixed initial cash per fold, warmup (3 calendar years,
+>= 756 confirmed sessions, 60 stable-history sessions before the first OOS
+day) used only for factor history — never for orders or returns — and a
+12-month non-overlapping OOS window on a January-1 anchor. Results go to the
+separate, schedule-hash-bound `fold_outcomes.json`.
+
+**Statuses and conclusions.** `research run` prints `research_status=` and
+`stability_conclusion=`:
+
+- `FAILED` (exit nonzero): any fold/system integrity failure — preflight,
+  acceptance, universe coverage, warmup shortfall, missing benchmark closes,
+  a missing portfolio return on a confirmed open day, or a declared cost
+  scenario with incomplete artifacts. `stability_conclusion` stays `null`; a
+  FAILED run can never be downgraded to INCONCLUSIVE and never publishes.
+- `COMPLETED` (exit zero, exact label retained):
+  - `INCONCLUSIVE` — the process is valid but the evidence is insufficient:
+    fewer than five executed folds, or a legally skipped
+    `skipped_not_tradeable` fold (only with versioned market-wide closure
+    evidence covering the whole OOS window). This is *valid-but-insufficient*,
+    never a statement about strategy quality.
+  - `STABLE` — every predeclared cost scenario independently passes:
+    positive-fold ratio >= 60% **and** worst fold calendar return > -10%.
+    The final verdict is the conjunction over all scenarios.
+  - `UNSTABLE` — not FAILED/INCONCLUSIVE and at least one scenario fails its
+    thresholds.
+
+**Published artifacts.** A completed formal experiment adds
+`fold_schedule.json`, `fold_outcomes.json`, `walk_forward_manifest.json`
+(binds both hashes plus the snapshot hashes), `stability_report.json`
+(carries the mandatory `stability_policy_hash`, every scenario's inputs,
+thresholds, statuses and reasons, per-scenario aggregate OOS returns and
+per-fold metrics) and the content-hashed `folds/<fold_id>/` asset set
+(`fold_manifest.json`, `signals.parquet`, `orders.parquet`, `fills.parquet`,
+`equity.parquet`, `daily_returns.parquet`, `metrics.json`). Failed folds
+remain in the schedule and the outcome ledger forever.
+
+**Metric conventions** (spec 指标口径):
+
+- One portfolio return per confirmed open OOS day; the fold's first-day
+  return uses the fixed `initial_equity` as its predecessor, later returns
+  the prior day's `net_equity_after_cost` (the engine's `total_equity` under
+  its audit-facing name).
+- `aggregate_return = product(1+r) - 1`;
+  `annualized_return = product(1+r)^(252/N) - 1`; volatility and Sharpe are
+  sample statistics (`ddof=1`, zero risk-free rate); undefined values are
+  JSON `null`, never zero.
+- `per_fold_max_drawdown` is computed only from the fold's own daily
+  mark-to-market `net_equity_after_cost`. Cross-fold (global) max drawdown
+  and Calmar are **forbidden** and appear in no artifact.
+- Cost metrics (`gross_return_before_explicit_cost`, `explicit_cost_drag`,
+  `slippage_impact`, `explicit_cost_ratio`, `reject_rate` with full/partial
+  order counts and `unfilled_quantity_rate`, `turnover-v1`) are computed per
+  fold per declared scenario; the same-path cost replay never alters the
+  realized fill set, and `zero_cost` stays a separate path-changing
+  counterfactual.
+
+The legacy single-window pipeline remains available only under the explicit
+`execution_pipeline: engineering_single_window` policy (the debug
+`backtest momentum_60d` diagnostic); it cannot publish a formal stability
+conclusion.
 
 ## Reproducibility check
 

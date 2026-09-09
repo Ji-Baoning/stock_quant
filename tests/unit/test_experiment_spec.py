@@ -28,9 +28,43 @@ from stock_quant.research.spec import (
     load_experiment_spec,
 )
 from stock_quant.research.trust import DataTrustMode
+from stock_quant.research.walk_forward.snapshots import build_snapshot_bundle
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _EXAMPLE_SPEC = _REPO_ROOT / "configs" / "experiments" / "momentum_60d.yml"
+
+#: Static pinned-dataset table hashes for identity tests.  Identity is
+#: spec + snapshot bundle, so every identity call needs a bundle built from
+#: the same frozen spec; the table hashes themselves are arbitrary constants.
+_DATASET_MANIFEST = {
+    "tables": {
+        "adjusted_bar": {"sha256": "1" * 64},
+        "daily_bar": {"sha256": "2" * 64},
+        "trading_calendar": {"sha256": "3" * 64},
+        "corporate_action": {"sha256": "4" * 64},
+        "corporate_action_coverage": {"sha256": "5" * 64},
+    },
+}
+
+_CONFIG_HASHES = {
+    "costs.yml": "c" * 64,
+    "trading_rules.yml": "e" * 64,
+}
+
+
+def bundle_for(spec: ExperimentSpec):
+    """A deterministic snapshot bundle bound to ``spec`` (identity v2)."""
+    return build_snapshot_bundle(
+        spec=spec,
+        dataset_manifest=_DATASET_MANIFEST,
+        universe_definition=None,
+        config_hashes=_CONFIG_HASHES,
+    )
+
+
+def experiment_id(spec: ExperimentSpec) -> str:
+    """The scheme-v2 identity of ``spec``: the spec plus its bundle."""
+    return compute_experiment_id(spec, bundle_for(spec))
 
 
 def spec_kwargs(**overrides):
@@ -70,16 +104,16 @@ def spec() -> ExperimentSpec:
 
 
 def test_experiment_id_is_deterministic_and_sensitive_to_result_inputs(spec):
-    assert compute_experiment_id(spec) == compute_experiment_id(
+    assert experiment_id(spec) == experiment_id(
         spec.model_copy(deep=True)
     )
     changed = spec.model_copy(update={"random_seed": spec.random_seed + 1})
-    assert compute_experiment_id(spec) != compute_experiment_id(changed)
+    assert experiment_id(spec) != experiment_id(changed)
 
 
 def test_experiment_id_survives_a_serialization_round_trip(spec):
     rebuilt = ExperimentSpec.model_validate_json(spec.model_dump_json())
-    assert compute_experiment_id(rebuilt) == compute_experiment_id(spec)
+    assert experiment_id(rebuilt) == experiment_id(spec)
 
 
 @pytest.mark.parametrize(
@@ -106,7 +140,7 @@ def test_experiment_id_survives_a_serialization_round_trip(spec):
 def test_experiment_id_changes_when_an_input_changes(change):
     base = make_spec()
     changed = make_spec(**change)
-    assert compute_experiment_id(base) != compute_experiment_id(changed)
+    assert experiment_id(base) != experiment_id(changed)
 
 
 def test_freeze_resolves_current_placeholders_to_explicit_versions():
@@ -121,19 +155,19 @@ def test_freeze_resolves_current_placeholders_to_explicit_versions():
     identical = make_spec(
         dataset_version="resolved-dataset", universe_version="resolved-universe"
     )
-    assert compute_experiment_id(frozen) == compute_experiment_id(identical)
+    assert experiment_id(frozen) == experiment_id(identical)
 
 
 def test_freeze_keeps_already_explicit_versions(spec):
     frozen = spec.freeze()
     assert frozen.dataset_version == spec.dataset_version
-    assert compute_experiment_id(frozen) == compute_experiment_id(spec)
+    assert experiment_id(frozen) == experiment_id(spec)
 
 
 def test_freeze_can_stamp_the_code_commit(spec):
     stamped = spec.freeze(code_commit="repo-head-sha")
     assert stamped.code_commit == "repo-head-sha"
-    assert compute_experiment_id(stamped) != compute_experiment_id(spec)
+    assert experiment_id(stamped) != experiment_id(spec)
 
 
 def test_freeze_requires_an_explicit_version_for_each_current_field():
@@ -154,7 +188,7 @@ def test_freeze_requires_an_explicit_version_for_each_current_field():
 def test_compute_experiment_id_rejects_unresolved_current_spec():
     placeholder = make_spec(dataset_version="CURRENT")
     with pytest.raises(ExperimentNotFrozenError):
-        compute_experiment_id(placeholder)
+        experiment_id(placeholder)
 
 
 # ---------------------------------------------------------------------------
@@ -169,9 +203,9 @@ def test_definition_version_changes_experiment_id():
     must receive different experiment ids: research identity incorporates the
     point-in-time universe, not just the dataset version.
     """
-    assert compute_experiment_id(
+    assert experiment_id(
         make_spec(universe_version="a" * 64)
-    ) != compute_experiment_id(make_spec(universe_version="b" * 64))
+    ) != experiment_id(make_spec(universe_version="b" * 64))
 
 
 def test_spec_defaults_to_no_universe_definition():
@@ -188,7 +222,7 @@ def test_spec_accepts_a_universe_definition_name_and_freezes_with_it():
     assert frozen.universe_definition == "csi300"
     # the named definition participates in identity: the same frozen versions
     # under a different definition name yield a different experiment id
-    assert compute_experiment_id(frozen) != compute_experiment_id(
+    assert experiment_id(frozen) != experiment_id(
         frozen.model_copy(update={"universe_definition": "csi500"})
     )
 
@@ -210,7 +244,7 @@ def test_research_spec_is_not_frozen_with_current_accepted():
 def test_acceptance_id_changes_experiment_identity():
     first = make_spec(data_acceptance_id="a" * 64)
     second = make_spec(data_acceptance_id="b" * 64)
-    assert compute_experiment_id(first) != compute_experiment_id(second)
+    assert experiment_id(first) != experiment_id(second)
 
 
 def test_engineering_spec_may_freeze_without_acceptance():
@@ -309,10 +343,10 @@ def test_committed_example_spec_is_coherent_and_loadable():
         code_commit="example-head",
     )
     assert frozen_once.is_frozen
-    assert compute_experiment_id(frozen_once) == compute_experiment_id(frozen_twice)
+    assert experiment_id(frozen_once) == experiment_id(frozen_twice)
     other_data = frozen_once.freeze(dataset_version="cc" * 32)
-    assert compute_experiment_id(frozen_once) != compute_experiment_id(other_data)
+    assert experiment_id(frozen_once) != experiment_id(other_data)
     other_acceptance = frozen_once.freeze(data_acceptance_id="ad" * 32)
-    assert compute_experiment_id(frozen_once) != compute_experiment_id(
+    assert experiment_id(frozen_once) != experiment_id(
         other_acceptance
     )

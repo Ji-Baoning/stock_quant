@@ -324,3 +324,96 @@ python -m stock_quant data acceptance show \
   `corrupt acceptance_id=<id>`、照常列出其余记录，但以非零退出——损坏绝不
   解释为通过，也不输出 traceback/路径/载荷。
 - CLI 输出不含 Token、原始供应商载荷或本机绝对路径。
+
+## 8. Walk-Forward 样本外稳定性审计清单（正式研究）
+
+`execution_pipeline: walk_forward_oos_v1` 的正式研究（固定日历年度 OOS fold、
+政策化稳定性结论）在每次运行前后按本清单核对。所有判定语义、产物含义与指标
+公式见 README「Walk-forward OOS stability」与 RUNBOOK 阶段 6；本节只列
+**审计动作**。任何一条不满足都不得把该实验当作正式结论引用。
+
+### 8.1 前置版本核对
+
+- [ ] 数据集版本已通过 `real-data-v1` 验收（§7），且携带 `adjusted_bar`、
+  `corporate_action_coverage`、`security_master_coverage` 与
+  `universe_membership` 证据表。
+- [ ] `configs/universes/<universe_definition>.yml` 钉住已发布事实表内容哈希
+  与数据集实际覆盖区间（不是目标区间）。
+
+### 8.2 运行前：schedule 先于执行并被哈希
+
+- [ ] `data/runs/<run_id>/fold_schedule.json` 在**任何回测之前**已写入，且
+  记录了 `fold_schedule_sha256`（`walk_forward_manifest.json` 与
+  `stability_report.json.schedule` 均绑定它）。
+- [ ] schedule 只含**计划时已知事实**：fold 自然/交易日边界、三年预热边界、
+  预热与 OOS 会话数、逐日成员快照计划；不携带任何运行后状态（status/reason
+  只出现在 `fold_outcomes.json`）。
+- [ ] 首尾不成完整 12 个月的日期在 `boundaries` 中记录为
+  `not_evaluated_boundary`（含原因），没有被静默丢弃，也没有被当作
+  `skipped` fold。
+
+### 8.3 运行后：schedule 不可变、结果只在 outcome 账本
+
+- [ ] 运行结束后重算 `fold_schedule.json` 的 SHA-256，与运行前一致——失败
+  fold 仍留在 schedule 中，schedule 从不因结果改写。
+- [ ] `fold_outcomes.json` 对 schedule 中**每一个**计划 fold 恰有一条结果
+  （`executed` / `failed_preflight` / `skipped_not_tradeable`），无未知、无
+  重复 fold id，且其 `schedule_sha256` 等于 schedule 的实际哈希。
+- [ ] `walk_forward_manifest.json` 同时固定 `fold_schedule_sha256` 与
+  `fold_outcomes_sha256`。
+
+### 8.4 账户隔离
+
+- [ ] 每个 fold（且每个成本情景）都从**全新账户**开始：`folds/<fold_id>/
+  fold_manifest.json` 与 fold 工件的 `initial_equity` 列显示**相同的固定初始
+  资金**（`configs/project.yml` 的 `initial_cash`），前一 fold 的现金、成交、
+  持仓与权益绝不延续。
+- [ ] 每个 fold 的第一笔订单、第一条收益记录都不早于该 fold 的
+  `first_trading_day`（预热只算因子，不产生订单/成交/绩效）。
+
+### 8.5 收益完整性
+
+- [ ] 对每个 executed fold：`daily_returns.parquet` 对该 fold 的每个确认开市
+  日恰有一条组合收益；fold 首日收益以固定 `initial_equity` 为前值，其后以前一
+  交易日的 `net_equity_after_cost` 为前值。
+- [ ] 跨 fold 拼接的 OOS 收益无重复日期（`stability_report.json` 的
+  `oos_return_observations == annualization_observations == N`，N 等于全部
+  executed fold 的日收益行数之和）；个股停牌日不缺失组合收益（stale
+  mark-to-market 规则补估值，不删除该日）。
+- [ ] 边界未评估区间、非交易日、fold 间空白与预热日都不在 OOS 聚合里。
+
+### 8.6 失败与结论语义
+
+- [ ] 任一 fold/system 完整性失败（预热不足、验收缺失、股票池覆盖、基准缺口、
+  开市日缺组合收益、声明情景产物不完整……）→ 运行 `research_status=FAILED`、
+  `stability_conclusion=null`，以非零退出；**绝不出现 FAILED → INCONCLUSIVE
+  的降级**，且该运行未发布任何实验目录。
+- [ ] `executed` fold 少于 5 或存在合法 `skipped_not_tradeable` fold（必须
+  附全窗口市场级禁交易证据；无证据的全年无开市日是 FAILED）→
+  `COMPLETED` + `INCONCLUSIVE`——研究有效但证据不足，不表示策略差。
+- [ ] 完成的结论（STABLE/UNSTABLE/INCONCLUSIVE）必须携带重算的
+  `stability_policy_hash`；没有该哈希的稳定性结论不是正式结论。
+
+### 8.7 指标与情景合取
+
+- [ ] `stability_report.json` **不含**任何跨 fold 拼接收益计算的全局最大回撤
+  或 Calmar 字段（`aggregate_max_drawdown` / `calmar` 不存在）；逐 fold 最大
+  回撤只用该 fold 自己的 `equity.parquet.net_equity_after_cost` 逐日
+  mark-to-market 计算。
+- [ ] `ExperimentSpec.cost_scenarios` 中**每一个**预声明成本情景都出现在
+  `scenario_results` / `scenario_aggregates` / `fold_metrics` 中——全部情景
+  逐一参加判定并完整展示，无“主情景”择优；最终 STABLE 是全部情景
+  （正收益 fold 比率 ≥ 60% 且最差 fold 年度收益 > -10%）的合取。
+- [ ] 成本指标核对：`explicit_cost_ratio = total_explicit_cost / initial_equity`
+  （分母恒为该 fold 固定期初权益）；`reject_rate` 按唯一 `order_id` 计数
+  （无订单时为 null，不是 0）；同路径成本重放不改变成交集合；`zero_cost`
+  只是改现金路径的反事实情景，从不用于显性成本拖累。
+
+### 8.8 报告核对
+
+- [ ] `report build` 重建的 HTML 渲染 Walk-Forward 小节：全部 fold id、全部
+  成本情景、`stability_policy_hash`、`oos_return_observations` 观测数、逐
+  fold 年度收益与 `per_fold_max_drawdown`，且无全局回撤字段。
+- [ ] CLI `research run` 打印 `research_status=` 与 `stability_conclusion=`；
+  FAILED 非零退出，COMPLETED 的 STABLE/UNSTABLE/INCONCLUSIVE 零退出并保留
+  确切标签。

@@ -33,11 +33,13 @@ from typing import Literal
 import pandas as pd
 from pydantic import BaseModel, Field, ValidationError
 
+from stock_quant.research.models import _MANIFEST_NAMES, validate_artifact_paths
 from stock_quant.research.spec import (
     ExperimentSpec,
     compute_experiment_id,
     load_experiment_spec,
 )
+from stock_quant.research.walk_forward.snapshots import SnapshotBundle
 
 _MANIFEST_NAME = "experiment_manifest.json"
 _RUN_MANIFEST_NAME = "run_manifest.json"
@@ -103,35 +105,62 @@ class ExperimentManifest(BaseModel):
     #: ENGINEERING diagnostic).  Validated against the frozen spec itself.
     data_acceptance_id: str | None = None
     code_commit: str | None = None
+    #: The three frozen walk-forward snapshot hashes (identity scheme v2).
+    #: A manifest without all three carries no snapshot bundle and can be
+    #: neither published nor indexed.
+    strategy_snapshot_sha256: str
+    experiment_snapshot_sha256: str
+    data_environment_snapshot_sha256: str
+    #: Walk-forward audit bindings (``None`` on legacy single-window
+    #: experiments): the stability verdict, its policy hash and the two
+    #: immutable walk-forward artifact hashes.
+    stability_conclusion: str | None = None
+    stability_policy_hash: str | None = None
+    fold_schedule_sha256: str | None = None
+    fold_outcomes_sha256: str | None = None
     evaluation_reason: str | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class ExperimentIdentity:
-    """Deterministic identity of one frozen experiment spec.
+    """Deterministic identity of one frozen experiment spec + snapshot bundle.
 
-    Carries the explicit data versions and code commit the identity was
-    computed from so the registry can cross-check a staged manifest.
+    Carries the explicit data versions, code commit and the three frozen
+    snapshot hashes the identity was computed from so the registry can
+    cross-check a staged manifest against the exact bundle.
     """
 
     experiment_id: str
     dataset_version: str
     universe_version: str
     code_commit: str
+    strategy_snapshot_sha256: str
+    experiment_snapshot_sha256: str
+    data_environment_snapshot_sha256: str
 
     @classmethod
-    def of(cls, spec: ExperimentSpec) -> "ExperimentIdentity":
+    def of(
+        cls, spec: ExperimentSpec, snapshots: "SnapshotBundle"
+    ) -> "ExperimentIdentity":
         if not isinstance(spec, ExperimentSpec):
             raise TypeError(
                 "ExperimentIdentity.of expects an ExperimentSpec, got "
                 f"{type(spec).__name__}"
             )
+        if not isinstance(snapshots, SnapshotBundle):
+            raise TypeError(
+                "ExperimentIdentity.of expects a SnapshotBundle as its second "
+                f"argument, got {type(snapshots).__name__}"
+            )
         return cls(
-            experiment_id=compute_experiment_id(spec),
+            experiment_id=compute_experiment_id(spec, snapshots),
             dataset_version=spec.dataset_version,
             universe_version=spec.universe_version,
             code_commit=spec.code_commit,
+            strategy_snapshot_sha256=snapshots.strategy_hash,
+            experiment_snapshot_sha256=snapshots.experiment_hash,
+            data_environment_snapshot_sha256=snapshots.data_environment_hash,
         )
 
 
@@ -222,9 +251,13 @@ class ExperimentRegistry:
                     f"staged experiment {manifest.experiment_id} does not match "
                     f"identity {identity.experiment_id}"
                 )
+            _assert_manifest_snapshot_binding(
+                staged, manifest, identity, InvalidExperimentManifest
+            )
             _assert_manifest_acceptance_binding(
                 staged, manifest, InvalidExperimentManifest
             )
+            _assert_artifact_tree(staged, manifest, InvalidExperimentManifest)
             if destination.exists():
                 if _declared_files_match(staged, destination, manifest.artifacts):
                     return PublishedExperiment(
@@ -359,6 +392,76 @@ class ExperimentRegistry:
         finally:
             temporary.unlink(missing_ok=True)
         return destination
+
+
+def _assert_manifest_snapshot_binding(
+    directory: Path,
+    manifest: ExperimentManifest,
+    identity: ExperimentIdentity,
+    error_class: type[ExperimentRegistryError],
+) -> None:
+    """Require the manifest to carry exactly the identity's snapshot hashes.
+
+    An experiment is published only under the frozen snapshot bundle its
+    identity was computed from: a manifest whose three snapshot hashes
+    disagree with the identity (or, by construction of the manifest model,
+    one that omits them) can never be published or indexed.
+    """
+    declared = {
+        "strategy_snapshot_sha256": (
+            manifest.strategy_snapshot_sha256,
+            identity.strategy_snapshot_sha256,
+        ),
+        "experiment_snapshot_sha256": (
+            manifest.experiment_snapshot_sha256,
+            identity.experiment_snapshot_sha256,
+        ),
+        "data_environment_snapshot_sha256": (
+            manifest.data_environment_snapshot_sha256,
+            identity.data_environment_snapshot_sha256,
+        ),
+    }
+    for field, (manifest_value, identity_value) in declared.items():
+        if manifest_value != identity_value:
+            raise error_class(
+                f"experiment {manifest.experiment_id} manifest records "
+                f"{field} {manifest_value!r} but the identity pins "
+                f"{identity_value!r} ({directory})"
+            )
+
+
+def _assert_artifact_tree(
+    staged: Path,
+    manifest: ExperimentManifest,
+    error_class: type[ExperimentRegistryError],
+) -> None:
+    """Admit only the declared artifact map: no extra and no missing files.
+
+    Every manifest artifact path must be a declared root file or a
+    ``folds/<fold_id>/<declared-name>`` path, every declared file must exist
+    (hash verification happens next), and the staged tree must contain
+    nothing beyond the declared map plus the two self-describing manifests.
+    """
+    try:
+        validate_artifact_paths(manifest.artifacts)
+    except ValueError as error:
+        raise error_class(str(error)) from error
+    declared = set(manifest.artifacts) | _MANIFEST_NAMES
+    actual = {
+        path.relative_to(staged).as_posix()
+        for path in staged.rglob("*")
+        if path.is_file()
+    }
+    missing = sorted(declared - actual)
+    if missing:
+        raise error_class(
+            f"staged experiment is incomplete; declared files absent: {missing}"
+        )
+    extra = sorted(actual - declared)
+    if extra:
+        raise error_class(
+            f"staged experiment carries undeclared files: {extra}"
+        )
 
 
 def _assert_manifest_acceptance_binding(

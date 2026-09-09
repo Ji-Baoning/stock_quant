@@ -169,8 +169,29 @@ python -m stock_quant data acceptance show --version <数据版本哈希> --root
 ```bash
 python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root .
 python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root .   # 复跑验证可复现
-# 两次 experiment_id 相同 → data/experiments/<id>/: metrics.json + report.html + 因子/组合/回测帧
+# 两次 experiment_id 相同 → data/experiments/<id>/
 ```
+
+`momentum_60d.yml` 声明 `execution_pipeline: walk_forward_oos_v1`：正式研究走
+**固定日历 Walk-Forward 样本外稳定性** 管线。`date_range` 是请求的 OOS 评估
+范围（不含预热）：范围被切成完整的 1–12 月非重叠年度 fold，每年 1 月 1 日锚定；
+每个 fold 独立账户、独立持仓、相同的固定初始资金，三年日历预热（≥756 个确认
+交易日 + 首个 OOS 日前 60 个稳定历史日）只供因子历史，绝不产生订单或收益。
+首尾不成完整年度的日期在 schedule 中记录为 `not_evaluated_boundary`（记录但
+不评估，不是 skipped）。运行输出打印 `research_status=` 与
+`stability_conclusion=`：FAILED 非零退出且结论恒为 null（绝不降级为
+INCONCLUSIVE）；COMPLETED 的 STABLE/UNSTABLE/INCONCLUSIVE 均为零退出并保留
+确切标签。`stability_report.json` 必含 `stability_policy_hash`；逐预锁定成本
+情景独立判定，最终 STABLE 是全部情景的合取——没有“主情景”择优。
+
+产物（发布于 `data/experiments/<id>/`）：`fold_schedule.json`（运行前写入并
+哈希，之后绝不修改）、`fold_outcomes.json`（按 fold_id 与 schedule 哈希绑定
+的独立结果账本，失败 fold 永久保留）、`walk_forward_manifest.json`（固定两个
+哈希与三类快照哈希）、`stability_report.json`（判定阈值/理由/逐情景聚合/
+逐 fold 指标）与逐 fold 的 `folds/<fold_id>/` 资产集（fold_manifest/signals/
+orders/fills/equity/daily_returns/metrics）。逐 fold 最大回撤只用该 fold 自己
+的 `net_equity_after_cost` 逐日 mark-to-market 计算；**跨 fold 拼接的最大回撤
+与 Calmar 被政策禁止**，任何产物都不存在该字段。
 
 REJECTED 实验也会完整发布并留原因；跑挂只留 `data/runs/` 审计、不发布半成品。
 运行前置：该数据版本必须持有有效 ACCEPTED 验收记录（阶段 5），否则在计算前
@@ -195,7 +216,9 @@ manifest 与 HTML 报告的**真实数据验收**小节；无验收的 run（工
   预检清单。
 
 `research run` **没有任何降级绕过开关**（`--help` 里无 `--engineering`）——正式
-结论永远不降低自己的证据标准。
+结论永远不降低自己的证据标准。遗留的单窗口管线只保留给
+`execution_pipeline: engineering_single_window` 的显式工程政策（`backtest
+momentum_60d` 调试诊断），它不能发布正式稳定性结论。
 
 核验覆盖证据（人工抽查）：
 - 证据表 = 数据集内的 `corporate_action_coverage` 表，位于

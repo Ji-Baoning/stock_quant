@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -234,3 +234,68 @@ CANONICAL_SCENARIO = "full_cost"
 #: Content artifacts recorded (and sha256-hashed) by ``experiment_manifest.json``
 #: -- everything except the two self-describing manifests.
 MANIFESTED_ARTIFACTS = tuple(sorted(REQUIRED_ARTIFACTS - _MANIFEST_NAMES))
+
+# --------------------------------------------------------------------------- #
+# Walk-forward artifact contract
+# --------------------------------------------------------------------------- #
+
+#: Root files a formal walk-forward experiment publishes beside the classic
+#: artifacts.  ``fold_schedule.json`` is written and hashed before any fold
+#: executes and is never modified; ``fold_outcomes.json`` is the separate,
+#: schedule-hash-bound ledger of per-fold results; the manifest binds both
+#: hashes, the snapshot hashes and the stability evaluation; the stability
+#: report carries the verdict and every per-fold/per-scenario metric.
+WALK_FORWARD_ROOT_ARTIFACTS = (
+    "fold_schedule.json",
+    "fold_outcomes.json",
+    "walk_forward_manifest.json",
+    "stability_report.json",
+)
+
+#: The exact file set published under ``folds/<fold_id>/`` for every executed
+#: fold.  ``equity.parquet`` carries the canonical columns ``trade_date``,
+#: ``initial_equity`` and ``net_equity_after_cost`` (the engine's current
+#: ``total_equity`` under its audit-facing name); ``metrics.json`` records
+#: every declared cost scenario's fold metrics.
+FOLD_ARTIFACTS = (
+    "fold_manifest.json",
+    "signals.parquet",
+    "orders.parquet",
+    "fills.parquet",
+    "equity.parquet",
+    "daily_returns.parquet",
+    "metrics.json",
+)
+
+#: Every admissible root artifact name across both execution pipelines.
+ADMISSIBLE_ROOT_ARTIFACTS = frozenset(REQUIRED_ARTIFACTS) | frozenset(
+    WALK_FORWARD_ROOT_ARTIFACTS
+)
+
+
+def admissible_artifact_path(name: str) -> bool:
+    """True when ``name`` is a declared root file or a fold artifact path.
+
+    The published-artifact contract is a deterministic map: only declared
+    root files and ``folds/<fold_id>/<declared fold artifact>`` paths (with a
+    64-hex content-hash fold id) may appear in an experiment manifest.
+    """
+    if name in ADMISSIBLE_ROOT_ARTIFACTS:
+        return True
+    parts = name.split("/")
+    if len(parts) != 3 or parts[0] != "folds":
+        return False
+    fold_id, artifact = parts[1], parts[2]
+    if len(fold_id) != 64 or any(char not in "0123456789abcdef" for char in fold_id):
+        return False
+    return artifact in FOLD_ARTIFACTS
+
+
+def validate_artifact_paths(names: Iterable[str]) -> None:
+    """Reject any artifact path outside the declared contract."""
+    for name in names:
+        if not admissible_artifact_path(name):
+            raise ValueError(
+                f"artifact path {name!r} is not a declared root file or a "
+                "folds/<fold_id>/<declared-name> artifact"
+            )

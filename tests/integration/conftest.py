@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import yaml
 
 from stock_quant.data_model.adjusted_bar import build_adjusted_bars
 from stock_quant.data_model.corporate_action_coverage import (
@@ -51,7 +52,10 @@ from stock_quant.data_model.security_master import (
     master_coverage_record,
 )
 from stock_quant.data_model.universe import Universe
-from stock_quant.data_model.universe_membership import membership_frame
+from stock_quant.data_model.universe_membership import (
+    membership_content_hash,
+    membership_frame,
+)
 from stock_quant.data_pipeline import (
     DataUpdateRequest,
     SourceStatus,
@@ -131,6 +135,76 @@ parent_experiment_ids: []
 agent_id: null
 """
 
+#: A formal walk-forward spec over the same fixture dataset.  The requested
+#: OOS range is the complete 2021 calendar year (its 2018-2020 warmup carries
+#: 784 confirmed weekday sessions, above the 756-session policy floor), so
+#: the run completes with one executed fold and an INCONCLUSIVE conclusion.
+_WF_SPEC_YAML = """\
+# 正式 walk-forward 规格（合成数据、非投资建议）：2021 单年度 OOS fold。
+hypothesis: >-
+  过去 60 个交易日的复权收益在合成样本 2021 年度样本外区间内的稳定性验证；
+  仅验证 walk-forward 管线与审计产物，不构成投资建议。
+execution_pipeline: walk_forward_oos_v1
+factor_versions:
+  momentum_60d: 2.0.0
+dataset_version: CURRENT
+universe_version: CURRENT
+universe_definition: custom_wf_fixture
+data_acceptance_id: CURRENT_ACCEPTED
+date_range:
+  start_date: 2021-01-01
+  end_date: 2021-12-31
+train_validation_holdout_policy: not_applicable_engineering_mvp
+preprocessing:
+  winsorization: none
+  standardization: none
+portfolio_rule:
+  name: top_n_equal_weight
+  top_n: 10
+  lot_size: 100
+cost_scenarios:
+  - zero_cost
+  - commission_tax
+  - full_cost
+random_seed: 42
+code_commit: unversioned
+parent_experiment_ids: []
+agent_id: null
+"""
+
+#: A walk-forward spec whose only fold cannot satisfy the 756-session warmup
+#: floor (2019's warmup spans 2018 only): the run must FAIL before any
+#: account exists, exit nonzero and publish no experiment.
+_WF_EARLY_SPEC_YAML = """\
+# 预热不足的 walk-forward 规格（合成数据）：2019 fold 预热仅 2018 一个年度。
+hypothesis: >-
+  验证预热不足的 fold 在任何回测前被拒绝（FAILED，结论为空）；不构成投资建议。
+execution_pipeline: walk_forward_oos_v1
+factor_versions:
+  momentum_60d: 2.0.0
+dataset_version: CURRENT
+universe_version: CURRENT
+universe_definition: custom_wf_fixture
+data_acceptance_id: CURRENT_ACCEPTED
+date_range:
+  start_date: 2019-01-01
+  end_date: 2019-12-31
+train_validation_holdout_policy: not_applicable_engineering_mvp
+preprocessing:
+  winsorization: none
+  standardization: none
+portfolio_rule:
+  name: top_n_equal_weight
+  top_n: 10
+  lot_size: 100
+cost_scenarios:
+  - full_cost
+random_seed: 42
+code_commit: unversioned
+parent_experiment_ids: []
+agent_id: null
+"""
+
 #: A narrow UNTRUSTED evidence band for the ``broken`` fixture: wide enough
 #: that a RESEARCH run's execution window is not fully trusted, narrow enough
 #: that momentum windows opening 61 observations past the band recover, so an
@@ -138,6 +212,16 @@ agent_id: null
 #: adjusted bars (rows inside and just after the band are ERROR breaks).
 _BROKEN_COVERAGE_START = date(2020, 6, 1)
 _BROKEN_COVERAGE_END = date(2020, 6, 5)
+
+#: The evidence-backed fixture universe definition the walk-forward specs
+#: resolve through (a custom pool carries no canonical cardinality).
+_WF_UNIVERSE_ID = "custom_wf_fixture"
+_WF_FACTS_START = date(2018, 1, 2)
+_WF_ANNOUNCED = date(2018, 1, 2)
+_WF_RULES_VERSION = "fixture-rules-v1"
+_WF_EVIDENCE_SUMMARY = "cd" * 32
+_WF_SNAPSHOT = "ef" * 32
+_WF_DOCUMENT = "ab" * 32
 
 #: The data-update window every trusted fixture dataset's sanitized build
 #: evidence binds.  It sits inside the fixture calendar/bars span and ends on
@@ -190,6 +274,31 @@ def _weekdays(start: date, end: date) -> list[date]:
     return days
 
 
+def _wf_membership_facts(universe: Universe) -> list[dict[str, object]]:
+    """One evidence-backed open interval per universe symbol.
+
+    Announced on/before the interval start and open-ended over the whole
+    fixture calendar, so the frozen ``custom_wf_fixture`` definition resolves
+    the full symbol set on every walk-forward OOS day.
+    """
+    return [
+        {
+            "universe_id": _WF_UNIVERSE_ID,
+            "symbol": entry.symbol,
+            "raw_effective_from": _WF_FACTS_START,
+            "raw_effective_to": None,
+            "announcement_date": _WF_ANNOUNCED,
+            "status": "active",
+            "reason": "initial_constituent",
+            "source": "fixture_announcement",
+            "source_url": "https://fixture.invalid/membership-2018.pdf",
+            "snapshot_sha256": _WF_SNAPSHOT,
+            "source_document_sha256": _WF_DOCUMENT,
+        }
+        for entry in universe.entries
+    ]
+
+
 def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject:
     """Materialise one full synthetic project under ``root``.
 
@@ -233,8 +342,31 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
     (experiments_dir / "momentum_60d.yml").write_text(
         _FIXTURE_SPEC_YAML, encoding="utf-8"
     )
-
+    (experiments_dir / "walk_forward.yml").write_text(
+        _WF_SPEC_YAML, encoding="utf-8"
+    )
+    (experiments_dir / "walk_forward_early.yml").write_text(
+        _WF_EARLY_SPEC_YAML, encoding="utf-8"
+    )
     universe = Universe.from_yaml(config_dir / "universe.yml")
+    (config_dir / "universes").mkdir(parents=True, exist_ok=True)
+    facts = _wf_membership_facts(universe)
+    (config_dir / "universes" / f"{_WF_UNIVERSE_ID}.yml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "universe_id": _WF_UNIVERSE_ID,
+                "rules_version": _WF_RULES_VERSION,
+                "membership_table_sha256": membership_content_hash(facts),
+                "coverage_start": CAL_START.isoformat(),
+                "coverage_end": CAL_END.isoformat(),
+                "evidence_summary_sha256": _WF_EVIDENCE_SUMMARY,
+            },
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
     sessions = _weekdays(BARS_START, BARS_END)
     daily = _bars(sessions, universe)
     corporate_actions = _corporate_action()
@@ -258,11 +390,12 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
         "corporate_action_coverage": coverage,
         "trading_calendar": _trading_calendar(),
         # The canonical schema contract also registers the immutable
-        # ``universe_membership`` table.  These fixture datasets back
-        # engineering/acceptance workflows whose specs never name a universe
-        # definition, so an empty canonical frame satisfies the required-table
-        # coverage check without pinning any membership evidence.
-        "universe_membership": membership_frame([]),
+        # ``universe_membership`` table.  Trusted fixtures carry one
+        # evidence-backed open interval per universe symbol so the
+        # walk-forward specs can resolve the frozen point-in-time
+        # ``custom_wf_fixture`` definition; the empty frame would satisfy
+        # only the engineering workflows.
+        "universe_membership": membership_frame(facts),
     }
     if broken:
         version = DatasetPublisher(root).publish(tables, QualityReport()).version
