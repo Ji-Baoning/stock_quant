@@ -3,10 +3,12 @@
 All fixtures are deterministic in-memory frames served through a tiny read
 surface implementing the ``FactorDataset`` protocol -- no DuckDB, no files and
 no network.  The tests pin the metadata, the exact sixty-session lag value,
-the three invalid reasons and their precedence, deterministic ordering and the
-byte-stable Parquet guarantee.
+the three invalid reasons and their precedence, the membership-first
+candidate gate over ``FactorContext.members_on``, deterministic ordering and
+the byte-stable Parquet guarantee.
 """
 
+import hashlib
 from datetime import date, timedelta
 from io import BytesIO
 
@@ -81,6 +83,12 @@ def _symbol_rows(
     return rows
 
 
+def _snapshot_hash(day: date, symbols: tuple[str, ...]) -> str:
+    """A deterministic stand-in for the resolver's daily snapshot hash."""
+    payload = f"{day.isoformat()}\x1f{','.join(symbols)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _make_context(
     rows: list[dict],
     *,
@@ -88,15 +96,29 @@ def _make_context(
     end_date: date,
     signal_dates: tuple[date, ...],
     universe_version: str = "universe-v1",
+    members: dict[date, tuple[str, ...]] | None = None,
 ) -> FactorContext:
     frame = pd.DataFrame(rows, columns=_FACTOR_INPUT_COLUMNS)
     dataset = _FrameDataset(frame)
+    if members is None:
+        members_on = None
+        snapshot_for = None
+    else:
+
+        def members_on(day: date) -> tuple[str, ...]:
+            return members[day]
+
+        def snapshot_for(day: date) -> str:
+            return _snapshot_hash(day, members[day])
+
     return FactorContext(
         dataset=dataset,
         universe_version=universe_version,
         start_date=start_date,
         end_date=end_date,
         signal_dates=signal_dates,
+        members_on=members_on,
+        membership_snapshot_for=snapshot_for,
     )
 
 
@@ -278,6 +300,78 @@ def test_momentum_rejects_duplicate_dates_within_a_symbol_series():
     )
     with pytest.raises(ValueError, match="duplicate"):
         Momentum60().compute(context)
+
+
+# --------------------------------------------------------------------------- #
+# Membership-first candidate filtering (point-in-time universe)
+# --------------------------------------------------------------------------- #
+
+
+def test_non_member_with_best_factor_is_not_signaled():
+    """A non-member with the best factor value never reaches the signal rows.
+
+    The dataset keeps the full fixed price surface (both symbols carry bars),
+    but on each signal day the candidates are first filtered to
+    ``context.members_on(day)`` -- before any factor logic -- so the
+    non-member ``999999.SH`` (whose momentum is the largest of the two) is
+    absent from that trade date's rows while the member's own row is
+    untouched.
+    """
+    sessions = _sessions(80, start=date(2020, 1, 2))
+    signal = date(2020, 3, 31)
+    rows = _symbol_rows("600000.SH", sessions)
+    rows += _symbol_rows("999999.SH", sessions, close_start=100.0, step=2.0)
+    context = _make_context(
+        rows,
+        start_date=sessions[0],
+        end_date=sessions[-1],
+        signal_dates=(signal,),
+        members={signal: ("600000.SH",)},
+    )
+
+    frame = Momentum60().compute(context).frame
+    signaled = frame.loc[frame["trade_date"].eq(signal), "symbol"]
+
+    assert "999999.SH" not in signaled.tolist()
+    assert set(signaled) == {"600000.SH"}
+    # the member's own value is computed exactly as without the gate
+    row = frame.iloc[0]
+    assert row.is_valid
+    available = [day for day in sessions if day <= signal]
+    window_start_close = 100.0 + (len(available) - 61)
+    window_end_close = 100.0 + (len(available) - 1)
+    assert row.raw_value == pytest.approx(
+        window_end_close / window_start_close - 1.0
+    )
+
+
+def test_membership_filter_precedes_factor_eligibility_filters():
+    """Ordering rule: membership cuts candidates before factor filters run.
+
+    A non-member never reaches the eligibility filters, so even a symbol with
+    far too few observations gets no row at all on that day -- it must not
+    surface as an ``insufficient_observations`` row -- while the member with
+    the identical short history still gets its explicit invalid row.
+    """
+    sessions = _sessions(50, start=date(2020, 1, 2))
+    signal = sessions[-1]
+    rows = _symbol_rows("600000.SH", sessions)
+    rows += _symbol_rows("999999.SH", sessions, close_start=100.0, step=2.0)
+    context = _make_context(
+        rows,
+        start_date=sessions[0],
+        end_date=sessions[-1],
+        signal_dates=(signal,),
+        members={signal: ("600000.SH",)},
+    )
+
+    frame = Momentum60().compute(context).frame
+
+    assert set(frame["symbol"]) == {"600000.SH"}
+    row = frame.iloc[0]
+    assert not row.is_valid
+    assert row.invalid_reason == "insufficient_observations"
+    assert pd.isna(row.raw_value)
 
 
 # --------------------------------------------------------------------------- #

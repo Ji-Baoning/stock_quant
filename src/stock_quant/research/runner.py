@@ -155,6 +155,11 @@ _LABEL_TO_DATASTAGE = {
 _STAGES_FILE = ".stages.json"
 _RUN_MANIFEST = "run_manifest.json"
 
+#: Factor-stage metadata artifact: the frozen universe identity plus the
+#: per-signal-day member counts and snapshot hashes the factor stage filtered
+#: under.  A run workspace file (resume-hashed), never a published artifact.
+_FACTOR_METADATA = "factor_metadata.json"
+
 #: Fraction of starting cash the weekly portfolio sizes its target notional
 #: from.  Sizing below 100% leaves a standing cash buffer so every order in the
 #: precomputed, signal-day-fixed buy list can be fully filled at the execution
@@ -1469,9 +1474,19 @@ class ResearchRunner:
         return symbols
 
     def _produce_factor(self, state: RunState, frozen: ExperimentSpec) -> dict:
-        """Compute every requested factor over one pinned signal-dataset."""
+        """Compute every requested factor over one pinned signal-dataset.
+
+        When the run preflighted a frozen universe definition, the factor
+        context carries its point-in-time membership hooks (``members_on`` /
+        ``membership_snapshot_for``, resolved from the frozen resolver) so
+        every factor filters its candidates to signal-day members before any
+        eligibility logic; the full master price surface stays pinned to the
+        adapter.  The per-signal-day snapshot hashes are persisted as
+        factor-stage metadata (``factor_metadata.json``).
+        """
         signals = self._signals(frozen)
         factors = self._resolve_factors(frozen)
+        preflight = self._universe_preflight
         frames: list[pd.DataFrame] = []
         for factor in factors:
             adapter = _DatasetFactorAdapter(
@@ -1484,6 +1499,16 @@ class ResearchRunner:
                 start_date=frozen.date_range.start_date,
                 end_date=frozen.date_range.end_date,
                 signal_dates=signals,
+                members_on=(
+                    preflight.resolver.members_on
+                    if preflight is not None
+                    else None
+                ),
+                membership_snapshot_for=(
+                    preflight.resolver.snapshot_for
+                    if preflight is not None
+                    else None
+                ),
             )
             result = factor.compute(factor_context)
             if not isinstance(result, FactorResult):
@@ -1499,8 +1524,43 @@ class ResearchRunner:
             ["trade_date", "symbol"], kind="stable"
         ).reset_index(drop=True)
         combined.to_parquet(self._run_dir / "factor_results.parquet", index=False)
-        return {"factor_results.parquet":
-                _sha256_file(self._run_dir / "factor_results.parquet")}
+        outputs = {"factor_results.parquet":
+                   _sha256_file(self._run_dir / "factor_results.parquet")}
+        metadata = self._factor_stage_metadata(signals)
+        if metadata is not None:
+            path = self._run_dir / _FACTOR_METADATA
+            path.write_text(
+                json.dumps(
+                    metadata, ensure_ascii=False, indent=2, sort_keys=True
+                ),
+                encoding="utf-8",
+            )
+            outputs[_FACTOR_METADATA] = _sha256_file(path)
+        return outputs
+
+    def _factor_stage_metadata(self, signals: tuple[date, ...]) -> dict | None:
+        """The factor-stage membership metadata record, or ``None``.
+
+        A definition-backed run records which frozen universe the factor stage
+        filtered under and the exact ``{ISO date: snapshot sha256}`` and
+        member-count maps for its signal days, so factor artifacts stay
+        auditable against membership evidence independently of the later
+        report stage.  A legacy run without a definition records nothing.
+        """
+        preflight = self._universe_preflight
+        if preflight is None:
+            return None
+        return {
+            "universe_id": preflight.definition.universe_id,
+            "universe_version": preflight.universe_version,
+            "signal_dates": [day.isoformat() for day in signals],
+            "daily_member_counts": dict(
+                sorted(preflight.daily_member_counts.items())
+            ),
+            "daily_snapshots": dict(
+                sorted(preflight.daily_snapshots.items())
+            ),
+        }
 
     def _resolve_factors(self, frozen: ExperimentSpec) -> list[Factor]:
         available = dict(self._factor_provider())
@@ -1562,9 +1622,11 @@ class ResearchRunner:
             execution_date = calendar.next_trading_day(signal)
             target = builder.build(result, price_map.get(signal, pd.DataFrame(
                 columns=["symbol", "close"])), sizing_capital)
+            target_records = target.frame.to_dict("records")
+            self._assert_targets_are_signal_day_members(signal, target_records)
             planned_notional = sum(
                 float(row["signal_price"]) * int(row["target_quantity"])
-                for row in target.frame.to_dict("records")
+                for row in target_records
             )
             signal_rows.append({
                 "signal_date": signal,
@@ -1574,8 +1636,7 @@ class ResearchRunner:
                 "unallocated_weight": round(target.unallocated_weight, 6),
             })
             target_rows.extend(
-                {**row, "trade_date": signal} for row in
-                target.frame.to_dict("records")
+                {**row, "trade_date": signal} for row in target_records
             )
 
         target_frame = pd.DataFrame(target_rows)
@@ -1588,6 +1649,33 @@ class ResearchRunner:
             name: _sha256_file(self._run_dir / name)
             for name in ("signals.parquet", "target_positions.parquet")
         }
+
+    def _assert_targets_are_signal_day_members(
+        self, signal: date, target_records: list[dict]
+    ) -> None:
+        """Loud guard: every NEW portfolio target is a member on its signal day.
+
+        Membership is an input gate, never a trading instruction: a removed
+        member only stops generating new targets and its exit stays with the
+        normal execution/exit accounting (removal is not a forced sell).  A
+        target outside the signal-day member set therefore means the
+        membership-first factor order was violated, and the run fails instead
+        of publishing it.
+        """
+        preflight = self._universe_preflight
+        if preflight is None:
+            return
+        members = set(preflight.resolver.members_on(signal))
+        outsiders = sorted(
+            {str(record["symbol"]) for record in target_records} - members
+        )
+        if outsiders:
+            raise ValueError(
+                f"portfolio targets {outsiders} on signal date "
+                f"{signal.isoformat()} are not {preflight.definition.universe_id} "
+                "members on that day; membership-first factor filtering was "
+                "violated"
+            )
 
     def _signal_price_frame(self, frozen: ExperimentSpec) -> pd.DataFrame:
         context = self._open_context(frozen.dataset_version)

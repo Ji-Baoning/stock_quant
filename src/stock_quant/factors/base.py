@@ -15,6 +15,7 @@ layer: it only reads what ``FactorContext.dataset`` exposes and returns a
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
@@ -49,6 +50,15 @@ class FactorContext:
     ``dataset`` is pinned to one immutable dataset version; ``signal_dates``
     are the trading dates the factor computes for (weekly last trading days),
     supplied by the caller from calendar semantics.
+
+    ``members_on(day)`` returns the point-in-time index members of a signal
+    day and ``membership_snapshot_for(day)`` the SHA-256 snapshot hash of
+    that member set; the research runner populates both from the frozen
+    universe preflight's resolver.  A factor must filter its candidate rows
+    to ``members_on(day)`` FIRST on every signal day and only then apply its
+    own missing/quality/minimum-history filters -- tradability stays with the
+    execution path.  Both hooks are ``None`` only on the legacy engineering
+    path that runs without a universe definition.
     """
 
     dataset: FactorDataset
@@ -56,6 +66,8 @@ class FactorContext:
     start_date: date
     end_date: date
     signal_dates: tuple[date, ...]
+    members_on: Callable[[date], Sequence[str]] | None = None
+    membership_snapshot_for: Callable[[date], str] | None = None
 
 
 class Factor(Protocol):

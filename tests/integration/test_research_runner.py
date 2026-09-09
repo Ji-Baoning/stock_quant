@@ -23,7 +23,9 @@ Every test publishes a deterministic synthetic market -- twelve SH main-board
 equities with bars (whose closes follow ``55 * exp(growth * (session - (n-1)))``
 plus two flat benchmark index rows), a security master that also carries the
 300 synthetic ``csi300`` constituents without bars, and an evidence-backed
-``universe_membership`` table -- under a temporary project root, then runs the
+``universe_membership`` table whose 300 constituents include every traded
+equity (so the membership-first factor filter leaves the tradable candidate
+pool intact) -- under a temporary project root, then runs the
 repository's real ``momentum_60d`` spec (``configs/experiments/
 momentum_60d.yml``) from a temporary config tree whose ``csi300`` definition is
 pinned to exactly those facts (the repository's ``configs/universes/csi300.yml``
@@ -154,6 +156,25 @@ def _csi300_symbols(count: int = _CSI300_SIZE) -> list[str]:
     return [f"{600000 + offset}.SH" for offset in range(count)]
 
 
+def _member_symbols(count: int = _CSI300_SIZE) -> list[str]:
+    """``count`` csi300 constituents that always include the traded names.
+
+    The factor/portfolio stages rank only securities with daily bars (the
+    twelve traded equities), and Task 5 filters factor candidates to the
+    signal-day members, so every traded name must be a point-in-time member
+    for the synthetic market to exercise the full pipeline.  Filler
+    constituents from the canonical ``600000..`` block make up the remaining
+    slots; the result has exactly ``count`` symbols.
+    """
+    traded = [symbol for symbol, _ in EQUITY_GROWTH]
+    filler = [
+        symbol
+        for symbol in _csi300_symbols(count + len(traded))
+        if symbol not in set(traded)
+    ]
+    return sorted(filler[: count - len(traded)] + traded)
+
+
 def _fact_payload(symbol: str) -> dict:
     """One evidence-backed open csi300 fact valid on every calendar day."""
     return {
@@ -172,7 +193,7 @@ def _fact_payload(symbol: str) -> dict:
 
 
 def _fact_payloads(count: int = _CSI300_SIZE) -> tuple[dict, ...]:
-    return tuple(_fact_payload(symbol) for symbol in _csi300_symbols(count))
+    return tuple(_fact_payload(symbol) for symbol in _member_symbols(count))
 
 
 def _bars(
@@ -417,12 +438,15 @@ def _publish_synthetic_dataset(
     return DatasetPublisher(project_root).publish(tables, QualityReport()).version
 
 
-def _write_config_tree(root: Path) -> Path:
+def _write_config_tree(
+    root: Path, *, facts: tuple[dict, ...] | None = None
+) -> Path:
     """A temporary config tree whose csi300 definition is real, not a template.
 
     Copies the repository config files (project/sources/costs/rules/universe)
     and the formal momentum spec, then writes ``configs/universes/csi300.yml``
-    pinned to the canonical synthetic facts and the dataset's actual covered
+    pinned to the canonical synthetic facts (``facts`` overrides them, e.g. to
+    swap a fresh listing in as a member) and the dataset's actual covered
     window.  Tests never use the repository's placeholder definition template.
     """
     config_root = root / "config_root"
@@ -444,11 +468,12 @@ def _write_config_tree(root: Path) -> Path:
         _REPO_ROOT / "configs" / "experiments" / "momentum_60d.yml",
         configs / "experiments" / "momentum_60d.yml",
     )
+    fact_payloads = _fact_payloads() if facts is None else facts
     document = {
         "schema_version": 1,
         "universe_id": "csi300",
         "rules_version": _RULES_VERSION,
-        "membership_table_sha256": membership_content_hash(list(_fact_payloads())),
+        "membership_table_sha256": membership_content_hash(list(fact_payloads)),
         "coverage_start": _FACTS_START.isoformat(),
         "coverage_end": _BARS_END.isoformat(),
         "evidence_summary_sha256": _EVIDENCE_SUMMARY,
@@ -736,12 +761,22 @@ def test_new_stock_excluded_before_120_listed_days(tmp_path):
     fresh_symbol = "603999.SH"
     fresh_list_date = sessions[-90]
     fresh_growth = 0.00200
+    # The fresh listing must itself be a point-in-time member (swapped in for
+    # one filler constituent, keeping the csi300 cardinality at 300) so this
+    # test isolates the momentum seasoning filter: membership alone does not
+    # admit the symbol, the minimum-history rule still does.
+    facts = list(_fact_payloads())
+    facts[-1] = _fact_payload(fresh_symbol)
     project_root = tmp_path / "project"
     _publish_synthetic_dataset(
         project_root,
         fresh=(fresh_symbol, fresh_list_date, fresh_growth),
+        membership_facts=tuple(facts),
     )
-    runner = ResearchRunner(project_root, config_root=_write_config_tree(tmp_path))
+    runner = ResearchRunner(
+        project_root,
+        config_root=_write_config_tree(tmp_path, facts=tuple(facts)),
+    )
     experiment = runner.run(_SPEC)
     assert experiment.manifest.status in ("ACCEPTED", "REJECTED")
 
