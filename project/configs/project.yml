@@ -1,0 +1,7 @@
+start_date: 2021-01-01
+end_date: 2026-08-30
+initial_cash: 100000
+benchmark_symbols:
+  - 000300.SH
+  - 000905.SH
+publication_time: "15:00"

@@ -200,7 +200,6 @@ REQUIRED_ARTIFACTS = frozenset(
         "factor_results.parquet",
         "signals.parquet",
         "target_positions.parquet",
-        "orders.parquet",
         "fills.parquet",
         "cash_ledger.parquet",
         "corporate_action_ledger.parquet",

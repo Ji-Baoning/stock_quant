@@ -11,4 +11,5 @@ __all__ = [
     "costs",
     "execution",
     "models",
+    "rebalancer",
 ]

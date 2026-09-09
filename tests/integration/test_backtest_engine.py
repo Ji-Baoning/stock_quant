@@ -37,10 +37,12 @@ from stock_quant.backtest.engine import (
     ReadinessError,
 )
 from stock_quant.backtest.models import BUY, SELL, Order
+from stock_quant.backtest.rebalancer import AccountAwareWeeklyRebalancer
 from stock_quant.config import CostRate
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.trading_rules import (
     REASON_BUY_AT_UPPER_LIMIT,
+    REASON_SELL_AT_LOWER_LIMIT,
     TradingRuleBook,
 )
 
@@ -1045,3 +1047,272 @@ def test_carried_prices_are_valuation_only_and_never_fill_orders():
     assert equity[equity.trade_date == _MARKET.days[25]].stale_market_value.iloc[0] == (
         100.0 * 10.0
     )
+
+
+# --------------------------------------------------------------------------- #
+# Provider mode: account-aware rebalance orders from the realized account
+# --------------------------------------------------------------------------- #
+
+
+# A corporate-action-free subset of the synthetic market (the I1 premise:
+# flat or plainly-moving prices, no bonus/split credits, sells unblocked).
+_PROVIDER_SYMBOLS = (BETA, DELTA, ETA, KAPPA)
+
+_S1, _S8, _S14, _S15, _S41 = 1, 8, 14, 15, 41
+_D1, _D8, _D14, _D15, _D41 = (_DAYS[s] for s in (_S1, _S8, _S14, _S15, _S41))
+
+
+def _provider_bars() -> pd.DataFrame:
+    rows: list[dict] = []
+    for session, trade_date in enumerate(_DAYS):
+        for symbol in _PROVIDER_SYMBOLS:
+            price = _price(symbol, session)
+            if price is None:
+                continue
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    "symbol": symbol,
+                    "open": price,
+                    "close": price,
+                    "quality_severity": "INFO",
+                    "status": "NORMAL",
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _provider_request(
+    scenario: str,
+    targets_by_day: dict,
+    provider=None,
+    initial_cash: Decimal = _INITIAL_CASH,
+) -> BacktestRequest:
+    spec = _SCENARIOS[scenario]
+    rebalancer = AccountAwareWeeklyRebalancer(targets_by_day)
+    return BacktestRequest(
+        dataset_version=_DATASET_VERSION,
+        initial_cash=initial_cash,
+        calendar=TradingCalendar.from_open_days(_MARKET.days),
+        rule_book=TradingRuleBook.from_yaml(
+            _REPO_ROOT / "configs" / "trading_rules.yml"
+        ),
+        cost_model=CostModel(_cost_rate(spec)),
+        bars=_provider_bars(),
+        corporate_actions=pd.DataFrame(),
+        benchmarks=_read_fixture("benchmarks.parquet"),
+        schedule=(),
+        order_provider=(
+            rebalancer.orders_for if provider is None else provider
+        ),
+        possible_held_symbols=frozenset(_PROVIDER_SYMBOLS),
+    )
+
+
+def _final_holdings(result) -> dict[str, int]:
+    fills = result.fills
+    bought = fills[fills.side == BUY].groupby("symbol")["quantity"].sum()
+    sold = fills[fills.side == SELL].groupby("symbol")["quantity"].sum()
+    return bought.subtract(sold, fill_value=0).astype(int).to_dict()
+
+
+def test_provider_mode_stale_residual_sell_is_resubmitted_and_fills():
+    """I1a/M0 engine-level: the W14 DELTA exit sell is price-limit blocked, so
+    W15 -- target still 0, holdings still 100 -- submits SELL DELTA again; the
+    W15 bar carries full execution metadata (prior close + open) and the
+    executor adjudicates the resubmission normally."""
+    targets = {
+        _D1: (_DAYS[0], {BETA: 200, DELTA: 100}),
+        _D14: (_DAYS[13], {BETA: 200, DELTA: 0}),
+        _D15: (_DAYS[14], {BETA: 200, DELTA: 0}),
+    }
+    result = BacktestEngine().run(
+        _provider_request("zero_cost", targets)
+    )
+
+    submitted = result.submitted_orders
+    delta_sells = submitted[
+        (submitted.symbol == DELTA) & (submitted.side == SELL)
+    ]
+    assert list(delta_sells.trade_date) == [_D14, _D15]
+    assert list(delta_sells.side) == [SELL, SELL]
+    assert list(delta_sells.quantity) == [100, 100]
+    # W14: sell 9.00 against a 10.00 prior close sits at the lower limit.
+    blocked = result.rejections[result.rejections.symbol == DELTA]
+    assert list(blocked.reason) == [REASON_SELL_AT_LOWER_LIMIT]
+    assert list(blocked.trade_date) == [_D14]
+    # W15: prior close 9.00, sell 9.00 is inside the band and fills.
+    retry_fill = result.fills[
+        (result.fills.symbol == DELTA) & (result.fills.side == SELL)
+    ]
+    assert list(retry_fill.trade_date) == [_D15]
+    assert list(retry_fill.quantity) == [100]
+    assert _final_holdings(result) == {BETA: 200, DELTA: 0}
+
+
+def test_provider_mode_partial_fill_residual_is_recomputed_and_tops_up():
+    """I1a: with cash for only one lot, W1's BUY 200 partially fills (100) and
+    the remainder is rejected; W2's exit sells exactly the realized residual
+    (100, not the ideal 200); W3's re-entry completes and final holdings equal
+    the final target (I2 on this cash-sufficient fixture)."""
+    targets = {
+        _D1: (_DAYS[0], {BETA: 200}),
+        _D8: (_DAYS[7], {BETA: 0}),
+        _D15: (_DAYS[14], {BETA: 100}),
+    }
+    result = BacktestEngine().run(
+        _provider_request("full_cost", targets, initial_cash=Decimal("1500"))
+    )
+
+    buys = result.fills[result.fills.side == BUY]
+    assert list(buys.loc[buys.trade_date == _D1, "quantity"]) == [100]
+    sells = result.fills[result.fills.side == SELL]
+    assert list(sells.loc[sells.trade_date == _D8, "quantity"]) == [100]
+    assert list(buys.loc[buys.trade_date == _D15, "quantity"]) == [100]
+    # The W2 exit was sized from the realized account (100 held), not from any
+    # idealized previous book (200 target of W1).
+    residual_sell = result.submitted_orders[
+        (result.submitted_orders.side == SELL)
+        & (result.submitted_orders.trade_date == _D8)
+    ]
+    assert list(residual_sell.quantity) == [100]
+    assert _final_holdings(result) == {BETA: 100}
+
+
+def test_provider_mode_same_day_sell_funds_the_buy():
+    """The rebalancer returns sells before buys and the executor keeps
+    sell-before-buy, so a buy the cash alone cannot afford still fills in
+    full behind the same-day exit -- no avoidable insufficient_cash."""
+    targets = {
+        _D1: (_DAYS[0], {DELTA: 100}),
+        _D8: (_DAYS[7], {DELTA: 0, BETA: 100}),
+    }
+    result = BacktestEngine().run(
+        _provider_request("full_cost", targets, initial_cash=Decimal("1500"))
+    )
+    day_fills = result.fills[result.fills.trade_date == _D8]
+    assert list(day_fills.side) == [SELL, BUY]
+    assert list(day_fills.symbol) == [DELTA, BETA]
+    assert list(day_fills.quantity) == [100, 100]
+    assert not (
+        result.rejections.reason == "insufficient_cash"
+    ).any()
+    assert _final_holdings(result) == {BETA: 100, DELTA: 0}
+
+
+def test_provider_fidelity_engine_submits_exactly_what_the_provider_returns():
+    """I3: a wrapper that captures the account at the provider-call instant
+    proves the engine submits the provider's orders verbatim and that the
+    provider saw the realized (post-partial-fill) account, not an idealized
+    book -- fidelity, not the engine re-deriving its own orders."""
+    targets = {
+        _D1: (_DAYS[0], {BETA: 200}),
+        _D8: (_DAYS[7], {BETA: 0}),
+        _D15: (_DAYS[14], {BETA: 100}),
+    }
+    captured: dict = {}
+    returned: dict = {}
+    inner = AccountAwareWeeklyRebalancer(targets)
+
+    def provider(day, account):
+        captured[day] = (
+            float(account.cash),
+            {
+                symbol: account.position_quantity(symbol)
+                for symbol in _PROVIDER_SYMBOLS
+            },
+        )
+        orders = inner.orders_for(day, account)
+        returned[day] = orders
+        return orders
+
+    result = BacktestEngine().run(
+        _provider_request("full_cost", targets, provider=provider,
+                          initial_cash=Decimal("1500"))
+    )
+
+    rows = [
+        {
+            "trade_date": day,
+            "order_id": order.order_id,
+            "side": order.side,
+            "symbol": order.symbol,
+            "quantity": order.quantity,
+        }
+        for day, orders in sorted(returned.items())
+        for order in orders
+    ]
+    expected = pd.DataFrame(rows, columns=list(SUBMITTED_ORDER_COLUMNS))
+    expected = expected.astype({"quantity": "int64"})
+    assert_frame_equal(result.submitted_orders, expected)
+    # The W1 call saw the empty account; the W2 call saw the realized one-lot
+    # holding left by the partial fill.
+    assert captured[_D1] == (1500.0, {BETA: 0, DELTA: 0, ETA: 0, KAPPA: 0})
+    assert captured[_D8][1][BETA] == 100
+
+
+def test_provider_mode_holdings_converge_across_scenarios_and_match_target():
+    """I1/I2/I4 on an upper-bound fixture (CA-free, sells unblocked, cash
+    ample): every scenario fully executes the same target differences, so
+    final holdings are identical and equal the final target book, and final
+    equity is ordered zero >= commission_tax >= full_cost."""
+    targets = {
+        _D1: (_DAYS[0], {BETA: 200, DELTA: 100, KAPPA: 100}),
+        _D15: (_DAYS[14], {BETA: 200, DELTA: 0, KAPPA: 100}),
+        _D41: (_DAYS[40], {BETA: 300, DELTA: 0, KAPPA: 100}),
+    }
+    final_equity: dict[str, float] = {}
+    for scenario in ("zero_cost", "commission_tax", "full_cost"):
+        result = BacktestEngine().run(_provider_request(scenario, targets))
+        holdings = _final_holdings(result)
+        assert holdings == {BETA: 300, DELTA: 0, KAPPA: 100}
+        final_equity[scenario] = float(result.daily_equity.total_equity.iloc[-1])
+    assert final_equity["zero_cost"] >= final_equity["commission_tax"]
+    assert final_equity["commission_tax"] >= final_equity["full_cost"]
+
+
+def test_empty_schedule_without_provider_keeps_the_legacy_behavior():
+    """Mode-judgment cheap case 1: order_provider=None with the legitimate
+    empty schedule stays a schedule-mode request (empty possible-held union,
+    no provider validation error) and replays an orderless window."""
+    request = BacktestRequest(
+        dataset_version=_DATASET_VERSION,
+        initial_cash=_INITIAL_CASH,
+        calendar=TradingCalendar.from_open_days(_MARKET.days),
+        rule_book=TradingRuleBook.from_yaml(
+            _REPO_ROOT / "configs" / "trading_rules.yml"
+        ),
+        cost_model=CostModel(_cost_rate(_SCENARIOS["full_cost"])),
+        bars=_provider_bars(),
+        corporate_actions=pd.DataFrame(),
+        benchmarks=_read_fixture("benchmarks.parquet"),
+        schedule=(),
+    )
+    result = BacktestEngine().run(request)
+    assert result.submitted_orders.empty
+    assert result.fills.empty
+    assert len(result.daily_equity) == 80
+
+
+def test_provider_without_possible_held_symbols_is_a_config_error():
+    """Mode-judgment cheap case 2: provider mode with possible_held_symbols
+    left as None is rejected at construction -- it carries the CA-coverage
+    universe, so silently accepting None would break that contract."""
+    rebalancer = AccountAwareWeeklyRebalancer(
+        {_D1: (_DAYS[0], {BETA: 100})}
+    )
+    with pytest.raises(ValueError, match="possible_held_symbols"):
+        BacktestRequest(
+            dataset_version=_DATASET_VERSION,
+            initial_cash=_INITIAL_CASH,
+            calendar=TradingCalendar.from_open_days(_MARKET.days),
+            rule_book=TradingRuleBook.from_yaml(
+                _REPO_ROOT / "configs" / "trading_rules.yml"
+            ),
+            cost_model=CostModel(_cost_rate(_SCENARIOS["full_cost"])),
+            bars=_provider_bars(),
+            corporate_actions=pd.DataFrame(),
+            benchmarks=_read_fixture("benchmarks.parquet"),
+            schedule=(),
+            order_provider=rebalancer.orders_for,
+        )

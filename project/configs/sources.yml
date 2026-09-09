@@ -1,0 +1,14 @@
+tushare:
+  enabled: true
+  timeout_seconds: 30
+  max_retries: 3
+akshare:
+  enabled: true
+  timeout_seconds: 30
+  max_retries: 3
+# baostock data server (:10030) down since 2026-09-05; optional cross-check only.
+# Re-enable once reachable.
+baostock:
+  enabled: false
+  timeout_seconds: 30
+  max_retries: 3

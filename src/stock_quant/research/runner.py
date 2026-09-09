@@ -42,6 +42,7 @@ import yaml
 from stock_quant.backtest.costs import CostModel
 from stock_quant.backtest.engine import BacktestEngine, BacktestRequest, OrderDay
 from stock_quant.backtest.models import BUY, SELL, Fill, Order
+from stock_quant.backtest.rebalancer import AccountAwareWeeklyRebalancer
 from stock_quant.config import load_project_config
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.corporate_action_coverage import CoverageReason
@@ -202,12 +203,14 @@ def _factor_provider_default() -> Mapping[str, Factor]:
 class _DefaultAnalytics:
     """Per-scenario summary over the completed backtest ledgers.
 
-    Each scenario records how the frozen plan diverged from what actually
-    executed.  ``order_diffs.parquet`` is the per-``order_id`` plan-ledger view
-    (counts and quantities), while ``rejections.parquet`` keeps the flow-level
-    view (one row per rejection record).  ``plan_diverged`` is true exactly
-    when ``unfilled_quantity > 0``, so a run whose plan was not fully executed
-    is self-auditing from ``metrics.json`` alone.
+    Each scenario records how its own submitted orders -- the account-aware
+    rebalance plan generated from that scenario's realized account state --
+    reconciled against execution.  ``order_diffs.parquet`` is the
+    per-``order_id`` submitted-order view (counts and quantities), while
+    ``rejections.parquet`` keeps the flow-level view (one row per rejection
+    record).  ``plan_diverged`` is true exactly when ``unfilled_quantity > 0``,
+    so a scenario whose submission was not fully executed is self-auditing
+    from ``metrics.json`` alone.
     """
 
     def compute(self, metrics_input: AnalyticsInput) -> dict[str, object]:
@@ -1115,7 +1118,15 @@ class ResearchRunner:
     def _produce_portfolio(
         self, state: RunState, frozen: ExperimentSpec
     ) -> dict[str, str]:
-        """Build weekly signals, target positions and net-rebalance orders."""
+        """Build weekly signals and the frozen target book (pure intent).
+
+        The target book is the only order intent this stage produces.  Each
+        cost scenario's backtest generates its own orders from it against the
+        scenario's realized account state (account-aware rebalance), so there
+        is deliberately no top-level planned-order ledger: an idealized
+        previous target book can never again mask what the account actually
+        holds.
+        """
         rule = frozen.portfolio_rule
         builder = TopNEqualWeight(top_n=rule.top_n, lot_size=rule.lot_size)
         factor_frame = pd.read_parquet(self._run_dir / "factor_results.parquet")
@@ -1132,9 +1143,6 @@ class ResearchRunner:
 
         target_rows: list[dict] = []
         signal_rows: list[dict] = []
-        order_rows: list[dict] = []
-        previous_book: dict[str, int] = {}
-        order_seq = 0
 
         sizing_capital = self._sizing_capital
         for signal in signals:
@@ -1149,52 +1157,6 @@ class ResearchRunner:
             execution_date = calendar.next_trading_day(signal)
             target = builder.build(result, price_map.get(signal, pd.DataFrame(
                 columns=["symbol", "close"])), sizing_capital)
-            target_by_symbol = {
-                str(row["symbol"]): int(row["target_quantity"])
-                for row in target.frame.to_dict("records")
-            }
-            # A weekly *net* rebalance: sell names that leave or shrink below
-            # their fixed target and buy names that enter or grow above it, so
-            # a retained name is never both sold and bought on the same open
-            # (the execution contract allows one bar row per symbol per day).
-            sells: list[Order] = []
-            for symbol in sorted(previous_book):
-                quantity = previous_book[symbol] - target_by_symbol.get(symbol, 0)
-                if quantity <= 0:
-                    continue
-                order_seq += 1
-                order = Order(
-                    order_id=f"o{order_seq:06d}", side=SELL, symbol=symbol,
-                    quantity=quantity, note="weekly_rebalance",
-                )
-                sells.append(order)
-                order_rows.append({
-                    "signal_date": signal,
-                    "execution_date": execution_date,
-                    "order_id": order.order_id,
-                    "side": SELL,
-                    "symbol": symbol,
-                    "quantity": quantity,
-                })
-            buys_list: list[Order] = []
-            for symbol, target_quantity in sorted(target_by_symbol.items()):
-                quantity = target_quantity - previous_book.get(symbol, 0)
-                if quantity <= 0:
-                    continue
-                order_seq += 1
-                order = Order(
-                    order_id=f"o{order_seq:06d}", side=BUY, symbol=symbol,
-                    quantity=quantity, note="weekly_rebalance",
-                )
-                buys_list.append(order)
-                order_rows.append({
-                    "signal_date": signal,
-                    "execution_date": execution_date,
-                    "order_id": order.order_id,
-                    "side": BUY,
-                    "symbol": symbol,
-                    "quantity": quantity,
-                })
             planned_notional = sum(
                 float(row["signal_price"]) * int(row["target_quantity"])
                 for row in target.frame.to_dict("records")
@@ -1210,7 +1172,6 @@ class ResearchRunner:
                 {**row, "trade_date": signal} for row in
                 target.frame.to_dict("records")
             )
-            previous_book = target_by_symbol
 
         target_frame = pd.DataFrame(target_rows)
         target_frame.to_parquet(
@@ -1218,16 +1179,9 @@ class ResearchRunner:
         )
         signal_frame = pd.DataFrame(signal_rows)
         signal_frame.to_parquet(self._run_dir / "signals.parquet", index=False)
-        order_frame = pd.DataFrame(
-            order_rows,
-            columns=["signal_date", "execution_date", "order_id", "side",
-                     "symbol", "quantity"],
-        )
-        order_frame.to_parquet(self._run_dir / "orders.parquet", index=False)
         return {
             name: _sha256_file(self._run_dir / name)
-            for name in ("signals.parquet", "target_positions.parquet",
-                         "orders.parquet")
+            for name in ("signals.parquet", "target_positions.parquet")
         }
 
     def _signal_price_frame(self, frozen: ExperimentSpec) -> pd.DataFrame:
@@ -1242,19 +1196,32 @@ class ResearchRunner:
     def _produce_backtest(
         self, state: RunState, frozen: ExperimentSpec
     ) -> dict[str, str]:
-        """Replay the frozen plan ledger through each scenario's live account."""
-        # The corporate-action gate runs first, before the plan ledger is read
+        """Replay every cost scenario with account-aware order generation.
+
+        Each scenario runs its own :class:`AccountAwareWeeklyRebalancer`
+        against the same frozen, scenario-independent target book: the engine
+        asks the provider once per open day with that scenario's live account,
+        so orders are always ``frozen target - realized holdings`` (I1a) and a
+        previously rejected difference is naturally resubmitted on a later
+        rebalance day (stale-residual self-healing).  Submitted orders are
+        scenario-specific by design; ``reconcile_orders`` then proves only the
+        per-scenario bookkeeping completeness (filled + rejected == submitted,
+        reasons within the auditable vocabulary), not generation correctness.
+        """
+        # The corporate-action gate runs first, before the target book is read
         # or the market/engine is built, so a RESEARCH run with untrusted
         # evidence never spends time on a backtest it will not keep.
         self._enforce_research_trust(state, frozen)
-        plan = self._read_order_ledger()
-        schedule = self._order_schedule(plan)
-        market = self._load_market(frozen, schedule)
+        targets_by_day, possible_held = self._load_target_book()
+        if not targets_by_day:
+            raise ValueError("no frozen target periods; nothing to backtest")
+        market = self._load_market(frozen, sorted(targets_by_day))
         outputs: dict[str, str] = {}
         scenario_names = list(frozen.cost_scenarios)
         for scenario in scenario_names:
             directory = self._run_dir / "backtest" / scenario
             directory.mkdir(parents=True, exist_ok=True)
+            rebalancer = AccountAwareWeeklyRebalancer(targets_by_day)
             request = BacktestRequest(
                 dataset_version=frozen.dataset_version,
                 initial_cash=self._project_config.initial_cash,
@@ -1265,9 +1232,11 @@ class ResearchRunner:
                 ),
                 bars=market.bars,
                 corporate_actions=market.corporate_actions,
-                schedule=schedule,
+                schedule=(),
                 benchmark_symbols=tuple(self._project_config.benchmark_symbols),
                 benchmarks=market.benchmarks,
+                order_provider=rebalancer.orders_for,
+                possible_held_symbols=possible_held,
             )
             result = BacktestEngine().run(request)
             result.fills.to_parquet(directory / "fills.parquet", index=False)
@@ -1284,7 +1253,9 @@ class ResearchRunner:
                 directory / "submitted_orders.parquet", index=False
             )
             diffs = reconcile_orders(
-                plan=plan,
+                plan=self._plan_from_submitted(
+                    result.submitted_orders, rebalancer
+                ),
                 submitted=result.submitted_orders,
                 fills=result.fills,
                 rejections=result.rejections,
@@ -1331,15 +1302,82 @@ class ResearchRunner:
             return CANONICAL_SCENARIO
         return scenario_names[-1]
 
-    def _read_order_ledger(self) -> pd.DataFrame:
-        """The frozen planned-order ledger, normalised for the engine."""
-        orders = pd.read_parquet(self._run_dir / "orders.parquet")
-        if orders.empty:
-            return orders
-        orders["signal_date"] = orders["signal_date"].map(_as_date)
-        orders["execution_date"] = orders["execution_date"].map(_as_date)
-        return orders.sort_values(
-            ["execution_date", "order_id"]
+    def _load_target_book(
+        self,
+    ) -> tuple[dict[date, tuple[date, dict[str, int]]], frozenset[str]]:
+        """The frozen target book and the possibly-held symbol superset.
+
+        Targets come from the portfolio stage's ``signals.parquet`` (the
+        signal/execution day pairs) and ``target_positions.parquet`` (the
+        per-symbol quantities); a period with an empty target frame keeps an
+        empty target map so held names are still carried into that rebalance
+        and sold flat.  The possibly-held superset is the union of every
+        period's target symbols (M0): a name can only be held if some period
+        targeted it (corporate actions never create a different ticker), so
+        the union covers every stale residual a provider order could touch.
+        """
+        signals = pd.read_parquet(self._run_dir / "signals.parquet")
+        if signals.empty:
+            return {}, frozenset()
+        signals["signal_date"] = signals["signal_date"].map(_as_date)
+        signals["execution_date"] = signals["execution_date"].map(_as_date)
+        signal_records = signals.to_dict("records")
+        targets_by_day: dict[date, tuple[date, dict[str, int]]] = {
+            record["execution_date"]: (record["signal_date"], {})
+            for record in signal_records
+        }
+        execution_of_signal = {
+            record["signal_date"]: record["execution_date"]
+            for record in signal_records
+        }
+        targets = pd.read_parquet(self._run_dir / "target_positions.parquet")
+        possible: set[str] = set()
+        if not targets.empty:
+            targets["trade_date"] = targets["trade_date"].map(_as_date)
+            for record in targets.to_dict("records"):
+                execution_date = execution_of_signal[record["trade_date"]]
+                targets_by_day[execution_date][1][str(record["symbol"])] = int(
+                    record["target_quantity"]
+                )
+                possible.add(str(record["symbol"]))
+        return targets_by_day, frozenset(possible)
+
+    @staticmethod
+    def _plan_from_submitted(
+        submitted: pd.DataFrame, rebalancer: AccountAwareWeeklyRebalancer
+    ) -> pd.DataFrame:
+        """The in-memory plan: what this scenario actually submitted (I3).
+
+        With account-aware generation the plan *is* the submitted stream, so
+        ``reconcile_orders``' stable-ID identity assertions hold by
+        construction and only bookkeeping completeness is being proven; the
+        generation contract is owned by the rebalancer's own oracle tests and
+        the engine's provider-fidelity test.  ``signal_date`` is stamped from
+        the frozen target book for reporting continuity.
+        """
+        signal_of_day = rebalancer.signal_date_by_execution_day
+        records = []
+        for row in submitted.to_dict("records"):
+            execution_date = _as_date(row["trade_date"])
+            records.append(
+                {
+                    "signal_date": signal_of_day[execution_date],
+                    "execution_date": execution_date,
+                    "order_id": str(row["order_id"]),
+                    "side": str(row["side"]),
+                    "symbol": str(row["symbol"]),
+                    "quantity": int(row["quantity"]),
+                }
+            )
+        plan = pd.DataFrame(
+            records,
+            columns=["signal_date", "execution_date", "order_id", "side",
+                     "symbol", "quantity"],
+        )
+        if plan.empty:
+            return plan
+        return plan.sort_values(
+            ["execution_date", "order_id"], kind="stable"
         ).reset_index(drop=True)
 
     @staticmethod
@@ -1381,15 +1419,20 @@ class ResearchRunner:
             )
         return tuple(order_days)
 
-    def _load_market(self, frozen: ExperimentSpec, schedule: Sequence[OrderDay]):
-        """The pinned equity/benchmark/corporate-action frames for one replay."""
+    def _load_market(
+        self, frozen: ExperimentSpec, execution_days: Sequence[date]
+    ):
+        """The pinned equity/benchmark/corporate-action frames for one replay.
+
+        ``execution_days`` are the frozen target book's rebalance days (the
+        provider's fire dates); the window starts one open day earlier so the
+        first execution open always has a prior close for its price-limit band.
+        """
         calendar = self._calendar()
-        execution_days = sorted(
-            order_day.trade_date for order_day in schedule
-        )
-        if not execution_days:
-            raise ValueError("schedule contains no order days; nothing to backtest")
-        first_execution, last_execution = execution_days[0], execution_days[-1]
+        days = sorted(set(execution_days))
+        if not days:
+            raise ValueError("no execution days; nothing to backtest")
+        first_execution, last_execution = days[0], days[-1]
         open_days = calendar.open_days
         index = open_days.index(first_execution)
         window_start = open_days[index - 1] if index > 0 else first_execution
