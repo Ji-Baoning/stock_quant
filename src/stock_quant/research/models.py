@@ -234,3 +234,35 @@ CANONICAL_SCENARIO = "full_cost"
 #: Content artifacts recorded (and sha256-hashed) by ``experiment_manifest.json``
 #: -- everything except the two self-describing manifests.
 MANIFESTED_ARTIFACTS = tuple(sorted(REQUIRED_ARTIFACTS - _MANIFEST_NAMES))
+
+# --------------------------------------------------------------------------- #
+# Walk-forward artifact contract
+# --------------------------------------------------------------------------- #
+
+#: Root files a formal walk-forward experiment publishes beside the classic
+#: artifacts.  ``fold_schedule.json`` is written and hashed before any fold
+#: executes and is never modified; ``fold_outcomes.json`` is the separate,
+#: schedule-hash-bound ledger of per-fold results; the manifest binds both
+#: hashes, the snapshot hashes and the stability evaluation; the stability
+#: report carries the verdict and every per-fold/per-scenario metric.
+WALK_FORWARD_ROOT_ARTIFACTS = (
+    "fold_schedule.json",
+    "fold_outcomes.json",
+    "walk_forward_manifest.json",
+    "stability_report.json",
+)
+
+#: The exact file set published under ``folds/<fold_id>/`` for every executed
+#: fold.  ``equity.parquet`` carries the canonical columns ``trade_date``,
+#: ``initial_equity`` and ``net_equity_after_cost`` (the engine's current
+#: ``total_equity`` under its audit-facing name); ``metrics.json`` records
+#: every declared cost scenario's fold metrics.
+FOLD_ARTIFACTS = (
+    "fold_manifest.json",
+    "signals.parquet",
+    "orders.parquet",
+    "fills.parquet",
+    "equity.parquet",
+    "daily_returns.parquet",
+    "metrics.json",
+)
