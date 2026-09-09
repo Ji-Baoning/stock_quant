@@ -68,7 +68,10 @@ PORTFOLIO_CONSTRUCTION_COLUMNS = (
 #: The exact, ordered columns of every scenario-local ``rebalance_decisions``
 #: frame: one row per reconciled symbol per rebalance day, including the
 #: suppressed differences (``within_rebalance_band`` / ``below_one_lot``) so
-#: a suppressed adjustment is auditable, never silent.
+#: a suppressed adjustment is auditable, never silent.  The signal-close
+#: equity that sized and valued the row is recorded beside it, so a
+#: suppression amount is exactly reconstructable as
+#: ``|weight_difference| * signal_close_equity``.
 REBALANCE_DECISION_COLUMNS = (
     "signal_date",
     "execution_day",
@@ -81,6 +84,7 @@ REBALANCE_DECISION_COLUMNS = (
     "target_quantity",
     "order_side",
     "order_quantity",
+    "signal_close_equity",
     "reason",
 )
 

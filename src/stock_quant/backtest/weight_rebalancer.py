@@ -163,6 +163,7 @@ class WeightTargetRebalancer:
                     decision,
                     signal_date=signal_date,
                     execution_day=day,
+                    signal_close_equity=equity,
                 )
             )
         self._decisions[day] = decisions
@@ -185,6 +186,7 @@ class WeightTargetRebalancer:
                 "target_quantity": decision.target_quantity,
                 "order_side": decision.order_side,
                 "order_quantity": decision.order_quantity,
+                "signal_close_equity": decision.signal_close_equity,
                 "reason": decision.reason,
             }
             for day in sorted(self._decisions)

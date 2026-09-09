@@ -61,6 +61,9 @@ class RebalanceDecision:
     reason: str
     signal_date: date | None = None
     execution_day: date | None = None
+    #: The scenario's signal-close equity that sized this row; ``None`` on a
+    #: bare band decision and stamped by the rebalancer.
+    signal_close_equity: Decimal | None = None
 
     @property
     def should_order(self) -> bool:

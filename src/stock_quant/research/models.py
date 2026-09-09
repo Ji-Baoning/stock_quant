@@ -256,7 +256,9 @@ WALK_FORWARD_ROOT_ARTIFACTS = (
 #: fold.  ``equity.parquet`` carries the canonical columns ``trade_date``,
 #: ``initial_equity`` and ``net_equity_after_cost`` (the engine's current
 #: ``total_equity`` under its audit-facing name); ``metrics.json`` records
-#: every declared cost scenario's fold metrics.
+#: every declared cost scenario's fold metrics;
+#: ``portfolio_construction.parquet`` is the common construction audit
+#: (empty with the exact columns for the equal-weight rule).
 FOLD_ARTIFACTS = (
     "fold_manifest.json",
     "signals.parquet",
@@ -264,8 +266,15 @@ FOLD_ARTIFACTS = (
     "fills.parquet",
     "equity.parquet",
     "daily_returns.parquet",
+    "portfolio_construction.parquet",
     "metrics.json",
 )
+
+#: The scenario-local audit artifact published under
+#: ``folds/<fold_id>/backtest/<scenario>/`` for the buffered risk-weighted
+#: rule: one rebalance-decision row per reconciled symbol per rebalance day,
+#: including the band/lot suppressions.
+SCENARIO_ARTIFACTS = ("rebalance_decisions.parquet",)
 
 #: Every admissible root artifact name across both execution pipelines.
 ADMISSIBLE_ROOT_ARTIFACTS = frozenset(REQUIRED_ARTIFACTS) | frozenset(
@@ -276,19 +285,26 @@ ADMISSIBLE_ROOT_ARTIFACTS = frozenset(REQUIRED_ARTIFACTS) | frozenset(
 def admissible_artifact_path(name: str) -> bool:
     """True when ``name`` is a declared root file or a fold artifact path.
 
-    The published-artifact contract is a deterministic map: only declared
-    root files and ``folds/<fold_id>/<declared fold artifact>`` paths (with a
-    64-hex content-hash fold id) may appear in an experiment manifest.
+    The published-artifact contract is a deterministic map: declared root
+    files, ``folds/<fold_id>/<declared fold artifact>`` paths and
+    ``folds/<fold_id>/backtest/<scenario>/<declared scenario artifact>``
+    paths (with a 64-hex content-hash fold id and a nonblank scenario name)
+    may appear in an experiment manifest.
     """
     if name in ADMISSIBLE_ROOT_ARTIFACTS:
         return True
     parts = name.split("/")
-    if len(parts) != 3 or parts[0] != "folds":
+    if parts[0] != "folds" or len(parts) < 3:
         return False
-    fold_id, artifact = parts[1], parts[2]
+    fold_id, artifact = parts[1], parts[-1]
     if len(fold_id) != 64 or any(char not in "0123456789abcdef" for char in fold_id):
         return False
-    return artifact in FOLD_ARTIFACTS
+    if len(parts) == 3:
+        return artifact in FOLD_ARTIFACTS
+    if len(parts) == 5 and parts[2] == "backtest":
+        scenario = parts[3]
+        return bool(scenario.strip()) and artifact in SCENARIO_ARTIFACTS
+    return False
 
 
 def validate_artifact_paths(names: Iterable[str]) -> None:

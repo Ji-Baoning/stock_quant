@@ -868,6 +868,49 @@ def _walk_forward_block(payload: dict | None) -> dict | None:
         if isinstance(item, dict)
     ]
     thresholds = payload.get("thresholds") or {}
+    buffered_payload = payload.get("buffered")
+    buffered = None
+    if isinstance(buffered_payload, dict) and buffered_payload.get(
+        "portfolio_rule_version"
+    ):
+        buffered_folds = [
+            {
+                "fold_id": str(item.get("fold_id", "")),
+                "signal_days": str(item.get("signal_days", 0)),
+                "retained": str(item.get("retained", 0)),
+                "entered": str(item.get("entered", 0)),
+                "exited": str(item.get("exited", 0)),
+                "risk_invalid": str(item.get("risk_invalid", 0)),
+                "achieved_gross_exposure": _pct(
+                    item.get("achieved_gross_exposure")
+                ),
+                "cash_residue": _pct(item.get("cash_residue")),
+            }
+            for item in buffered_payload.get("folds", []) or []
+            if isinstance(item, dict)
+        ]
+        buffered_scenarios = [
+            {
+                "scenario": str(item.get("scenario", "")),
+                "band_suppressed_rows": str(item.get("band_suppressed_rows", 0)),
+                "band_suppressed_amount": _money(
+                    item.get("band_suppressed_amount")
+                ),
+                "lot_suppressed_rows": str(item.get("lot_suppressed_rows", 0)),
+                "lot_suppressed_amount": _money(
+                    item.get("lot_suppressed_amount")
+                ),
+            }
+            for item in buffered_payload.get("scenarios", []) or []
+            if isinstance(item, dict)
+        ]
+        buffered = {
+            "portfolio_rule_version": str(
+                buffered_payload["portfolio_rule_version"]
+            ),
+            "folds": buffered_folds,
+            "scenarios": buffered_scenarios,
+        }
     return {
         "research_status": str(payload.get("research_status", "")),
         "stability_conclusion": str(payload.get("stability_conclusion")),
@@ -889,6 +932,7 @@ def _walk_forward_block(payload: dict | None) -> dict | None:
         "scenario_rows": scenario_rows,
         "fold_rows": fold_rows,
         "reasons": [str(reason) for reason in payload.get("reasons", []) or []],
+        "buffered": buffered,
     }
 
 

@@ -351,6 +351,7 @@ def test_audit_column_constants_are_ordered_and_complete():
         "target_quantity",
         "order_side",
         "order_quantity",
+        "signal_close_equity",
         "reason",
     )
 

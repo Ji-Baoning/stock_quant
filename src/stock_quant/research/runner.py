@@ -128,7 +128,11 @@ from stock_quant.research.registry import (
     ExperimentRegistry,
     PublishedExperiment,
 )
-from stock_quant.research.spec import ExperimentSpec, load_experiment_spec
+from stock_quant.research.spec import (
+    BufferedRiskWeightedPortfolioRule,
+    ExperimentSpec,
+    load_experiment_spec,
+)
 from stock_quant.research.trust import (
     DataTrustMode,
     evaluate_corporate_action_trust,
@@ -1400,6 +1404,13 @@ class ResearchRunner:
         }
         factors = {factor.name: factor for factor in self._resolve_factors(frozen)}
         rule = frozen.portfolio_rule
+        if isinstance(rule, BufferedRiskWeightedPortfolioRule):
+            # The buffered rule builds its own common weight-target periods
+            # from the frozen policy inside the fold runner; there is no
+            # equal-weight fallback to hand the request.
+            builder = None
+        else:
+            builder = TopNEqualWeight(top_n=rule.top_n, lot_size=rule.lot_size)
         request = WalkForwardRequest(
             run_dir=self._run_dir,
             spec=frozen,
@@ -1418,9 +1429,7 @@ class ResearchRunner:
             corporate_actions=market.corporate_actions,
             factors=factors,
             factor_input_provider=self._walk_forward_factor_input(frozen),
-            portfolio_builder=TopNEqualWeight(
-                top_n=rule.top_n, lot_size=rule.lot_size
-            ),
+            portfolio_builder=builder,
             cost_models=scenarios,
             universe_resolver=self._universe_preflight.resolver,
             acceptance_audit=self._walk_forward_acceptance_audit(frozen),
@@ -1441,6 +1450,15 @@ class ResearchRunner:
                 path = fold_dir / name
                 if path.is_file():
                     outputs[f"folds/{fold.fold_id}/{name}"] = sha256_file(path)
+            for scenario in frozen.cost_scenarios:
+                path = fold_dir / "backtest" / scenario / \
+                    "rebalance_decisions.parquet"
+                if path.is_file():
+                    key = (
+                        f"folds/{fold.fold_id}/backtest/{scenario}/"
+                        "rebalance_decisions.parquet"
+                    )
+                    outputs[key] = sha256_file(path)
         return outputs
 
     def _walk_forward_factor_input(self, frozen: ExperimentSpec):
@@ -1629,6 +1647,9 @@ class ResearchRunner:
                 "the stability report can never carry a cross-fold drawdown "
                 "or Calmar field"
             )
+        buffered = self._buffered_report_block()
+        if buffered is not None:
+            report["buffered"] = buffered
         report_path = self._run_dir / "stability_report.json"
         report_path.write_text(
             json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
@@ -1656,6 +1677,7 @@ class ResearchRunner:
                 "stability_policy_hash": report["stability_policy_hash"],
                 "schedule": report["schedule"],
                 "scenario_aggregates": scenario_aggregates,
+                **({"buffered": buffered} if buffered is not None else {}),
             },
             "corporate_action_trust": trust_record,
             "evaluation": {"status": status.value, "reason": reason},
@@ -1683,6 +1705,101 @@ class ResearchRunner:
             "stability_report.json": sha256_file(report_path),
             "metrics.json": sha256_file(metrics_path),
             "report.html": sha256_file(html_path),
+        }
+
+    def _buffered_report_block(self) -> dict[str, object] | None:
+        """The buffered construction/turnover audit for the stability report.
+
+        Reads the published fold construction frames and scenario decision
+        frames only -- nothing is recomputed.  ``None`` for an equal-weight
+        run (no non-empty construction frame anywhere), so the report never
+        renders an empty buffered section.  Suppressed amounts are exact:
+        ``|weight_difference| * signal_close_equity`` from the recorded
+        decision rows, priced at the scenario's own signal close.
+        """
+        folds_dir = self._run_dir / "folds"
+        if not folds_dir.is_dir():
+            return None
+        fold_rows: list[dict[str, object]] = []
+        scenario_rows: dict[str, dict[str, object]] = {}
+        rule_version: str | None = None
+        for fold_dir in sorted(folds_dir.iterdir()):
+            construction_path = fold_dir / "portfolio_construction.parquet"
+            if not construction_path.is_file():
+                continue
+            construction = pd.read_parquet(construction_path)
+            if construction.empty:
+                continue
+            rule_version = str(construction["portfolio_rule_version"].iloc[0])
+            per_signal = construction.groupby("signal_date", sort=True)
+            cash_series = per_signal["cash_weight"].first()
+            achieved_gross = float(1.0 - cash_series.mean())
+            fold_rows.append(
+                {
+                    "fold_id": fold_dir.name,
+                    "signal_days": int(construction["signal_date"].nunique()),
+                    "retained": int(
+                        (construction["member_status"] == "retained").sum()
+                    ),
+                    "entered": int(
+                        (construction["member_status"] == "entered").sum()
+                    ),
+                    "exited": int(
+                        (construction["member_status"] == "exited").sum()
+                    ),
+                    "risk_invalid": int(
+                        (construction["member_status"] == "risk_invalid").sum()
+                    ),
+                    "achieved_gross_exposure": round(achieved_gross, 6),
+                    "cash_residue": round(float(cash_series.mean()), 6),
+                }
+            )
+            for decision_path in sorted(
+                fold_dir.glob("backtest/*/rebalance_decisions.parquet")
+            ):
+                scenario = decision_path.parent.name
+                decisions = pd.read_parquet(decision_path)
+                row = scenario_rows.setdefault(
+                    scenario,
+                    {
+                        "scenario": scenario,
+                        "band_suppressed_rows": 0,
+                        "band_suppressed_amount": 0.0,
+                        "lot_suppressed_rows": 0,
+                        "lot_suppressed_amount": 0.0,
+                    },
+                )
+                if decisions.empty:
+                    continue
+                for reason, prefix in (
+                    ("within_rebalance_band", "band"),
+                    ("below_one_lot", "lot"),
+                ):
+                    suppressed = decisions[decisions["reason"] == reason]
+                    amount = sum(
+                        abs(diff) * equity
+                        for diff, equity in zip(
+                            suppressed["weight_difference"],
+                            suppressed["signal_close_equity"],
+                        )
+                    )
+                    row[f"{prefix}_suppressed_rows"] = (
+                        int(row[f"{prefix}_suppressed_rows"])
+                        + int(len(suppressed))
+                    )
+                    row[f"{prefix}_suppressed_amount"] = round(
+                        float(row[f"{prefix}_suppressed_amount"])
+                        + float(amount),
+                        2,
+                    )
+        if rule_version is None:
+            return None
+        return {
+            "portfolio_rule_version": rule_version,
+            "folds": fold_rows,
+            "scenarios": [
+                scenario_rows[scenario] for scenario in sorted(scenario_rows)
+            ],
         }
 
     def _record_walk_forward_trust(
@@ -2320,6 +2437,17 @@ class ResearchRunner:
         holds.
         """
         rule = frozen.portfolio_rule
+        if isinstance(rule, BufferedRiskWeightedPortfolioRule):
+            # The buffered rule has no equal-weight fallback anywhere: the
+            # engineering single-window pipeline is an equal-weight diagnostic
+            # and must refuse a buffered spec loudly instead of silently
+            # building a different strategy.
+            raise ValueError(
+                "the buffered_risk_weighted portfolio rule executes only "
+                "under the walk_forward_oos_v1 pipeline; the engineering "
+                "single-window diagnostic pipeline keeps the "
+                "top_n_equal_weight rule"
+            )
         builder = TopNEqualWeight(top_n=rule.top_n, lot_size=rule.lot_size)
         factor_frame = pd.read_parquet(self._run_dir / "factor_results.parquet")
         # The factor frame is written from python-``date`` objects; a parquet
@@ -2520,9 +2648,12 @@ class ResearchRunner:
     def _walk_forward_publish_set(self) -> tuple[str, ...]:
         """The complete walk-forward audit set (relative paths, sorted).
 
-        Root audit files plus every executed fold's declared artifact set;
-        an executed fold's assets publish only when the whole set is present,
-        so an incomplete experiment can never be staged.
+        Root audit files, every executed fold's declared artifact set and
+        every scenario-local rebalance-decision artifact; an executed fold's
+        assets publish only when the whole set is present, so an incomplete
+        experiment can never be staged.  A buffered fold (a non-empty
+        ``portfolio_construction.parquet``) must carry one decision file per
+        declared scenario.
         """
         names = [
             "experiment_spec.yml",
@@ -2545,7 +2676,36 @@ class ResearchRunner:
                         "incomplete fold audit set can never be published"
                     )
             names.extend(f"folds/{fold_dir.name}/{name}" for name in FOLD_ARTIFACTS)
+            construction = pd.read_parquet(
+                fold_dir / "portfolio_construction.parquet"
+            )
+            buffered = not construction.empty
+            for scenario in self._active_cost_scenarios(fold_dir):
+                path = fold_dir / "backtest" / scenario / \
+                    "rebalance_decisions.parquet"
+                if buffered and not path.is_file():
+                    raise FileNotFoundError(
+                        f"buffered fold {fold_dir.name} is missing the "
+                        f"{scenario} rebalance_decisions artifact; an "
+                        "incomplete fold audit set can never be published"
+                    )
+                if path.is_file():
+                    names.append(
+                        f"folds/{fold_dir.name}/backtest/{scenario}/"
+                        "rebalance_decisions.parquet"
+                    )
         return tuple(sorted(names))
+
+    def _active_cost_scenarios(self, fold_dir: Path) -> list[str]:
+        """The declared scenarios recorded in the fold's manifest."""
+        manifest_path = fold_dir / "fold_manifest.json"
+        if not manifest_path.is_file():
+            return []
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        scenarios = manifest.get("declared_scenarios")
+        if not isinstance(scenarios, list):
+            return []
+        return [str(scenario) for scenario in scenarios]
 
     def _canonical_scenario(self, scenario_names: Sequence[str]) -> str:
         if CANONICAL_SCENARIO in scenario_names:
