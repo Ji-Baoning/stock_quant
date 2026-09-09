@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------------------
+# TEMPLATE — csi300 (沪深300) frozen universe definition. NOT A USABLE DEFINITION.
+# ---------------------------------------------------------------------------
+#
+# Every value below is a PLACEHOLDER. Placeholders cannot be used by formal
+# runs: `load_universe_definition` rejects this file (hash and coverage
+# validation fail loudly) until every placeholder is replaced with the real,
+# evidence-backed values pinned to a published immutable dataset.
+#
+# How to fill it in (after `project/refresh_index_membership.py` has imported
+# the evidence-backed facts and the dataset has been published immutably):
+#
+#   membership_table_sha256
+#       SHA-256 over the canonical serialization of the exact
+#       `universe_membership` fact rows in the published dataset, i.e.
+#       `membership_content_hash(facts)` from
+#       `stock_quant.data_model.universe_membership`. This is an
+#       order-independent content hash; any fact change yields a new hash and
+#       therefore a new definition version.
+#   evidence_summary_sha256
+#       SHA-256 of the evidence summary (sources, source-document hashes and
+#       snapshot hashes backing the fact set). Must locate real evidence; a
+#       hash that cannot be located fails Research acceptance.
+#   coverage_start / coverage_end
+#       The dataset's ACTUAL earliest/latest covered trading days as recorded
+#       in the dataset manifest. Never write the aspirational target window
+#       (e.g. "2005-01-04..today") here: coverage is what exists, not what is
+#       intended. Research fails with UniverseCoverageError outside this
+#       window.
+#   rules_version
+#       Stable label of the index rules edition used to build the facts
+#       (e.g. the half-year rebalance edition); any rules change must come
+#       with new facts and a new value here.
+#
+# The definition `version` (`universe_version`) is derived, not stored: it is
+# the SHA-256 of this document's canonical JSON once values are real.
+# Tests never read this file; they build temporary explicit definitions.
+# ---------------------------------------------------------------------------
+
+schema_version: 1
+universe_id: csi300
+rules_version: "PLACEHOLDER_RULES_VERSION"
+membership_table_sha256: "PLACEHOLDER_MEMBERSHIP_TABLE_SHA256"
+coverage_start: 1900-01-01 # PLACEHOLDER — must be the actual earliest covered day
+coverage_end: 1900-01-01 # PLACEHOLDER — must be the actual latest covered day
+evidence_summary_sha256: "PLACEHOLDER_EVIDENCE_SUMMARY_SHA256"
