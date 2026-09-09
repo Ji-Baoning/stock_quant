@@ -19,13 +19,21 @@ dataset's membership evidence *before* the identity is computed, then freezes
 without a ``universe_definition`` keeps the legacy engineering
 ``configs/universe.yml`` resolution path.
 
-Identity (:func:`compute_experiment_id`) hashes the frozen spec with
-RFC-8785-style canonical JSON semantics implemented as sorted UTF-8 JSON with
-compact separators.  Dates are already normalized to ISO strings by
-``model_dump(mode="json")``; ``allow_nan=False`` refuses any non-finite float.
-Every field of the spec is hashed, so code and data versions, the pinned
-data acceptance and every other input that can affect execution change the
-id, and ``model_copy(deep=True)`` of the same spec hashes identically.
+Identity (:func:`compute_experiment_id`) hashes the frozen spec *together
+with* the frozen :class:`~stock_quant.research.walk_forward.snapshots.
+SnapshotBundle` -- all three full snapshot payloads (strategy, experiment,
+data environment) and their three canonical SHA-256 hashes enter the identity
+payload -- under RFC-8785-style canonical JSON semantics implemented as
+sorted UTF-8 JSON with compact separators.  Dates are already normalized to
+ISO strings by ``model_dump(mode="json")``; ``allow_nan=False`` refuses any
+non-finite float.  Every field of the spec and of the snapshots is hashed, so
+code and data versions, the pinned data acceptance, the frozen policies and
+every other research-relevant input change the id, and
+``model_copy(deep=True)`` of the same inputs hashes identically.  Runtime
+metadata (run id, output paths, timestamps, host name, pid, worker count)
+never enters the identity.  The identity scheme version was incremented to 2
+when the snapshot payloads became part of the canonical payload, deliberately
+invalidating every pre-snapshot identity.
 """
 
 from __future__ import annotations
@@ -41,6 +49,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from stock_quant.research.acceptance.models import CURRENT_ACCEPTED
 from stock_quant.research.trust import DataTrustMode
+from stock_quant.research.walk_forward.snapshots import SnapshotBundle
 
 #: Reserved dataset/universe version placeholder; resolved to an explicit
 #: version by :meth:`ExperimentSpec.freeze` before an identity may be computed.
@@ -52,7 +61,9 @@ _ACCEPTANCE_UNSET = object()
 
 #: Scheme version embedded in the canonical hash payload so a future change of
 #: the serialization semantics deliberately invalidates all prior identities.
-_IDENTITY_SCHEME_VERSION = 1
+#: Version 2 added the three frozen snapshot payloads and hashes to the
+#: canonical identity payload (a semantics change, not an extension).
+_IDENTITY_SCHEME_VERSION = 2
 
 
 class ExperimentNotFrozenError(ValueError):
@@ -246,16 +257,26 @@ def load_experiment_spec(path: str | Path) -> ExperimentSpec:
     return ExperimentSpec.model_validate(raw)
 
 
-def compute_experiment_id(spec: ExperimentSpec) -> str:
-    """Deterministic sha256 of the frozen spec under canonical JSON semantics.
+def compute_experiment_id(
+    spec: ExperimentSpec, snapshots: "SnapshotBundle"
+) -> str:
+    """Deterministic sha256 of the frozen spec plus the frozen snapshot bundle.
 
-    Raises :class:`ExperimentNotFrozenError` if the spec still references
-    ``CURRENT``; an identity only exists for an explicit-version spec.
+    Both full snapshot payloads and their three hashes enter the canonical
+    identity payload (scheme version 2).  Raises
+    :class:`ExperimentNotFrozenError` if the spec still references ``CURRENT``;
+    an identity only exists for an explicit-version spec bound to a
+    :class:`~stock_quant.research.walk_forward.snapshots.SnapshotBundle`.
     """
     if not isinstance(spec, ExperimentSpec):
         raise TypeError(
             "compute_experiment_id expects an ExperimentSpec, got "
             f"{type(spec).__name__}"
+        )
+    if not isinstance(snapshots, SnapshotBundle):
+        raise TypeError(
+            "compute_experiment_id expects a SnapshotBundle as its second "
+            f"argument, got {type(snapshots).__name__}"
         )
     if not spec.is_frozen:
         raise ExperimentNotFrozenError(
@@ -267,6 +288,8 @@ def compute_experiment_id(spec: ExperimentSpec) -> str:
     payload = {
         "experiment_spec_scheme_version": _IDENTITY_SCHEME_VERSION,
         "experiment_spec": spec.model_dump(mode="json"),
+        "snapshot_bundle": snapshots.model_dump(mode="json"),
+        "snapshot_hashes": snapshots.hashes,
     }
     text = _canonical_json(payload)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
