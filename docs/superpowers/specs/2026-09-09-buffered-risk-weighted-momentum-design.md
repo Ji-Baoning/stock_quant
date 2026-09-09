@@ -48,7 +48,7 @@ weight_quantum: 0.000000000001
 - 窗口内至少需要 40 个真实有效收盘观察；可信停牌前值日参与 60 日收益路径，但不计入这 40 个真实观察。
 - 年化波动率为日收益样本标准差（`ddof=1`）乘 `sqrt(252)`；低于 10% 时按 10% 计算。
 
-风险计算必须输出窗口起止日、真实观察数、停牌前值日数、无效原因、原始和应用下限后的年化波动率。新上市、刚调入或长时间停牌证券可以因风险历史不足暂时无法入选；这不是全 fold 完整性失败。
+风险计算必须输出窗口起止日、真实观察数、停牌前值日数、无效原因、原始和应用下限后的年化波动率。资格只由 60 日窗口内的 `real_close_observations >= 40` 判定，不直接以连续停牌天数或 ST 状态判定；因此长时间停牌只有在真实观察数降到 40 以下或停牌证据不可信时才使风险输入无效。新上市、刚调入或长时间停牌证券可以因风险历史不足暂时无法入选；这不是全 fold 完整性失败，也不得在 `universe_membership` 中增加或改写标记。ST 是否排除只能由已冻结的因子/交易条件政策显式决定，不属于成分资格规则。
 
 ## 成员缓冲
 
@@ -106,13 +106,17 @@ baseline_experiment_id
 challenger_strategy_hash
 comparison_policy_hash
 fold_schedule_hash
+universe_id
+universe_version
+membership_table_sha256
+evidence_summary_sha256
 declared_before_run_at
 strategy_family
 ```
 
-挑战者与基线使用相同数据、验收、时点股票池、fold 日历、初始资金、`momentum_60d` 信号及成本情景；只允许组合构建规则不同。
+这四个股票池字段组成不可拆分的 `universe_definition` 身份块，并与其余预声明字段共同进入 `challenge_id`。挑战者与基线使用相同数据、验收、时点股票池、fold 日历、初始资金、`momentum_60d` 信号及成本情景；只允许组合构建规则不同。任一股票池身份字段不同都属于不可配对的研究身份错误，不能作为本设计的一次性策略比较；跨股票池研究必须另立预注册方案。
 
-开始正式挑战时，注册表以 `strategy_family + fold_schedule_hash` 为键原子消费 holdout。即使挑战失败、进程崩溃或结论被拒绝，该区间仍为 `consumed`。只有相同 `challenge_id` 及全部相同哈希可以幂等恢复；参数或输入变化会产生新 ID，不能复用已消费区间作为未见样本外。
+开始正式挑战时，注册表仍以 `strategy_family + fold_schedule_hash` 为消费键原子消费 holdout，并在消费记录中固定完整 `universe_definition` 身份块。股票池身份参与 `challenge_id` 和幂等恢复校验，但不扩展消费键；否则更换股票池版本会错误地产生新的“未消费”槽位。即使挑战失败、进程崩溃或结论被拒绝，该区间仍为 `consumed`。只有相同 `challenge_id` 及全部相同哈希可以幂等恢复；参数、输入或股票池定义变化会产生新 ID，不能复用已消费区间作为未见样本外，也不能通过更换股票池版本把相同历史重新声明为未见数据。
 
 该机制只证明项目流程没有在结果之后改写本次挑战者，不声称研究者从未在系统外看过历史。失败后的新版本可把已消费区间用于开发诊断，但正式晋级必须等待新的未消费历史 fold 或未来数据。少于五个未消费完整 fold 时，挑战最多得到 `INCONCLUSIVE_RESEARCH_ONLY`。
 
@@ -166,7 +170,7 @@ strategy_comparison.json
 strategy_comparison_report.html
 ```
 
-`paired_fold_metrics.parquet` 保存每个配对的基线值、挑战者值、差值、阈值和逐项通过状态。比较 JSON 固定两侧实验 ID、三类快照、schedule hash、政策 hash、holdout 消费记录和结论。注册表使用锁和原子发布，保证同一 holdout 只能有一个正式消费者；已有记录不可覆盖或删除。
+`strategy_challenge.json`、`holdout_consumption.json`、holdout registry 和 `strategy_comparison.json` 都必须保存完整 `universe_definition` 身份块。`paired_fold_metrics.parquet` 保存每个配对的基线值、挑战者值、差值、阈值和逐项通过状态。比较 JSON 固定两侧实验 ID、三类快照、schedule hash、政策 hash、holdout 消费记录和结论。注册表使用锁和原子发布，保证同一作用域内的 holdout 只能有一个正式消费者；已有记录不可覆盖或删除。
 
 ## 错误处理与验收
 
@@ -174,7 +178,7 @@ strategy_comparison_report.html
 
 离线测试必须覆盖：字符串排序、双重排名、缓冲保留/补位/退出、风险无效、停牌前值、40/60 日边界、无前视、capped-simplex 上限和现金残余、`1e-12` 量化、统一目标/场景账户分化、2% 等号边界、新入/退出不受带宽、fold 重置，以及换手原因拆分。
 
-挑战测试必须覆盖：原子消费、并发冲突、崩溃后仍消费、同 ID 恢复、修改哈希不可恢复、少于五 fold、合法跳过、缺失配对、全场景合取、任一门槛失败、FAILED 结论为空，以及报告不能隐藏失败项或提出下一组参数。
+挑战测试必须覆盖：原子消费、并发冲突、崩溃后仍消费、同 ID 恢复、修改任一哈希不可恢复、修改任一股票池身份字段会改变 `challenge_id` 并阻止配对、换股票池版本不能重置相同历史的未见状态、少于五 fold、合法跳过、缺失配对、全场景合取、任一门槛失败、FAILED 结论为空，以及报告不能隐藏失败项或提出下一组参数。
 
 ## 非目标
 
