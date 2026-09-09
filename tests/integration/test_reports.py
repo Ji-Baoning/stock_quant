@@ -702,3 +702,149 @@ def test_templates_resolve_independent_of_cwd(tmp_path, monkeypatch):
     )
     assert "工程验证" in exp_path.read_text(encoding="utf-8")
     assert "门禁决定" in qual_path.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# Walk-forward audit section
+# --------------------------------------------------------------------------- #
+
+
+def _walk_forward_payload() -> dict:
+    return {
+        "research_status": "COMPLETED",
+        "stability_conclusion": "UNSTABLE",
+        "stability_policy_hash": "ab" * 32,
+        "stability_policy_version": "stability-v1",
+        "thresholds": {
+            "policy_version": "stability-v1",
+            "minimum_executed_folds": 5,
+            "minimum_positive_fold_ratio": 0.60,
+            "worst_fold_calendar_return_floor": -0.10,
+            "annualization_sessions": 252,
+            "risk_free_rate": 0.0,
+        },
+        "integrity_failures": [],
+        "skipped_fold_ids": [],
+        "reasons": ["unstable scenarios: full_cost"],
+        "schedule": {
+            "requested_start": "2020-01-01",
+            "requested_end": "2025-12-31",
+            "fold_count": 5,
+            "boundary_count": 1,
+            "boundaries": [
+                {
+                    "calendar_start": "2026-01-01",
+                    "calendar_end": "2026-09-02",
+                    "reason": "trailing_partial_year",
+                }
+            ],
+            "fold_schedule_sha256": "cd" * 32,
+            "fold_outcomes_sha256": "de" * 32,
+        },
+        "fold_statuses": [
+            {"fold_id": "fold-0001", "status": "executed", "reason_code": None},
+            {"fold_id": "fold-0002", "status": "failed_preflight",
+             "reason_code": "DATA_GAP"},
+        ],
+        "scenario_results": [
+            {
+                "scenario": "full_cost",
+                "executed_fold_count": 5,
+                "positive_fold_count": 2,
+                "positive_fold_ratio": 0.4,
+                "worst_fold_calendar_return": -0.5,
+                "minimum_positive_fold_ratio": 0.6,
+                "worst_fold_calendar_return_floor": -0.1,
+                "policy_version": "stability-v1",
+                "passed": False,
+                "reasons": ["positive fold ratio 0.4 < 0.6"],
+            }
+        ],
+        "scenario_aggregates": [
+            {
+                "scenario": "full_cost",
+                "aggregate_return": 0.21,
+                "annualized_return": 0.039,
+                "annualized_volatility": 0.18,
+                "sharpe_zero_rf": 0.216,
+                "oos_return_observations": 1220,
+                "annualization_observations": 1220,
+            }
+        ],
+        "fold_metrics": [
+            {
+                "fold_id": "fold-0001",
+                "scenario": "full_cost",
+                "fold_calendar_return": 0.05,
+                "per_fold_max_drawdown": -0.03,
+                "observation_count": 244,
+                "reject_rate": 0.1,
+                "turnover": 0.42,
+                "explicit_cost_ratio": 0.001,
+            },
+            {
+                "fold_id": "fold-0002",
+                "scenario": "full_cost",
+                "fold_calendar_return": -0.5,
+                "per_fold_max_drawdown": -0.55,
+                "observation_count": 244,
+                "reject_rate": 0.2,
+                "turnover": 0.51,
+                "explicit_cost_ratio": 0.002,
+            },
+        ],
+        "experiment_id": "exp-abc123",
+        "dataset_version": "dataset-v1",
+        "universe_version": "universe-v1",
+    }
+
+
+def test_experiment_html_renders_the_walk_forward_audit_section(tmp_path):
+    payload = _walk_forward_payload()
+    run_input = _experiment_input()
+    report_input = ExperimentReportInput(
+        experiment_id=run_input.experiment_id,
+        dataset_version=run_input.dataset_version,
+        universe_version=run_input.universe_version,
+        code_commit=run_input.code_commit,
+        scenarios=(),
+        benchmark_closes=run_input.benchmark_closes,
+        benchmark_symbols=run_input.benchmark_symbols,
+        run_id=run_input.run_id,
+        hypothesis=run_input.hypothesis,
+        initial_cash=run_input.initial_cash,
+        walk_forward=payload,
+    )
+    destination = tmp_path / "walk_forward.html"
+    render_experiment_report(report_input, destination)
+    html = destination.read_text(encoding="utf-8")
+    # every fold id, every scenario, the policy hash and observation counts
+    assert "fold-0001" in html
+    assert "fold-0002" in html
+    assert "full_cost" in html
+    assert ("ab" * 32) in html
+    assert "stability_policy_hash" in html
+    assert "oos_return_observations" in html
+    # per-fold drawdowns are rendered; no global drawdown field exists
+    assert "per_fold_max_drawdown" in html
+    assert "-55.00%" in html
+    assert "aggregate_max_drawdown" not in html
+    assert "全局最大回撤" not in html
+    # no Calmar metric field exists anywhere; the policy disclaimer names it
+    assert "calmar_ratio" not in html
+    assert "Calmar" in html and "被政策禁止" in html
+    # boundary exclusions are recorded, never silently dropped
+    assert "trailing_partial_year" in html
+    assert "not_evaluated_boundary" in html or "边界未评估" in html
+    # failed folds remain listed
+    assert "failed_preflight" in html
+    # the conclusion and its null-on-failure rule are visible
+    assert "UNSTABLE" in html
+
+
+def test_experiment_html_omits_walk_forward_section_without_payload(tmp_path):
+    destination = tmp_path / "plain.html"
+    render_experiment_report(_experiment_input(), destination)
+    html = destination.read_text(encoding="utf-8")
+    assert "stability_policy_hash" not in html
+    assert "Walk-Forward" not in html

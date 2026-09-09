@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -266,3 +266,36 @@ FOLD_ARTIFACTS = (
     "daily_returns.parquet",
     "metrics.json",
 )
+
+#: Every admissible root artifact name across both execution pipelines.
+ADMISSIBLE_ROOT_ARTIFACTS = frozenset(REQUIRED_ARTIFACTS) | frozenset(
+    WALK_FORWARD_ROOT_ARTIFACTS
+)
+
+
+def admissible_artifact_path(name: str) -> bool:
+    """True when ``name`` is a declared root file or a fold artifact path.
+
+    The published-artifact contract is a deterministic map: only declared
+    root files and ``folds/<fold_id>/<declared fold artifact>`` paths (with a
+    64-hex content-hash fold id) may appear in an experiment manifest.
+    """
+    if name in ADMISSIBLE_ROOT_ARTIFACTS:
+        return True
+    parts = name.split("/")
+    if len(parts) != 3 or parts[0] != "folds":
+        return False
+    fold_id, artifact = parts[1], parts[2]
+    if len(fold_id) != 64 or any(char not in "0123456789abcdef" for char in fold_id):
+        return False
+    return artifact in FOLD_ARTIFACTS
+
+
+def validate_artifact_paths(names: Iterable[str]) -> None:
+    """Reject any artifact path outside the declared contract."""
+    for name in names:
+        if not admissible_artifact_path(name):
+            raise ValueError(
+                f"artifact path {name!r} is not a declared root file or a "
+                "folds/<fold_id>/<declared-name> artifact"
+            )

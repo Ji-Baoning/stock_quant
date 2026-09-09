@@ -503,12 +503,28 @@ def research_run(
 
     Formal research always applies the RESEARCH corporate-action trust bar and
     refuses to backtest a dataset whose pinned coverage is not trusted, so a
-    formal run can never lower its own evidence bar.
+    formal run can never lower its own evidence bar.  A walk-forward run
+    prints its research status and its nullable stability conclusion: FAILED
+    exits nonzero; a COMPLETED STABLE/UNSTABLE/INCONCLUSIVE research retains
+    the exact label and exits zero.
     """
     published = _run_one_research(Path(root), spec)
     typer.echo(f"experiment_id={published.experiment_id}")
     typer.echo(f"published={published.path}")
+    _echo_stability(published)
     _echo_trust(published)
+
+
+def _echo_stability(published: "PublishedExperiment") -> None:
+    """Print the research status and the nullable stability conclusion."""
+    report_path = Path(published.path) / "stability_report.json"
+    if not report_path.is_file():
+        typer.echo("research_status=COMPLETED")
+        typer.echo("stability_conclusion=none")
+        return
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    typer.echo(f"research_status={report.get('research_status', 'COMPLETED')}")
+    typer.echo(f"stability_conclusion={report.get('stability_conclusion')}")
 
 
 # --------------------------------------------------------------------------- #
@@ -630,9 +646,32 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
     spec = meta.get("spec", {})
     run_id = str(meta.get("run_id", ""))
     dataset_version = str(meta.get("dataset_version", ""))
-    scenario_names = tuple(str(item) for item in spec.get("cost_scenarios", ()))
     benchmark_symbols = tuple(str(item) for item in meta.get("benchmark_symbols", ()))
     run_dir = project_root / "data" / "runs" / run_id
+    # A formal walk-forward experiment carries its complete audit section in
+    # stability_report.json and no classic per-scenario backtest tree: the
+    # report renders the walk-forward section over an empty scenario list.
+    stability_path = experiment_dir / "stability_report.json"
+    if stability_path.is_file():
+        benchmark = _benchmark_closes(project_root, dataset_version, benchmark_symbols)
+        run_input = ExperimentReportInput(
+            experiment_id=experiment_id,
+            dataset_version=dataset_version,
+            universe_version=str(meta.get("universe_version", "")),
+            code_commit=str(meta.get("code_commit", "")),
+            scenarios=(),
+            benchmark_closes=benchmark,
+            benchmark_symbols=benchmark_symbols,
+            run_id=run_id,
+            hypothesis=str(spec.get("hypothesis", "")),
+            initial_cash=float(meta.get("initial_cash", 0.0)),
+            corporate_action_trust=metrics.get("corporate_action_trust"),
+            factor_input_audit=metrics.get("factor_input"),
+            data_acceptance=metrics.get("data_acceptance"),
+            walk_forward=json.loads(stability_path.read_text(encoding="utf-8")),
+        )
+        return run_input
+    scenario_names = tuple(str(item) for item in spec.get("cost_scenarios", ()))
     committed_scenarios = metrics.get("scenarios", {})
 
     benchmark = _benchmark_closes(project_root, dataset_version, benchmark_symbols)
@@ -699,6 +738,7 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
         # inferred ACCEPTED decision.
         data_acceptance=metrics.get("data_acceptance"),
     )
+    return run_input
 
 
 def _benchmark_closes(

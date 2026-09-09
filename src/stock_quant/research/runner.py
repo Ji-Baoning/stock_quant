@@ -106,6 +106,7 @@ from stock_quant.research.acceptance.service import (
 )
 from stock_quant.research.models import (
     CANONICAL_SCENARIO,
+    FOLD_ARTIFACTS,
     MANIFESTED_ARTIFACTS,
     DataStage,
     Evaluation,
@@ -137,12 +138,46 @@ from stock_quant.research.universe import (
     UniverseResolver,
     load_universe_definition,
 )
+from stock_quant.research.walk_forward.evaluation import evaluate_stability
+from stock_quant.research.walk_forward.metrics import (
+    FoldMetrics,
+    aggregate_oos_returns,
+)
+from stock_quant.research.walk_forward.policy import (
+    StabilityPolicy,
+    WalkForwardPolicy,
+)
+from stock_quant.research.walk_forward.runner import (
+    WalkForwardRequest,
+    WalkForwardRunner,
+)
+from stock_quant.research.walk_forward.schedule import (
+    FoldOutcomeLedger,
+    FoldOutcomeStatus,
+    FoldSchedule,
+    FoldWindow,
+    materialize_schedule,
+    sha256_file,
+)
+from stock_quant.research.walk_forward.snapshots import build_snapshot_bundle
 
 _CURRENT = "CURRENT"
 
 #: Coarse pipeline stage labels, in dependency order.  The stage record is
 #: also the resume unit: labels map to the shared ``DataStage`` vocabulary.
 _STAGE_LABELS = ("pin", "factor", "portfolio", "backtest", "report")
+
+#: Walk-forward pipeline stage labels (the ``walk_forward_oos_v1``
+#: execution pipeline): the schedule materializes before any fold runs and
+#: the stability report closes the run.
+_WF_STAGE_LABELS = ("pin", "schedule", "folds", "report")
+
+_WF_LABEL_TO_DATASTAGE = {
+    "pin": DataStage.PUBLISHED,
+    "schedule": DataStage.PUBLISHED,
+    "folds": DataStage.BACKTESTED,
+    "report": DataStage.REPORTED,
+}
 
 #: The fine pre-factor stage label a frozen-definition preflight failure is
 #: recorded under: the membership acceptance gate runs before identity and
@@ -575,6 +610,9 @@ class ResearchRunner:
         self._context: DatasetContext | None = None
         self._digest: str = ""
         self._universe_preflight: UniversePreflight | None = None
+        # The frozen snapshot bundle (identity scheme v2), built once per run
+        # after the spec freezes and before any identity is computed.
+        self._bundle = None
         # The sanitized audit of the acceptance record resolved before the
         # experiment identity is frozen; ``None`` when no acceptance was
         # pinned (an ENGINEERING diagnostic or a preflight failure).
@@ -658,10 +696,30 @@ class ResearchRunner:
             trust_mode=mode,
         )
         self._universe_preflight = preflight
+        # Freeze the three research snapshots before the identity is computed:
+        # identity scheme v2 hashes the snapshot bundle beside the spec.  A
+        # dataset that cannot support the snapshots (e.g. a legacy dataset
+        # without adjusted_bar) fails closed here, audited as a FAILED
+        # preflight manifest with no experiment identity.
+        try:
+            self._bundle = self._build_snapshot_bundle(frozen)
+        except Exception as error:  # noqa: BLE001 - any rejection is audited
+            self._close_context()
+            self._record_snapshot_preflight_failure(frozen, mode, error)
+            raise ResearchRunFailed(
+                "research run failed to freeze the snapshot bundle: "
+                f"{redact_text(error, self._secrets)}",
+                run_id=self._run_id,
+                failed_stage="snapshot_bundle",
+                retriable=False,
+            ) from error
         state = self._begin(frozen)
         try:
             self._active_stage = None
-            self._pipeline(state, frozen, observer)
+            if frozen.execution_pipeline == "walk_forward_oos_v1":
+                self._walk_forward_pipeline(state, frozen, observer)
+            else:
+                self._pipeline(state, frozen, observer)
             published = self._publish(state, frozen)
             state.status = RunStatus.COMPLETED
             state.stage = DataStage.REPORTED
@@ -1033,6 +1091,40 @@ class ResearchRunner:
         self._run_id = run_id
         self._run_dir = run_dir
 
+    def _record_snapshot_preflight_failure(
+        self,
+        frozen: ExperimentSpec,
+        mode: DataTrustMode,
+        error: Exception,
+    ) -> None:
+        """Persist the FAILED manifest for a snapshot-bundle freeze rejection.
+
+        No experiment identity exists yet, so the run id is a fresh
+        ``preflight_snapshot_<uuid>`` and the recorded ``experiment_id`` is
+        ``None``; the redacted error keeps the failure auditable.
+        """
+        run_id = f"preflight_snapshot_{uuid.uuid4().hex}"
+        run_dir = self._project_root / "data" / "runs" / run_id
+        state = RunState(
+            run_id=run_id,
+            experiment_id=None,
+            status=RunStatus.FAILED,
+            stage=DataStage.FAILED,
+            dataset_version=frozen.dataset_version,
+            universe_version=frozen.universe_version,
+            trust_mode=mode.value,
+            failed_stage="snapshot_bundle",
+            error={
+                "stage": "snapshot_bundle",
+                "exception_class": type(error).__name__,
+                "message": redact_text(str(error), self._secrets),
+                "retriable": False,
+            },
+        )
+        write_run_manifest(run_dir, state)
+        self._run_id = run_id
+        self._run_dir = run_dir
+
     def _detect_code_commit(self) -> str | None:
         """The repository HEAD when ``config_root`` is inside a git work tree."""
         try:
@@ -1048,8 +1140,35 @@ class ResearchRunner:
         commit = result.stdout.strip()
         return commit or None
 
+    def _build_snapshot_bundle(self, frozen: ExperimentSpec):
+        """Freeze the three research snapshots for the identity (scheme v2).
+
+        Reads the pinned dataset version's published manifest for the table
+        content hashes and combines it with the frozen universe definition
+        (when preflighted) and the consumed config hashes.  Deterministic in
+        its inputs: no path, clock, host or worker count enters the bundle.
+        """
+        manifest_path = (
+            self._project_root
+            / "data"
+            / "standardized"
+            / frozen.dataset_version
+            / "dataset_manifest.json"
+        )
+        dataset_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return build_snapshot_bundle(
+            spec=frozen,
+            dataset_manifest=dataset_manifest,
+            universe_definition=(
+                self._universe_preflight.definition
+                if self._universe_preflight is not None
+                else None
+            ),
+            config_hashes=self._config_hashes(frozen),
+        )
+
     def _begin(self, frozen: ExperimentSpec) -> RunState:
-        identity = ExperimentIdentity.of(frozen)
+        identity = ExperimentIdentity.of(frozen, self._bundle)
         run_id = f"run_{identity.experiment_id}"
         run_dir = self._project_root / "data" / "runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1200,6 +1319,402 @@ class ResearchRunner:
                             observer)
         self._active_stage = None
 
+    def _walk_forward_pipeline(
+        self,
+        state: RunState,
+        frozen: ExperimentSpec,
+        observer,
+    ) -> None:
+        """The formal ``walk_forward_oos_v1`` pipeline.
+
+        Freezing, the dataset acceptance gate and the point-in-time universe
+        preflight already ran before the identity was computed.  The runner
+        then only orchestrates: it materializes the immutable fold schedule,
+        delegates isolated fold execution to :class:`WalkForwardRunner` and
+        writes the stability report.  It never selects parameters, rewrites
+        the calendar or bypasses a gate.
+        """
+        self._frozen_version = frozen.dataset_version
+        self._universe_symbols = self._load_universe_symbols()
+        self._enforce_research_master_evidence(frozen)
+        producers = {
+            "pin": lambda: self._produce_pin(frozen),
+            "schedule": lambda: self._produce_walk_forward_schedule(frozen),
+            "folds": lambda: self._produce_walk_forward_folds(state, frozen),
+            "report": lambda: self._produce_walk_forward_report(state, frozen),
+        }
+        for label in _WF_STAGE_LABELS:
+            self._active_stage = label
+            self._run_stage(
+                label, _WF_LABEL_TO_DATASTAGE[label], state, producers[label],
+                observer,
+            )
+        self._active_stage = None
+
+    def _produce_walk_forward_schedule(
+        self, frozen: ExperimentSpec
+    ) -> dict[str, str]:
+        """Materialize the immutable fold schedule (written by the fold runner)."""
+        if self._universe_preflight is None:
+            raise ValueError(
+                "a formal walk-forward run requires a frozen universe "
+                "definition; the legacy engineering universe cannot provide "
+                "point-in-time fold membership"
+            )
+        schedule = self._materialize_walk_forward_schedule(frozen)
+        if not schedule.folds:
+            raise ValueError(
+                "the requested range "
+                f"{frozen.date_range.start_date}..{frozen.date_range.end_date} "
+                "contains no complete 12-month OOS fold; a walk-forward run "
+                "needs at least one complete calendar year"
+            )
+        return {}
+
+    def _materialize_walk_forward_schedule(
+        self, frozen: ExperimentSpec
+    ) -> FoldSchedule:
+        """The deterministic fold schedule over the pinned calendar."""
+        preflight = self._universe_preflight
+        return materialize_schedule(
+            requested_start=frozen.date_range.start_date,
+            requested_end=frozen.date_range.end_date,
+            calendar=self._calendar(),
+            policy=WalkForwardPolicy(),
+            membership_snapshots=dict(preflight.daily_snapshots),
+        )
+
+    def _produce_walk_forward_folds(
+        self, state: RunState, frozen: ExperimentSpec
+    ) -> dict[str, str]:
+        """Delegate isolated fold execution; the fold runner owns its artifacts."""
+        schedule = self._materialize_walk_forward_schedule(frozen)
+        first = schedule.folds[0]
+        last = schedule.folds[-1]
+        window_start = first.first_trading_day or first.calendar_start
+        window_end = last.last_trading_day or last.calendar_end
+        market = self._walk_forward_market(frozen, window_start, window_end)
+        scenarios = {
+            scenario: CostModel.from_config(self._project_config.costs, scenario)
+            for scenario in frozen.cost_scenarios
+        }
+        factors = {factor.name: factor for factor in self._resolve_factors(frozen)}
+        rule = frozen.portfolio_rule
+        request = WalkForwardRequest(
+            run_dir=self._run_dir,
+            spec=frozen,
+            schedule=schedule,
+            snapshot_bundle=self._bundle,
+            walk_forward_policy=WalkForwardPolicy(),
+            stability_policy=StabilityPolicy(),
+            calendar=self._calendar(),
+            rule_book=self._rule_book,
+            initial_cash=float(self._project_config.initial_cash),
+            dataset_version=frozen.dataset_version,
+            universe_symbols=self._universe_symbols,
+            bars=market.bars,
+            benchmarks=market.benchmarks,
+            benchmark_symbols=tuple(self._project_config.benchmark_symbols),
+            corporate_actions=market.corporate_actions,
+            factors=factors,
+            factor_input_provider=self._walk_forward_factor_input(frozen),
+            portfolio_builder=TopNEqualWeight(
+                top_n=rule.top_n, lot_size=rule.lot_size
+            ),
+            cost_models=scenarios,
+            universe_resolver=self._universe_preflight.resolver,
+            acceptance_audit=self._walk_forward_acceptance_audit(frozen),
+        )
+        WalkForwardRunner().run(request)
+        outputs: dict[str, str] = {}
+        for name in (
+            "fold_schedule.json",
+            "fold_outcomes.json",
+            "walk_forward_manifest.json",
+        ):
+            outputs[name] = sha256_file(self._run_dir / name)
+        for fold in schedule.folds:
+            fold_dir = self._run_dir / "folds" / fold.fold_id
+            if not fold_dir.is_dir():
+                continue  # a fold that failed preflight publishes no assets
+            for name in FOLD_ARTIFACTS:
+                path = fold_dir / name
+                if path.is_file():
+                    outputs[f"folds/{fold.fold_id}/{name}"] = sha256_file(path)
+        return outputs
+
+    def _walk_forward_factor_input(self, frozen: ExperimentSpec):
+        """The pinned adjusted-bar factor input provider for the fold runner."""
+        def provider() -> pd.DataFrame:
+            adapter = _DatasetFactorAdapter(
+                context=self._open_context(frozen.dataset_version),
+                universe_symbols=self._universe_symbols,
+            )
+            return adapter.factor_input()
+
+        return provider
+
+    def _walk_forward_acceptance_audit(
+        self, frozen: ExperimentSpec
+    ) -> dict[str, object] | None:
+        """The pinned acceptance audit, bound to the pinned dataset version."""
+        if self._data_acceptance is None:
+            return None
+        return {
+            "dataset_version": frozen.dataset_version,
+            **dict(self._data_acceptance),
+        }
+
+    def _walk_forward_market(
+        self, frozen: ExperimentSpec, window_start: date, window_end: date
+    ):
+        """The pinned OOS market frames (bars restricted to the fold span)."""
+        context = self._open_context(frozen.dataset_version)
+        daily = context.read("daily_bar")
+        equity = daily[daily["symbol"].isin(self._universe_symbols)].copy()
+        equity["trade_date"] = equity["trade_date"].map(_as_date)
+        equity = equity[
+            (equity["trade_date"] >= window_start)
+            & (equity["trade_date"] <= window_end)
+        ].copy()
+        if equity.empty:
+            raise ValueError("no equity bars cover the walk-forward OOS window")
+        equity = equity.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+        bars = pd.DataFrame({
+            "symbol": equity["symbol"],
+            "trade_date": equity["trade_date"],
+            "open": equity["open"],
+            "close": equity["close"],
+            # Phase-one ruling (§13.5): the primary close series is
+            # authoritative; ERROR bars never reach the backtest.
+            "quality_severity": QUALITY_SEVERITY_AUTHORITATIVE,
+        })
+        benchmark_symbols = set(self._project_config.benchmark_symbols)
+        benchmark = daily[daily["symbol"].isin(benchmark_symbols)].copy()
+        benchmark["trade_date"] = benchmark["trade_date"].map(_as_date)
+        benchmark = benchmark[
+            (benchmark["trade_date"] >= window_start)
+            & (benchmark["trade_date"] <= window_end)
+        ].copy()
+        benchmarks = pd.DataFrame({
+            "symbol": benchmark["symbol"],
+            "trade_date": benchmark["trade_date"],
+            "close": benchmark["close"],
+        })
+        if len(benchmarks) != len(benchmark):
+            raise ValueError("benchmark frame must be one row per symbol/date")
+        return _MarketFrames(
+            calendar=self._calendar(),
+            bars=bars,
+            benchmarks=benchmarks,
+            corporate_actions=context.read("corporate_action"),
+        )
+
+    def _produce_walk_forward_report(
+        self, state: RunState, frozen: ExperimentSpec
+    ) -> dict[str, str]:
+        """Build ``stability_report.json``, the evaluation and the report."""
+        schedule = self._materialize_walk_forward_schedule(frozen)
+        ledger = FoldOutcomeLedger.model_validate(
+            json.loads(
+                (self._run_dir / "fold_outcomes.json").read_text(encoding="utf-8")
+            )
+        )
+        windows = {fold.fold_id: fold for fold in schedule.folds}
+        scenario_metrics: list[FoldMetrics] = []
+        fold_metrics_payload: list[dict] = []
+        for fold in schedule.folds:
+            metrics_path = self._run_dir / "folds" / fold.fold_id / "metrics.json"
+            if not metrics_path.is_file():
+                continue  # a fold that failed preflight has no metrics
+            payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+            for scenario in sorted(payload["scenarios"]):
+                metrics = FoldMetrics.model_validate(payload["scenarios"][scenario])
+                scenario_metrics.append(metrics)
+                fold_metrics_payload.append(metrics.model_dump(mode="json"))
+        evaluation = evaluate_stability(
+            policy=StabilityPolicy(),
+            declared_scenarios=tuple(frozen.cost_scenarios),
+            scenario_metrics=scenario_metrics,
+            outcomes=ledger.outcomes,
+            integrity_failures=(),
+        )
+        if evaluation.research_status.value == "FAILED":
+            raise ValueError(
+                "the executed folds failed the stability integrity review: "
+                + "; ".join(evaluation.reasons)
+            )
+        scenario_aggregates: list[dict] = []
+        for scenario in frozen.cost_scenarios:
+            per_fold: list[tuple[FoldWindow, pd.DataFrame]] = []
+            for outcome in ledger.outcomes:
+                if outcome.status is not FoldOutcomeStatus.EXECUTED:
+                    continue
+                fold = windows[outcome.fold_id]
+                path = (
+                    self._run_dir / "backtest" / fold.fold_id / scenario
+                    / "daily_returns.parquet"
+                )
+                if path.is_file():
+                    per_fold.append((fold, pd.read_parquet(path)))
+            aggregate = aggregate_oos_returns(per_fold)
+            scenario_aggregates.append(
+                {"scenario": scenario, **aggregate.model_dump(mode="json")}
+            )
+        trust_record = self._record_walk_forward_trust(state, frozen, windows)
+        reasons = list(evaluation.reasons)
+        if evaluation.stability_conclusion == "STABLE":
+            status = ExperimentEvaluation.ACCEPTED
+            reason = (
+                "stability STABLE under the frozen policy "
+                f"{evaluation.stability_policy_version} "
+                f"(hash {evaluation.stability_policy_hash})"
+            )
+        else:
+            status = ExperimentEvaluation.REJECTED
+            reason = (
+                f"stability {evaluation.stability_conclusion} under the frozen "
+                f"policy {evaluation.stability_policy_version}: "
+                + ("; ".join(reasons) if reasons else "thresholds not met")
+            )
+            reasons.insert(0, f"stability {evaluation.stability_conclusion}")
+        boundaries = [
+            {
+                "calendar_start": window.calendar_start.isoformat(),
+                "calendar_end": window.calendar_end.isoformat(),
+                "reason": window.reason,
+            }
+            for window in schedule.boundaries
+        ]
+        report: dict[str, object] = {
+            "research_status": evaluation.research_status.value,
+            "stability_conclusion": evaluation.stability_conclusion,
+            "stability_policy_hash": evaluation.stability_policy_hash,
+            "stability_policy_version": evaluation.stability_policy_version,
+            "thresholds": StabilityPolicy().model_dump(mode="json"),
+            "integrity_failures": list(evaluation.integrity_failures),
+            "skipped_fold_ids": list(evaluation.skipped_fold_ids),
+            "reasons": reasons,
+            "schedule": {
+                "requested_start": schedule.requested_start.isoformat(),
+                "requested_end": schedule.requested_end.isoformat(),
+                "fold_count": len(schedule.folds),
+                "boundary_count": len(schedule.boundaries),
+                "boundaries": boundaries,
+                "fold_schedule_sha256": ledger.schedule_sha256,
+                "fold_outcomes_sha256": sha256_file(
+                    self._run_dir / "fold_outcomes.json"
+                ),
+            },
+            "fold_statuses": [
+                {
+                    "fold_id": outcome.fold_id,
+                    "status": outcome.status.value,
+                    "reason_code": outcome.reason_code,
+                }
+                for outcome in ledger.outcomes
+            ],
+            "scenario_results": [
+                result.model_dump(mode="json")
+                for result in evaluation.scenario_results
+            ],
+            "scenario_aggregates": scenario_aggregates,
+            "fold_metrics": fold_metrics_payload,
+            "experiment_id": state.experiment_id,
+            "dataset_version": frozen.dataset_version,
+            "universe_version": frozen.universe_version,
+        }
+        if "aggregate_max_drawdown" in report or "calmar" in report:
+            raise ValueError(
+                "the stability report can never carry a cross-fold drawdown "
+                "or Calmar field"
+            )
+        report_path = self._run_dir / "stability_report.json"
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        meta = {
+            "run_id": self._run_id,
+            "experiment_id": state.experiment_id,
+            "spec": frozen.model_dump(mode="json"),
+            "dataset_version": frozen.dataset_version,
+            "universe_version": frozen.universe_version,
+            "universe": self._universe_identity(frozen),
+            "code_commit": frozen.code_commit,
+            "config_file_hashes": self._config_hashes(frozen),
+            "run_input_digest": self._digest,
+            "initial_cash": float(self._project_config.initial_cash),
+            "benchmark_symbols": list(self._project_config.benchmark_symbols),
+            "execution_pipeline": frozen.execution_pipeline,
+        }
+        metrics = {
+            "meta": meta,
+            "walk_forward": {
+                "research_status": report["research_status"],
+                "stability_conclusion": report["stability_conclusion"],
+                "stability_policy_hash": report["stability_policy_hash"],
+                "schedule": report["schedule"],
+                "scenario_aggregates": scenario_aggregates,
+            },
+            "corporate_action_trust": trust_record,
+            "evaluation": {"status": status.value, "reason": reason},
+        }
+        if frozen.trust_mode is DataTrustMode.ENGINEERING:
+            metrics["evaluation"] = {
+                "status": ExperimentEvaluation.UNTRUSTED.value,
+                "reason": (
+                    "engineering diagnostics can never publish a formal "
+                    "stability conclusion; the walk-forward run is recorded "
+                    "as an UNTRUSTED diagnostic"
+                ),
+            }
+        metrics_path = self._run_dir / "metrics.json"
+        metrics_path.write_text(
+            json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        report_html = self._report(metrics)
+        if not isinstance(report_html, str):
+            raise TypeError("report must return an HTML string")
+        html_path = self._run_dir / "report.html"
+        html_path.write_text(report_html, encoding="utf-8")
+        return {
+            "stability_report.json": sha256_file(report_path),
+            "metrics.json": sha256_file(metrics_path),
+            "report.html": sha256_file(html_path),
+        }
+
+    def _record_walk_forward_trust(
+        self,
+        state: RunState,
+        frozen: ExperimentSpec,
+        windows: Mapping[str, FoldWindow],
+    ) -> dict[str, object]:
+        """The corporate-action trust record over the walk-forward OOS span."""
+        starts = [
+            fold.first_trading_day or fold.calendar_start
+            for fold in windows.values()
+        ]
+        ends = [
+            fold.last_trading_day or fold.calendar_end for fold in windows.values()
+        ]
+        decision = evaluate_corporate_action_trust(
+            self._coverage_evidence(frozen),
+            self._universe_symbols,
+            min(starts) if starts else frozen.date_range.start_date,
+            max(ends) if ends else frozen.date_range.end_date,
+        )
+        record: dict[str, object] = {
+            "mode": frozen.trust_mode.value,
+            "dataset_version": frozen.dataset_version,
+            "window_start": min(starts).isoformat() if starts else None,
+            "window_end": max(ends).isoformat() if ends else None,
+        }
+        record.update(decision.to_dict())
+        state.corporate_action_trust = record
+        return record
+
     def _run_stage(self, label, target_stage, state, producer, observer) -> None:
         records = self._stage_records()
         record = records.get(label)
@@ -1258,14 +1773,20 @@ class ResearchRunner:
         """Copy the canonical content into ``publish/`` and call the registry."""
         publish_dir = self._run_dir / "publish"
         publish_dir.mkdir(parents=True, exist_ok=True)
-        for name in MANIFESTED_ARTIFACTS:
+        if frozen.execution_pipeline == "walk_forward_oos_v1":
+            manifested = self._walk_forward_publish_set()
+        else:
+            manifested = MANIFESTED_ARTIFACTS
+        for name in manifested:
             source = self._run_dir / name
             if not source.is_file():
                 raise FileNotFoundError(
                     f"cannot publish run {self._run_id}: content artifact "
                     f"{name!r} is missing from {self._run_dir}"
                 )
-            shutil.copyfile(source, publish_dir / name)
+            destination = publish_dir / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
         (publish_dir / _RUN_MANIFEST).write_text(
             json.dumps(
                 {"run_id": self._run_id, "status": "COMPLETED"},
@@ -1275,7 +1796,7 @@ class ResearchRunner:
             encoding="utf-8",
         )
         artifacts = {name: _sha256_file(self._run_dir / name) for name in
-                     MANIFESTED_ARTIFACTS}
+                     manifested}
         metrics = json.loads(
             (self._run_dir / "metrics.json").read_text(encoding="utf-8")
         )
@@ -1321,6 +1842,10 @@ class ResearchRunner:
             "universe_version": frozen.universe_version,
             "data_acceptance_id": frozen.data_acceptance_id,
             "code_commit": frozen.code_commit,
+            "strategy_snapshot_sha256": self._bundle.strategy_hash,
+            "experiment_snapshot_sha256": self._bundle.experiment_hash,
+            "data_environment_snapshot_sha256":
+                self._bundle.data_environment_hash,
             "evaluation_reason": reason,
             "artifacts": artifacts,
         }
@@ -1335,12 +1860,28 @@ class ResearchRunner:
                 "universe_membership_table_sha256":
                     self._universe_preflight.definition.membership_table_sha256,
             })
+        if frozen.execution_pipeline == "walk_forward_oos_v1":
+            wf_report = json.loads(
+                (self._run_dir / "stability_report.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            manifest.update({
+                "stability_conclusion": wf_report["stability_conclusion"],
+                "stability_policy_hash": wf_report["stability_policy_hash"],
+                "fold_schedule_sha256": wf_report["schedule"][
+                    "fold_schedule_sha256"
+                ],
+                "fold_outcomes_sha256": wf_report["schedule"][
+                    "fold_outcomes_sha256"
+                ],
+            })
         (publish_dir / "experiment_manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
             encoding="utf-8",
         )
         return self._registry.publish(
-            self._run_dir, ExperimentIdentity.of(frozen)
+            self._run_dir, ExperimentIdentity.of(frozen, self._bundle)
         )
 
     def _fail(self, state: RunState, error: Exception) -> None:
@@ -1591,7 +2132,9 @@ class ResearchRunner:
         version_path = self._run_dir / "dataset_version.txt"
         version_path.write_text(f"{frozen.dataset_version}\n", encoding="utf-8")
         snapshot = {
-            "experiment_id": ExperimentIdentity.of(frozen).experiment_id,
+            "experiment_id": ExperimentIdentity.of(
+                frozen, self._bundle
+            ).experiment_id,
             "dataset_version": frozen.dataset_version,
             "universe_version": frozen.universe_version,
             "universe": self._universe_identity(frozen),
@@ -1973,6 +2516,36 @@ class ResearchRunner:
             self._run_dir / "cash_ledger.parquet"
         )
         return outputs
+
+    def _walk_forward_publish_set(self) -> tuple[str, ...]:
+        """The complete walk-forward audit set (relative paths, sorted).
+
+        Root audit files plus every executed fold's declared artifact set;
+        an executed fold's assets publish only when the whole set is present,
+        so an incomplete experiment can never be staged.
+        """
+        names = [
+            "experiment_spec.yml",
+            "config_snapshot.yml",
+            "dataset_version.txt",
+            "metrics.json",
+            "report.html",
+            "stability_report.json",
+            "fold_schedule.json",
+            "fold_outcomes.json",
+            "walk_forward_manifest.json",
+        ]
+        for fold_dir in sorted((self._run_dir / "folds").iterdir()):
+            if not fold_dir.is_dir():
+                continue
+            for name in FOLD_ARTIFACTS:
+                if not (fold_dir / name).is_file():
+                    raise FileNotFoundError(
+                        f"fold {fold_dir.name} is missing {name}; an "
+                        "incomplete fold audit set can never be published"
+                    )
+            names.extend(f"folds/{fold_dir.name}/{name}" for name in FOLD_ARTIFACTS)
+        return tuple(sorted(names))
 
     def _canonical_scenario(self, scenario_names: Sequence[str]) -> str:
         if CANONICAL_SCENARIO in scenario_names:

@@ -14,6 +14,13 @@
 #
 # data_acceptance_id 同理：CURRENT_ACCEPTED 请求当前有效的真实数据验收记录，
 # runner 在计算实验身份前解析并冻结为显式验收 id（正式 RESEARCH 必需）。
+#
+# execution_pipeline 声明本研究的执行政策：walk_forward_oos_v1（固定日历年度
+# OOS fold、独立账户、政策化稳定性结论）是正式研究管线。date_range 是请求的
+# OOS 评估范围，不含预热：每个 fold 的三年日历预热在范围之外由 runner 计算，
+# 未能形成完整 12 个月 fold 的首尾日期记录为 not_evaluated_boundary。
+# engineering_single_window（遗留单窗口工程诊断路径）不产出正式稳定性结论。
+execution_pipeline: walk_forward_oos_v1
 hypothesis: >-
   过去 60 个交易日的复权收益在 A 股样本内对随后短期收益存在一定持续性；
   一期仅验证工程链路可复现并跑通全部运行状态，不声称统计有效性，也不构成投资建议。

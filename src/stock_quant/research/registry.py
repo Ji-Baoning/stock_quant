@@ -33,6 +33,7 @@ from typing import Literal
 import pandas as pd
 from pydantic import BaseModel, Field, ValidationError
 
+from stock_quant.research.models import _MANIFEST_NAMES, validate_artifact_paths
 from stock_quant.research.spec import (
     ExperimentSpec,
     compute_experiment_id,
@@ -110,6 +111,13 @@ class ExperimentManifest(BaseModel):
     strategy_snapshot_sha256: str
     experiment_snapshot_sha256: str
     data_environment_snapshot_sha256: str
+    #: Walk-forward audit bindings (``None`` on legacy single-window
+    #: experiments): the stability verdict, its policy hash and the two
+    #: immutable walk-forward artifact hashes.
+    stability_conclusion: str | None = None
+    stability_policy_hash: str | None = None
+    fold_schedule_sha256: str | None = None
+    fold_outcomes_sha256: str | None = None
     evaluation_reason: str | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
 
@@ -249,6 +257,7 @@ class ExperimentRegistry:
             _assert_manifest_acceptance_binding(
                 staged, manifest, InvalidExperimentManifest
             )
+            _assert_artifact_tree(staged, manifest, InvalidExperimentManifest)
             if destination.exists():
                 if _declared_files_match(staged, destination, manifest.artifacts):
                     return PublishedExperiment(
@@ -419,6 +428,40 @@ def _assert_manifest_snapshot_binding(
                 f"{field} {manifest_value!r} but the identity pins "
                 f"{identity_value!r} ({directory})"
             )
+
+
+def _assert_artifact_tree(
+    staged: Path,
+    manifest: ExperimentManifest,
+    error_class: type[ExperimentRegistryError],
+) -> None:
+    """Admit only the declared artifact map: no extra and no missing files.
+
+    Every manifest artifact path must be a declared root file or a
+    ``folds/<fold_id>/<declared-name>`` path, every declared file must exist
+    (hash verification happens next), and the staged tree must contain
+    nothing beyond the declared map plus the two self-describing manifests.
+    """
+    try:
+        validate_artifact_paths(manifest.artifacts)
+    except ValueError as error:
+        raise error_class(str(error)) from error
+    declared = set(manifest.artifacts) | _MANIFEST_NAMES
+    actual = {
+        path.relative_to(staged).as_posix()
+        for path in staged.rglob("*")
+        if path.is_file()
+    }
+    missing = sorted(declared - actual)
+    if missing:
+        raise error_class(
+            f"staged experiment is incomplete; declared files absent: {missing}"
+        )
+    extra = sorted(actual - declared)
+    if extra:
+        raise error_class(
+            f"staged experiment carries undeclared files: {extra}"
+        )
 
 
 def _assert_manifest_acceptance_binding(

@@ -547,3 +547,75 @@ def test_membership_import_prepare_writes_canonical_facts(cli_runner, tmp_path):
     assert printed_hash == membership_content_hash(
         [_fact_payload("600000.SH"), _fact_payload("000001.SZ")]
     )
+
+
+# --------------------------------------------------------------------------- #
+# Walk-forward CLI behaviour: status + nullable conclusion, nonzero on failure
+# --------------------------------------------------------------------------- #
+
+
+def test_walk_forward_research_prints_status_and_nullable_conclusion(
+    cli_runner, fixture_root
+):
+    """A completed walk-forward run exits zero retaining the exact label.
+
+    The 2021-only spec completes with one executed fold: a valid process with
+    fewer than five executed folds is INCONCLUSIVE -- valid-but-insufficient
+    evidence, never a statement about strategy quality.
+    """
+    result = cli_runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            "--spec",
+            "configs/experiments/walk_forward.yml",
+            "--root",
+            str(fixture_root.root),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "research_status=COMPLETED" in result.stdout
+    assert "stability_conclusion=INCONCLUSIVE" in result.stdout
+    experiment_id = next(
+        line.split("=", 1)[1].strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("experiment_id=")
+    )
+    root = fixture_root.root / "data" / "experiments" / experiment_id
+    assert (root / "fold_schedule.json").is_file()
+    assert (root / "fold_outcomes.json").is_file()
+    assert (root / "stability_report.json").is_file()
+    assert (root / "walk_forward_manifest.json").is_file()
+
+
+def test_walk_forward_fold_failure_exits_nonzero_and_publishes_nothing(
+    cli_runner, fixture_root
+):
+    """A fold/system preflight failure is FAILED with a null conclusion.
+
+    The early-2019 spec's only fold cannot satisfy the 756-session warmup
+    floor: the run fails before any account exists, exits nonzero, and the
+    published experiment registry receives no incomplete experiment.
+    """
+    experiments = fixture_root.root / "data" / "experiments"
+    before = (
+        set(p.name for p in experiments.iterdir()) if experiments.is_dir() else set()
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            "--spec",
+            "configs/experiments/walk_forward_early.yml",
+            "--root",
+            str(fixture_root.root),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "FAILED" in result.stdout
+    published = (
+        set(p.name for p in experiments.iterdir()) if experiments.is_dir() else set()
+    )
+    assert published == before, "a failed fold can never publish an experiment"

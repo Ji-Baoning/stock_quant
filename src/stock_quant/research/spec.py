@@ -123,6 +123,15 @@ class ExperimentSpec(BaseModel):
     #: diagnostic (its performance decision stays UNTRUSTED).
     data_acceptance_id: str | None = CURRENT_ACCEPTED
     date_range: DateRange
+    #: The explicit execution policy of this study.  The first-phase formal
+    #: research pipeline is ``walk_forward_oos_v1`` (fixed-calendar annual
+    #: OOS folds with a policy-bound stability conclusion); the legacy
+    #: single-window engineering pipeline stays available only under its
+    #: explicit ``engineering_single_window`` policy and can never publish a
+    #: formal stability conclusion.
+    execution_pipeline: Literal[
+        "engineering_single_window", "walk_forward_oos_v1"
+    ] = "engineering_single_window"
     train_validation_holdout_policy: Literal["not_applicable_engineering_mvp"]
     preprocessing: Preprocessing
     portfolio_rule: PortfolioRule
