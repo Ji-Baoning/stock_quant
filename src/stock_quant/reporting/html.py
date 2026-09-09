@@ -128,6 +128,13 @@ class ExperimentReportInput:
     #: (report inputs that predate the trust gate) reads as a trusted default so
     #: no report renders an untrusted alarm it cannot substantiate.
     corporate_action_trust: dict | None = None
+    #: The pinned real-data acceptance audit persisted with the run
+    #: (``metrics["data_acceptance"]``): ``{"acceptance_id", "policy_version",
+    #: "operator_id", "created_at", "decision"}``.  ``None`` -- or the
+    #: engineering ``{"acceptance_id": None, "status": "UNVERIFIED"}`` shape
+    #: that carries no decision -- renders the prominent UNVERIFIED alert: a
+    #: report never infers ACCEPTED from missing data.
+    data_acceptance: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -298,6 +305,30 @@ def _factor_input_block(factor_input_audit: dict | None) -> dict | None:
         "reason_text": "、".join(
             f"{reason}: {count}" for reason, count in reason_items
         ),
+    }
+
+
+def _data_acceptance_block(data_acceptance: dict[str, object] | None) -> dict | None:
+    """Normalize the persisted real-data acceptance audit for the template.
+
+    Returns ``None`` when no audit is supplied -- or when the mapping carries
+    no concrete ``decision`` (the engineering ``{"acceptance_id": None,
+    "status": "UNVERIFIED"}`` shape) -- so the 真实数据验收 section renders its
+    prominent UNVERIFIED alert instead of an empty claim: a report never
+    infers ACCEPTED from missing data.  Every field stays a plain string that
+    only Jinja's autoescape ever renders, never markup.
+    """
+    if not isinstance(data_acceptance, dict):
+        return None
+    decision = data_acceptance.get("decision")
+    if not decision:
+        return None
+    return {
+        "decision": str(decision),
+        "policy_version": str(data_acceptance.get("policy_version", "")),
+        "acceptance_id": str(data_acceptance.get("acceptance_id") or ""),
+        "operator_id": str(data_acceptance.get("operator_id", "")),
+        "created_at": str(data_acceptance.get("created_at", "")),
     }
 
 
@@ -760,6 +791,7 @@ def render_experiment_report(
         ),
         trust=_trust_block(experiment.corporate_action_trust),
         factor_input=_factor_input_block(experiment.factor_input_audit),
+        data_acceptance=_data_acceptance_block(experiment.data_acceptance),
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(body, encoding="utf-8")

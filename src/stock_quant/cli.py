@@ -59,11 +59,15 @@ from stock_quant.reporting.html import (
     render_experiment_report,
     render_quality_report,
 )
+from stock_quant.research.acceptance.models import AcceptanceRecord
+from stock_quant.research.acceptance.registry import (
+    AcceptanceIntegrityError,
+    AcceptanceRegistry,
+)
 from stock_quant.research.acceptance.service import (
     AcceptanceRejected,
     prepare_checklist,
     publish_checklist,
-    show_acceptances,
 )
 from stock_quant.research.models import ResearchRunFailed
 from stock_quant.research.reconcile import (
@@ -344,16 +348,47 @@ def data_acceptance_show(
     version: Annotated[str, typer.Option("--version", help="Dataset version hash.")],
     root: Path = typer.Option(".", "--root", help="Project root."),
 ) -> None:
-    """List one dataset version's acceptance history, oldest first."""
-    records = show_acceptances(Path(root), version)
-    if not records:
+    """List one dataset version's acceptance history, oldest first.
+
+    Every record prints its stored decision; a record that carries rejection
+    (or other) reasons appends one ``reason=`` line each.  A stored record
+    that fails its integrity check is named with ``corrupt acceptance_id=``
+    instead of surfacing a traceback, the remaining history is still listed,
+    and the command exits nonzero so corruption is never mistaken for a pass.
+    """
+    registry = AcceptanceRegistry(Path(root))
+    directory = registry.root / version
+    if not directory.is_dir():
         typer.echo("UNACCEPTED")
         return
-    for record in records:
+    records: list[AcceptanceRecord] = []
+    corrupt_ids: list[str] = []
+    for child in sorted(directory.iterdir()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        try:
+            records.append(registry.get(version, child.name))
+        except AcceptanceIntegrityError:
+            # Integrity validation stays in the registry; here the damaged
+            # record is only named so the history remains readable and the
+            # corrupted id is auditable without leaking paths or payloads.
+            corrupt_ids.append(child.name)
+    if not records and not corrupt_ids:
+        typer.echo("UNACCEPTED")
+        return
+    for record in sorted(
+        records, key=lambda row: (row.created_at, row.acceptance_id)
+    ):
         typer.echo(
             f"{record.created_at.isoformat()} {record.acceptance_id} "
             f"{record.policy_version} {record.decision.value}"
         )
+        for reason in record.reasons:
+            typer.echo(f"reason={reason}")
+    for acceptance_id in corrupt_ids:
+        typer.echo(f"corrupt acceptance_id={acceptance_id}")
+    if corrupt_ids:
+        raise typer.Exit(code=1)
 
 
 # --------------------------------------------------------------------------- #
@@ -563,6 +598,10 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
         # rebuilt report states the same adjustment basis and break counts the
         # run recorded; older metrics without the key simply omit the section.
         factor_input_audit=metrics.get("factor_input"),
+        # The pinned real-data acceptance audit (metrics["data_acceptance"]);
+        # metrics without the key render the UNVERIFIED alert, never an
+        # inferred ACCEPTED decision.
+        data_acceptance=metrics.get("data_acceptance"),
     )
 
 

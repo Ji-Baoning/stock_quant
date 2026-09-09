@@ -89,6 +89,62 @@ section, including the ERROR break count of the pinned dataset.
 
 Status: 复权/公司行为一致性已实现，等待真实数据验收。
 
+## Real data acceptance (数据验收)
+
+Formal `research run` is gated by a **real data acceptance** record
+(`policy_version=real-data-v1`): a content-addressed, immutable, operator
+signed verdict that one pinned dataset version's supply quality was verified.
+It is a *data supply* quality gate, not a strategy verdict: a published
+experiment's performance credibility stays diagnostic-only (`UNTRUSTED`) in
+engineering mode regardless of any acceptance record. Data acceptance and
+strategy acceptance (绩效可信度) are separate decisions.
+
+Operator flow (offline except the data itself; details in
+`docs/operations/phase-one-validation.md`):
+
+```bash
+# 1. Prepare the checklist: fresh automated check verdicts; every manual row
+#    starts as an explicit FAIL the operator must turn into PASS.
+python -m stock_quant data acceptance prepare --version <VERSION_HASH> \
+  --operator <OPERATOR_ID> --output checklist.yml --root <PROJECT_ROOT>
+
+# 2. Edit the checklist by hand: flip each manual row to PASS with evidence.
+#    Evidence files live inside the project (project-relative `reference` +
+#    `sha256`); `external` references are never fetched -- their sha256 pins
+#    the stored UTF-8 summary text.
+
+# 3. Publish: re-runs every automated check and re-hashes all bound evidence.
+#    All PASS -> ACCEPTED, exit 0.  Anything else -> the REJECTED record is
+#    persisted first (immutable audit), reasons printed, exit 1.
+python -m stock_quant data acceptance publish --checklist checklist.yml --root <PROJECT_ROOT>
+
+# 4. Inspect the version's history (oldest first, with reason= lines; a
+#    corrupted record prints corrupt acceptance_id=<id> and exits nonzero).
+python -m stock_quant data acceptance show --version <VERSION_HASH> --root <PROJECT_ROOT>
+```
+
+Semantics formal research relies on:
+
+- A spec's `data_acceptance_id` may be the placeholder `CURRENT_ACCEPTED`
+  (resolves to the newest valid ACCEPTED record for the pinned dataset at run
+  time, re-verified against the live evidence every run) or an explicit
+  64-hex id (pins exactly one record). A frozen spec always carries the
+  concrete resolved id, never the placeholder.
+- REJECTED records are persisted and immutable but never selectable: with no
+  valid ACCEPTED record the research run fails before any factor or backtest
+  work and leaves a FAILED preflight manifest.
+- Datasets published before the acceptance evidence existed (bootstrap seeds,
+  legacy versions) fail the automated checks that need `build_config`
+  provenance — run a full `data update` to publish a compatible dataset.
+  Old experiments stay readable; engineering-mode runs need no acceptance but
+  are recorded `UNVERIFIED` and stay `UNTRUSTED`.
+- Every experiment report renders the 真实数据验收 section from
+  `metrics.json["data_acceptance"]`; a run without an accepted record shows a
+  prominent `UNVERIFIED` alert and the report never infers `ACCEPTED`.
+
+The mechanism is implemented and offline-tested, but no operator has yet run
+the acceptance flow on real data.
+
 ## Notebook
 
 `notebooks/01_momentum_baseline.ipynb` is a thin, fully offline walkthrough over

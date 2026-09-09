@@ -216,6 +216,15 @@ def test_get_detects_truncated_json(tmp_path, accepted_record):
         registry.get(_DATASET_VERSION, accepted_record.acceptance_id)
 
 
+def test_get_detects_binary_garbage(tmp_path, accepted_record):
+    """A record file that is not valid UTF-8 is corrupt, never a crash."""
+    registry = AcceptanceRegistry(tmp_path)
+    registry.publish(accepted_record)
+    registry.path_for(accepted_record).write_bytes(b"\xff\xfe\x00garbage")
+    with pytest.raises(AcceptanceIntegrityError):
+        registry.get(_DATASET_VERSION, accepted_record.acceptance_id)
+
+
 def test_get_detects_decision_flip_without_reasons(tmp_path, accepted_record):
     registry = AcceptanceRegistry(tmp_path)
     registry.publish(accepted_record)

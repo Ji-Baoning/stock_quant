@@ -111,7 +111,9 @@ class AcceptanceRegistry:
             record = AcceptanceRecord.model_validate_json(
                 path.read_text(encoding="utf-8")
             )
-        except ValidationError as error:
+        except (ValidationError, UnicodeDecodeError) as error:
+            # Binary garbage fails UTF-8 decoding before pydantic ever sees
+            # it; both shapes are a corrupt stored record, never a crash.
             raise AcceptanceIntegrityError(
                 "acceptance.json is not a valid record"
             ) from error

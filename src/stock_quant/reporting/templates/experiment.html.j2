@@ -32,6 +32,7 @@
   .trust-ok { color: #2e7d32; font-weight: 600; }
   .banner.trust-fail { border-color: #c62828; background: #fdecea; }
   .banner.trust-fail strong { color: #b71c1c; }
+  .alert { color: #b71c1c; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -79,6 +80,18 @@
     {% if factor_input.reason_text %}<p>断点原因：{{ factor_input.reason_text }}</p>{% endif %}
   </section>
   {% endif %}
+
+  <section class="data-acceptance">
+    <h2>真实数据验收</h2>
+    {% if data_acceptance %}
+    <p>结论：{{ data_acceptance.decision }}</p>
+    <p>规则：{{ data_acceptance.policy_version }}</p>
+    <p>验收 ID：<code>{{ data_acceptance.acceptance_id }}</code></p>
+    <p>操作者：{{ data_acceptance.operator_id }}；时间：{{ data_acceptance.created_at }}</p>
+    {% else %}
+    <p class="alert">UNVERIFIED：没有绑定真实数据验收记录。</p>
+    {% endif %}
+  </section>
 
   <section>
     <h2>版本与配置</h2>

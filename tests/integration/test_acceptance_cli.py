@@ -11,6 +11,7 @@ no stdout line ever carries an absolute local path.  Offline only.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -254,3 +255,105 @@ def test_show_lists_history_oldest_first(cli_runner, project):
     assert _acceptance_id(first.stdout) in lines[0]
     assert _acceptance_id(second.stdout) in lines[1]
     assert lines[0].endswith("ACCEPTED")
+
+
+def test_show_lists_rejection_reasons(cli_runner, project):
+    """A persisted REJECTED record shows its stored reasons under its line."""
+    checklist = _prepare(cli_runner, project)
+    rejected = _invoke(
+        cli_runner, project, "publish", "--checklist", str(checklist)
+    )
+    assert rejected.exit_code == 1
+    acceptance_id = _acceptance_id(rejected.stdout)
+
+    shown = _invoke(cli_runner, project, "show", "--version", project.version)
+    assert shown.exit_code == 0, shown.stdout
+    assert acceptance_id in shown.stdout
+    assert "REJECTED" in shown.stdout
+    saved = AcceptanceRegistry(project.root).get(project.version, acceptance_id)
+    assert saved.reasons
+    for reason in saved.reasons:
+        assert f"reason={reason}" in shown.stdout
+
+
+def test_show_names_corrupted_record_and_still_lists_history(cli_runner, project):
+    """A hash-broken record is named and fails the command without a
+    traceback, while the remaining valid history is still listed and the
+    damaged payload itself never surfaces."""
+    completed = _complete_checklist(project, _prepare(cli_runner, project))
+    accepted = _invoke(cli_runner, project, "publish", "--checklist", str(completed))
+    assert accepted.exit_code == 0, accepted.stdout
+
+    payload = yaml.safe_load(completed.read_text(encoding="utf-8"))
+    payload["operator_id"] = "operator-b"
+    resigned = completed.with_name("resigned.yml")
+    resigned.write_text(
+        yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    second = _invoke(cli_runner, project, "publish", "--checklist", str(resigned))
+    assert second.exit_code == 0, second.stdout
+
+    corrupt_id = _acceptance_id(accepted.stdout)
+    record_path = (
+        project.root
+        / "data"
+        / "acceptances"
+        / project.version
+        / corrupt_id
+        / "acceptance.json"
+    )
+    tampered = json.loads(record_path.read_text(encoding="utf-8"))
+    tampered["operator_id"] = "operator-tampered"
+    record_path.write_text(
+        json.dumps(tampered, ensure_ascii=False, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    shown = _invoke(cli_runner, project, "show", "--version", project.version)
+    assert shown.exit_code == 1
+    assert f"corrupt acceptance_id={corrupt_id}" in shown.stdout
+    assert _acceptance_id(second.stdout) in shown.stdout
+    assert "ACCEPTED" in shown.stdout
+    assert "Traceback" not in shown.output
+    assert "operator-tampered" not in shown.output
+
+
+def test_show_names_binary_garbage_record_and_still_lists_history(
+    cli_runner, project
+):
+    """A record file that is not valid UTF-8 is named as corrupt without a
+    traceback -- the command still lists the remaining valid history and
+    fails nonzero, so undecodable bytes never abort the audit halfway."""
+    completed = _complete_checklist(project, _prepare(cli_runner, project))
+    accepted = _invoke(cli_runner, project, "publish", "--checklist", str(completed))
+    assert accepted.exit_code == 0, accepted.stdout
+
+    payload = yaml.safe_load(completed.read_text(encoding="utf-8"))
+    payload["operator_id"] = "operator-b"
+    resigned = completed.with_name("resigned.yml")
+    resigned.write_text(
+        yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    second = _invoke(cli_runner, project, "publish", "--checklist", str(resigned))
+    assert second.exit_code == 0, second.stdout
+
+    corrupt_id = _acceptance_id(accepted.stdout)
+    record_path = (
+        project.root
+        / "data"
+        / "acceptances"
+        / project.version
+        / corrupt_id
+        / "acceptance.json"
+    )
+    record_path.write_bytes(b"\xff\xfe\x00garbage")
+
+    shown = _invoke(cli_runner, project, "show", "--version", project.version)
+    assert shown.exit_code == 1
+    assert f"corrupt acceptance_id={corrupt_id}" in shown.stdout
+    assert _acceptance_id(second.stdout) in shown.stdout
+    assert "ACCEPTED" in shown.stdout
+    assert "Traceback" not in shown.output
+    assert "garbage" not in shown.output

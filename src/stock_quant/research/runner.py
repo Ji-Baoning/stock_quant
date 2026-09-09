@@ -338,6 +338,7 @@ class _DefaultReport:
             f"<h1>{_html(experiment_id)}</h1>"
             f"<p>evaluation: {_html(status)}</p><p>{reason}</p>"
             + _factor_input_paragraph(metrics)
+            + _data_acceptance_paragraph(metrics)
             + "<table><thead><tr><th>scenario</th><th>start</th><th>end</th>"
             "<th>periods</th><th>end_equity</th><th>total_return</th>"
             "</tr></thead><tbody>"
@@ -371,6 +372,29 @@ def _factor_input_paragraph(metrics: dict[str, object]) -> str:
         f"输入行数 {_html(audit.get('row_count'))}；"
         f"不可信断点 {_html(audit.get('error_break_count'))}</p>"
     )
+
+
+def _data_acceptance_paragraph(metrics: dict[str, object]) -> str:
+    """An escaped 真实数据验收 status line over the pinned acceptance audit.
+
+    The rebuilt rich report renders ``metrics["data_acceptance"]`` as a full
+    section; this one line keeps the lightweight report produced directly by
+    ``research run`` aligned on the same acceptance identity.  A run without a
+    concrete accepted decision -- engineering runs and older metrics alike --
+    prints UNVERIFIED: the lightweight report never infers ACCEPTED from
+    missing data.
+    """
+    audit = metrics.get("data_acceptance")
+    if isinstance(audit, Mapping) and audit.get("decision"):
+        return (
+            "<p>真实数据验收: "
+            f"{_html(audit.get('decision'))}；"
+            f"规则 {_html(audit.get('policy_version'))}；"
+            f"验收 ID {_html(audit.get('acceptance_id'))}；"
+            f"操作者 {_html(audit.get('operator_id'))}；"
+            f"时间 {_html(audit.get('created_at'))}</p>"
+        )
+    return "<p>真实数据验收: UNVERIFIED（没有绑定真实数据验收记录）</p>"
 
 
 class _DefaultEvaluator:

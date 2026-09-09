@@ -225,6 +225,7 @@ def _experiment_input(
     known_limitations: tuple[str, ...] | None = None,
     corporate_action_trust: dict | None = None,
     factor_input_audit: dict | None = None,
+    data_acceptance: dict | None = None,
 ) -> ExperimentReportInput:
     benchmark = _benchmark()
     scenarios: list[ExperimentScenario] = []
@@ -265,6 +266,7 @@ def _experiment_input(
         known_limitations=known_limitations,
         corporate_action_trust=corporate_action_trust,
         factor_input_audit=factor_input_audit,
+        data_acceptance=data_acceptance,
     )
 
 
@@ -580,6 +582,63 @@ def test_experiment_html_escapes_factor_audit_reasons(tmp_path):
     }
     html = render_experiment_report(
         _experiment_input(factor_input_audit=audit), tmp_path / "report.html"
+    ).read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+
+
+# --------------------------------------------------------------------------- #
+# Real-data acceptance audit section (plan Task 7)
+# --------------------------------------------------------------------------- #
+
+
+def test_experiment_report_shows_data_acceptance(tmp_path):
+    report = _experiment_input(
+        data_acceptance={
+            "acceptance_id": "a" * 64,
+            "policy_version": "real-data-v1",
+            "operator_id": "operator-a",
+            "created_at": "2026-09-08T12:00:00+00:00",
+            "decision": "ACCEPTED",
+        }
+    )
+    path = render_experiment_report(report, tmp_path / "report.html")
+    html = path.read_text(encoding="utf-8")
+    assert "真实数据验收" in html
+    assert "real-data-v1" in html
+    assert "operator-a" in html
+    assert "a" * 64 in html
+    assert "ACCEPTED" in html
+    assert "2026-09-08T12:00:00+00:00" in html
+    # The audit section leads the performance presentation, never follows it.
+    assert html.index("真实数据验收") < html.index("绩效汇总")
+    assert html.index("真实数据验收") < html.index("净值与回撤")
+
+
+def test_experiment_html_flags_unverified_without_acceptance(tmp_path):
+    # No acceptance audit (or the engineering {"acceptance_id": None,
+    # "status": "UNVERIFIED"} shape) must render the prominent UNVERIFIED
+    # alert and never an inferred ACCEPTED claim.
+    for missing in (None, {"acceptance_id": None, "status": "UNVERIFIED"}):
+        html = render_experiment_report(
+            _experiment_input(data_acceptance=missing), tmp_path / "r.html"
+        ).read_text(encoding="utf-8")
+        assert "真实数据验收" in html
+        assert "UNVERIFIED" in html
+        assert "ACCEPTED" not in html
+        assert "real-data-v1" not in html
+
+
+def test_experiment_html_escapes_data_acceptance_fields(tmp_path):
+    audit = {
+        "acceptance_id": "b" * 64,
+        "policy_version": "real-data-v1",
+        "operator_id": "<script>alert(1)</script>",
+        "created_at": "2026-09-08T12:00:00+00:00",
+        "decision": "ACCEPTED",
+    }
+    html = render_experiment_report(
+        _experiment_input(data_acceptance=audit), tmp_path / "report.html"
     ).read_text(encoding="utf-8")
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
