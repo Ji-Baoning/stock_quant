@@ -159,7 +159,9 @@ separate, schedule-hash-bound `fold_outcomes.json`.
 thresholds, statuses and reasons, per-scenario aggregate OOS returns and
 per-fold metrics) and the content-hashed `folds/<fold_id>/` asset set
 (`fold_manifest.json`, `signals.parquet`, `orders.parquet`, `fills.parquet`,
-`equity.parquet`, `daily_returns.parquet`, `metrics.json`). Failed folds
+`equity.parquet`, `daily_returns.parquet`, `portfolio_construction.parquet`,
+`metrics.json`, plus each scenario's
+`backtest/<scenario>/rebalance_decisions.parquet`). Failed folds
 remain in the schedule and the outcome ledger forever.
 
 **Metric conventions** (spec 指标口径):
@@ -186,6 +188,99 @@ The legacy single-window pipeline remains available only under the explicit
 `execution_pipeline: engineering_single_window` policy (the debug
 `backtest momentum_60d` diagnostic); it cannot publish a formal stability
 conclusion.
+
+## Buffered risk-weighted momentum (`buffered_risk_weighted`)
+
+The committed `momentum_60d.yml` selects the pre-registered
+`buffered_risk_weighted` portfolio rule: the `momentum_60d` factor and the
+weekly rebalance frequency are unchanged; only portfolio construction and
+account reconciliation changed from the equal-weight baseline (which stays
+available for baseline/engineering specs). The frozen first-run parameters
+are `target_count=10`, `entry_rank=10`, `hold_rank=15`,
+`risk_lookback_days=60`, `min_risk_observations=40`,
+`volatility_floor_annualized=0.10`, `max_single_weight=0.15`,
+`rebalance_band_absolute=0.02`, `gross_exposure=1.00`,
+`weight_quantum=1e-12`, long-only, no leverage.
+
+**Identity.** `portfolio_rule_version` is the SHA-256 of the rule's canonical
+JSON — never a handwritten label. The same canonical content sits in the
+strategy snapshot's `parameters_hash`, so any explicit parameter change is a
+*new* experiment identity and a registered run can never be silently
+re-parameterized. Read it from `folds/<fold_id>/fold_manifest.json`
+(`portfolio_rule.portfolio_rule_version`) or from every
+`portfolio_construction.parquet` row.
+
+**Construction (one common target, scenario-free).** Per signal date:
+
+1. `raw_momentum_rank` orders factor-valid candidates by descending
+   processed momentum then ascending full symbol string (`000001.SZ` <
+   `000002.SZ` < `600000.SH`); supplier row order never matters.
+2. Symbols whose trusted risk input is invalid are removed and the order is
+   renumbered continuously into `risk_eligible_rank` — a risk-invalid top
+   name never consumes an entry slot.
+3. Previous target members stay retained through `risk_eligible_rank <= 15`;
+   the remaining seats fill only from `risk_eligible_rank <= 10`. Membership
+   state crosses signal dates only inside one fold and resets at every fold
+   boundary; it inherits frozen member codes only — never quantities, fills,
+   cash or any scenario state.
+4. Weights are capped inverse-volatility over the members: risk score
+   `1 / max(applied_vol, 0.10)`, target exposure
+   `min(1.00, count * 0.15)`, deterministic water-fill under the 15% cap,
+   every weight quantized down to `1e-12` with the residual quanta
+   redistributed in ascending symbol order. The unallocatable residue is
+   cash, so `sum(target_weight) + cash_weight == 1.00` exactly.
+
+**Trusted risk.** Each candidate's volatility uses the final 60 confirmed
+sessions ending at the signal date, never a later one. A real close needs a
+finite positive adjusted close with non-ERROR quality and no missing reason;
+at least 40 real closes are required (`real_close_observations >= 40`).
+A `suspended_verified` carry row contributes a zero path return and never
+counts toward the 40; an unknown gap, quality ERROR, non-positive close or a
+carry without a prior trusted close invalidates that symbol's risk input with
+the stable reason in `risk_invalid_reason` — the candidate is excluded, the
+fold does not fail.
+
+**Common targets, scenario accounts.** Every declared cost scenario shares
+the identical signal, members and theoretical target weights. Each scenario
+converts the common weights into whole-lot quantities from its own
+signal-close account equity (`target_quantity =
+floor(target_weight * signal_close_equity / signal_price / 100) * 100`), so
+quantities, orders, fills and cash may diverge — member selection never
+depends on them.
+
+**Reconcile band and suppressions.** A *continuing* position (in both the
+previous and current common member sets with a positive target weight) is
+rebalanced only when `|current_weight - target_weight| >= 0.02`; exactly 2%
+rebalances, strictly below suppresses (`within_rebalance_band`). Entries and
+zero-weight exits always reconcile; any difference below one lot emits
+`below_one_lot` with no order. Both suppressions are recorded rows in the
+scenario's `rebalance_decisions.parquet` (with both weights, the difference,
+both quantities, the signal-close equity and the reason) — they are
+pre-order portfolio decisions, **not execution rejections**; rejections stay
+in `rejections.parquet`. Risk invalidity is a third, separate thing again:
+an excluded candidate recorded in the construction audit.
+
+**Artifacts.** Per fold: `folds/<fold_id>/portfolio_construction.parquet`
+(one ordered audit row per factor-valid candidate plus every previous
+target: both ranks, member status/reason, 60/40 risk counts, raw and applied
+volatility, risk score, raw/capped/target weights, cash residue and the rule
+version). Per scenario:
+`folds/<fold_id>/backtest/<scenario>/rebalance_decisions.parquet` beside that
+scenario's submitted orders/fills/rejections. The stability report and the
+HTML report carry a `buffered` section: per-fold member changes
+(`成员变化换手`), continuing-position rebalances (`连续持仓再平衡换手`),
+band suppression (`带宽抑制金额`) and lot suppression (`手数抑制金额`).
+
+**Operator checks.** Verify a fold's 60/40 counts from
+`portfolio_construction.parquet` (`window_start/window_end`,
+`real_close_observations >= 40`, `suspension_carry_days`); inspect
+`member_status` (`retained|entered|exited|not_selected|risk_invalid`) and
+`member_reason`; recompute any member's weight from
+`applied_annualized_volatility` (score `1 / max(vol, 0.10)`, cap at 0.15,
+quantize down to `1e-12`) and confirm `sum(target_weight) + cash_weight ==
+1.00`; confirm every scenario's decisions reference only common members.
+**Parameters cannot be changed after viewing fold results** — any change is
+a new pre-registered identity that must be declared before its own run.
 
 ## Reproducibility check
 

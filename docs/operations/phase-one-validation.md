@@ -417,3 +417,77 @@ python -m stock_quant data acceptance show \
 - [ ] CLI `research run` 打印 `research_status=` 与 `stability_conclusion=`；
   FAILED 非零退出，COMPLETED 的 STABLE/UNSTABLE/INCONCLUSIVE 零退出并保留
   确切标签。
+
+## 9. 缓冲式风险加权组合审计清单（buffered_risk_weighted，正式研究）
+
+`momentum_60d` 因子与周频调仓不变；本清单只核对组合构建与账户对账的新产物。
+首期预注册参数固定为：`target_count=10`、`entry_rank=10`、`hold_rank=15`、
+`risk_lookback_days=60`、`min_risk_observations=40`、
+`volatility_floor_annualized=0.10`、`max_single_weight=0.15`、
+`rebalance_band_absolute=0.02`、`gross_exposure=1.00`、
+`weight_quantum=1e-12`、仅多头、无杠杆。**看过 fold 结果之后不允许改参数**；
+任何修改都是新的预注册身份，必须先声明再运行。
+
+### 9.1 身份与规则版本
+
+- [ ] `folds/<fold_id>/fold_manifest.json` 的 `portfolio_rule.name` 为
+  `buffered_risk_weighted`，`portfolio_rule.portfolio_rule_version` 为 64 位
+  十六进制（规则参数规范 JSON 的 SHA-256，非手写标签）。
+- [ ] 该版本与每一行 `portfolio_construction.parquet` 的
+  `portfolio_rule_version` 列一致，也与 `metrics.json` 顶层
+  `meta.spec.portfolio_rule`（及 `experiment_spec.yml` 的 `portfolio_rule`）
+  的规范 JSON 内容一致；同一规范内容进入策略快照的 `parameters_hash` 与
+  实验 ID（改参数 = 新实验身份，已注册运行不可变）。
+
+### 9.2 60/40 风险输入
+
+- [ ] 每个候选行的窗口为 `window_start..window_end` 恰 60 个确认交易日且
+  终于信号日；`real_close_observations >= 40` 的候选才允许进入成员资格。
+- [ ] `suspension_carry_days`（可信停牌前值日）贡献零收益且不计入 40 个真实
+  收盘；`risk_invalid_reason` 只出现 `untrusted_missing_observation` 或
+  `insufficient_real_close_observations`，风险无效只淘汰该候选并留原因。
+
+### 9.3 双排名与成员缓冲
+
+- [ ] `raw_momentum_rank` 覆盖全部因子有效候选（动量降序 + symbol 完整字符串
+  升序，与供应商行序无关）；删除风险无效行后 `risk_eligible_rank` 连续重编，
+  风险无效的前十不占名额、后续有效证券前移补位。
+- [ ] 保留成员 `risk_eligible_rank <= 15`，新入成员全部来自
+  `risk_eligible_rank <= 10`，每期成员不超过 10；fold 首个信号日
+  `previous_target_member` 全为 False（fold 间状态完全重置），fold 内只继承
+  冻结目标成员代码（绝不继承数量、成交、现金或任何情景状态）。
+- [ ] `member_status` 只取 `retained|entered|exited|not_selected|risk_invalid`
+  且每行带 `member_reason`；退出候选的目标权重为 0。
+
+### 9.4 封顶权重与现金残余
+
+- [ ] 任选成员手工重算：`risk_score = 1 / max(applied_vol, 0.10)`，目标暴露
+  `min(1.00, 成员数 × 0.15)`，超过 0.15 的固定为 0.15、其余按 score 比例
+  重分；全部权重向下量化到 `1e-12`，量化余数按 symbol 升序逐个分配（不越过
+  上限），不可分配余数记现金。
+- [ ] 每个信号日 `sum(target_weight) + cash_weight == 1.00`（十进制精确相等）；
+  `capped_weight`（封顶后、量化前）与 `raw_weight`（封顶前）同时留档可查。
+
+### 9.5 统一目标与情景对账
+
+- [ ] 三个（或全部预声明的）成本情景的
+  `folds/<fold_id>/backtest/<scenario>/rebalance_decisions.parquet` 都存在，
+  其下单行的 symbol 全部落在统一目标成员集内；统一构建帧
+  `folds/<fold_id>/portfolio_construction.parquet` 每个信号日恰一组成员与
+  目标权重，情景之间完全一致。
+- [ ] 情景之间订单数量/成交/现金可以分化；任何情景的拒单都没有改变下一期的
+  成员选择（下一期 `previous_target_member` 只来自统一目标成员）。
+
+### 9.6 抑制、拒单与风险无效的区分
+
+- [ ] `within_rebalance_band`（继续持有、|权重差| < 0.02，恰好 0.02 要调仓）
+  与 `below_one_lot`（数量差不足一手）都作为决策行留档，含当前/目标权重、
+  权重差、当前/目标数量、signal_close_equity 与原因；抑制金额可用
+  `|weight_difference| × signal_close_equity` 精确重算。
+- [ ] 抑制发生在下单之前，**不是执行拒单**；执行拒单只在
+  `rejections.parquet` / `order_diffs.parquet` 与逐 fold `reject_rate` 中，
+  属于策略结果而非系统失败。报告的“缓冲式组合构建审计”小节分别展示成员
+  变化换手、连续持仓再平衡换手、带宽抑制金额与手数抑制金额，且不把抑制
+  表述为拒单。
+- [ ] 缺失数据、重复 signal/symbol 行或目标 outsiders 使 fold FAILED
+  （`EXECUTION_INTEGRITY`，结论为空），系统绝不静默回退等权。
