@@ -4,7 +4,11 @@ Four thin groups over the existing ports, all offline-testable against a
 synthetic project and never printing a token or a raw supplier response:
 
 - ``data update`` / ``data validate`` -- drive :class:`DataPipeline`, the only
-  writer of the immutable published dataset.
+  writer of the immutable published dataset. ``data index-membership prepare``
+  is the offline first step of the membership workflow: it normalizes one
+  already-stored official snapshot into the canonical ``universe_membership``
+  frame, bound to the snapshot/document SHA-256 evidence the operator passes
+  as mandatory arguments (no network access, no bypass flag).
 - ``research run`` -- the **only** formal publisher: runs one experiment spec
   end-to-end (freeze -> factor -> portfolio -> backtest -> metrics -> report)
   through :class:`ResearchRunner` and publishes into ``data/experiments``.
@@ -39,6 +43,8 @@ from stock_quant.analytics.performance import PerformanceMetrics, compute_metric
 from stock_quant.bootstrap import bootstrap_dataset
 from stock_quant.config import load_project_config
 from stock_quant.data_model.dataset import DatasetReader
+from stock_quant.data_model.index_membership_import import prepare_membership_file
+from stock_quant.data_model.universe_membership import MembershipReason
 from stock_quant.data_pipeline import DataPipeline, DataUpdateRequest
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import (
@@ -72,11 +78,18 @@ app = typer.Typer(
 )
 
 data_app = typer.Typer(help="Fetch, quality-check and publish one dataset window.")
+index_membership_app = typer.Typer(
+    help=(
+        "Offline evidence-bound preparation of immutable universe_membership "
+        "facts (snapshot/document hashes are mandatory arguments)."
+    )
+)
 research_app = typer.Typer(help="Run and publish one formal experiment spec.")
 backtest_app = typer.Typer(help="Scratch backtests that never publish experiments.")
 report_app = typer.Typer(help="Render self-contained reports from committed artifacts.")
 
 app.add_typer(data_app, name="data")
+data_app.add_typer(index_membership_app, name="index-membership")
 app.add_typer(research_app, name="research")
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(report_app, name="report")
@@ -257,6 +270,89 @@ def data_validate(
         raise typer.Exit(code=1)
     _echo_failure("quality gate did not pass")
     raise typer.Exit(code=1)
+
+
+@index_membership_app.command("prepare")
+def data_index_membership_prepare(
+    universe_id: str = typer.Option(
+        ..., "--universe-id", help="Canonical universe id, e.g. csi300."
+    ),
+    input_path: Path = typer.Option(
+        ...,
+        "--input",
+        exists=True,
+        dir_okay=False,
+        help="Already-downloaded membership list (.csv or .parquet).",
+    ),
+    snapshot_sha256: str = typer.Option(
+        ...,
+        "--snapshot-sha256",
+        help="SHA-256 of the stored raw snapshot this import is bound to.",
+    ),
+    source_document_sha256: str = typer.Option(
+        ...,
+        "--source-document-sha256",
+        help="SHA-256 of the stored official source document.",
+    ),
+    source: str = typer.Option(
+        ...,
+        "--source",
+        help="Evidence source label, e.g. csi_index_announcement.",
+    ),
+    source_url: str = typer.Option(
+        ...,
+        "--source-url",
+        help="Credential-free http(s) locator of the evidence document.",
+    ),
+    effective_date: str = typer.Option(
+        ...,
+        "--effective-date",
+        help="Default raw_effective_from for rows without their own (ISO).",
+    ),
+    announcement_date: str = typer.Option(
+        ...,
+        "--announcement-date",
+        help="Default announcement_date for rows without their own (ISO).",
+    ),
+    reason: MembershipReason = typer.Option(
+        MembershipReason.INITIAL_CONSTITUENT,
+        "--reason",
+        help="Default reason for rows without their own.",
+    ),
+    output: Path = typer.Option(
+        ...,
+        "--output",
+        help="Destination for the canonical frame (.parquet or .csv).",
+    ),
+) -> None:
+    """Normalize one official snapshot into immutable membership facts.
+
+    Every fact is bound to the stored snapshot/document evidence named by the
+    mandatory arguments; a missing or invalid argument is rejected before any
+    output byte is written. Prints the ``membership_table_sha256=`` that the
+    frozen universe definition must pin. There is no bypass flag: unevidenced
+    facts cannot be prepared.
+    """
+    try:
+        result = prepare_membership_file(
+            input_path,
+            universe_id=universe_id,
+            source=source,
+            source_url=source_url,
+            snapshot_sha256=snapshot_sha256,
+            source_document_sha256=source_document_sha256,
+            effective_date=date.fromisoformat(effective_date),
+            announcement_date=date.fromisoformat(announcement_date),
+            reason=reason.value,
+            output=output,
+        )
+    except (ValueError, TypeError) as error:
+        _echo_failure(f"membership import rejected: {error}")
+        raise typer.Exit(code=1) from None
+    typer.echo(f"rows={len(result.frame)}")
+    typer.echo(f"universe_id={result.universe_id}")
+    typer.echo(f"membership_table_sha256={result.content_hash}")
+    typer.echo(f"output={output}")
 
 
 # --------------------------------------------------------------------------- #

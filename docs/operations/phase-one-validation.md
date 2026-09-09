@@ -2,7 +2,7 @@
 
 本文档是**操作者（operator）验收清单**：在用户本机具备网络与自备凭证后，用真实
 供应商小窗口数据验证阶段一的接口连通与数据契约。它补充 [README](../../README.md)
-（README 记录五个 CLI 命令与数据目录），不重复整篇文档。
+（README 记录六个 CLI 命令、时点化指数成分工作流与数据目录），不重复整篇文档。
 
 工程验证（engineering-validation MVP）目标仅是“链路能连通、契约能核对、门禁能
 给出可解释结论”，**不声称验证数据绝对正确，不构成投资建议或盈利/实盘就绪声明**。
@@ -38,7 +38,8 @@ export TUSHARE_TOKEN=<your_rotated_token>   # 仅环境变量，绝不入库
 | 冒烟（单股小窗口全链路） | `pytest -m smoke -v` | 真实 `data update` 语义、PASS/BLOCK 均可接受 |
 | 数据更新 | `python -m stock_quant data update --start 2024-01-01 --end 2024-12-31 --root <ROOT>` | 拉取并入原始库→清洗→门禁→发布；打印 `run_id`、`resolved_end_date`、`resolved_end_is_fallback`、来源状态、`dataset_version`，发布成功打印 `PASS` |
 | 数据校验 | `python -m stock_quant data validate [--version <VERSION>] --root <ROOT>` | 对指定/当前数据集重跑共享质检；打印摘要与 `PASS` |
-| 正式研究（唯一发布者） | `python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root <ROOT>` | 冻结规格端到端运行并内容寻址发布；打印 `experiment_id=` |
+| 指数成分导入（离线） | `python -m stock_quant data index-membership prepare --universe-id csi300 --input <快照文件> --snapshot-sha256 <64HEX> --source-document-sha256 <64HEX> --source <来源> --source-url <无凭证URL> --effective-date <ISO> --announcement-date <ISO> --output <帧文件>` | 把已存储的官方成分快照规范化为带证据哈希的不可变 `universe_membership` 事实帧；打印 `membership_table_sha256=`（冻结定义必须钉住的哈希）。缺任一证据哈希 = usage error；无网络、无绕过 |
+| 正式研究（唯一发布者） | `python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root <ROOT>` | 冻结规格端到端运行并内容寻址发布；打印 `experiment_id=`；运行前先做 `universe_acceptance` 成分证据预检（见步骤 E） |
 | 报表 | `python -m stock_quant report build [--experiment <ID>] --root <ROOT>` | 渲染实验 HTML 与当前数据质量 HTML（实验默认取最新发布；`data/reports/<experiment_id>.html`、`data/reports/quality-<version>.html`） |
 
 `data update` / `data validate` 任一失败路径以非零退出并打印 `FAILED: ...`；被门禁
@@ -97,7 +98,35 @@ python -m stock_quant data validate --root <ROOT>
 `resolved_end_is_fallback` 体现“latest-complete-date 规则”（§14）：当任一必需数据
 角色未达最新开市日时回退到上一个确认完整交易日并注明。
 
-### 步骤 E：研究复现与报表
+### 步骤 E：指数成分（csi300）证据导入、定义冻结与预检
+
+正式 `research run` 的候选集不再是 `security_master` 全量标的：因子在每个信号日
+先按时点化 `csi300` 成分过滤。该链必须按序完成，任何一步证据不足即停，**没有
+绕过开关**：
+
+1. **来源与原始快照**：取得中证指数公司官方成分公告（开源 `index-constitution`
+   类项目可用于交叉核对，但不能替代官方证据），把原始快照存入 `data/raw/csi/...`
+   （不入库），记录文件 SHA-256 与无凭证 `source_url`。
+2. **离线导入**：`data index-membership prepare`（或等价的
+   `project/refresh_index_membership.py`）以**必填**的
+   `--snapshot-sha256` / `--source-document-sha256` / 来源 / 日期 / 理由参数把
+   快照规范化为不可变事实帧，打印 `membership_table_sha256=`。缺哈希 =
+   usage error（非零退出并点名缺失参数）。
+3. **数据集发布**：把事实帧作为 `universe_membership` 表并入下一个数据集版本
+   一次性发布；之后每次 `data update` 原样携带，`data validate` 复审（缺证据行
+   或篡改哈希 = FATAL）。
+4. **定义哈希**：用真实值填写 `configs/universes/csi300.yml`（事实表内容哈希、
+   证据摘要哈希、数据集**实际**覆盖区间）。仓库内的占位模板不能通过正式运行。
+5. **预检验证**：`research run` 在因子之前执行 `index_membership_evidence`
+   预检。**证据缺失（`UNIVERSE_EVIDENCE_MISSING`）、成分数量不对
+   （`UNIVERSE_MEMBER_COUNT_MISMATCH`）、退市边界不确定、公告先视、覆盖断裂、
+   定义哈希与数据集成分表不符——任一命中都以 `universe_acceptance` 失败**：
+   非零退出、打印 `FAILED: research run failed at stage universe_acceptance`、
+   在 `data/runs/run_preflight_<hash>/universe_preflight.json` 留下仅含
+   status/failed_stage/error_codes 的 redacted 清单，不产出因子、不回退全量
+   master。更正只能作为带证据的新事实版本重新发布，不得原地改写。
+
+### 步骤 F：研究复现与报表
 
 ```bash
 python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root <ROOT>   # 运行两次
@@ -164,6 +193,15 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
     研究冻结以「每标的行存在」为 VERIFIED 前提；缺行/空表/旧数据集在 RESEARCH 模式会被
     拒绝（逐标的 `SOURCE_NOT_REQUESTED`），bootstrap 空种子恒被拒。对已发布数据集执行
     `data validate` 复核「事实 vs 行情边界」WARNING 与「coverage↔master 一致性」FATAL。
+14. **指数成分证据与冻结定义核对**：活数据集若携带 `universe_membership` 表，逐条
+    抽查事实能回溯到已存储的官方快照与公告（`snapshot_sha256` /
+    `source_document_sha256` 与 `data/raw/...` 中文件的实际哈希一致、
+    `source_url` 可打开且无凭证、区间闭区间语义正确、同标的事实区间无重叠）；
+    `configs/universes/csi300.yml` 必须钉住**已发布事实表**的内容哈希与数据集
+    **实际**覆盖区间（从版本 manifest 读，不写目标区间）。对任意冻结实验，从
+    `data/experiments/<id>/metrics.json` 的 `meta.universe`（universe_id /
+    universe_version / membership_table_sha256 / coverage）与
+    `meta.universe_daily_snapshots`（每信号日成员快照哈希）复核至原始证据。
 
 ## 5. 阶段一已知限制（对齐操作者预期）
 
@@ -184,6 +222,10 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
   diagnostic-only；覆盖证据不足时理由改为点明数据 UNTRUSTED + 原因/标的）。stdout 的
   `trust=` 反映数据可信度（可信数据在工程模式下仍打印 `trust=TRUSTED`，但产物仍非正式
   结论），产物进 `data/runs/debug`，不得作为可信绩效发布。
+- **正式研究依赖冻结的 `csi300` 定义，仓库内是占位模板**：`configs/universes/csi300.yml`
+  在操作者用真实证据哈希与实际覆盖区间填写之前不可用，正式运行会在
+  `universe_acceptance` 处失败（这是设计而非缺陷）。指数成分证据链（步骤 E）必须在
+  首次正式研究前完成；证据缺失、数量不对、退市边界不确定一律停止工作，无绕过开关。
 - 无任何策略盈利或实盘就绪声明。
 
 ## 6. 记录模板（按数据集/实验 ID 留存，不入库）
