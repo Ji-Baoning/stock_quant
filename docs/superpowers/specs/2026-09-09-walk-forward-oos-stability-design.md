@@ -67,11 +67,13 @@ partial_boundary_policy: record_not_evaluated
 fold_status_policy: strict_market_calendar_v1
 ```
 
-`ExperimentSpec.date_range` 是请求评估范围，不包含预热。对每一个完整自然年候选区间，`calendar_start`/`calendar_end` 是自然日边界；`first_trading_day` 为锚点当日或其后的首个确认开市日，`last_trading_day` 为下一锚点前最后一个确认开市日。预热区间为 `[calendar_start - 3 calendar years, calendar_start)`，并且在 `first_trading_day` 前必须至少存在 756 个确认交易日及策略所需最慢因子的 60 个稳定历史日。
+`ExperimentSpec.date_range` 是请求评估范围，不包含预热。对每一个完整自然年候选区间，`calendar_start`/`calendar_end` 是自然日边界；`first_trading_day` 为锚点当日或其后的首个确认开市日，`last_trading_day` 为下一锚点前最后一个确认开市日。预热区间为 `[calendar_start - 3 calendar years, calendar_start)`，并且在 `first_trading_day` 前必须至少存在 756 个确认交易日及策略所需最慢因子的 60 个稳定历史日。这里的“60 个稳定历史日”是数据与因子引擎的窗口能力要求：一个在整个窗口内持续上市、持续属于股票池且数据完整的证券，必须能在首个 OOS 日产生因子；它不要求新上市或刚调入的每只证券都已有 60 日历史。单证券仍由因子自身的上市天数、缺失值与质量规则决定何时获得信号，不能因此让整个 fold 失败。
 
 范围首尾未形成完整 12 个月 OOS 区间的日期必须记录为 `not_evaluated_boundary`，连同原因写入日历；它们不是 `skipped`，不进入 OOS 聚合。Runner 在任何回测前物化并哈希 `fold_schedule.json`；后续不得基于收益、数据质量或市场表现重切、删除、补齐或重排日历。
 
-`fold_schedule.json` 必须保留所有原计划 fold，即使其 preflight 失败。每行至少记录 fold ID、自然/交易日边界、预热边界、成员快照计划、状态及原因。预期状态包括 `planned`、`executed`、`failed_preflight`、`skipped_not_tradeable` 和 `not_evaluated_boundary`。
+`fold_schedule.json` 必须保留所有原计划 fold，即使其后来 preflight 失败。每行至少记录 fold ID、自然/交易日边界、预热边界、成员快照计划和计划时已知的处置。它在回测前写入并哈希，之后绝不修改，因此运行后状态不能回写到该文件。
+
+运行结果另存为不可变的 `fold_outcomes.json`，按 `fold_id` 一一引用 schedule 中的每个计划 fold，记录 `executed`、`failed_preflight` 或 `skipped_not_tradeable` 及原因；范围边界行在 schedule 中固定为 `not_evaluated_boundary`，不产生执行结果。这样失败 fold 同时永久存在于原始计划与结果账本中，且不会为更新状态而破坏预先冻结的 schedule 哈希。`walk_forward_manifest.json` 同时固定 `fold_schedule_sha256` 和 `fold_outcomes_sha256`。
 
 `skipped_not_tradeable` 只有在版本化政策中存在市场级证据，且交易所日历或市场级禁交易证据覆盖整个 OOS 区间时才允许。个股停牌、数据缺失、股票池缩小、因子异常、执行拒单、回撤或收益差不能触发跳过。
 
@@ -89,13 +91,13 @@ folds/<fold_id>/daily_returns.parquet
 folds/<fold_id>/metrics.json
 ```
 
-运行根目录另有 `walk_forward_manifest.json`、`fold_schedule.json` 和 `stability_report.json`。每份 fold manifest 固定三类快照哈希、数据/验收/股票池版本、预热和交易边界、交易日数、逐日成员快照、状态以及脱敏失败原因。
+运行根目录另有 `walk_forward_manifest.json`、`fold_schedule.json`、`fold_outcomes.json` 和 `stability_report.json`。每份 fold manifest 固定三类快照哈希、数据/验收/股票池版本、预热和交易边界、交易日数、逐日成员快照、状态以及脱敏失败原因。
 
-若任一 fold 在冻结、日历、预热、数据、验收、股票池或执行完整性检查中失败，整个正式研究状态为 `FAILED`，`stability_conclusion=null`，不生成正式稳定性结论，也绝不允许降级或改写为 `INCONCLUSIVE`。该 fold 仍保留为 `failed_preflight` 在日历和审计产物中，但不进入 OOS 聚合。
+若任一 fold 在冻结、日历、预热、数据、验收、股票池或执行完整性检查中失败，整个正式研究状态为 `FAILED`，`stability_conclusion=null`，不生成正式稳定性结论，也绝不允许降级或改写为 `INCONCLUSIVE`。该 fold 仍存在于 schedule，并在 outcome 账本中记为 `failed_preflight`，但不进入 OOS 聚合。正常的停牌、涨跌停、资金不足或不可成交订单是需要统计的策略/市场结果，不是执行完整性失败；只有账本缺失、日期越界、输入哈希不符、数量对账失败等系统完整性错误才导致 FAILED。
 
 ## 指标口径
 
-设 `R` 为所有 `executed` fold 按真实交易日升序拼接的唯一有效 OOS 日收益；不得含非交易日、停牌造成的缺失日、fold 间空白、预热日或 `not_evaluated_boundary`。`N = len(R)`。报告必须给出 `oos_return_observations=N` 与 `annualization_observations=N`。
+设 `R` 为所有 `executed` fold 按真实交易日升序拼接的唯一有效 OOS 组合日收益。每个确认开市日必须恰有一条组合权益与收益记录；个股停牌使用既有 stale mark-to-market 规则，不能删除该市场交易日。非交易日、fold 间空白、预热日和 `not_evaluated_boundary` 不得进入 `R`；确认开市日缺失组合收益属于完整性失败，不能通过减少样本数掩盖。每个 fold 的首日收益以固定 `initial_equity` 为前值，其后以同 fold 前一交易日的 `net_equity_after_cost` 为前值。`N = len(executed_oos_daily_returns)`，报告必须给出 `oos_return_observations=N` 与 `annualization_observations=N`。
 
 ```text
 aggregate_return = product(1 + r for r in R) - 1
@@ -122,7 +124,8 @@ per_fold_max_drawdown = min(drawdown_t)
 - `explicit_cost_drag` 是该同路径重放收益与净收益之差。
 - `slippage_impact` 以同一成交数量、实际成交价及政策冻结的参考价逐笔计算，不能改变成交集合。
 - `explicit_cost_ratio = total_explicit_cost / initial_equity`；分母始终为本 fold 固定期初权益，报告同时保留分子与分母。
-- `reject_rate = rejected_orders / submitted_orders`；没有提交订单时为 `undefined`。
+- `reject_rate = orders_with_any_rejected_quantity / submitted_orders`，按唯一 `order_id` 计数，部分成交且有剩余拒绝数量的订单进入分子；没有提交订单时为 `undefined`。另报 `fully_rejected_order_count`、`partially_filled_order_count` 与 `unfilled_quantity_rate = sum(rejected_quantity) / sum(requested_quantity)`，分母为零时同样为 `undefined`。
+- 现有 `zero_cost` 若保留，是会改变现金路径的独立反事实回测情景，不等于同成交路径的 `gross_return_before_explicit_cost`，也不得用它计算 `explicit_cost_drag`。
 
 ## 稳定性判定
 
@@ -138,22 +141,22 @@ INCONCLUSIVE:
 
 STABLE:
   executed fold 至少 5；
-  正收益 fold 比率至少 60%；
-  最差 fold_calendar_return 大于 -10%；
-  所有必需成本情景完整执行。
+  所有预锁定成本情景均完整执行；
+  且每个成本情景各自的正收益 fold 比率至少 60%；
+  且每个成本情景各自的最差 fold_calendar_return 大于 -10%。
 
 UNSTABLE:
   非 FAILED、非 INCONCLUSIVE，且不满足 STABLE。
 ```
 
-`INCONCLUSIVE` 只表示研究过程有效但当前证据不足，不表示策略无效、接近 UNSTABLE 或接近 STABLE。每个成本情景均完整展示，不能被择优；判定是研究门禁提示，不是自动选参或投资决策。
+`INCONCLUSIVE` 只表示研究过程有效但当前证据不足，不表示策略无效、接近 UNSTABLE 或接近 STABLE。每个成本情景均完整展示，不能被择优。稳定性条件逐个应用于 `ExperimentSpec.cost_scenarios` 中全部预锁定情景，最终结论取合取结果；不允许指定“主要情景”绕过较差情景。判定是研究门禁提示，不是自动选参或投资决策。
 
 `stability_report.json` 必须含 `stability_policy_hash`，以及判定使用的原始 fold 指标、阈值、状态和原因。没有该哈希的稳定性结论不得作为正式结论。
 
 ## 组件边界
 
 - `research/walk_forward/policy.py`：严格政策/枚举、规范化和哈希。
-- `research/walk_forward/schedule.py`：固定日历和交易日边界，生成不可变 schedule。
+- `research/walk_forward/schedule.py`：固定日历和交易日边界，生成不可变 schedule 与独立 outcome 账本。
 - `research/walk_forward/snapshots.py`：三类快照与身份载荷。
 - `research/walk_forward/runner.py`：单 fold 隔离执行及产物管理。
 - `research/walk_forward/metrics.py`：无重叠收益、逐 fold 风险与同路径成本指标。
@@ -164,7 +167,7 @@ UNSTABLE:
 
 离线合成测试必须证明：相同冻结输入稳定生成相同 schedule、fold ID、快照哈希和结论；影响身份的字段改变会改变实验 ID，而日志路径、机器名、时间戳和 worker 数不改变 ID；OOS 重叠、跨 fold 账户延续、边界日混入聚合、表现差触发跳过和缺失 policy hash 都被拒绝。
 
-测试还必须证明：失败 fold 仍留在 schedule；FAILED 无结论且不可转换为 INCONCLUSIVE；少于五个 executed fold 必为 INCONCLUSIVE；合法市场级跳过可审计；全局回撤字段不存在；逐 fold 回撤基于 `net_equity_after_cost`；成本指标不改变成交路径；所有正式结果能追溯至三类快照、数据验收、时点股票池与政策哈希。
+测试还必须证明：失败 fold 仍留在 schedule 且 schedule 哈希不变、运行结果只写 outcome 账本；FAILED 无结论且不可转换为 INCONCLUSIVE；少于五个 executed fold 必为 INCONCLUSIVE；合法市场级跳过可审计；个股停牌不删除组合收益日；首日收益以前值 `initial_equity` 计算；全局回撤字段不存在；逐 fold 回撤基于 `net_equity_after_cost`；成本指标不改变成交路径；全部预锁定成本情景逐一参加判定；所有正式结果能追溯至三类快照、数据验收、时点股票池与政策哈希。
 
 ## 非目标
 
