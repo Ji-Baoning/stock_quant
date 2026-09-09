@@ -317,11 +317,15 @@ volume, amount, source, ingested_at
 
 完成判据：研究使用已验收、可追溯、时点化的数据；数据版本、覆盖证据、复权/公司行为核验和股票池边界均可复跑并留有结论记录。
 
-### 8.2 回测稳定性：部分具备，次优先级
+### 8.2 回测稳定性：机制已建成（walk-forward OOS 稳定性已完成），次优先级
 
 已具备的基础：冻结规格可确定性复现，三种成本情景、事件驱动订单回放、交易限制处理，以及单元和集成测试覆盖关键工程契约。
 
-尚未闭环的关键项：时间序列训练/验证/隐藏样本外或 walk-forward 验证；跨牛熊、不同股票池、持仓数、调仓频率、参数与成本/滑点假设的敏感性测试；流动性、成交参与率和延迟成交压力测试。工程层面的“可重复运行”不等同于策略跨条件的“稳定有效”。
+**固定日历 Walk-Forward 样本外稳定性（2026-09-10 完成机制建设并全部离线验证）**：`execution_pipeline: walk_forward_oos_v1` 成为正式研究管线——把请求的 OOS 评估范围切成 1–12 月非重叠年度 fold（1 月 1 日锚定），每个 fold 独立账户、相同固定初始资金，三年日历预热（≥756 个确认交易日 + 首个 OOS 日前 60 个稳定历史日）只供因子历史；`fold_schedule.json` 在任何回测前写入并哈希、此后绝不修改，结果写入按 schedule 哈希绑定的独立 `fold_outcomes.json` 账本，失败 fold 永久保留。实验身份（scheme v2）在冻结规格之外纳入三类研究快照（策略/实验/数据环境）及其规范哈希；运行期元数据（路径/时间戳/主机/PID/worker 数）永不进入身份。判定规则版本化哈希化（`stability-v1`）：任一 fold/system 完整性失败 → FAILED 且结论恒为 null（绝不降级 INCONCLUSIVE）；executed fold < 5 或存在合法市场级跳过 → COMPLETED/INCONCLUSIVE（有效但证据不足）；否则逐预锁定成本情景独立判定（正收益 fold 比率 ≥ 60% 且最差 fold 年度收益 > -10%），最终 STABLE 为全部情景的合取。指标口径：每确认开市日恰一条组合收益（fold 首日以 `initial_equity` 为前值）、逐 fold 最大回撤只用该 fold 的 `net_equity_after_cost` 逐日 mark-to-market、**跨 fold 全局回撤与 Calmar 被禁止**、同路径成本重放不改变成交集合、`turnover-v1` 带分子分母留档。发布产物：`fold_schedule.json`、`fold_outcomes.json`、`walk_forward_manifest.json`、`stability_report.json`（必含 `stability_policy_hash`）与逐 fold `folds/<fold_id>/` 资产集；HTML 报告渲染完整 Walk-Forward 审计小节，CLI 打印 `research_status=` 与 `stability_conclusion=`（FAILED 非零退出，COMPLETED 零退出并保留确切标签）。操作语义与公式见 README「Walk-forward OOS stability」、RUNBOOK 阶段 6 与 `docs/operations/phase-one-validation.md` §8 审计清单。
+
+验证命令（全部通过）：`python3 -m pytest tests/unit/test_walk_forward_policy.py tests/unit/test_walk_forward_snapshots.py tests/unit/test_walk_forward_schedule.py tests/unit/test_walk_forward_metrics.py tests/unit/test_walk_forward_evaluation.py tests/integration/test_walk_forward_runner.py -q`（83 passed）及全量 `python3 -m pytest -q`、`ruff check src tests project`。
+
+尚未闭环的关键项：该稳定性机制如同验收与股票池机制，**仍待真实数据上的首次运行**（`csi300` 定义需真实官方证据哈希）；跨牛熊、不同股票池、持仓数、调仓频率、参数与成本/滑点假设的敏感性测试；流动性、成交参与率和延迟成交压力测试。工程层面的“可重复运行”不等同于策略跨条件的“稳定有效”。
 
 完成判据：在预先约定的样本外区间和压力情景下，净收益、回撤、换手与风险暴露的结论保持可解释，并明确记录失效场景。
 
