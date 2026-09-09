@@ -39,6 +39,8 @@ data_environment_snapshot
   calendar_version
 ```
 
+各版本是固定数据集中对应表或证据的内容哈希，而不是供应商显示名称。策略未消费基本面时，`fundamental_version` 必须使用固定值 `NOT_USED`；不能为了填充快照而引入无关数据依赖。`corporate_action_version` 同理指向公司行为事实及其覆盖证据的组合内容哈希。
+
 修改因子或组合参数必须改变 `strategy_snapshot`；修改费用、滑点或 Walk-Forward 规则必须改变 `experiment_snapshot`；修订行情、基本面或日历必须改变 `data_environment_snapshot`。日志路径、报告目录、机器名、进程号、运行时间戳、并行 worker 数不进入上述快照或实验 ID。
 
 首期禁止将 `rebalance_frequency` 作为事后择优变量，也禁止选择最佳成本情景作为正式结论。若未来做频率或参数比较，必须在新的、明确冻结的实验矩阵中进行，并报告所有预先声明的组合。
@@ -75,7 +77,7 @@ fold_status_policy: strict_market_calendar_v1
 
 运行结果另存为不可变的 `fold_outcomes.json`，按 `fold_id` 一一引用 schedule 中的每个计划 fold，记录 `executed`、`failed_preflight` 或 `skipped_not_tradeable` 及原因；范围边界行在 schedule 中固定为 `not_evaluated_boundary`，不产生执行结果。这样失败 fold 同时永久存在于原始计划与结果账本中，且不会为更新状态而破坏预先冻结的 schedule 哈希。`walk_forward_manifest.json` 同时固定 `fold_schedule_sha256` 和 `fold_outcomes_sha256`。
 
-`skipped_not_tradeable` 只有在版本化政策中存在市场级证据，且交易所日历或市场级禁交易证据覆盖整个 OOS 区间时才允许。个股停牌、数据缺失、股票池缩小、因子异常、执行拒单、回撤或收益差不能触发跳过。
+`skipped_not_tradeable` 只有在版本化政策中存在市场级证据，且交易所日历或市场级禁交易证据覆盖整个 OOS 区间时才允许。此时 schedule 仍保留自然日边界，`first_trading_day` 与 `last_trading_day` 为 null，outcome 引用市场级证据并标记跳过。没有开市日但缺少该证据属于 FAILED，而不是合法跳过。个股停牌、数据缺失、股票池缩小、因子异常、执行拒单、回撤或收益差不能触发跳过。
 
 ## Fold 执行与产物
 
@@ -152,6 +154,8 @@ UNSTABLE:
 `INCONCLUSIVE` 只表示研究过程有效但当前证据不足，不表示策略无效、接近 UNSTABLE 或接近 STABLE。每个成本情景均完整展示，不能被择优。稳定性条件逐个应用于 `ExperimentSpec.cost_scenarios` 中全部预锁定情景，最终结论取合取结果；不允许指定“主要情景”绕过较差情景。判定是研究门禁提示，不是自动选参或投资决策。
 
 `stability_report.json` 必须含 `stability_policy_hash`，以及判定使用的原始 fold 指标、阈值、状态和原因。没有该哈希的稳定性结论不得作为正式结论。
+
+`UNSTABLE` 只评价已完整执行且研究过程有效的 fold 表现；它不能承接任何完整性错误。若任一声明的成本情景缺失、未完成或产物不完整，结果是 FAILED，而不是 UNSTABLE。
 
 ## 组件边界
 
