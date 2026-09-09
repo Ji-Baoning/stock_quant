@@ -41,6 +41,7 @@ from stock_quant.data_model.schemas import (
     SECURITY_MASTER_COVERAGE_SCHEMA,
     SECURITY_MASTER_SCHEMA,
     TRADING_CALENDAR_SCHEMA,
+    UNIVERSE_MEMBERSHIP_SCHEMA,
 )
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import QualityReport, issue_dict_dumps
@@ -55,6 +56,7 @@ STANDARDIZED_SCHEMAS: dict[str, pa.Schema] = {
     "corporate_action": CORPORATE_ACTION_SCHEMA,
     "corporate_action_coverage": CORPORATE_ACTION_COVERAGE_SCHEMA,
     "trading_calendar": TRADING_CALENDAR_SCHEMA,
+    "universe_membership": UNIVERSE_MEMBERSHIP_SCHEMA,
 }
 
 _MANIFEST_NAME = "dataset_manifest.json"

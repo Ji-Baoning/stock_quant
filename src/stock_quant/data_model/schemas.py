@@ -96,6 +96,24 @@ SECURITY_MASTER_COLUMNS = [
     "list_status",
 ]
 
+# Immutable index-membership facts (point-in-time universe task): one row per
+# raw inclusive membership interval, bound to auditable snapshot and document
+# evidence. The resolved view of these facts is never persisted here; only the
+# raw fact table is registered (design spec: 原始区间与实际资格区间).
+UNIVERSE_MEMBERSHIP_COLUMNS = [
+    "universe_id",
+    "symbol",
+    "raw_effective_from",
+    "raw_effective_to",
+    "announcement_date",
+    "status",
+    "reason",
+    "source",
+    "source_url",
+    "snapshot_sha256",
+    "source_document_sha256",
+]
+
 # Trading calendar marks which calendar dates are confirmed open days.
 TRADING_CALENDAR_COLUMNS = [
     "calendar_date",
@@ -176,6 +194,22 @@ def _security_master_coverage_fields() -> list[pa.Field]:
     ]
 
 
+def _universe_membership_fields() -> list[pa.Field]:
+    return [
+        pa.field("universe_id", pa.string()),
+        pa.field("symbol", pa.string()),
+        pa.field("raw_effective_from", pa.date32()),
+        pa.field("raw_effective_to", pa.date32()),
+        pa.field("announcement_date", pa.date32()),
+        pa.field("status", pa.string()),
+        pa.field("reason", pa.string()),
+        pa.field("source", pa.string()),
+        pa.field("source_url", pa.string()),
+        pa.field("snapshot_sha256", pa.string()),
+        pa.field("source_document_sha256", pa.string()),
+    ]
+
+
 def _trading_calendar_fields() -> list[pa.Field]:
     return [
         pa.field("calendar_date", pa.date32()),
@@ -188,4 +222,5 @@ CORPORATE_ACTION_SCHEMA = pa.schema(_corporate_action_fields())
 CORPORATE_ACTION_COVERAGE_SCHEMA = pa.schema(_corporate_action_coverage_fields())
 SECURITY_MASTER_SCHEMA = pa.schema(_security_master_fields())
 SECURITY_MASTER_COVERAGE_SCHEMA = pa.schema(_security_master_coverage_fields())
+UNIVERSE_MEMBERSHIP_SCHEMA = pa.schema(_universe_membership_fields())
 TRADING_CALENDAR_SCHEMA = pa.schema(_trading_calendar_fields())
