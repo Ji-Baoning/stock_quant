@@ -1,5 +1,6 @@
 """Rebuild the published calendar from benchmark sessions (no network access)."""
 from pathlib import Path
+
 import pandas as pd
 
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader

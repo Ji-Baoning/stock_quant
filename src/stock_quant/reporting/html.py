@@ -123,6 +123,15 @@ class ExperimentReportInput:
     #: (report inputs that predate the trust gate) reads as a trusted default so
     #: no report renders an untrusted alarm it cannot substantiate.
     corporate_action_trust: dict | None = None
+    #: The frozen universe definition identity recorded on the run
+    #: (``metrics["meta"]["universe"]`` plus the daily snapshot map):
+    #: ``{"universe_id", "universe_version", "rules_version",
+    #: "membership_table_sha256", "coverage_start", "coverage_end",
+    #: "expected_size"}`` and, when the caller composes them in, the
+    #: ``universe_daily_member_counts`` / ``universe_daily_snapshots`` maps.
+    #: ``None``/empty (legacy runs resolved through the engineering universe)
+    #: hides the frozen-universe section entirely.
+    universe: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -261,6 +270,47 @@ def _trust_block(corporate_action_trust: dict | None) -> dict[str, object]:
         "trusted": trusted,
         "reasons": reasons,
         "window_text": window_text,
+    }
+
+
+def _universe_block(universe: dict | None) -> dict | None:
+    """The report's frozen-universe section model, or ``None``.
+
+    A missing or empty mapping (a run resolved through the legacy engineering
+    universe) renders no frozen-universe section at all.  The daily rows are
+    built from the caller-supplied ``universe_daily_member_counts`` /
+    ``universe_daily_snapshots`` maps, sorted by ISO date so identical inputs
+    always render identical bytes.
+    """
+    if not isinstance(universe, dict) or not universe.get("universe_id"):
+        return None
+    coverage_start = universe.get("coverage_start")
+    coverage_end = universe.get("coverage_end")
+    coverage_text = ""
+    if coverage_start and coverage_end:
+        coverage_text = f"{coverage_start} ~ {coverage_end}"
+    counts = universe.get("universe_daily_member_counts")
+    snapshots = universe.get("universe_daily_snapshots")
+    counts = counts if isinstance(counts, dict) else {}
+    snapshots = snapshots if isinstance(snapshots, dict) else {}
+    daily_rows = [
+        [
+            day,
+            str(counts.get(day, "—")),
+            str(snapshots.get(day, "—")),
+        ]
+        for day in sorted({*counts, *snapshots})
+    ]
+    return {
+        "universe_id": str(universe.get("universe_id", "")),
+        "universe_version": str(universe.get("universe_version", "")),
+        "rules_version": str(universe.get("rules_version", "")),
+        "membership_table_sha256": str(
+            universe.get("membership_table_sha256", "")
+        ),
+        "coverage_text": coverage_text,
+        "expected_size": universe.get("expected_size"),
+        "daily_rows": daily_rows,
     }
 
 
@@ -699,6 +749,7 @@ def render_experiment_report(
         "code_commit": experiment.code_commit,
         "generated_at": experiment.generated_at,
     }
+    universe = _universe_block(experiment.universe)
     charts = [
         _figure_html(_net_value_figure(experiment)),
         _figure_html(_drawdown_figure(experiment)),
@@ -722,6 +773,7 @@ def render_experiment_report(
             _pct(benchmark_excess) if benchmark_excess is not None else "—"
         ),
         trust=_trust_block(experiment.corporate_action_trust),
+        universe=universe,
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(body, encoding="utf-8")

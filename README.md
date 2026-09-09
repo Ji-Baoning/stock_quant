@@ -41,6 +41,17 @@ in configuration files.
 python -m stock_quant data update --start 2024-01-01 --end 2024-12-31 --root <PROJECT_ROOT>
 python -m stock_quant data validate --version <VERSION_HASH> --root <PROJECT_ROOT>
 
+# Offline first step of the membership workflow: bind one already-stored
+# official snapshot to its evidence hashes and emit the canonical facts frame.
+python -m stock_quant data index-membership prepare \
+    --universe-id csi300 \
+    --input data/raw/csi/members_2005.csv \
+    --snapshot-sha256 <64-HEX> --source-document-sha256 <64-HEX> \
+    --source csi_index_announcement \
+    --source-url https://www.csindex.com.cn/announcement.pdf \
+    --effective-date 2005-01-04 --announcement-date 2005-01-04 \
+    --output data/membership/universe_membership.parquet
+
 # The only formal publisher: run a frozen spec end-to-end and publish it.
 python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root <PROJECT_ROOT>
 
@@ -54,6 +65,47 @@ python -m stock_quant report build --experiment <EXPERIMENT_ID> --root <PROJECT_
 Every command exits non-zero and prints `FAILED: ...` on failure; a failed or
 blocked run never changes the published dataset or the experiments registry. No
 command prints a token or a raw supplier response.
+
+## Point-in-time index universe (csi300)
+
+Formal research no longer ranks all `security_master` symbols: the momentum
+factor first filters its candidates to the frozen `csi300` membership of each
+signal day, as resolved from immutable, evidence-backed membership facts. The
+operator chain that produces and freezes those facts is:
+
+1. **Source documents** — obtain the official (or officially corroborated)
+   index-constitution announcements and store them together with the raw
+   membership snapshot under `data/raw/...`; record each file's SHA-256. The
+   `source_url` must be a credential-free, auditable locator. Never commit
+   data payloads or credentials.
+2. **Import (`data index-membership prepare`, or the equivalent
+   `project/refresh_index_membership.py` script)** — offline; both surfaces
+   share one implementation and require explicit `--snapshot-sha256`,
+   `--source-document-sha256`, source, dates and reason arguments. A missing
+   hash is a usage error, not a warning. The output prints
+   `membership_table_sha256=`, the content hash of the prepared facts.
+3. **Dataset publication** — publish the prepared frame as the immutable
+   `universe_membership` table of the next dataset version; every later
+   `data update` carries it byte-for-byte and `data validate` re-audits it
+   (tampered evidence is FATAL).
+4. **Definition hash** — fill `configs/universes/csi300.yml` with the REAL
+   values: the published table's content hash, the evidence-summary hash and
+   the dataset's actual coverage window. The committed file is a placeholder
+   template that formal runs always reject; only the operator, holding the
+   real evidence, can turn it into a usable definition.
+5. **Acceptance and research** — `research run` preflights the definition
+   against the pinned dataset (`index_membership_evidence` gate) before any
+   factor computation, then freezes `universe_version` (the definition's
+   content hash) into the experiment identity and persists every signal day's
+   member snapshot hash in the artifacts.
+
+The gates have **no bypass flag**. Missing proof, a wrong member count
+(`csi300` is 300 on every trading day unless an official exception record
+exists) and ambiguous delisting boundaries **stop work** (`universe_acceptance`
+failure with a redacted preflight manifest under `data/runs/`; no factors, no
+fallback to master symbols) and require a correction published as new,
+evidence-backed facts. Removal from the index never force-sells an existing
+holding; it only stops new signals.
 
 ## Reproducibility check
 

@@ -35,7 +35,7 @@
 - Produces `MembershipStatus`, `MembershipReason`, `MembershipFact`, `ResolvedMembership`, `UniverseBoundaryError`, `membership_frame`, `membership_content_hash`, and `resolve_memberships`.
 - Produces/registers `UNIVERSE_MEMBERSHIP_COLUMNS` and `UNIVERSE_MEMBERSHIP_SCHEMA`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```python
 def test_regular_removal_has_an_inclusive_end_before_removal_day():
@@ -57,21 +57,21 @@ def test_ambiguous_delisting_boundary_is_rejected():
         resolve_memberships((fact(status="removed", reason="delisting"),), master(last_tradable_date=None))
 ```
 
-- [ ] **Step 2: Verify the tests fail**
+- [x] **Step 2: Verify the tests fail**
 
 Run `pytest tests/unit/test_universe_membership.py -v`; expect import failure.
 
-- [ ] **Step 3: Implement minimal strict models**
+- [x] **Step 3: Implement minimal strict models**
 
 Use frozen Pydantic models. `MembershipFact` fields are `universe_id`, `symbol`, raw start/end, `announcement_date`, status, reason, source, URL, snapshot hash and document hash. Validate canonical symbols, IDs, 64-character lowercase hashes, date order, nonempty evidence, non-overlap, and status/reason consistency. Reasons are exactly `initial_constituent`, `regular_rebalance`, `temporary_adjustment`, `delisting`, `merger_or_reorganization`, `correction`.
 
 Implement `ResolvedMembership` separately. It uses `max(raw_start, list_date)` and a finite `min(raw_end, last_tradable_date)` when both exist; preserves raw values and records `before_listing`/`after_delisting`. Never infer last trade date from a delisting notice.
 
-- [ ] **Step 4: Add Arrow schema registration**
+- [x] **Step 4: Add Arrow schema registration**
 
 Add these fields in order: `universe_id`, `symbol`, `raw_effective_from`, `raw_effective_to`, `announcement_date`, `status`, `reason`, `source`, `source_url`, `snapshot_sha256`, `source_document_sha256`. Dates use `pa.date32()`, all other fields `pa.string()`. Register only the raw table.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run `pytest tests/unit/test_universe_membership.py tests/unit/test_normalize.py -v`; expect PASS. Commit only Task 1 paths with message `feat: add immutable index membership facts`.
 
@@ -88,7 +88,7 @@ Run `pytest tests/unit/test_universe_membership.py tests/unit/test_normalize.py 
 - Produces `UniverseDefinition`, `UniverseResolver`, `UniverseCoverageError`, `load_universe_definition`.
 - `members_on(day) -> tuple[str, ...]`; `snapshot_for(day) -> str`.
 
-- [ ] **Step 1: Write failing day-visibility tests**
+- [x] **Step 1: Write failing day-visibility tests**
 
 ```python
 def test_member_is_hidden_until_announcement_date(resolver):
@@ -105,19 +105,19 @@ def test_daily_snapshot_ignores_source_row_order(resolver, reordered_resolver):
     assert resolver.snapshot_for(date(2020, 6, 15)) == reordered_resolver.snapshot_for(date(2020, 6, 15))
 ```
 
-- [ ] **Step 2: Verify failure**
+- [x] **Step 2: Verify failure**
 
 Run `pytest tests/unit/test_research_universe.py -v`; expect missing-module failure.
 
-- [ ] **Step 3: Implement definition and resolver**
+- [x] **Step 3: Implement definition and resolver**
 
 Definition fields: `schema_version=1`, ID, `rules_version`, membership-table SHA-256, coverage start/end, evidence-summary SHA-256. Its canonical JSON SHA-256 is the version. Validate table hash against pinned context. `members_on` applies only resolved date bounds and `announcement_date <= day`, returns sorted symbols, and raises outside coverage. It must not look at factor/market/execution state. `snapshot_for` hashes canonical ID, date and symbols.
 
-- [ ] **Step 4: Add csi300 template**
+- [x] **Step 4: Add csi300 template**
 
 Add a commented template with required actual hashes and coverage. State in comments that placeholders cannot be used by formal runs. Tests use temporary explicit definitions.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run `pytest tests/unit/test_research_universe.py -v`; expect PASS. Commit Task 2 paths as `feat: resolve index members by signal date`.
 
@@ -138,7 +138,7 @@ Run `pytest tests/unit/test_research_universe.py -v`; expect PASS. Commit Task 2
 - Produces `validate_membership_facts(frame, *, calendar, expected_sizes) -> list[Issue]`.
 - Produces required acceptance result `index_membership_evidence`.
 
-- [ ] **Step 1: Write failing fatal-check tests**
+- [x] **Step 1: Write failing fatal-check tests**
 
 ```python
 def test_csi300_cardinality_mismatch_is_fatal(calendar, valid_facts):
@@ -155,19 +155,19 @@ def test_missing_snapshot_evidence_is_fatal(calendar, valid_facts):
     }
 ```
 
-- [ ] **Step 2: Verify failure**
+- [x] **Step 2: Verify failure**
 
 Run `pytest tests/unit/test_index_membership_checks.py -v`; expect missing validator.
 
-- [ ] **Step 3: Implement conversion and pure checks**
+- [x] **Step 3: Implement conversion and pure checks**
 
 The refresh script requires explicit universe ID, source input, source/document snapshot hashes, effective date and announcement date. It normalizes to facts and has no network dependency. Validator rejects missing evidence, unknown symbols, overlap, announcement-before-use, empty master intersection, uncertain delisting endpoint and coverage gaps. It checks 300 members on every trading day or stable interval unless an immutable official exception evidence record exists.
 
-- [ ] **Step 4: Extend real-data acceptance**
+- [x] **Step 4: Extend real-data acceptance**
 
 Make `index_membership_evidence` mandatory. Deterministic details contain coverage, counts, hashes and error codes only. It fails on missing table, mismatched definition hash, unlocatable evidence or any FATAL issue. Update acceptance fixtures with this required synthetic pass result.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run `pytest tests/unit/test_index_membership_checks.py tests/unit/test_acceptance_models.py tests/integration/test_data_pipeline.py -v`; expect PASS. Commit as `feat: gate research on index membership evidence`.
 
@@ -188,7 +188,7 @@ Run `pytest tests/unit/test_index_membership_checks.py tests/unit/test_acceptanc
 - `CURRENT` resolves through a `UniverseDefinition`, not legacy `configs/universe.yml`.
 - Artifacts persist definition identity plus all signal-day snapshots.
 
-- [ ] **Step 1: Write failing preflight tests**
+- [x] **Step 1: Write failing preflight tests**
 
 ```python
 def test_definition_version_changes_experiment_id(make_spec):
@@ -204,19 +204,19 @@ def test_invalid_membership_fails_before_factor_artifact(runner, formal_spec):
     assert not result.factor_artifact_exists
 ```
 
-- [ ] **Step 2: Verify failure**
+- [x] **Step 2: Verify failure**
 
 Run `pytest tests/integration/test_research_runner.py -k 'membership or definition' -v`; expect Runner’s current static-master behavior to fail the assertion.
 
-- [ ] **Step 3: Implement definition pinning/preflight**
+- [x] **Step 3: Implement definition pinning/preflight**
 
 Pin dataset and data acceptance, open the fixed context, load and validate the selected definition, then freeze `universe_version`. On failure write a redacted preflight manifest with `failed_stage="universe_acceptance"`; do not produce factors or fall back to master symbols. Persist universe ID/version/table hash/rules version and a `{ISO date: SHA-256}` daily snapshot map in manifests, metrics and report context.
 
-- [ ] **Step 4: Update formal config**
+- [x] **Step 4: Update formal config**
 
 Add `universe_definition: csi300` while retaining `universe_version: CURRENT`. Legacy YAML is engineering-only. Build temporary definitions in integration fixtures.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run `pytest tests/unit/test_experiment_spec.py tests/integration/test_research_runner.py tests/integration/test_experiment_registry.py -v`; expect PASS. Commit as `feat: freeze index universe in research identity`.
 
@@ -235,7 +235,7 @@ Run `pytest tests/unit/test_experiment_spec.py tests/integration/test_research_r
 - Factor context receives `members_on(day)` and `membership_snapshot_for(day)`.
 - Every newly generated portfolio target must be a member on its signal date.
 
-- [ ] **Step 1: Write failing order tests**
+- [x] **Step 1: Write failing order tests**
 
 ```python
 def test_non_member_with_best_factor_is_not_signaled(dataset, context):
@@ -248,15 +248,15 @@ def test_removed_member_makes_no_new_signal(dataset, context):
     assert "600000.SH" not in result.loc[result.trade_date.eq(date(2020, 6, 15)), "symbol"].tolist()
 ```
 
-- [ ] **Step 2: Verify failure**
+- [x] **Step 2: Verify failure**
 
 Run `pytest tests/unit/test_momentum.py tests/integration/test_factor_no_lookahead.py -k member -v`; expect failure with the static symbol adapter.
 
-- [ ] **Step 3: Implement exact filtering order**
+- [x] **Step 3: Implement exact filtering order**
 
 Keep the full fixed price surface. On each signal day, first filter to `set(context.members_on(day))`; only then apply factor missing/quality/minimum-history filters; leave tradability to the existing execution path. Include the daily snapshot hash in factor-stage metadata. Assert all new targets are day members. Keep existing out-of-index holdings for normal execution/exit accounting; removal is not a forced sell.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run `pytest tests/unit/test_momentum.py tests/integration/test_factor_no_lookahead.py tests/integration/test_research_runner.py -v`; expect PASS. Commit as `feat: filter factors by point-in-time index members`.
 
@@ -272,7 +272,7 @@ Run `pytest tests/unit/test_momentum.py tests/integration/test_factor_no_lookahe
 
 **Interfaces:** Documents source snapshot → import → dataset publication → definition hash → acceptance → Research; no bypass flag.
 
-- [ ] **Step 1: Write failing CLI tests**
+- [x] **Step 1: Write failing CLI tests**
 
 ```python
 def test_membership_preflight_returns_nonzero_without_factor(cli, bad_spec):
@@ -287,15 +287,15 @@ def test_membership_import_requires_snapshot_hash(cli, source_file):
     assert "--snapshot-sha256" in result.output
 ```
 
-- [ ] **Step 2: Verify failure**
+- [x] **Step 2: Verify failure**
 
 Run `pytest tests/integration/test_cli.py -k membership -v`; expect failure until CLI output/help exists.
 
-- [ ] **Step 3: Document explicit operating procedure**
+- [x] **Step 3: Document explicit operating procedure**
 
 Require official/corroborated source documents, raw snapshot storage, explicit converter arguments, immutable dataset publication, explicit definition hashes, acceptance publication, then Research. Explicitly state that missing proof, wrong count and ambiguous delisting boundaries stop work and require correction; never bypass them. Do not commit data payloads or credentials.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run `pytest -q` and `ruff check src tests project`; expect PASS. Run `git diff --check` and inspect `git status --short`; commit only Task 6 paths as `docs: operate point-in-time index universe`.
 

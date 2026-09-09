@@ -5,6 +5,12 @@
 # dataset_version 与 universe_version 用 CURRENT 占位：运行期由 runner 读取
 # 数据层 CURRENT 指针一次、解析为显式版本（ExperimentSpec.freeze）后再计算
 # experiment_id；冻结后写入实验目录的规格只引用显式版本，永不保留 CURRENT。
+#
+# universe_definition 指向冻结的时点化指数成分定义（configs/universes/
+# csi300.yml）：runner 在计算实验身份之前先对该定义做预检——数据集固定后校验
+# 成分表哈希并强制 index_membership_evidence 验收门禁，通过后把 universe_version
+# 冻结为定义版本。正式研究必须经由定义解析股票池；遗留 configs/universe.yml
+# 仅保留给工程路径。
 hypothesis: >-
   过去 60 个交易日的复权收益在 A 股样本内对随后短期收益存在一定持续性；
   一期仅验证工程链路可复现并跑通全部运行状态，不声称统计有效性，也不构成投资建议。
@@ -12,6 +18,7 @@ factor_versions:
   momentum_60d: 1.0.0
 dataset_version: CURRENT
 universe_version: CURRENT
+universe_definition: csi300
 date_range:
   start_date: 2020-01-01
   end_date: 2026-09-02

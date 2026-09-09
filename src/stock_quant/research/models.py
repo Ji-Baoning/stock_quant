@@ -139,6 +139,13 @@ class RunState(BaseModel):
     stage: DataStage = DataStage.CREATED
     dataset_version: str
     universe_version: str
+    #: The frozen universe definition identity a formal run was accepted
+    #: under (Task 4): ``universe_id``, ``universe_version``,
+    #: ``rules_version``, ``membership_table_sha256``,
+    #: ``evidence_summary_sha256``, the coverage window, the acceptance
+    #: status and the per-signal-day member counts / snapshot-hash maps.
+    #: ``None`` for runs resolved through the legacy engineering universe.
+    universe: dict[str, Any] | None = None
     code_commit: str = "unversioned"
     factor_versions: dict[str, str] = Field(default_factory=dict)
     cost_scenarios: list[str] = Field(default_factory=list)

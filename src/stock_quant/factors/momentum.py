@@ -13,6 +13,15 @@ date has ``trade_date <= t`` -- rows added after a signal date can never
 change that date's factor value -- and ``processed_value`` equals
 ``raw_value`` in this phase.
 
+Membership-first order (Task 5): when the context carries the point-in-time
+membership hooks, the candidate symbols of each signal day are filtered to
+``context.members_on(signal)`` BEFORE the observation/quality/seasoning
+filters, so a non-member never produces a row (valid or invalid) for that day
+while a member removed from the universe keeps every row up to its last
+membership day and simply makes no new signal afterwards.  Removal is an
+input gate, not a trading instruction.  A context without ``members_on``
+(the legacy engineering path) applies no membership gate.
+
 Only the signal dates given in ``FactorContext.signal_dates`` produce rows;
 rows are sorted by trade date then symbol, so identical inputs yield
 byte-stable Parquet.
@@ -65,7 +74,16 @@ class Momentum60:
 
         records: list[dict] = []
         for signal in sorted(set(context.signal_dates)):
+            # Membership-first: resolve this signal day's point-in-time member
+            # set once, before any factor eligibility logic touches a row.
+            members = (
+                None
+                if context.members_on is None
+                else frozenset(context.members_on(signal))
+            )
             for symbol in sorted(by_symbol):
+                if members is not None and symbol not in members:
+                    continue  # not a member on this signal day: no row at all
                 series = by_symbol[symbol]
                 if series["trade_date"].iloc[0] > signal:
                     continue  # symbol has no observation by this signal date

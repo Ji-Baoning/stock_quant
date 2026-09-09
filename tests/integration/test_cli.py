@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import date
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import build_fixture_project  # noqa: E402
 from test_end_to_end import run_offline_fixture  # noqa: E402  (after app import)
 from test_reports import _experiment_input  # noqa: E402  (synthetic report helper)
@@ -295,3 +297,246 @@ def test_fixture_project_dataset_publishes_trusted_coverage(fixture_root):
         coverage = context.read("corporate_action_coverage")
     assert not coverage.empty
     assert set(coverage["status"]) == {"VERIFIED_EMPTY"}
+
+
+# --------------------------------------------------------------------------- #
+# Task 6: point-in-time index membership on the operator surface
+# --------------------------------------------------------------------------- #
+
+#: The formal spec written into the membership fixture project: the same short
+#: momentum spec the other CLI tests run, but naming the frozen csi300
+#: definition (``universe_definition: csi300``) so the run preflights it.
+_BAD_UNIVERSE_SPEC = "momentum_60d_csi300_unverified.yml"
+
+_FACTS_START = date(2018, 1, 2)
+_FACTS_ANNOUNCED = date(2017, 12, 15)
+_FACTS_END = date(2022, 1, 7)
+_RULES_VERSION = "csi-index-rules-cli-fixture-2026h2"
+
+# One evidence-backed open csi300 fact, following the Task 4 fixture shape.
+def _fact_payload(symbol: str) -> dict:
+    return {
+        "universe_id": "csi300",
+        "symbol": symbol,
+        "raw_effective_from": _FACTS_START,
+        "raw_effective_to": None,
+        "announcement_date": _FACTS_ANNOUNCED,
+        "status": "active",
+        "reason": "initial_constituent",
+        "source": "csi_index_announcement",
+        "source_url": "https://www.csindex.com.cn/announcement-2017-12.pdf",
+        "snapshot_sha256": "a1" * 32,
+        "source_document_sha256": "b2" * 32,
+    }
+
+
+@pytest.fixture(scope="module")
+def membership_project(tmp_path_factory):
+    """A synthetic project whose dataset carries *insufficient* csi300 evidence.
+
+    Built exactly like ``fixture_root``, then republished with an evidenced
+    ``universe_membership`` table (the 30 fixture symbols only) and a REAL
+    ``configs/universes/csi300.yml`` definition pinned to exactly those facts.
+    The definition itself is valid; the evidence fails the mandatory csi300
+    cardinality check (30 members vs 300 expected), so a formal run naming the
+    definition must stop at ``universe_acceptance`` before any factor work --
+    the operator-facing shape of "a wrong member count stops work".
+    """
+    from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+    from stock_quant.data_model.universe import Universe
+    from stock_quant.data_model.universe_membership import (
+        membership_content_hash,
+        membership_frame,
+    )
+    from stock_quant.data_quality.models import QualityReport
+
+    project = build_fixture_project(tmp_path_factory.mktemp("membership"))
+    universe = Universe.from_yaml(project.root / "configs" / "universe.yml")
+    facts = [_fact_payload(entry.symbol) for entry in universe.entries]
+
+    reader = DatasetReader(project.root)
+    version = DatasetPublisher(project.root).current().version
+    with reader.open(version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+    tables["universe_membership"] = membership_frame(facts)
+    DatasetPublisher(project.root).publish(tables, QualityReport())
+
+    definition = {
+        "schema_version": 1,
+        "universe_id": "csi300",
+        "rules_version": _RULES_VERSION,
+        "membership_table_sha256": membership_content_hash(facts),
+        "coverage_start": _FACTS_START.isoformat(),
+        "coverage_end": _FACTS_END.isoformat(),
+        "evidence_summary_sha256": "cd" * 32,
+    }
+    (project.root / "configs" / "universes").mkdir(parents=True, exist_ok=True)
+    (project.root / "configs" / "universes" / "csi300.yml").write_text(
+        yaml.safe_dump(definition, sort_keys=True), encoding="utf-8"
+    )
+    (project.root / "configs" / "experiments" / _BAD_UNIVERSE_SPEC).write_text(
+        _BAD_SPEC_YAML, encoding="utf-8"
+    )
+    return project
+
+
+#: Same frozen spec the offline fixtures run, plus the formal universe
+#: definition name. The date range stays fully inside the synthetic bars.
+_BAD_SPEC_YAML = """\
+# 离线验收用：指向冻结 csi300 定义的正式规格，但数据集只携带不足的成分证据
+#（30 只 vs 300 预期）——按操作规程必须在 universe_acceptance 处大声停止。
+hypothesis: >-
+  过去 60 个交易日的复权收益在合成样本内对随后短期收益存在持续性；
+  仅验证离线 CLI 工程链路可复现并跑通全部运行状态，不构成投资建议。
+factor_versions:
+  momentum_60d: 1.0.0
+dataset_version: CURRENT
+universe_version: CURRENT
+universe_definition: csi300
+date_range:
+  start_date: 2020-01-01
+  end_date: 2021-12-31
+train_validation_holdout_policy: not_applicable_engineering_mvp
+preprocessing:
+  winsorization: none
+  standardization: none
+portfolio_rule:
+  name: top_n_equal_weight
+  top_n: 10
+  lot_size: 100
+cost_scenarios:
+  - zero_cost
+  - commission_tax
+  - full_cost
+random_seed: 42
+code_commit: unversioned
+parent_experiment_ids: []
+agent_id: null
+"""
+
+
+def test_membership_preflight_returns_nonzero_without_factor(
+    cli_runner, membership_project
+):
+    """Formal research over insufficient membership evidence stops loudly.
+
+    The operator rule under test: a wrong member count is a STOP, never a
+    bypass. ``research run`` must exit non-zero, name the
+    ``universe_acceptance`` stage, leave only the redacted preflight manifest
+    under ``data/runs`` and never publish an experiment or factor artifact.
+    """
+    result = cli_runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            "--spec",
+            f"configs/experiments/{_BAD_UNIVERSE_SPEC}",
+            "--root",
+            str(membership_project.root),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "universe_acceptance" in result.output
+
+    runs = membership_project.root / "data" / "runs"
+    manifests = sorted(runs.glob("run_preflight_*/universe_preflight.json"))
+    assert manifests, "the failed run must write its redacted preflight manifest"
+    record = json.loads(manifests[-1].read_text(encoding="utf-8"))
+    assert record["failed_stage"] == "universe_acceptance"
+    assert record["error_codes"], "the rejection must name its stable codes"
+
+    # The redacted preflight workspace is the ONLY run artifact: no factor
+    # stage ever started and no experiment was published.
+    assert sorted(path.name for path in runs.iterdir()) == [
+        manifests[-1].parent.name
+    ]
+    experiments = membership_project.root / "data" / "experiments"
+    published = (
+        sorted(path.name for path in experiments.iterdir())
+        if experiments.is_dir()
+        else []
+    )
+    assert published == []
+
+
+def test_membership_import_requires_snapshot_hash(cli_runner, tmp_path):
+    """``data index-membership prepare`` refuses unevidenced imports.
+
+    The snapshot hash is a mandatory argument: calling prepare without it is a
+    usage error that names the missing flag, so an import can never publish
+    facts that are not bound to a stored raw snapshot.
+    """
+    source_file = tmp_path / "members.csv"
+    source_file.write_text("symbol\n600000.SH\n000001.SZ\n", encoding="utf-8")
+    result = cli_runner.invoke(
+        app,
+        [
+            "data",
+            "index-membership",
+            "prepare",
+            "--universe-id",
+            "csi300",
+            "--input",
+            str(source_file),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--snapshot-sha256" in result.output
+
+
+def test_membership_import_prepare_writes_canonical_facts(cli_runner, tmp_path):
+    """The documented happy path: prepare prints the hash a definition pins.
+
+    ``prepare`` binds every row to the operator-supplied snapshot/document
+    evidence, writes the canonical ``universe_membership`` frame and prints
+    the ``membership_table_sha256=`` line the frozen universe definition must
+    pin (see README / RUNBOOK). It performs no network access.
+    """
+    source_file = tmp_path / "members.csv"
+    source_file.write_text("symbol\n600000.SH\n000001.SZ\n", encoding="utf-8")
+    output = tmp_path / "membership" / "universe_membership.parquet"
+    result = cli_runner.invoke(
+        app,
+        [
+            "data",
+            "index-membership",
+            "prepare",
+            "--universe-id",
+            "csi300",
+            "--input",
+            str(source_file),
+            "--snapshot-sha256",
+            "a1" * 32,
+            "--source-document-sha256",
+            "b2" * 32,
+            "--source",
+            "csi_index_announcement",
+            "--source-url",
+            "https://www.csindex.com.cn/announcement-2017-12.pdf",
+            "--effective-date",
+            "2018-01-02",
+            "--announcement-date",
+            "2017-12-15",
+            "--output",
+            str(output),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "rows=2" in result.output
+    assert "universe_id=csi300" in result.output
+    assert "membership_table_sha256=" in result.output
+    assert output.is_file()
+
+    from stock_quant.data_model.universe_membership import (
+        membership_content_hash,
+    )
+
+    printed_hash = next(
+        line.split("=", 1)[1]
+        for line in result.output.splitlines()
+        if line.startswith("membership_table_sha256=")
+    )
+    assert printed_hash == membership_content_hash(
+        [_fact_payload("600000.SH"), _fact_payload("000001.SZ")]
+    )

@@ -8,6 +8,13 @@ resolves ``CURRENT`` once against the data layer and writes the explicit
 resolved version into the *frozen* spec via :meth:`ExperimentSpec.freeze`, so a
 stored spec never references the token.
 
+A formal spec additionally names a frozen universe ``universe_definition``
+(e.g. ``csi300``): the runner validates that definition against the pinned
+dataset's membership evidence *before* the identity is computed, then freezes
+``universe_version`` to the definition's content-derived version.  A spec
+without a ``universe_definition`` keeps the legacy engineering
+``configs/universe.yml`` resolution path.
+
 Identity (:func:`compute_experiment_id`) hashes the frozen spec with
 RFC-8785-style canonical JSON semantics implemented as sorted UTF-8 JSON with
 compact separators.  Dates are already normalized to ISO strings by
@@ -82,6 +89,14 @@ class ExperimentSpec(BaseModel):
     factor_versions: dict[str, str]
     dataset_version: str
     universe_version: str
+    #: The frozen universe definition a formal run resolves, e.g.
+    #: ``csi300``: the runner loads
+    #: ``configs/universes/<universe_definition>.yml``, validates its
+    #: membership-table hash against the pinned dataset through the mandatory
+    #: acceptance gate and freezes ``universe_version`` to the definition
+    #: version.  ``None`` keeps the legacy engineering ``configs/universe.yml``
+    #: path, which formal runs never take.
+    universe_definition: str | None = None
     date_range: DateRange
     train_validation_holdout_policy: Literal["not_applicable_engineering_mvp"]
     preprocessing: Preprocessing
@@ -104,6 +119,14 @@ class ExperimentSpec(BaseModel):
                 raise ValueError("factor names and versions must be non-empty")
         if not self.dataset_version.strip() or not self.universe_version.strip():
             raise ValueError("dataset_version and universe_version must be non-empty")
+        if self.universe_definition is not None and (
+            not self.universe_definition.strip()
+            or self.universe_definition != self.universe_definition.strip()
+        ):
+            raise ValueError(
+                "universe_definition must be None or nonblank trimmed text: "
+                f"{self.universe_definition!r}"
+            )
         if not self.cost_scenarios:
             raise ValueError("cost_scenarios must name at least one scenario")
         if any(not scenario.strip() for scenario in self.cost_scenarios):

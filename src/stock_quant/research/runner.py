@@ -2,12 +2,28 @@
 
 :class:`ResearchRunner` turns one frozen :class:`ExperimentSpec` into a complete,
 reproducible experiment.  It resolves a ``CURRENT`` dataset/universe request to
-an explicit version *exactly once* (``ExperimentSpec.freeze``) before any market
-data is read, then runs the pinned pipeline: a factor dataset adapter, the
+an explicit version *exactly once* before any market data is read: the dataset
+version is pinned first, then a spec that names a ``universe_definition`` is
+preflighted against it -- the frozen :class:`~stock_quant.research.universe.
+UniverseDefinition` is loaded from ``configs/universes/``, its membership-table
+hash and the mandatory ``index_membership_evidence`` acceptance gate are
+enforced on the pinned dataset *before* the identity is computed, and only then
+is ``universe_version`` frozen to the definition version
+(``ExperimentSpec.freeze``).  A preflight rejection stops the run at the
+distinct ``universe_acceptance`` stage with a redacted manifest, never produces
+factor artifacts and never falls back to the master's full symbol list; a spec
+without a ``universe_definition`` keeps the legacy engineering
+``configs/universe.yml`` resolution.
+
+The run then executes the pinned pipeline: a factor dataset adapter, the
 specified factor, a weekly top-N equal-weight portfolio, one T+1 backtest per
-cost scenario and analytics/report generation.  Results are staged under
-``data/runs/<run_id>/`` and only an evaluated, manifest-verified publish is
-renamed into ``data/experiments/<experiment_id>/`` by the registry.
+cost scenario and analytics/report generation.  Definition identity
+(universe id/version, rules version, table hash, coverage) plus the
+per-signal-day member counts and ``{ISO date: snapshot sha256}`` map are
+persisted into the run manifest, ``universe_preflight.json``, the experiment
+manifest, ``config_snapshot.yml`` and ``metrics.json``.  Results are staged
+under ``data/runs/<run_id>/`` and only an evaluated, manifest-verified publish
+is renamed into ``data/experiments/<experiment_id>/`` by the registry.
 
 The workspace is resumable: every stage records the run input digest plus the
 sha256 of each output it produced in ``.stages.json``; re-running the same
@@ -54,10 +70,22 @@ from stock_quant.data_model.dataset import (
 from stock_quant.data_model.security_master import missing_master_coverage_symbols
 from stock_quant.data_model.trading_rules import TradingRuleBook
 from stock_quant.data_model.universe import Universe
+from stock_quant.data_model.universe_membership import (
+    MembershipFact,
+    SecurityMasterBoundary,
+    resolve_memberships,
+)
 from stock_quant.factors.base import Factor, FactorContext
 from stock_quant.factors.models import FactorResult
 from stock_quant.logging import StructuredLogger, redact_text
 from stock_quant.portfolio.equal_weight import TopNEqualWeight
+from stock_quant.research.acceptance import (
+    AcceptanceGateError,
+    AcceptanceResult,
+    enforce_required_results,
+    evaluate_index_membership_evidence,
+    read_membership_table,
+)
 from stock_quant.research.models import (
     CANONICAL_SCENARIO,
     MANIFESTED_ARTIFACTS,
@@ -86,12 +114,35 @@ from stock_quant.research.trust import (
     DataTrustMode,
     evaluate_corporate_action_trust,
 )
+from stock_quant.research.universe import (
+    UniverseDefinition,
+    UniverseResolver,
+    load_universe_definition,
+)
 
 _CURRENT = "CURRENT"
 
 #: Coarse pipeline stage labels, in dependency order.  The stage record is
 #: also the resume unit: labels map to the shared ``DataStage`` vocabulary.
 _STAGE_LABELS = ("pin", "factor", "portfolio", "backtest", "report")
+
+#: The fine pre-factor stage label a frozen-definition preflight failure is
+#: recorded under: the membership acceptance gate runs before identity and
+#: before any factor work, so its failures never reach a pipeline stage.
+_STAGE_UNIVERSE_ACCEPTANCE = "universe_acceptance"
+
+#: Steady-state member counts of the first-class indices.  The preflight
+#: cardinality check enforces the count on every trading day of the pinned
+#: calendar unless an immutable official exception record applies; custom
+#: pools carry no canonical size and are validated without one.
+_CANONICAL_UNIVERSE_SIZES = {
+    "csi300": 300,
+    "csi500": 500,
+    "csi1000": 1000,
+    "sse50": 50,
+    "sse180": 180,
+    "szse100": 100,
+}
 
 _LABEL_TO_DATASTAGE = {
     "pin": DataStage.PUBLISHED,
@@ -103,6 +154,11 @@ _LABEL_TO_DATASTAGE = {
 
 _STAGES_FILE = ".stages.json"
 _RUN_MANIFEST = "run_manifest.json"
+
+#: Factor-stage metadata artifact: the frozen universe identity plus the
+#: per-signal-day member counts and snapshot hashes the factor stage filtered
+#: under.  A run workspace file (resume-hashed), never a published artifact.
+_FACTOR_METADATA = "factor_metadata.json"
 
 #: Fraction of starting cash the weekly portfolio sizes its target notional
 #: from.  Sizing below 100% leaves a standing cash buffer so every order in the
@@ -144,6 +200,40 @@ class Evaluator(Protocol):
     """Records an engineering acceptance decision independent of performance."""
 
     def evaluate(self, metrics: dict[str, object]) -> Evaluation: ...
+
+
+class UniversePreflightFailed(RuntimeError):
+    """The frozen universe definition was rejected before any factor work.
+
+    Carries only the stable error codes (never evidence payloads) so the
+    redacted preflight manifest can name the rejection without leaking data.
+    """
+
+    def __init__(self, message: str, *, error_codes: Sequence[str] = (),
+                 universe_id: str | None = None) -> None:
+        super().__init__(message)
+        self.error_codes = tuple(sorted(set(error_codes)))
+        self.universe_id = universe_id
+
+
+@dataclass(frozen=True)
+class UniversePreflight:
+    """The frozen universe definition a formal run was accepted under.
+
+    Produced once during the preflight (before the experiment identity is
+    computed): the validated :class:`UniverseDefinition`, its signal-day
+    :class:`UniverseResolver`, the mandatory ``index_membership_evidence``
+    verdict and the per-signal-day member counts / snapshot-hash maps that
+    every artifact persists.
+    """
+
+    definition: UniverseDefinition
+    resolver: UniverseResolver
+    universe_version: str
+    expected_size: int | None
+    acceptance: AcceptanceResult
+    daily_member_counts: dict[str, int]
+    daily_snapshots: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -414,6 +504,7 @@ class ResearchRunner:
         self._active_stage: str | None = None
         self._context: DatasetContext | None = None
         self._digest: str = ""
+        self._universe_preflight: UniversePreflight | None = None
 
     # ------------------------------------------------------------------ #
     # Public entry point
@@ -441,7 +532,36 @@ class ResearchRunner:
         observer = self._observer if stage_observer is None else stage_observer
         mode = trust_mode if isinstance(trust_mode, DataTrustMode) \
             else DataTrustMode(trust_mode)
-        frozen = self._freeze(spec_path, trust_mode=mode)
+        spec, dataset_version = self._pin_inputs(spec_path)
+        # The universe preflight runs before identity: the frozen definition
+        # must validate against the pinned dataset's membership evidence and
+        # the mandatory acceptance gate before ``universe_version`` (and with
+        # it the experiment id) can be frozen, and any rejection must stop the
+        # run before a single factor is computed.
+        try:
+            preflight = self._preflight_universe(spec, dataset_version)
+        except Exception as error:  # noqa: BLE001 - any rejection is audited
+            self._fail_universe_preflight(spec, dataset_version, mode, error)
+            raise ResearchRunFailed(
+                f"research run failed at stage "
+                f"{_STAGE_UNIVERSE_ACCEPTANCE}: "
+                f"{redact_text(error, self._secrets)}",
+                run_id=self._run_id,
+                failed_stage=_STAGE_UNIVERSE_ACCEPTANCE,
+                retriable=not isinstance(error, (TypeError, ValueError)),
+            ) from error
+        universe_version = (
+            preflight.universe_version
+            if preflight is not None
+            else self._legacy_universe_version(spec)
+        )
+        frozen = spec.freeze(
+            dataset_version=dataset_version,
+            universe_version=universe_version,
+            code_commit=self._detect_code_commit() or spec.code_commit,
+            trust_mode=mode,
+        )
+        self._universe_preflight = preflight
         state = self._begin(frozen)
         try:
             self._active_stage = None
@@ -519,9 +639,14 @@ class ResearchRunner:
     # Freeze / identity / workspace
     # ------------------------------------------------------------------ #
 
-    def _freeze(
-        self, spec_path: str | Path, *, trust_mode: DataTrustMode
-    ) -> ExperimentSpec:
+    def _pin_inputs(self, spec_path: str | Path) -> tuple[ExperimentSpec, str]:
+        """Load the spec and pin the dataset version exactly once.
+
+        The returned spec may still request ``CURRENT`` for the universe; the
+        caller resolves that through the definition preflight (formal runs) or
+        the legacy engineering file.  A dataset whose ``CURRENT`` pointer is
+        missing raises before any run workspace is created.
+        """
         path = Path(spec_path)
         if not path.is_absolute():
             path = self._config_root / path
@@ -529,17 +654,207 @@ class ResearchRunner:
         dataset_version = spec.dataset_version
         if dataset_version == _CURRENT:
             dataset_version = DatasetPublisher(self._project_root).current().version
-        universe_version = spec.universe_version
-        if universe_version == _CURRENT:
-            universe = Universe.from_yaml(self._config_root / "configs"
-                                          / "universe.yml")
-            universe_version = universe.version
-        code_commit = self._detect_code_commit() or spec.code_commit
-        return spec.freeze(
+        return spec, dataset_version
+
+    def _legacy_universe_version(self, spec: ExperimentSpec) -> str:
+        """Resolve a ``CURRENT`` universe through the legacy engineering file.
+
+        This is the engineering-only path: a formal spec names a
+        ``universe_definition`` and resolves through a frozen
+        :class:`UniverseDefinition` instead (see ``_preflight_universe``).
+        """
+        if spec.universe_version != _CURRENT:
+            return spec.universe_version
+        universe = Universe.from_yaml(self._config_root / "configs"
+                                      / "universe.yml")
+        return universe.version
+
+    def _preflight_universe(
+        self, spec: ExperimentSpec, dataset_version: str
+    ) -> UniversePreflight | None:
+        """Validate the selected universe definition against the pinned data.
+
+        Loads ``configs/universes/<universe_definition>.yml``, opens the fixed
+        dataset context and evaluates the mandatory
+        ``index_membership_evidence`` result (evidence, boundaries, coverage
+        and cardinality) plus the pinned membership-table hash *before* any
+        factor computation, then freezes ``universe_version`` to the
+        definition's content-derived version.  Any rejection raises
+        :class:`UniversePreflightFailed` (or the underlying error) -- the run
+        never falls back to the master's full symbol list.
+        """
+        if spec.universe_definition is None:
+            return None
+        definition_path = (
+            self._config_root / "configs" / "universes"
+            / f"{spec.universe_definition}.yml"
+        )
+        definition = load_universe_definition(definition_path)
+        # Pin the dataset context once: every later stage reads the same
+        # immutable version through the already-open context.
+        self._frozen_version = dataset_version
+        context = self._open_context(dataset_version)
+        frame = read_membership_table(context)
+        calendar = self._calendar()
+        boundaries = self._master_boundaries(context)
+        size = _CANONICAL_UNIVERSE_SIZES.get(definition.universe_id)
+        expected_sizes = (
+            {definition.universe_id: size} if size is not None else {}
+        )
+        result = evaluate_index_membership_evidence(
+            frame,
+            definition=definition,
+            calendar=calendar,
+            expected_sizes=expected_sizes,
+            master=boundaries,
+        )
+        try:
+            enforce_required_results([result])
+        except AcceptanceGateError as error:
+            codes = tuple(result.details.get("error_codes") or ())
+            raise UniversePreflightFailed(
+                str(error), error_codes=codes,
+                universe_id=definition.universe_id,
+            ) from error
+        facts = _facts_from_membership_frame(frame)
+        resolver = UniverseResolver(
+            definition, resolve_memberships(facts, boundaries), facts=facts
+        )
+        if spec.universe_version != _CURRENT and \
+                spec.universe_version != definition.version:
+            raise UniversePreflightFailed(
+                f"spec universe_version {spec.universe_version!r} does not "
+                f"match the {definition.universe_id} definition version "
+                f"{definition.version!r}",
+                universe_id=definition.universe_id,
+            )
+        signals = self._signals(spec)
+        return UniversePreflight(
+            definition=definition,
+            resolver=resolver,
+            universe_version=definition.version,
+            expected_size=size,
+            acceptance=result,
+            daily_member_counts={
+                day.isoformat(): len(resolver.members_on(day))
+                for day in signals
+            },
+            daily_snapshots={
+                day.isoformat(): resolver.snapshot_for(day) for day in signals
+            },
+        )
+
+    def _master_boundaries(
+        self, context: DatasetContext
+    ) -> dict[str, SecurityMasterBoundary]:
+        """Fixed master boundaries for the acceptance check.
+
+        Only the listing date is applied: ``security_master.delist_date``
+        carries no proven last-tradable-date semantics in this schema, so it
+        is never used to close a membership interval (a delisting removal
+        without other proof fails the gate instead of being guessed).
+        """
+        master = context.read("security_master")
+        boundaries: dict[str, SecurityMasterBoundary] = {}
+        for record in master.to_dict("records"):
+            symbol = str(record["symbol"])
+            raw_list = record.get("list_date")
+            list_date = (
+                None
+                if raw_list is None or pd.isna(raw_list)
+                else _as_date(raw_list)
+            )
+            boundaries[symbol] = SecurityMasterBoundary(
+                symbol=symbol, list_date=list_date, last_tradable_date=None
+            )
+        return boundaries
+
+    def _fail_universe_preflight(
+        self,
+        spec: ExperimentSpec,
+        dataset_version: str,
+        mode: DataTrustMode,
+        error: Exception,
+    ) -> None:
+        """Audit a preflight rejection without producing any factor artifact.
+
+        Writes a FAILED run manifest plus the redacted preflight record
+        (``universe_preflight.json``) under a deterministic preflight run id:
+        only stable error codes and the redacted message are recorded, never
+        membership rows or evidence payloads.
+        """
+        self._active_stage = _STAGE_UNIVERSE_ACCEPTANCE
+        self._close_context()
+        digest_payload = json.dumps(
+            {
+                "spec": spec.model_dump(mode="json"),
+                "dataset_version": dataset_version,
+                "trust_mode": mode.value,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        run_id = (
+            "run_preflight_"
+            + hashlib.sha256(digest_payload.encode("utf-8")).hexdigest()[:16]
+        )
+        run_dir = self._project_root / "data" / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        self._run_id = run_id
+        self._run_dir = run_dir
+        self._logger = StructuredLogger(
+            run_dir / ".run.log.jsonl",
+            terminal=False,
+            secrets=self._secrets,
+        )
+        message = redact_text(str(error), self._secrets)
+        state = RunState(
+            run_id=run_id,
+            experiment_id="",
+            status=RunStatus.FAILED,
+            stage=DataStage.FAILED,
             dataset_version=dataset_version,
-            universe_version=universe_version,
-            code_commit=code_commit,
-            trust_mode=trust_mode,
+            universe_version=spec.universe_version,
+            code_commit=spec.code_commit,
+            factor_versions=dict(spec.factor_versions),
+            cost_scenarios=list(spec.cost_scenarios),
+            random_seed=spec.random_seed,
+            parent_experiment_ids=list(spec.parent_experiment_ids),
+            agent_id=spec.agent_id,
+            trust_mode=mode.value,
+            failed_stage=_STAGE_UNIVERSE_ACCEPTANCE,
+            error={
+                "stage": _STAGE_UNIVERSE_ACCEPTANCE,
+                "exception_class": type(error).__name__,
+                "message": message,
+                "retriable": not isinstance(error, (TypeError, ValueError)),
+            },
+        )
+        write_run_manifest(run_dir, state)
+        preflight = {
+            "status": "FAIL",
+            "failed_stage": _STAGE_UNIVERSE_ACCEPTANCE,
+            "dataset_version": dataset_version,
+            "universe_definition": spec.universe_definition,
+            "universe_id": getattr(error, "universe_id", None),
+            "universe_version": None,
+            "error_codes": list(getattr(error, "error_codes", ())),
+            "error": {
+                "exception_class": type(error).__name__,
+                "message": message,
+                "retriable": not isinstance(error, (TypeError, ValueError)),
+            },
+        }
+        (run_dir / "universe_preflight.json").write_text(
+            json.dumps(preflight, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        self._logger.error(
+            f"universe preflight failed: {type(error).__name__}: {message}",
+            run_id=run_id,
+            stage=_STAGE_UNIVERSE_ACCEPTANCE,
+            event="universe_preflight_failed",
         )
 
     def _detect_code_commit(self) -> str | None:
@@ -576,6 +891,7 @@ class ResearchRunner:
             stage=DataStage.CREATED,
             dataset_version=frozen.dataset_version,
             universe_version=frozen.universe_version,
+            universe=self._universe_record(frozen),
             code_commit=frozen.code_commit,
             factor_versions=dict(frozen.factor_versions),
             cost_scenarios=list(frozen.cost_scenarios),
@@ -585,23 +901,82 @@ class ResearchRunner:
             trust_mode=frozen.trust_mode.value,
         )
         write_run_manifest(run_dir, state)
+        self._write_universe_preflight_record(frozen)
         self._digest = self._run_digest(frozen)
         return state
 
+    def _universe_record(self, frozen: ExperimentSpec) -> dict[str, object] | None:
+        """The frozen definition identity persisted with the run manifest.
+
+        Carries the definition identity, the acceptance verdict and the
+        per-signal-day member counts / snapshot-hash maps, so a run manifest
+        alone locates the frozen universe and every day's membership hash.
+        """
+        preflight = self._universe_preflight
+        if preflight is None:
+            return None
+        definition = preflight.definition
+        return {
+            "universe_id": definition.universe_id,
+            "universe_version": frozen.universe_version,
+            "rules_version": definition.rules_version,
+            "membership_table_sha256": definition.membership_table_sha256,
+            "evidence_summary_sha256": definition.evidence_summary_sha256,
+            "coverage_start": definition.coverage_start.isoformat(),
+            "coverage_end": definition.coverage_end.isoformat(),
+            "expected_size": preflight.expected_size,
+            "acceptance_status": preflight.acceptance.status.value,
+            "daily_member_counts": dict(preflight.daily_member_counts),
+            "daily_snapshots": dict(preflight.daily_snapshots),
+        }
+
+    def _universe_identity(self, frozen: ExperimentSpec) -> dict[str, object]:
+        """The universe identity block for metrics/config snapshot artifacts."""
+        preflight = self._universe_preflight
+        if preflight is None:
+            return {}
+        definition = preflight.definition
+        return {
+            "universe_id": definition.universe_id,
+            "universe_version": frozen.universe_version,
+            "rules_version": definition.rules_version,
+            "membership_table_sha256": definition.membership_table_sha256,
+            "evidence_summary_sha256": definition.evidence_summary_sha256,
+            "coverage_start": definition.coverage_start.isoformat(),
+            "coverage_end": definition.coverage_end.isoformat(),
+            "expected_size": preflight.expected_size,
+        }
+
+    def _write_universe_preflight_record(self, frozen: ExperimentSpec) -> None:
+        """Persist the redacted PASS preflight record in the run workspace."""
+        preflight = self._universe_preflight
+        if preflight is None:
+            return
+        definition = preflight.definition
+        record = {
+            "status": "PASS",
+            "failed_stage": None,
+            "dataset_version": frozen.dataset_version,
+            "universe_definition": frozen.universe_definition,
+            "universe_id": definition.universe_id,
+            "universe_version": frozen.universe_version,
+            "rules_version": definition.rules_version,
+            "membership_table_sha256": definition.membership_table_sha256,
+            "coverage_start": definition.coverage_start.isoformat(),
+            "coverage_end": definition.coverage_end.isoformat(),
+            "acceptance_summary": preflight.acceptance.summary,
+            "error_codes": [],
+        }
+        (self._run_dir / "universe_preflight.json").write_text(
+            json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
     def _run_digest(self, frozen: ExperimentSpec) -> str:
         """One deterministic sha over every input the stages consume."""
-        config_hashes = {
-            name: _sha256_file(self._config_root / "configs" / name)
-            for name in (
-                "project.yml",
-                "costs.yml",
-                "trading_rules.yml",
-                "universe.yml",
-            )
-        }
         payload = {
             "frozen_spec": frozen.model_dump(mode="json"),
-            "config_file_hashes": config_hashes,
+            "config_file_hashes": self._config_hashes(frozen),
             "python_version": platform.python_version(),
             "dependency_versions": self._dependency_versions(),
         }
@@ -765,6 +1140,17 @@ class ResearchRunner:
             "evaluation_reason": reason,
             "artifacts": artifacts,
         }
+        if self._universe_preflight is not None:
+            # A definition-backed run carries its frozen universe identity in
+            # the immutable experiment manifest, so the registry index can
+            # locate the exact membership definition an experiment used.
+            manifest.update({
+                "universe_id": self._universe_preflight.definition.universe_id,
+                "universe_rules_version":
+                    self._universe_preflight.definition.rules_version,
+                "universe_membership_table_sha256":
+                    self._universe_preflight.definition.membership_table_sha256,
+            })
         (publish_dir / "experiment_manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
             encoding="utf-8",
@@ -1024,6 +1410,17 @@ class ResearchRunner:
             "experiment_id": ExperimentIdentity.of(frozen).experiment_id,
             "dataset_version": frozen.dataset_version,
             "universe_version": frozen.universe_version,
+            "universe": self._universe_identity(frozen),
+            "universe_daily_member_counts": (
+                dict(self._universe_preflight.daily_member_counts)
+                if self._universe_preflight is not None
+                else {}
+            ),
+            "universe_daily_snapshots": (
+                dict(self._universe_preflight.daily_snapshots)
+                if self._universe_preflight is not None
+                else {}
+            ),
             "code_commit": frozen.code_commit,
             "factor_versions": dict(frozen.factor_versions),
             "cost_scenarios": list(frozen.cost_scenarios),
@@ -1032,7 +1429,7 @@ class ResearchRunner:
             "agent_id": frozen.agent_id,
             "python_version": platform.python_version(),
             "dependency_versions": self._dependency_versions(),
-            "config_file_hashes": self._config_hashes(),
+            "config_file_hashes": self._config_hashes(frozen),
             "run_input_digest": self._digest,
         }
         snapshot_path = self._run_dir / "config_snapshot.yml"
@@ -1044,11 +1441,24 @@ class ResearchRunner:
                 for name in ("experiment_spec.yml", "dataset_version.txt",
                              "config_snapshot.yml")}
 
-    def _config_hashes(self) -> dict[str, str]:
+    def _config_hashes(self, frozen: ExperimentSpec) -> dict[str, str]:
+        """sha256 of every config file the run consumes.
+
+        A frozen-definition run hashes its ``configs/universes/<name>.yml``
+        too: the definition content is a run input (its version is derived
+        from it), so any definition change re-digests every stage.
+        """
+        names = [
+            "project.yml",
+            "costs.yml",
+            "trading_rules.yml",
+            "universe.yml",
+        ]
+        if frozen.universe_definition is not None:
+            names.append(f"universes/{frozen.universe_definition}.yml")
         return {
             name: _sha256_file(self._config_root / "configs" / name)
-            for name in ("project.yml", "costs.yml", "trading_rules.yml",
-                         "universe.yml")
+            for name in names
         }
 
     def _load_universe_symbols(self) -> tuple[str, ...]:
@@ -1064,9 +1474,19 @@ class ResearchRunner:
         return symbols
 
     def _produce_factor(self, state: RunState, frozen: ExperimentSpec) -> dict:
-        """Compute every requested factor over one pinned signal-dataset."""
+        """Compute every requested factor over one pinned signal-dataset.
+
+        When the run preflighted a frozen universe definition, the factor
+        context carries its point-in-time membership hooks (``members_on`` /
+        ``membership_snapshot_for``, resolved from the frozen resolver) so
+        every factor filters its candidates to signal-day members before any
+        eligibility logic; the full master price surface stays pinned to the
+        adapter.  The per-signal-day snapshot hashes are persisted as
+        factor-stage metadata (``factor_metadata.json``).
+        """
         signals = self._signals(frozen)
         factors = self._resolve_factors(frozen)
+        preflight = self._universe_preflight
         frames: list[pd.DataFrame] = []
         for factor in factors:
             adapter = _DatasetFactorAdapter(
@@ -1079,6 +1499,16 @@ class ResearchRunner:
                 start_date=frozen.date_range.start_date,
                 end_date=frozen.date_range.end_date,
                 signal_dates=signals,
+                members_on=(
+                    preflight.resolver.members_on
+                    if preflight is not None
+                    else None
+                ),
+                membership_snapshot_for=(
+                    preflight.resolver.snapshot_for
+                    if preflight is not None
+                    else None
+                ),
             )
             result = factor.compute(factor_context)
             if not isinstance(result, FactorResult):
@@ -1094,8 +1524,43 @@ class ResearchRunner:
             ["trade_date", "symbol"], kind="stable"
         ).reset_index(drop=True)
         combined.to_parquet(self._run_dir / "factor_results.parquet", index=False)
-        return {"factor_results.parquet":
-                _sha256_file(self._run_dir / "factor_results.parquet")}
+        outputs = {"factor_results.parquet":
+                   _sha256_file(self._run_dir / "factor_results.parquet")}
+        metadata = self._factor_stage_metadata(signals)
+        if metadata is not None:
+            path = self._run_dir / _FACTOR_METADATA
+            path.write_text(
+                json.dumps(
+                    metadata, ensure_ascii=False, indent=2, sort_keys=True
+                ),
+                encoding="utf-8",
+            )
+            outputs[_FACTOR_METADATA] = _sha256_file(path)
+        return outputs
+
+    def _factor_stage_metadata(self, signals: tuple[date, ...]) -> dict | None:
+        """The factor-stage membership metadata record, or ``None``.
+
+        A definition-backed run records which frozen universe the factor stage
+        filtered under and the exact ``{ISO date: snapshot sha256}`` and
+        member-count maps for its signal days, so factor artifacts stay
+        auditable against membership evidence independently of the later
+        report stage.  A legacy run without a definition records nothing.
+        """
+        preflight = self._universe_preflight
+        if preflight is None:
+            return None
+        return {
+            "universe_id": preflight.definition.universe_id,
+            "universe_version": preflight.universe_version,
+            "signal_dates": [day.isoformat() for day in signals],
+            "daily_member_counts": dict(
+                sorted(preflight.daily_member_counts.items())
+            ),
+            "daily_snapshots": dict(
+                sorted(preflight.daily_snapshots.items())
+            ),
+        }
 
     def _resolve_factors(self, frozen: ExperimentSpec) -> list[Factor]:
         available = dict(self._factor_provider())
@@ -1157,9 +1622,11 @@ class ResearchRunner:
             execution_date = calendar.next_trading_day(signal)
             target = builder.build(result, price_map.get(signal, pd.DataFrame(
                 columns=["symbol", "close"])), sizing_capital)
+            target_records = target.frame.to_dict("records")
+            self._assert_targets_are_signal_day_members(signal, target_records)
             planned_notional = sum(
                 float(row["signal_price"]) * int(row["target_quantity"])
-                for row in target.frame.to_dict("records")
+                for row in target_records
             )
             signal_rows.append({
                 "signal_date": signal,
@@ -1169,8 +1636,7 @@ class ResearchRunner:
                 "unallocated_weight": round(target.unallocated_weight, 6),
             })
             target_rows.extend(
-                {**row, "trade_date": signal} for row in
-                target.frame.to_dict("records")
+                {**row, "trade_date": signal} for row in target_records
             )
 
         target_frame = pd.DataFrame(target_rows)
@@ -1183,6 +1649,33 @@ class ResearchRunner:
             name: _sha256_file(self._run_dir / name)
             for name in ("signals.parquet", "target_positions.parquet")
         }
+
+    def _assert_targets_are_signal_day_members(
+        self, signal: date, target_records: list[dict]
+    ) -> None:
+        """Loud guard: every NEW portfolio target is a member on its signal day.
+
+        Membership is an input gate, never a trading instruction: a removed
+        member only stops generating new targets and its exit stays with the
+        normal execution/exit accounting (removal is not a forced sell).  A
+        target outside the signal-day member set therefore means the
+        membership-first factor order was violated, and the run fails instead
+        of publishing it.
+        """
+        preflight = self._universe_preflight
+        if preflight is None:
+            return
+        members = set(preflight.resolver.members_on(signal))
+        outsiders = sorted(
+            {str(record["symbol"]) for record in target_records} - members
+        )
+        if outsiders:
+            raise ValueError(
+                f"portfolio targets {outsiders} on signal date "
+                f"{signal.isoformat()} are not {preflight.definition.universe_id} "
+                "members on that day; membership-first factor filtering was "
+                "violated"
+            )
 
     def _signal_price_frame(self, frozen: ExperimentSpec) -> pd.DataFrame:
         context = self._open_context(frozen.dataset_version)
@@ -1569,10 +2062,21 @@ class ResearchRunner:
             "spec": frozen.model_dump(mode="json"),
             "dataset_version": frozen.dataset_version,
             "universe_version": frozen.universe_version,
+            "universe": self._universe_identity(frozen),
+            "universe_daily_member_counts": (
+                dict(self._universe_preflight.daily_member_counts)
+                if self._universe_preflight is not None
+                else {}
+            ),
+            "universe_daily_snapshots": (
+                dict(self._universe_preflight.daily_snapshots)
+                if self._universe_preflight is not None
+                else {}
+            ),
             "code_commit": frozen.code_commit,
             "python_version": platform.python_version(),
             "dependency_versions": self._dependency_versions(),
-            "config_file_hashes": self._config_hashes(),
+            "config_file_hashes": self._config_hashes(frozen),
             "run_input_digest": self._digest,
             "initial_cash": self._project_config.initial_cash,
             "sizing_capital": self._sizing_capital,
@@ -1718,6 +2222,27 @@ class _DatasetFactorAdapter:
 # --------------------------------------------------------------------------- #
 # Small shared helpers
 # --------------------------------------------------------------------------- #
+
+
+def _facts_from_membership_frame(frame: pd.DataFrame) -> list[MembershipFact]:
+    """Rebuild validated facts from the dataset's ``universe_membership`` rows.
+
+    Only called after the acceptance gate passed, so every row satisfies the
+    fact contract; a breach here raises and fails the run loudly.
+    """
+    facts: list[MembershipFact] = []
+    for record in frame.to_dict("records"):
+        payload = dict(record)
+        for column in ("raw_effective_from", "raw_effective_to",
+                       "announcement_date"):
+            value = payload.get(column)
+            payload[column] = (
+                None
+                if value is None or pd.isna(value)
+                else pd.Timestamp(value).date()
+            )
+        facts.append(MembershipFact.model_validate(payload))
+    return facts
 
 
 def _to_ordinal(day: object) -> int:

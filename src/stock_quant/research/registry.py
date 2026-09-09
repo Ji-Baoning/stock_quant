@@ -48,6 +48,7 @@ _INDEX_COLUMNS = (
     "status",
     "dataset_version",
     "universe_version",
+    "universe_id",
     "code_commit",
     "evaluation_reason",
 )
@@ -88,6 +89,12 @@ class ExperimentManifest(BaseModel):
     status: Literal["ACCEPTED", "REJECTED"]
     dataset_version: str
     universe_version: str
+    #: The frozen universe definition identity a definition-backed run
+    #: records (Task 4).  ``None`` for legacy manifests and runs resolved
+    #: through the engineering ``configs/universe.yml`` path.
+    universe_id: str | None = None
+    universe_rules_version: str | None = None
+    universe_membership_table_sha256: str | None = None
     code_commit: str | None = None
     evaluation_reason: str | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
@@ -309,6 +316,7 @@ class ExperimentRegistry:
                     "status": raw.get("status"),
                     "dataset_version": raw.get("dataset_version"),
                     "universe_version": raw.get("universe_version"),
+                    "universe_id": raw.get("universe_id"),
                     "code_commit": raw.get("code_commit"),
                     "evaluation_reason": raw.get("evaluation_reason"),
                 }

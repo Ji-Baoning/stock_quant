@@ -6,16 +6,28 @@ historical factor row must be bit-identical: appending data after a signal
 date can never rewrite the factor value at that signal date.  Both frames must
 also write to byte-identical Parquet.  Everything runs offline on
 deterministic in-memory datasets.
+
+Task 5 (point-in-time universe) adds the membership-first gate: a context
+whose ``members_on`` resolves per signal day must keep a removed member's
+history but never produce a NEW signal after its removal day, and the
+research runner's factor stage must persist the per-signal-day membership
+snapshot hashes it computed under (``factor_metadata.json``).
 """
 
+import hashlib
+import json
 from datetime import date, timedelta
 from io import BytesIO
 
 import pandas as pd
 import pytest
+from test_research_runner import _SPEC, _new_env
 
+from stock_quant.data_model.universe_membership import resolve_memberships
 from stock_quant.factors.base import FactorContext
 from stock_quant.factors.momentum import Momentum60
+from stock_quant.research.runner import ResearchRunner
+from stock_quant.research.universe import UniverseResolver
 
 _SYMBOL = "600000.SH"
 _FACTOR_INPUT_COLUMNS = [
@@ -71,20 +83,40 @@ def _symbol_rows(
     return rows
 
 
+def _snapshot_hash(day: date, symbols: tuple[str, ...]) -> str:
+    """A deterministic stand-in for the resolver's daily snapshot hash."""
+    payload = f"{day.isoformat()}\x1f{','.join(symbols)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _make_context(
     rows: list[dict],
     *,
     start_date: date,
     end_date: date,
     signal_dates: tuple[date, ...],
+    members: dict[date, tuple[str, ...]] | None = None,
 ) -> FactorContext:
     frame = pd.DataFrame(rows, columns=_FACTOR_INPUT_COLUMNS)
+    if members is None:
+        members_on = None
+        snapshot_for = None
+    else:
+
+        def members_on(day: date) -> tuple[str, ...]:
+            return members[day]
+
+        def snapshot_for(day: date) -> str:
+            return _snapshot_hash(day, members[day])
+
     return FactorContext(
         dataset=_FrameDataset(frame),
         universe_version="universe-v1",
         start_date=start_date,
         end_date=end_date,
         signal_dates=signal_dates,
+        members_on=members_on,
+        membership_snapshot_for=snapshot_for,
     )
 
 
@@ -152,3 +184,87 @@ def test_no_lookahead_rows_are_byte_stable_in_parquet(
     after = Momentum60().compute(context_with_future).frame
     after = after[after["trade_date"] <= base_context.end_date]
     assert _parquet_bytes(before) == _parquet_bytes(after.reset_index(drop=True))
+
+
+# --------------------------------------------------------------------------- #
+# Membership-first candidate filtering (point-in-time universe, Task 5)
+# --------------------------------------------------------------------------- #
+
+
+def test_removed_member_makes_no_new_signal():
+    """A removed member keeps its history but makes no NEW signal after removal.
+
+    ``600000.SH`` is a member through 2020-06-14 (the last membership signal
+    here is Friday 2020-06-12) and is removed from 2020-06-15: its rows at the
+    last membership day stay, it produces no row at all -- valid or invalid --
+    on the first post-removal signal day, and a still-member name keeps
+    producing rows on that same day.
+    """
+    sessions = _sessions(130, start=date(2020, 1, 2))
+    last_member_day = date(2020, 6, 12)
+    removal_day = date(2020, 6, 15)
+    rows = _symbol_rows(sessions)  # 600000.SH
+    rows += _symbol_rows(sessions, symbol="000001.SZ", close_start=50.0)
+    context = _make_context(
+        rows,
+        start_date=sessions[0],
+        end_date=sessions[-1],
+        signal_dates=(last_member_day, removal_day),
+        members={
+            last_member_day: ("600000.SH", "000001.SZ"),
+            removal_day: ("000001.SZ",),
+        },
+    )
+
+    frame = Momentum60().compute(context).frame
+
+    assert "600000.SH" in set(
+        frame.loc[frame["trade_date"].eq(last_member_day), "symbol"]
+    )
+    assert "600000.SH" not in set(
+        frame.loc[frame["trade_date"].eq(removal_day), "symbol"]
+    )
+    assert "000001.SZ" in set(
+        frame.loc[frame["trade_date"].eq(removal_day), "symbol"]
+    )
+
+
+def test_factor_stage_metadata_carries_daily_snapshot_hash(tmp_path):
+    """The factor stage persists the membership snapshot hashes it ran under.
+
+    ``factor_metadata.json`` in the run workspace records the frozen universe
+    identity plus the per-signal-day member counts and snapshot hashes; they
+    equal the run's persisted metrics map and an independently built frozen
+    resolver's hashes, so the factor artifact is auditable against the exact
+    point-in-time membership day by day.
+    """
+    env = _new_env(tmp_path)
+    runner = ResearchRunner(env.root, config_root=env.config_root)
+    experiment = runner.run(_SPEC)
+
+    metadata = json.loads(
+        (env.root / "data" / "runs" / runner.run_id / "factor_metadata.json")
+        .read_text(encoding="utf-8")
+    )
+    metrics = json.loads(
+        (experiment.path / "metrics.json").read_text(encoding="utf-8")
+    )
+
+    assert metadata["universe_id"] == "csi300"
+    assert metadata["universe_version"] == experiment.manifest.universe_version
+    assert (
+        metadata["daily_snapshots"]
+        == metrics["meta"]["universe_daily_snapshots"]
+    )
+    assert (
+        metadata["daily_member_counts"]
+        == metrics["meta"]["universe_daily_member_counts"]
+    )
+
+    resolver = UniverseResolver(
+        env.definition,
+        resolve_memberships(list(env.facts), {}),
+        facts=list(env.facts),
+    )
+    for day_text, snapshot in metadata["daily_snapshots"].items():
+        assert snapshot == resolver.snapshot_for(date.fromisoformat(day_text))
