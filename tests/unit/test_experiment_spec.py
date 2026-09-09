@@ -152,6 +152,48 @@ def test_compute_experiment_id_rejects_unresolved_current_spec():
         compute_experiment_id(placeholder)
 
 
+# ---------------------------------------------------------------------------
+# Task 4: the frozen universe definition is part of experiment identity
+# ---------------------------------------------------------------------------
+
+
+def test_definition_version_changes_experiment_id():
+    """The plan's identity rule: the frozen universe_version is hashed.
+
+    Two specs identical except for the resolved universe definition version
+    must receive different experiment ids: research identity incorporates the
+    point-in-time universe, not just the dataset version.
+    """
+    assert compute_experiment_id(
+        make_spec(universe_version="a" * 64)
+    ) != compute_experiment_id(make_spec(universe_version="b" * 64))
+
+
+def test_spec_defaults_to_no_universe_definition():
+    """A spec without ``universe_definition`` keeps the legacy path."""
+    assert make_spec().universe_definition is None
+
+
+def test_spec_accepts_a_universe_definition_name_and_freezes_with_it():
+    spec = make_spec(universe_definition="csi300")
+    assert spec.universe_definition == "csi300"
+    frozen = spec.freeze(
+        dataset_version="d" * 64, universe_version="e" * 64, code_commit="head"
+    )
+    assert frozen.universe_definition == "csi300"
+    # the named definition participates in identity: the same frozen versions
+    # under a different definition name yield a different experiment id
+    assert compute_experiment_id(frozen) != compute_experiment_id(
+        frozen.model_copy(update={"universe_definition": "csi500"})
+    )
+
+
+@pytest.mark.parametrize("bad", ["", "   ", " csi300", "csi300 "])
+def test_spec_rejects_blank_or_padded_universe_definition(bad):
+    with pytest.raises(ValidationError):
+        make_spec(universe_definition=bad)
+
+
 def test_spec_forbids_extra_fields():
     with pytest.raises(ValidationError):
         make_spec(unexpected_key="not part of the spec")
@@ -212,6 +254,9 @@ def test_committed_example_spec_is_coherent_and_loadable():
     )
     assert loaded.dataset_version == "CURRENT"
     assert loaded.universe_version == "CURRENT"
+    # Formal research resolves the universe through the frozen csi300
+    # definition (never the legacy engineering universe.yml).
+    assert loaded.universe_definition == "csi300"
     # resolve-to-explicit semantics: freezing the same example twice with the
     # same explicit versions yields one stable id; a different data version
     # yields a different id.

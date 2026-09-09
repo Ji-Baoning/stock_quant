@@ -85,6 +85,32 @@
     </table>
   </section>
 
+  {% if universe %}
+  <section>
+    <h2>股票池冻结</h2>
+    <p>本实验的候选股票池由冻结的指数成分定义在任一信号日前解析并通过验收门禁；
+    逐信号日成员快照哈希使股票池序列可审计、可复现。</p>
+    <table class="kv">
+      <tr><td>指数池（universe_id）</td><td>{{ universe.universe_id }}</td></tr>
+      <tr><td>股票池版本（universe_version）</td><td>{{ universe.universe_version }}</td></tr>
+      <tr><td>规则版本（rules_version）</td><td>{{ universe.rules_version }}</td></tr>
+      <tr><td>成分表哈希（membership_table_sha256）</td><td>{{ universe.membership_table_sha256 }}</td></tr>
+      <tr><td>覆盖窗口</td><td>{{ universe.coverage_text or "—" }}</td></tr>
+    </table>
+    {% if universe.daily_rows %}
+    <details class="daily-trade-snapshot">
+      <summary>逐信号日成员快照（{{ universe.daily_rows | length }} 天）</summary>
+      <table>
+        <thead><tr><th>信号日</th><th>成员数</th><th>成员快照哈希</th></tr></thead>
+        <tbody>
+          {% for row in universe.daily_rows %}<tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </details>
+    {% endif %}
+  </section>
+  {% endif %}
+
   <section>
     <h2>绩效汇总</h2>
     <table>
