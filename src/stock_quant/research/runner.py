@@ -2681,8 +2681,21 @@ class ResearchRunner:
             )
             buffered = not construction.empty
             for scenario in self._active_cost_scenarios(fold_dir):
-                path = fold_dir / "backtest" / scenario / \
-                    "rebalance_decisions.parquet"
+                scenario_dir = fold_dir / "backtest" / scenario
+                # Every declared scenario's daily equity path is mandatory
+                # evidence for an executed fold (the one-time challenge's
+                # invested-exposure input).
+                equity = scenario_dir / "equity.parquet"
+                if not equity.is_file():
+                    raise FileNotFoundError(
+                        f"fold {fold_dir.name} is missing the {scenario} "
+                        "equity artifact; an incomplete fold audit set can "
+                        "never be published"
+                    )
+                names.append(
+                    f"folds/{fold_dir.name}/backtest/{scenario}/equity.parquet"
+                )
+                path = scenario_dir / "rebalance_decisions.parquet"
                 if buffered and not path.is_file():
                     raise FileNotFoundError(
                         f"buffered fold {fold_dir.name} is missing the "

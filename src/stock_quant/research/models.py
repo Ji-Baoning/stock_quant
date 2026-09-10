@@ -270,11 +270,15 @@ FOLD_ARTIFACTS = (
     "metrics.json",
 )
 
-#: The scenario-local audit artifact published under
-#: ``folds/<fold_id>/backtest/<scenario>/`` for the buffered risk-weighted
-#: rule: one rebalance-decision row per reconciled symbol per rebalance day,
+#: The scenario-local audit artifacts published under
+#: ``folds/<fold_id>/backtest/<scenario>/``.  ``equity.parquet`` publishes
+#: for every declared cost scenario of every executed fold (the auditable
+#: daily ``cash``/``market_value``/``net_equity_after_cost`` path a one-time
+#: strategy challenge needs for its invested-exposure evidence);
+#: ``rebalance_decisions.parquet`` is the buffered risk-weighted rule's
+#: decision audit: one row per reconciled symbol per rebalance day,
 #: including the band/lot suppressions.
-SCENARIO_ARTIFACTS = ("rebalance_decisions.parquet",)
+SCENARIO_ARTIFACTS = ("equity.parquet", "rebalance_decisions.parquet")
 
 #: Every admissible root artifact name across both execution pipelines.
 ADMISSIBLE_ROOT_ARTIFACTS = frozenset(REQUIRED_ARTIFACTS) | frozenset(

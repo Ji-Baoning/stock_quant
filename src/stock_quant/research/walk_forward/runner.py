@@ -1054,6 +1054,13 @@ class WalkForwardRunner:
             per_scenario[scenario]["rebalance_decisions"].to_parquet(
                 scenario_dir / "rebalance_decisions.parquet", index=False
             )
+            # Every declared scenario's daily equity path (cash, market
+            # value, net equity after cost) publishes beside its decision
+            # audit: the one-time strategy challenge computes the invested
+            # exposure evidence from exactly these rows.
+            per_scenario[scenario]["equity"].to_parquet(
+                scenario_dir / "equity.parquet", index=False
+            )
         metrics_payload = {
             "fold_id": fold.fold_id,
             "initial_equity": request.initial_cash,
@@ -1127,6 +1134,7 @@ class WalkForwardRunner:
             artifact_names.append(
                 f"backtest/{scenario}/rebalance_decisions.parquet"
             )
+            artifact_names.append(f"backtest/{scenario}/equity.parquet")
         return {
             name: sha256_file(fold_dir / name) for name in artifact_names
         }
