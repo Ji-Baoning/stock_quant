@@ -1193,6 +1193,31 @@ def test_seal_evidence_requires_a_repairs_table(tmp_path: Path):
     (directory / "manifest.json").write_text("{}", encoding="utf-8")
     with pytest.raises(FileNotFoundError):
         module.seal_evidence(directory)
+
+
+def test_seal_evidence_returns_the_summary_it_wrote(tmp_path: Path):
+    """The return contract is part of the interface, not just the file."""
+    module = _load_build_module()
+    directory = _sealed_snapshot(tmp_path)
+    summary = module.seal_evidence(directory)  # idempotent on unchanged inputs
+    assert summary["manifest_sha256"] == module._sha256_file(
+        directory / "manifest.json"
+    )
+    assert summary["repairs_sha256"] == module._sha256_file(
+        directory / "repairs.csv"
+    )
+
+
+def test_verify_snapshot_rejects_a_tampered_manifest(tmp_path: Path):
+    module = _load_build_module()
+    directory = _sealed_snapshot(tmp_path)
+    (directory / "manifest.json").write_text(
+        json.dumps({"source": "index_constitution", "files": {}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as excinfo:
+        module.verify_snapshot(directory)
+    assert "manifest" in str(excinfo.value)
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -1231,8 +1256,10 @@ def _sha256_file(path: Path) -> str:
 def seal_evidence(snapshot_dir: Path) -> dict:
     """Pin ``manifest.json`` and ``repairs.csv`` into ``evidence_summary.json``.
 
-    The summary is the row-level ``source_document_sha256`` and the
-    definition's ``evidence_summary_sha256``.  Binding the repair table here is
+    This file's own SHA-256 becomes each fact's ``source_document_sha256`` and
+    the definition's ``evidence_summary_sha256``; the file itself pins
+    ``manifest_sha256`` (which covers the upstream CSVs) and ``repairs_sha256``
+    (which covers the hand-authored corrections).  Binding the repair table is
     what makes the corrections tamper-evident: without it a repair could be
     edited while every other hash still verified.
     """
@@ -1290,7 +1317,7 @@ def verify_snapshot(snapshot_dir: Path) -> tuple[dict, dict]:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python -m pytest tests/unit/test_csi300_universe_build.py -q`
-Expected: 27 passed（Task 3/4 的 22 + 本任务的 5）
+Expected: 29 passed（Task 3/4 的 22 + 本任务的 7）
 
 - [ ] **Step 5: 提交**
 
@@ -1644,7 +1671,7 @@ from stock_quant.data_quality.models import QualityReport
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python -m pytest tests/unit/test_csi300_universe_build.py -q`
-Expected: 36 passed（Task 3/4/5 的 27 + 本任务的 9）
+Expected: 38 passed（Task 3/4/5 的 29 + 本任务的 9）
 
 - [ ] **Step 5: 跑 lint**
 
