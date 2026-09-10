@@ -114,3 +114,131 @@ def test_membership_rows_rejects_a_missing_opt_in_instead_of_dropping_it():
     with pytest.raises(ValueError) as excinfo:
         module.membership_rows(_history_with_nat())
     assert "SH600501" in str(excinfo.value)
+
+
+def _history() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "symbol": ["SZ000001", "SZ000780", "SH600000"],
+            "name": ["平安银行", "平庄能源", "浦发银行"],
+            "opt-in": pd.to_datetime(["2005-04-08", "2005-04-08", "2005-04-08"]),
+            "opt-out": pd.to_datetime([None, "2013-12-16", "2007-04-30"]),
+        }
+    )
+
+
+def _repairs(**overrides) -> pd.DataFrame:
+    row = {
+        "symbol": "SZ000780",
+        "action": "set_field",
+        "field": "opt-out",
+        "old_value": "2013-12-16",
+        "new_value": "2006-08-14",
+        "evidence_tier": "A",
+        "evidence_source": "data/raw/csi/csi_index_announcements/85.json",
+        "evidence_detail": "官方公告：2006-08-15 起调出 000780 草原兴发",
+    }
+    row.update(overrides)
+    return pd.DataFrame([row])
+
+
+def test_read_repairs_returns_the_declared_columns(tmp_path: Path):
+    module = _load_build_module()
+    path = tmp_path / "repairs.csv"
+    path.write_text(
+        "symbol,action,field,old_value,new_value,evidence_tier,"
+        "evidence_source,evidence_detail\n",
+        encoding="utf-8",
+    )
+    repairs = module.read_repairs(path)
+    assert list(repairs.columns) == list(module.REPAIR_COLUMNS)
+    assert repairs.empty
+
+
+def test_empty_repairs_leave_the_history_untouched():
+    module = _load_build_module()
+    history = _history()
+    result = module.apply_repairs(
+        history, pd.DataFrame(columns=list(module.REPAIR_COLUMNS))
+    )
+    pd.testing.assert_frame_equal(result, history)
+
+
+def test_set_field_replaces_the_matching_value():
+    module = _load_build_module()
+    result = module.apply_repairs(_history(), _repairs())
+    row = result[result["symbol"] == "SZ000780"].iloc[0]
+    assert row["opt-out"] == pd.Timestamp("2006-08-14")
+    assert len(result) == 3
+
+
+def test_set_field_does_not_mutate_the_input_frame():
+    module = _load_build_module()
+    history = _history()
+    module.apply_repairs(history, _repairs())
+    assert history.loc[history["symbol"] == "SZ000780", "opt-out"].iloc[0] == (
+        pd.Timestamp("2013-12-16")
+    )
+
+
+def test_set_field_with_a_stale_old_value_sets_nothing():
+    """A repair whose old_value no longer matches must not silently apply."""
+    module = _load_build_module()
+    result = module.apply_repairs(
+        _history(), _repairs(old_value="1999-01-01")
+    )
+    row = result[result["symbol"] == "SZ000780"].iloc[0]
+    assert row["opt-out"] == pd.Timestamp("2013-12-16")
+
+
+def test_drop_row_removes_the_matching_interval():
+    module = _load_build_module()
+    result = module.apply_repairs(
+        _history(),
+        _repairs(action="drop_row", field="opt-in", old_value="2005-04-08"),
+    )
+    assert "SZ000780" not in set(result["symbol"])
+
+
+def test_insert_row_appends_a_new_interval():
+    module = _load_build_module()
+    result = module.apply_repairs(
+        _history(),
+        _repairs(
+            symbol="SZ002558",
+            action="insert_row",
+            field="opt-in",
+            old_value="2026-06-12",
+            new_value="",
+        ),
+    )
+    assert "SZ002558" in set(result["symbol"])
+    assert len(result) == 4
+
+
+def test_unknown_action_is_rejected():
+    module = _load_build_module()
+    with pytest.raises(ValueError) as excinfo:
+        module.apply_repairs(_history(), _repairs(action="frobnicate"))
+    assert "frobnicate" in str(excinfo.value)
+
+
+def test_unknown_field_is_rejected():
+    module = _load_build_module()
+    with pytest.raises(ValueError) as excinfo:
+        module.apply_repairs(_history(), _repairs(field="name"))
+    assert "name" in str(excinfo.value)
+
+
+def test_unknown_evidence_tier_is_rejected():
+    module = _load_build_module()
+    with pytest.raises(ValueError) as excinfo:
+        module.apply_repairs(_history(), _repairs(evidence_tier="C"))
+    assert "C" in str(excinfo.value)
+
+
+def test_set_field_on_an_absent_symbol_is_rejected():
+    module = _load_build_module()
+    with pytest.raises(ValueError) as excinfo:
+        module.apply_repairs(_history(), _repairs(symbol="SZ999999"))
+    assert "SZ999999" in str(excinfo.value)

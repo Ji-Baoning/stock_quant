@@ -82,3 +82,112 @@ def membership_rows(history: pd.DataFrame) -> pd.DataFrame:
         for still_open, launched in zip(active, base, strict=True)
     ]
     return rows[list(MEMBERSHIP_ROW_COLUMNS)]
+
+
+#: The adjudicated-correction table.  Every row must name the evidence it
+#: rests on; an unadjudicated dispute is deliberately absent from this table
+#: and lives in adjudication_report.md instead.
+REPAIR_COLUMNS = (
+    "symbol",
+    "action",
+    "field",
+    "old_value",
+    "new_value",
+    "evidence_tier",
+    "evidence_source",
+    "evidence_detail",
+)
+REPAIR_ACTIONS = ("set_field", "drop_row", "insert_row")
+REPAIR_FIELDS = (OPT_IN, OPT_OUT)
+#: A = official CSI announcement body; B = Sina history table (corroborating).
+REPAIR_TIERS = ("A", "B")
+
+
+def read_repairs(path: Path) -> pd.DataFrame:
+    """Read the repair table, tolerating a header-only (no-repair) file."""
+    return pd.read_csv(Path(path), dtype=str).fillna("")
+
+
+def _validated_repairs(repairs: pd.DataFrame) -> pd.DataFrame:
+    if repairs.empty:
+        return repairs
+    unknown_actions = sorted(set(repairs["action"]) - set(REPAIR_ACTIONS))
+    if unknown_actions:
+        raise ValueError(f"unknown repair actions: {', '.join(unknown_actions)}")
+    unknown_fields = sorted(set(repairs["field"]) - set(REPAIR_FIELDS))
+    if unknown_fields:
+        raise ValueError(f"unknown repair fields: {', '.join(unknown_fields)}")
+    unknown_tiers = sorted(set(repairs["evidence_tier"]) - set(REPAIR_TIERS))
+    if unknown_tiers:
+        raise ValueError(f"unknown evidence tiers: {', '.join(unknown_tiers)}")
+    for row in repairs.itertuples(index=False):
+        if not str(row.evidence_source).strip():
+            raise ValueError(f"repair on {row.symbol} names no evidence source")
+    return repairs
+
+
+def _cell(value: object) -> str:
+    """Comparable text for a frame cell; NaT/NaN read as empty."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    if value is pd.NaT:
+        return ""
+    return str(pd.Timestamp(value).date()) if hasattr(value, "date") else str(value)
+
+
+def apply_repairs(history: pd.DataFrame, repairs: pd.DataFrame) -> pd.DataFrame:
+    """Apply the adjudicated corrections to a copy of the raw history frame.
+
+    Each repair identifies its target by ``symbol`` plus the current value in
+    ``field`` (``old_value``); a repair whose ``old_value`` no longer matches
+    does nothing, so a stale table cannot mis-edit a changed upstream frame.
+    A repair naming a ``symbol`` absent from the frame raises instead -- a row
+    that matches no target at all is a broken adjudication, not a stale value.
+    Unknown actions, fields and tiers raise rather than being skipped: a typo
+    in the adjudication must not silently drop a fix.  ``insert_row`` is the
+    exception -- it has no target, and takes its start date from ``old_value``
+    and its end date (empty for still-active) from ``new_value``.
+    """
+    frame = history.copy()
+    if repairs.empty:
+        return frame
+    repairs = _validated_repairs(repairs)
+    for row in repairs.itertuples(index=False):
+        symbol = str(row.symbol).strip()
+        if row.action == "insert_row":
+            frame = pd.concat(
+                [
+                    frame,
+                    pd.DataFrame(
+                        [
+                            {
+                                "symbol": symbol,
+                                "name": str(row.evidence_detail).strip() or symbol,
+                                OPT_IN: pd.to_datetime(row.old_value or pd.NaT),
+                                OPT_OUT: pd.to_datetime(row.new_value or pd.NaT),
+                            }
+                        ]
+                    ),
+                ],
+                ignore_index=True,
+            )
+            continue
+        on_symbol = frame["symbol"].astype(str) == symbol
+        if not on_symbol.any():
+            raise ValueError(
+                f"repair on {symbol} matches no row in the history; the "
+                f"snapshot or the repair is stale"
+            )
+        matched = on_symbol & (
+            frame[row.field].map(_cell) == str(row.old_value).strip()
+        )
+        if row.action == "set_field":
+            if matched.any():
+                frame.loc[matched, row.field] = pd.to_datetime(
+                    row.new_value or pd.NaT
+                )
+            continue
+        # drop_row: a stale old_value is a no-op, not an error.
+        if matched.any():
+            frame = frame.loc[~matched].reset_index(drop=True)
+    return frame
