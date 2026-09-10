@@ -13,8 +13,11 @@ snapshot hash stays resolvable and historical builds stay reproducible.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import importlib.metadata
 import json
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -84,3 +87,92 @@ def export_frames(
         json.dumps(manifest, indent=1, sort_keys=True), encoding="utf-8"
     )
     return manifest
+
+
+def require_pandas_major(version: str, *, minimum: int = 3) -> None:
+    """Fail fast when this interpreter cannot read the bundled frames.
+
+    The package's pickles use pandas 3's ``StringDtype``; pandas 2 raises
+    ``NotImplementedError`` deep inside ``read_pickle``.  Checking up front
+    turns that opaque traceback into an actionable instruction.
+    """
+    major = int(str(version).split(".", 1)[0])
+    if major < minimum:
+        raise SystemExit(
+            f"index-constitution's bundled frames need pandas >= {minimum} to "
+            f"read, but this interpreter has pandas {version}. Run the export "
+            "in the isolated interpreter instead, e.g.\n"
+            "  /home/ji/miniconda3/envs/sq312/bin/python "
+            "project/collect_index_constitution.py"
+        )
+
+
+def _distribution_version() -> str:
+    """The installed wheel's version, e.g. ``1.0.0``.
+
+    ``index_constitution.__version__`` is stale (it still reads 0.1.0 while
+    the released wheel is 1.0.0), so the distribution metadata is the
+    authoritative record for the manifest and the definition's rule version.
+    """
+    try:
+        return importlib.metadata.version("index-constitution")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Export the index-constitution csi300 frames into a dated, "
+            "immutable snapshot directory (requires pandas >= 3)."
+        )
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help=(
+            "snapshot directory; defaults to "
+            "data/raw/csi/index_constitution/<today>"
+        ),
+    )
+    return parser
+
+
+def _default_out_dir() -> Path:
+    return (
+        ROOT / "data" / "raw" / "csi" / "index_constitution"
+        / date.today().isoformat()
+    )
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    require_pandas_major(pd.__version__)
+
+    # Local import: the module must stay loadable under pandas 2.x so the
+    # tests can exercise export_frames in the main environment.
+    import index_constitution as ic
+
+    out_dir = args.out_dir or _default_out_dir()
+    manifest = export_frames(
+        ic.history("csi300"),
+        ic.latest("csi300"),
+        ic.events(region="cn"),
+        out_dir,
+        # The module's own __version__ is stale ("0.1.0" while the released
+        # wheel is 1.0.0); the installed distribution metadata is authoritative.
+        package_version=_distribution_version(),
+        python_version=f"{sys.version_info.major}.{sys.version_info.minor}."
+        f"{sys.version_info.micro}",
+        pandas_version=pd.__version__,
+        exported_on=date.today(),
+    )
+    print(f"snapshot={out_dir}")
+    for name, digest in sorted(manifest["files"].items()):
+        print(f"  {name} sha256={digest}")
+    print(f"manifest sha256={_sha256_file(out_dir / 'manifest.json')}")
+
+
+if __name__ == "__main__":
+    main()
