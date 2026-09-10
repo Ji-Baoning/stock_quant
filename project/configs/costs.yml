@@ -1,6 +1,15 @@
+# 成本情景费率表（操作者申报的简化模型）。2020-01-01 起的费率是项目原申报；
+# 2015-01-01 行为扩展历史窗口（2015-2020 回补数据）声明同一费率 schedule——
+# 印花税沿用文件既有口径（0.5‰ 卖出，未按 2023-08-28 前的 1‰ 区分），
+# 仅作 ENGINEERING 诊断假设，正式研究前需按真实费率历史重审。
 scenarios:
   - name: zero_cost
     rates:
+      - effective_from: 2015-01-01
+        commission_rate: 0.0
+        minimum_commission: 0.0
+        stamp_tax_sell_rate: 0.0
+        slippage_rate: 0.0
       - effective_from: 2020-01-01
         commission_rate: 0.0
         minimum_commission: 0.0
@@ -8,6 +17,11 @@ scenarios:
         slippage_rate: 0.0
   - name: commission_tax
     rates:
+      - effective_from: 2015-01-01
+        commission_rate: 0.0003
+        minimum_commission: 5
+        stamp_tax_sell_rate: 0.0005
+        slippage_rate: 0.0
       - effective_from: 2020-01-01
         commission_rate: 0.0003
         minimum_commission: 5
@@ -15,6 +29,11 @@ scenarios:
         slippage_rate: 0.0
   - name: full_cost
     rates:
+      - effective_from: 2015-01-01
+        commission_rate: 0.0003
+        minimum_commission: 5
+        stamp_tax_sell_rate: 0.0005
+        slippage_rate: 0.001
       - effective_from: 2020-01-01
         commission_rate: 0.0003
         minimum_commission: 5

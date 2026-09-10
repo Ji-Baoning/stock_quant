@@ -343,6 +343,14 @@ volume, amount, source, ingested_at
 
 启动条件：只有回测可信性和稳定性达到上述完成判据后，才比较行业/风格中性、波动率或风险预算约束、趋势过滤及多因子组合等改进。任何策略变更必须保持冻结规格、独立样本外评价和完整成本归因，避免把测试集变成训练集。
 
+### 8.4 真实数据执行进展（2026-09-10）：链路已跑通，walk-forward/挑战被外部证据阻塞
+
+**预热下限结构缺陷修复（commit 151434e）**：`materialize_schedule` 原把预热窗口写死为恰好 3 个日历年，而 A 股每年约 242 个交易日、3 年仅约 727 个确认开市日，永远达不到 756 的预热下限——任何真实 A 股日历上每个 fold 都会预热预检失败。现语义：预热**至少**三个整年且 ≥756 个确认交易日，不足时按整年（1 月 1 日锚定）向前延伸至满足（有界 10 年，稀疏日历如实记录不足并由 fold 预检 FAILED）。政策常量（`warmup_years=3`、`min_warmup_trading_days=756`）未动，向更早延伸是更保守方向。
+
+**真实数据历史回补（数据集 e834b375…）**：`project/extend_history_offline.py` 按既有离线重建模式把真实数据从 2021-01-04 回补到 2015-01-05（tushare `daily` 单源回补 30 只股票池、akshare eastmoney→sina→tencent 回退链取基准指数、已复核公司行为全历史（1991 年起）驱动 adjusted_bar 重建：67,098 行全部 INFO 无不可信断点；日历 2833 个交易日；`data validate` PASS；tushare `stock_basic` 快照未重拉，security_master 沿用）。`configs/costs.yml` 三情景费率 schedule 由 2020-01-01 向前延伸到 2015-01-01（同一费率的显式建模假设，印花税未按 2023-08-28 前 1‰ 区分，正式研究前需重审）。**真实数据全链路工程诊断已跑通**：等权 Top-10、2015-01..2026-08、三成本情景（2825 个交易日；零成本 +104.0%、佣金税 +92.1%、全成本 +81.3%），`python -m stock_quant backtest momentum_60d --engineering` 产出 UNTRUSTED 诊断（experiment_id a64b961a…），绝不构成可信绩效。
+
+**未解锁项与阻塞原因**：真实数据上的 walk-forward 正式研究与一次性挑战仍被**时点宇宙证据**阻塞，这不是代码缺口——`walk_forward_oos_v1` 硬性要求冻结宇宙定义（固定工程池是 2026-09-03 回溯选样，伪装成历史成员即伪造证据，被明确拒绝）；而真实 csi300 历史成分当前外部不可得：东财 IP 封禁、csindex OSS 历史月度 closeweight 归档 404、csindex 主站本网络不可达、baostock 下线、akshare 1.18 无历史成分变更接口、tushare `index_daily` 限 1 次/小时。解锁路径：取得官方（或可交叉核对）的历史成分公告快照后按 RUNBOOK 阶段 5 导入并冻结 `csi300.yml`，再按阶段 5b 完成真实数据验收，然后才能预注册执行阶段 8 的一次性挑战。工程信任模式另有设计约束：`research run` 恒为 RESEARCH 模式（无绕过），工程诊断只走 `backtest --engineering`；`buffered_risk_weighted` 只在 walk-forward 管线执行、单窗口工程管线会响亮拒绝。
+
 ## 9. 项目质量检查
 
 项目需要持续回答三个问题：

@@ -1,0 +1,47 @@
+# 真实行情离线 ENGINEERING 复跑规格（扩展窗口 2015-2026；非投资建议，非可信
+# 绩效声明）。
+#
+# 与 momentum_60d_offline_real.yml 相同的信任语义，但数据集升级为
+# extend_history_offline.py 发布的扩展真实数据版本：tushare 单源回补
+# 2015-01-05..2020-12-31 的 30 只股票池日线与 sina 源基准指数日线，
+# 已复核公司行为全历史（1991 年起）驱动 adjusted_bar 重建（67,098 行全部
+# INFO，无不可信断点），日历 2833 个交易日（2015-01-05..2026-08-28）。
+#
+# trust_mode: engineering —— 无正式验收记录允许跑通全链路，metrics 与报告
+# 只能呈现为 UNTRUSTED，永不发布 ACCEPTED 实验。等权 Top-10 是当前唯一允许
+# 走单窗口工程管线的组合规则；buffered_risk_weighted 只在
+# walk_forward_oos_v1 管线执行，而该管线要求时点宇宙证据（外部数据源不可
+# 得，见 RUNBOOK 阶段 5/5b），故本规格不含缓冲规则。
+hypothesis: >-
+  过去 60 个交易日的复权收益在 A 股样本内对随后短期收益存在一定持续性；
+  本规格在扩展真实行情（2015-01 至 2026-08，含 2015 股灾、2018 熊市、
+  2019-2021 结构市、2022-2024 震荡市）上复跑工程链路，验证回补数据集上
+  2.0.0 复权因子全流程可重现并产出报告。外部数据源故障期间仅作
+  ENGINEERING 诊断，不声称统计有效性，也不构成投资建议或可信绩效声明。
+factor_versions:
+  momentum_60d: 2.0.0
+dataset_version: CURRENT
+universe_version: CURRENT
+trust_mode: engineering
+# 显式 null：工程诊断不绑定真实数据验收记录（缺省值 CURRENT_ACCEPTED 会触发
+# 阶段 5b 的正式验收门禁）。
+data_acceptance_id: null
+date_range:
+  start_date: 2015-01-01
+  end_date: 2026-08-21
+train_validation_holdout_policy: not_applicable_engineering_mvp
+preprocessing:
+  winsorization: none
+  standardization: none
+portfolio_rule:
+  name: top_n_equal_weight
+  top_n: 10
+  lot_size: 100
+cost_scenarios:
+  - zero_cost
+  - commission_tax
+  - full_cost
+random_seed: 42
+code_commit: unversioned
+parent_experiment_ids: []
+agent_id: null

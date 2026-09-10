@@ -1,0 +1,43 @@
+# 真实行情 Walk-Forward ENGINEERING 挑战者规格（缓冲式风险加权；非投资建议）。
+#
+# 与 momentum_60d_wf_real_baseline.yml 唯一差异是 portfolio_rule：
+# buffered_risk_weighted 使用全部冻结默认参数（target_count=10 / entry_rank=10 /
+# hold_rank=15 / risk_lookback_days=60 / min_risk_observations=40 /
+# volatility_floor_annualized=0.10 / max_single_weight=0.15 /
+# rebalance_band_absolute=0.02 / gross_exposure=1.00 / weight_quantum=1e-12、
+# 仅多头、无杠杆）。任何显式参数修改都是新的策略身份。
+#
+# 数据与信任语义与基线规格一致：扩展真实数据版本、工程信任模式、UNTRUSTED
+# 诊断、永不发布 ACCEPTED 实验或正式稳定性结论。
+hypothesis: >-
+  在等权 Top-10 之上，以 60 日风险倒数加权、二阶段排名缓冲成员与 2% 再平衡
+  带宽能否在真实行情的年度样本外 fold 上改善风险调整后收益并控制换手与
+  拒单率。本规格仅作 ENGINEERING 诊断，不声称统计有效性，也不构成投资建议。
+execution_pipeline: walk_forward_oos_v1
+factor_versions:
+  momentum_60d: 2.0.0
+dataset_version: CURRENT
+universe_version: CURRENT
+trust_mode: engineering
+# 工程诊断不绑定真实数据验收记录（缺省 CURRENT_ACCEPTED 会触发验收门禁）。
+data_acceptance_id: null
+# 注意：walk_forward_oos_v1 要求冻结的时点宇宙定义（universe_definition），
+# 当前 csi300 历史成分证据被外部源阻断（东财 IP 封禁 / csindex 历史归档
+# 404 / baostock 下线），本规格在证据到位并完成 RUNBOOK 阶段 5 之前无法运行。
+date_range:
+  start_date: 2020-01-01
+  end_date: 2026-08-28
+train_validation_holdout_policy: not_applicable_engineering_mvp
+preprocessing:
+  winsorization: none
+  standardization: none
+portfolio_rule:
+  name: buffered_risk_weighted
+cost_scenarios:
+  - zero_cost
+  - commission_tax
+  - full_cost
+random_seed: 42
+code_commit: unversioned
+parent_experiment_ids: []
+agent_id: null
