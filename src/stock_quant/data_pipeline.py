@@ -374,6 +374,57 @@ def _day_complete(status: SourceCoverage, day: date) -> bool:
     )
 
 
+def master_bar_boundary_issues(
+    master: pd.DataFrame, daily: pd.DataFrame
+) -> list[QualityIssue]:
+    """WARNING when a bar row lies outside its symbol's listing window.
+
+    A bar before ``list_date`` (or after ``delist_date``) contradicts the
+    refreshed master facts.  Missing rows are *not* this check's job -- they
+    are classified separately by ``classify_missing_row``.  A WARNING never
+    blocks publication; it surfaces a source-vs-master disagreement.
+    """
+    if daily is None or daily.empty:
+        return []
+    bounds = {
+        str(row["symbol"]): (_as_date(row["list_date"]),
+                             _as_date(row["delist_date"]))
+        for row in master.to_dict("records")
+    }
+    issues: list[QualityIssue] = []
+    for record in daily.to_dict("records"):
+        symbol = str(record["symbol"])
+        list_date, delist_date = bounds.get(symbol, (None, None))
+        if list_date is None and delist_date is None:
+            continue
+        trade_date = _as_date(record["trade_date"])
+        if trade_date is None:
+            continue
+        if list_date is not None and trade_date < list_date:
+            boundary = "before_list_date"
+        elif delist_date is not None and trade_date > delist_date:
+            boundary = "after_delist_date"
+        else:
+            continue
+        issues.append(
+            _issue(
+                Severity.WARNING,
+                CODE_MASTER_BAR_BOUNDARY,
+                symbol=symbol,
+                trade_date=trade_date,
+                table="daily_bar",
+                details={
+                    "boundary": boundary,
+                    "list_date": list_date.isoformat()
+                    if list_date is not None else None,
+                    "delist_date": delist_date.isoformat()
+                    if delist_date is not None else None,
+                },
+            )
+        )
+    return issues
+
+
 # --------------------------------------------------------------------------- #
 # DataPipeline
 # --------------------------------------------------------------------------- #
@@ -851,45 +902,7 @@ class DataPipeline:
         are classified separately by ``classify_missing_row``.  A WARNING never
         blocks publication; it surfaces a source-vs-master disagreement.
         """
-        if daily is None or daily.empty:
-            return []
-        bounds = {
-            str(row["symbol"]): (_as_date(row["list_date"]),
-                                 _as_date(row["delist_date"]))
-            for row in master.to_dict("records")
-        }
-        issues: list[QualityIssue] = []
-        for record in daily.to_dict("records"):
-            symbol = str(record["symbol"])
-            list_date, delist_date = bounds.get(symbol, (None, None))
-            if list_date is None and delist_date is None:
-                continue
-            trade_date = _as_date(record["trade_date"])
-            if trade_date is None:
-                continue
-            if list_date is not None and trade_date < list_date:
-                boundary = "before_list_date"
-            elif delist_date is not None and trade_date > delist_date:
-                boundary = "after_delist_date"
-            else:
-                continue
-            issues.append(
-                _issue(
-                    Severity.WARNING,
-                    CODE_MASTER_BAR_BOUNDARY,
-                    symbol=symbol,
-                    trade_date=trade_date,
-                    table="daily_bar",
-                    details={
-                        "boundary": boundary,
-                        "list_date": list_date.isoformat()
-                        if list_date is not None else None,
-                        "delist_date": delist_date.isoformat()
-                        if delist_date is not None else None,
-                    },
-                )
-            )
-        return issues
+        return master_bar_boundary_issues(master, daily)
 
     def _master_coverage_consistency_issues(
         self, master: pd.DataFrame, coverage: pd.DataFrame | None
