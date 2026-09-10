@@ -227,9 +227,11 @@ def _sha256_file(path: Path) -> str:
 def seal_evidence(snapshot_dir: Path) -> dict:
     """Pin ``manifest.json`` and ``repairs.csv`` into ``evidence_summary.json``.
 
-    The summary is the row-level ``source_document_sha256`` and the
-    definition's ``evidence_summary_sha256``.  Binding the repair table here is
-    what makes the corrections tamper-evident: without it a repair could be
+    This file's own SHA-256 becomes each fact's ``source_document_sha256`` and
+    the definition's ``evidence_summary_sha256``; the file itself pins
+    ``manifest_sha256`` (which covers the upstream CSVs) and ``repairs_sha256``
+    (which covers the hand-authored corrections).  Binding the repair table here
+    is what makes the corrections tamper-evident: without it a repair could be
     edited while every other hash still verified.
     """
     snapshot_dir = Path(snapshot_dir)

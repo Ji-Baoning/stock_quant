@@ -327,6 +327,19 @@ def test_seal_evidence_pins_the_manifest_and_the_repairs(tmp_path: Path):
     )
 
 
+def test_seal_evidence_returns_the_summary_it_wrote(tmp_path: Path):
+    """The return contract is part of the interface, not just the file."""
+    module = _load_build_module()
+    directory = _sealed_snapshot(tmp_path)
+    summary = module.seal_evidence(directory)  # idempotent on unchanged inputs
+    assert summary["manifest_sha256"] == module._sha256_file(
+        directory / "manifest.json"
+    )
+    assert summary["repairs_sha256"] == module._sha256_file(
+        directory / "repairs.csv"
+    )
+
+
 def test_verify_snapshot_accepts_a_sealed_snapshot(tmp_path: Path):
     module = _load_build_module()
     directory = _sealed_snapshot(tmp_path)
@@ -345,6 +358,18 @@ def test_verify_snapshot_rejects_a_tampered_csv(tmp_path: Path):
     with pytest.raises(ValueError) as excinfo:
         module.verify_snapshot(directory)
     assert "csi300_history.csv" in str(excinfo.value)
+
+
+def test_verify_snapshot_rejects_a_tampered_manifest(tmp_path: Path):
+    module = _load_build_module()
+    directory = _sealed_snapshot(tmp_path)
+    (directory / "manifest.json").write_text(
+        json.dumps({"source": "index_constitution", "files": {}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as excinfo:
+        module.verify_snapshot(directory)
+    assert "manifest" in str(excinfo.value)
 
 
 def test_verify_snapshot_rejects_an_edited_repairs_table(tmp_path: Path):
