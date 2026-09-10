@@ -1886,7 +1886,19 @@ Expected: 要么 `cardinality exactly 300 on every session` 且 `universe_id=csi
 | 溯源 schema 与哈希绑定（rules_version 字符串、evidence_summary） | Task 5、6 |
 | 构建步骤 1–7 | Task 5、6 |
 | 映射表 11 列 + NaT 显式处理 + 无重叠 | Task 3 |
-| 测试清单（导出器、修复表、快照完整性、指纹、逐日、确定性、端到端） | Task 1–6 |
+| 测试清单（导出器、修复表、快照完整性、指纹、逐日、确定性、端到端） | Task 1–6、终审修复 |
+
+> **订正（2026-09-10 终审）：** 本行原先写作「Task 1–6」，**不实**。spec 测试清单中的
+> **端到端（离线 fixture）** 一条，Task 1–6 实际**没有**覆盖：`main()` 既读已发布数据集
+> 又会重新发布，无法直接跑，于是 `verify_snapshot → read_repairs → apply_repairs →
+> membership_rows → cardinality_deviations → resolve_universe_id → prepare_membership_file`
+> 这条链在分支上从未被任何测试驱动过。恰好因为如此，一个真实缺陷（派生 membership CSV
+> 被写进密封快照目录）一路躲过了每个任务的审查，直到整分支终审才被人工发现。
+> 修复见 commit `0d47d2b`：把 `main()` 的"从快照产出 facts"那一半抽成
+> `build_membership(snapshot_dir, *, sessions, requested_id, output=None)`，
+> 由 `main()` 调用，并新增 fixture 快照的端到端测试
+> （`test_build_membership_end_to_end_from_a_fixture_snapshot`、
+> `test_build_membership_falls_back_to_custom_when_count_cannot_reach_300`）。
 
 **未覆盖项（有意）：** spec 测试清单里的「确定性：同一输入构建两次 → `membership_table_sha256` 相同」。这一条由 `membership_content_hash` 自身保证（既有实现，已有测试），且 Task 6 的 `membership_rows` 是纯函数。若要在本链上再钉一遍，可在 Task 6 加一条断言两次 `membership_rows` 输出相等的测试——**建议实现时补上**，成本一行。
 
@@ -1896,5 +1908,6 @@ Expected: 要么 `cardinality exactly 300 on every session` 且 `universe_id=csi
 - `apply_repairs(history, repairs)`、`read_repairs(path)` — Task 4 定义，Task 6 调用一致。
 - `seal_evidence(snapshot_dir)`、`verify_snapshot(snapshot_dir) -> (manifest, summary)` — Task 5 定义，Task 6 调用一致。
 - `cardinality_deviations(rows, sessions, *, expected)`、`resolve_universe_id(deviations, *, requested)` — Task 6 定义并自用。
+- `build_membership(snapshot_dir, *, sessions, requested_id, output=None) -> MembershipBuild` — 终审修复（`0d47d2b`）新增：把 `main()` 的离线半边抽出以便测试。`main()` 调用它并消费 `universe_id` / `result` / `manifest`。`output=None` 是有意的哨兵值——默认路径依赖函数内才解析出的 `universe_id`，`main()` 无法预先算出。
 - `_sha256_file(path) -> str` — Task 5 定义，Task 6 复用。Task 1 在另一模块里独立定义了一份（两脚本不能互相 import，`project/` 不是包），是有意的重复。
 - 常量 `MANIFEST_NAME`/`REPAIRS_NAME`/`EVIDENCE_NAME`/`SOURCE`/`SOURCE_URL` — Task 5 定义，Task 6 使用。
