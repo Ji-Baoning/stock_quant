@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -393,3 +394,76 @@ def test_seal_evidence_requires_a_repairs_table(tmp_path: Path):
     (directory / "manifest.json").write_text("{}", encoding="utf-8")
     with pytest.raises(FileNotFoundError):
         module.seal_evidence(directory)
+
+
+def _rows_for_count(count: int, start: str = "2010-01-04") -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "symbol": [f"{i:06d}.SZ" for i in range(count)],
+            "raw_effective_from": pd.to_datetime([start] * count),
+            "raw_effective_to": pd.to_datetime([None] * count),
+            "announcement_date": pd.to_datetime([start] * count),
+            "reason": ["regular_rebalance"] * count,
+        }
+    )
+
+
+def test_cardinality_reports_no_deviation_at_exactly_300():
+    module = _load_build_module()
+    sessions = [date(2010, 1, 4), date(2010, 1, 5)]
+    assert module.cardinality_deviations(_rows_for_count(300), sessions) == []
+
+
+def test_cardinality_reports_each_deviating_day_with_its_count():
+    module = _load_build_module()
+    sessions = [date(2010, 1, 4)]
+    deviations = module.cardinality_deviations(_rows_for_count(301), sessions)
+    assert deviations == ["2010-01-04:301"]
+
+
+def test_cardinality_ignores_days_outside_every_interval():
+    module = _load_build_module()
+    sessions = [date(2010, 1, 4), date(1999, 1, 4)]
+    deviations = module.cardinality_deviations(_rows_for_count(300), sessions)
+    assert deviations == ["1999-01-04:0"]
+
+
+def test_resolve_universe_id_keeps_the_canonical_id_when_exact():
+    module = _load_build_module()
+    assert module.resolve_universe_id([], requested="csi300") == "csi300"
+
+
+def test_resolve_universe_id_falls_back_to_custom_when_deviating():
+    module = _load_build_module()
+    assert (
+        module.resolve_universe_id(["2010-01-04:301"], requested="csi300")
+        == "custom_csi300_ic"
+    )
+
+
+def test_resolve_universe_id_keeps_an_explicitly_requested_custom_id():
+    module = _load_build_module()
+    assert (
+        module.resolve_universe_id(["2010-01-04:301"], requested="custom_other")
+        == "custom_other"
+    )
+
+
+def test_parser_requires_an_explicit_snapshot_dir():
+    module = _load_build_module()
+    with pytest.raises(SystemExit):
+        module.build_parser().parse_args([])
+
+
+def test_parser_takes_the_snapshot_dir(tmp_path: Path):
+    module = _load_build_module()
+    args = module.build_parser().parse_args(["--snapshot-dir", str(tmp_path)])
+    assert args.snapshot_dir == tmp_path
+
+
+def test_parser_has_a_seal_only_mode(tmp_path: Path):
+    module = _load_build_module()
+    args = module.build_parser().parse_args(
+        ["--snapshot-dir", str(tmp_path), "--seal-evidence"]
+    )
+    assert args.seal_evidence is True

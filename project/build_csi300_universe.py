@@ -15,12 +15,21 @@ underestimate early inclusion but can never leak future information.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 from datetime import date
 from pathlib import Path
+from typing import Sequence
 
 import pandas as pd
+import yaml
+
+from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+from stock_quant.data_model.index_membership_import import (
+    prepare_membership_file,
+)
+from stock_quant.data_quality.models import QualityReport
 
 ROOT = Path(__file__).resolve().parent
 
@@ -283,3 +292,220 @@ def verify_snapshot(snapshot_dir: Path) -> tuple[dict, dict]:
                 f"{name} hashes to {actual} but the manifest records {recorded}"
             )
     return manifest, summary
+
+
+CANONICAL_ID = "csi300"
+CUSTOM_ID = "custom_csi300_ic"
+EXPECTED_MEMBERS = 300
+
+
+def cardinality_deviations(
+    rows: pd.DataFrame, sessions: Sequence[date], *, expected: int = 300
+) -> list[str]:
+    """``["<day>:<count>", ...]`` for every session whose member count is off.
+
+    Checked globally rather than at the repaired interval: a locally plausible
+    fix can move a +1 onto another date, and only a full re-scan catches that.
+
+    This answers a build-time question -- "is this history clean enough to
+    claim the canonical ``csi300`` id?" -- so it deliberately has no notion of
+    a sanctioned exception and treats every off-count day as a deviation.
+    Erring strict is the safe direction here: a doubtful history is downgraded
+    to ``custom_csi300_ic`` rather than allowed to masquerade as canonical.
+
+    Officially sanctioned temporary exceptions are a separate, later concern
+    owned by the dataset quality layer, which already models them via
+    ``MembershipSizeException`` in
+    ``stock_quant.data_quality.raw_checks._cardinality_issues``.  That check
+    runs on published facts and cannot be reused here without a publish
+    round-trip, which is why this scan is a local duplicate rather than a
+    call into it.
+    """
+    intervals = [
+        (
+            row.symbol,
+            pd.Timestamp(row.raw_effective_from).date(),
+            None
+            if pd.isna(row.raw_effective_to)
+            else pd.Timestamp(row.raw_effective_to).date(),
+        )
+        for row in rows.itertuples(index=False)
+    ]
+    deviations: list[str] = []
+    for day in sessions:
+        count = sum(
+            1
+            for _, start, end in intervals
+            if start <= day and (end is None or day <= end)
+        )
+        if count != expected:
+            deviations.append(f"{day.isoformat()}:{count}")
+    return deviations
+
+
+def resolve_universe_id(deviations: list[str], *, requested: str) -> str:
+    """Keep ``csi300`` only when every session carries exactly 300 members.
+
+    A deviating history may not claim the canonical id, because that id is
+    what downstream cardinality acceptance gates on.  The custom pool skips
+    only that check; the evidence chain is identical.
+    """
+    if not deviations or requested != CANONICAL_ID:
+        return requested
+    return CUSTOM_ID
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build the frozen csi300 universe from a sealed "
+            "index-constitution snapshot (offline; no network access)."
+        )
+    )
+    parser.add_argument(
+        "--snapshot-dir",
+        type=Path,
+        required=True,
+        help=(
+            "the dated snapshot directory to build from; always explicit so "
+            "the same experiment cannot silently pick up a newer snapshot"
+        ),
+    )
+    parser.add_argument(
+        "--universe-id",
+        default=CANONICAL_ID,
+        help=(
+            "requested universe id; falls back to custom_csi300_ic when the "
+            "history cannot guarantee exactly 300 members per session"
+        ),
+    )
+    parser.add_argument(
+        "--seal-evidence",
+        action="store_true",
+        help="write evidence_summary.json and exit (run after adjudication)",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="membership parquet path; defaults to data/membership/<id>.parquet",
+    )
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    snapshot_dir = Path(args.snapshot_dir)
+
+    if args.seal_evidence:
+        summary = seal_evidence(snapshot_dir)
+        print(f"sealed {snapshot_dir / EVIDENCE_NAME}")
+        print(f"  manifest_sha256={summary['manifest_sha256']}")
+        print(f"  repairs_sha256={summary['repairs_sha256']}")
+        return
+
+    manifest, summary = verify_snapshot(snapshot_dir)
+    print(
+        f"verified snapshot {snapshot_dir}\n"
+        f"  manifest_sha256={summary['manifest_sha256']}\n"
+        f"  repairs_sha256={summary['repairs_sha256']}\n"
+        f"  package_version={manifest['package_version']}"
+    )
+    history = pd.read_csv(snapshot_dir / "csi300_history.csv")
+    repairs = read_repairs(snapshot_dir / REPAIRS_NAME)
+    repaired = apply_repairs(history, repairs)
+    print(
+        f"history rows={len(history)} repairs={len(repairs)} "
+        f"effective rows={len(repaired)}"
+    )
+    rows = membership_rows(repaired)
+
+    publisher = DatasetPublisher(ROOT)
+    with DatasetReader(ROOT).open(publisher.current().version) as dataset:
+        calendar = dataset.read("trading_calendar")
+        tables = {name: dataset.read(name) for name in dataset.tables}
+    sessions = [
+        day.date()
+        for day in pd.to_datetime(
+            calendar.loc[calendar["is_trading_day"], "calendar_date"]
+        )
+    ]
+    deviations = cardinality_deviations(rows, sessions)
+    universe_id = resolve_universe_id(deviations, requested=args.universe_id)
+    if deviations:
+        print(
+            f"cardinality deviates from {EXPECTED_MEMBERS} on "
+            f"{len(deviations)}/{len(sessions)} sessions "
+            f"(first: {deviations[:8]})"
+        )
+        if universe_id != args.universe_id:
+            print(
+                f"falling back to {universe_id}: a custom pool skips only the "
+                "cardinality check; the evidence chain is identical"
+            )
+    else:
+        print(f"cardinality exactly {EXPECTED_MEMBERS} on every session")
+
+    snapshot_csv = snapshot_dir / f"{universe_id}_membership_snapshot.csv"
+    rows.to_csv(snapshot_csv, index=False)
+    output = args.output or (
+        ROOT / "data" / "membership" / f"{universe_id}.parquet"
+    )
+    result = prepare_membership_file(
+        snapshot_csv,
+        universe_id=universe_id,
+        source=SOURCE,
+        source_url=SOURCE_URL,
+        snapshot_sha256=manifest["files"]["csi300_history.csv"],
+        source_document_sha256=_sha256_file(snapshot_dir / EVIDENCE_NAME),
+        effective_date=pd.Timestamp(
+            rows["raw_effective_from"].min()
+        ).date(),
+        announcement_date=pd.Timestamp(
+            rows["raw_effective_from"].min()
+        ).date(),
+        reason="regular_rebalance",
+        output=output,
+    )
+    print(
+        f"membership rows={len(result.frame)} "
+        f"membership_table_sha256={result.content_hash}"
+    )
+
+    tables["universe_membership"] = result.frame
+    published = publisher.publish(tables, QualityReport())
+    print(f"dataset_version={published.version}")
+
+    with DatasetReader(ROOT).open(published.version) as dataset:
+        daily = dataset.read("daily_bar")
+    repairs_sha = _sha256_file(snapshot_dir / REPAIRS_NAME)
+    definition = {
+        "schema_version": 1,
+        "universe_id": universe_id,
+        "rules_version": (
+            f"{SOURCE}-{manifest['package_version']}"
+            f"+repairs-{repairs_sha[:8]}"
+        ),
+        "membership_table_sha256": result.content_hash,
+        "evidence_summary_sha256": _sha256_file(snapshot_dir / EVIDENCE_NAME),
+        "coverage_start": pd.to_datetime(daily["trade_date"]).min().date().isoformat(),
+        "coverage_end": pd.to_datetime(daily["trade_date"]).max().date().isoformat(),
+    }
+    definition_path = ROOT / "configs" / "universes" / f"{universe_id}.yml"
+    definition_path.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "# Frozen universe definition generated by build_csi300_universe.py.\n"
+        f"# Built from snapshot {snapshot_dir}\n"
+        "# evidence_summary_sha256 = SHA-256 of that snapshot's\n"
+        "# evidence_summary.json, which pins manifest.json (the upstream CSV\n"
+        "# hashes) and repairs.csv (the adjudicated corrections).\n"
+    )
+    definition_path.write_text(
+        header + yaml.safe_dump(definition, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    print(f"definition={definition_path}")
+
+
+if __name__ == "__main__":
+    main()
