@@ -340,10 +340,11 @@ git commit -m "feat: export index-constitution frames into a dated snapshot"
 
 ```python
 def test_require_pandas_major_rejects_pandas_2():
+    """The message must name the substitute interpreter, not just any failure."""
     module = _load_export_module()
     with pytest.raises(SystemExit) as excinfo:
         module.require_pandas_major("2.3.3")
-    assert "sq312" in str(excinfo.value) or "pandas" in str(excinfo.value)
+    assert "sq312" in str(excinfo.value)
 
 
 def test_require_pandas_major_accepts_pandas_3():
@@ -352,25 +353,33 @@ def test_require_pandas_major_accepts_pandas_3():
 
 
 def test_parser_defaults_to_todays_dated_directory():
+    """``out_dir`` defaults to None so main() derives today's dated path."""
     module = _load_export_module()
     args = module.build_parser().parse_args([])
-    assert args.out_dir is None  # main() derives the dated path
+    assert args.out_dir is None
+    assert module._default_out_dir() == (
+        module.ROOT
+        / "data"
+        / "raw"
+        / "csi"
+        / "index_constitution"
+        / date.today().isoformat()
+    )
 
 
 def test_parser_accepts_an_explicit_out_dir(tmp_path: Path):
     module = _load_export_module()
     args = module.build_parser().parse_args(["--out-dir", str(tmp_path / "x")])
     assert args.out_dir == tmp_path / "x"
-
-
-def test_module_level_import_guard_is_a_local_import():
-    """Re-assert Task 1's structural constraint now that main() exists."""
-    source = (
-        REPO_ROOT / "project" / "collect_index_constitution.py"
-    ).read_text(encoding="utf-8")
-    assert source.count("import index_constitution") == 1
-    assert "    import index_constitution as ic" in source
 ```
+
+Task 2 的这 4 条测试之外不再重复断言模块级 import 约束——Task 1 的
+`test_module_does_not_import_index_constitution_at_module_level` 已经用**逐字相同**的
+两个判定覆盖了它，再写一遍是零覆盖的冗余（Task 2 审查发现）。`main()` 落地后那条
+测试自然转绿，无需另立一条。
+
+`date` 已由 Task 1 的测试文件顶部 `from datetime import date` 导入（Task 1 的
+`exported_on=date(2026, 9, 10)` 就用了它），**不要重复导入**（ruff F811）。
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -486,7 +495,7 @@ from pathlib import Path
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python -m pytest tests/unit/test_index_constitution_snapshot.py -q`
-Expected: 10 passed
+Expected: 9 passed（Task 1 的 5 条 + 本任务的 4 条）
 
 - [ ] **Step 5: 跑 lint**
 
