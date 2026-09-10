@@ -161,10 +161,11 @@ def test_module_does_not_import_index_constitution_at_module_level():
 
 
 def test_require_pandas_major_rejects_pandas_2():
+    """The message must name the substitute interpreter, not just any failure."""
     module = _load_export_module()
     with pytest.raises(SystemExit) as excinfo:
         module.require_pandas_major("2.3.3")
-    assert "sq312" in str(excinfo.value) or "pandas" in str(excinfo.value)
+    assert "sq312" in str(excinfo.value)
 
 
 def test_require_pandas_major_accepts_pandas_3():
@@ -173,9 +174,18 @@ def test_require_pandas_major_accepts_pandas_3():
 
 
 def test_parser_defaults_to_todays_dated_directory():
+    """``out_dir`` defaults to None so main() derives today's dated path."""
     module = _load_export_module()
     args = module.build_parser().parse_args([])
-    assert args.out_dir is None  # main() derives the dated path
+    assert args.out_dir is None
+    assert module._default_out_dir() == (
+        module.ROOT
+        / "data"
+        / "raw"
+        / "csi"
+        / "index_constitution"
+        / date.today().isoformat()
+    )
 
 
 def test_parser_accepts_an_explicit_out_dir(tmp_path: Path):
@@ -184,10 +194,3 @@ def test_parser_accepts_an_explicit_out_dir(tmp_path: Path):
     assert args.out_dir == tmp_path / "x"
 
 
-def test_module_level_import_guard_is_a_local_import():
-    """Re-assert Task 1's structural constraint now that main() exists."""
-    source = (
-        REPO_ROOT / "project" / "collect_index_constitution.py"
-    ).read_text(encoding="utf-8")
-    assert source.count("import index_constitution") == 1
-    assert "    import index_constitution as ic" in source
