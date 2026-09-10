@@ -307,17 +307,23 @@ def test_repair_old_value_format_is_normalized():
         assert row["opt-out"] == pd.Timestamp("2006-08-14")
 
 
-def _sealed_snapshot(tmp_path: Path) -> Path:
+def _sealed_snapshot(
+    tmp_path: Path,
+    *,
+    history_csv: str = ("symbol,name,opt-in,opt-out\nSZ000001,平安银行,2005-04-08,\n"),
+    repairs_csv: str = (
+        "symbol,action,field,old_value,new_value,evidence_tier,"
+        "evidence_source,evidence_detail\n"
+    ),
+) -> Path:
     """A minimal sealed snapshot: one CSV, a manifest and a repairs table."""
     directory = tmp_path / "2026-09-10"
     directory.mkdir()
-    (directory / "csi300_history.csv").write_text(
-        "symbol,name,opt-in,opt-out\nSZ000001,平安银行,2005-04-08,\n",
-        encoding="utf-8",
-    )
+    (directory / "csi300_history.csv").write_text(history_csv, encoding="utf-8")
     module = _load_build_module()
     manifest = {
         "source": "index_constitution",
+        "package_version": "test",
         "files": {
             "csi300_history.csv": module._sha256_file(
                 directory / "csi300_history.csv"
@@ -327,11 +333,7 @@ def _sealed_snapshot(tmp_path: Path) -> Path:
     (directory / "manifest.json").write_text(
         json.dumps(manifest, indent=1, sort_keys=True), encoding="utf-8"
     )
-    (directory / "repairs.csv").write_text(
-        "symbol,action,field,old_value,new_value,evidence_tier,"
-        "evidence_source,evidence_detail\n",
-        encoding="utf-8",
-    )
+    (directory / "repairs.csv").write_text(repairs_csv, encoding="utf-8")
     module.seal_evidence(directory)
     return directory
 
@@ -416,6 +418,100 @@ def test_seal_evidence_requires_a_repairs_table(tmp_path: Path):
     (directory / "manifest.json").write_text("{}", encoding="utf-8")
     with pytest.raises(FileNotFoundError):
         module.seal_evidence(directory)
+
+
+def _redirect_staging(monkeypatch, tmp_path: Path):
+    """Keep the derived membership CSV in the fixture's sandbox.
+
+    ``build_membership`` stages that CSV via ``membership_snapshot_path``,
+    which points at the repo's real ``data/raw/csi/``; redirect the module
+    function so an end-to-end run never clobbers a real build artifact.  The
+    code path under test still calls ``membership_snapshot_path``.
+    """
+    module = _load_build_module()
+    staged = tmp_path / "staging"
+
+    def _path(universe_id: str) -> Path:
+        return staged / f"{universe_id}_membership_snapshot.csv"
+
+    monkeypatch.setattr(module, "membership_snapshot_path", _path)
+    return module
+
+
+def test_build_membership_end_to_end_from_a_fixture_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Drive verify -> repairs -> rows -> deviations -> import from a fixture.
+
+    The fixture is deliberately small but real: 299 launch-cohort members that
+    stay active, one later regular entry, and a duplicate third row that only
+    the repair table removes.  The result is exactly 300 active members on the
+    session, which is the one case that may keep the canonical id.
+    """
+    module = _redirect_staging(monkeypatch, tmp_path)
+    history_rows = [(f"SZ{i:06d}", "2005-04-08") for i in range(1, 300)] + [
+        ("SZ000300", "2006-08-14"),
+        ("SZ000301", "2006-08-14"),
+    ]
+    history_csv = "symbol,name,opt-in,opt-out\n" + "".join(
+        f"{symbol},constituent,{opt_in},\n" for symbol, opt_in in history_rows
+    )
+    repairs_csv = (
+        "symbol,action,field,old_value,new_value,evidence_tier,"
+        "evidence_source,evidence_detail\n"
+        "SZ000301,drop_row,opt-in,2006-08-14,,B,"
+        "upstream row duplicates SZ000300,duplicate interval\n"
+    )
+    directory = _sealed_snapshot(
+        tmp_path, history_csv=history_csv, repairs_csv=repairs_csv
+    )
+    output = tmp_path / "membership.parquet"
+
+    build = module.build_membership(
+        directory,
+        sessions=[date(2006, 8, 14)],
+        requested_id="csi300",
+        output=output,
+    )
+
+    expected = len(history_rows) - 1  # the repair drops SZ000301
+    assert build.universe_id == "csi300"
+    assert build.deviations == []
+    assert output.is_file()
+    facts = pd.read_parquet(output)
+    assert len(facts) == expected
+    assert set(facts["symbol"]) == {
+        module.to_canonical_symbol(symbol) for symbol, _ in history_rows
+    } - {"000301.SZ"}
+    initial = facts[facts["symbol"] == "000001.SZ"].iloc[0]
+    regular = facts[facts["symbol"] == "000300.SZ"].iloc[0]
+    assert initial["reason"] == "initial_constituent"
+    assert regular["reason"] == "regular_rebalance"
+    assert build.result.universe_id == build.universe_id
+    assert build.result.content_hash
+    # The derived staging CSV must never land inside the sealed snapshot.
+    assert not list(directory.glob("*_membership_snapshot.csv"))
+
+
+def test_build_membership_falls_back_to_custom_when_count_cannot_reach_300(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A history that cannot fill every session downgrades to the custom id."""
+    module = _redirect_staging(monkeypatch, tmp_path)
+    directory = _sealed_snapshot(tmp_path)  # one member, header-only repairs
+    output = tmp_path / "membership.parquet"
+
+    build = module.build_membership(
+        directory,
+        sessions=[date(2005, 4, 8)],
+        requested_id="csi300",
+        output=output,
+    )
+
+    assert build.universe_id == "custom_csi300_ic"
+    assert build.deviations == ["2005-04-08:1"]
+    assert len(pd.read_parquet(output)) == 1
+    assert build.result.universe_id == "custom_csi300_ic"
 
 
 def _rows_for_count(count: int, start: str = "2010-01-04") -> pd.DataFrame:

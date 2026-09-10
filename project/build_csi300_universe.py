@@ -20,13 +20,14 @@ import hashlib
 import json
 from datetime import date
 from pathlib import Path
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 import pandas as pd
 import yaml
 
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.index_membership_import import (
+    MembershipImportResult,
     prepare_membership_file,
 )
 from stock_quant.data_quality.models import QualityReport
@@ -121,7 +122,10 @@ REPAIR_COLUMNS = (
 )
 REPAIR_ACTIONS = ("set_field", "drop_row", "insert_row")
 REPAIR_FIELDS = (OPT_IN, OPT_OUT)
-#: A = official CSI announcement body; B = Sina history table (corroborating).
+#: Records the *strength* of the basis a repair rests on, not its author:
+#: A = official CSI announcement body; B = corroborating/secondary evidence,
+#: including the case where the only admissible basis is the upstream row's
+#: own deficiency -- which ``evidence_source`` must state explicitly.
 REPAIR_TIERS = ("A", "B")
 
 
@@ -367,6 +371,10 @@ def resolve_universe_id(deviations: list[str], *, requested: str) -> str:
     A deviating history may not claim the canonical id, because that id is
     what downstream cardinality acceptance gates on.  The custom pool skips
     only that check; the evidence chain is identical.
+
+    The fallback is deliberately scoped to ``csi300``: this script only ever
+    builds the csi300 history, so another canonical id (e.g. ``csi500``) is
+    returned unchanged even when it deviates.
     """
     if not deviations or requested != CANONICAL_ID:
         return requested
@@ -381,6 +389,97 @@ def membership_snapshot_path(universe_id: str) -> Path:
     rewritten on every build.
     """
     return ROOT / "data" / "raw" / "csi" / f"{universe_id}_membership_snapshot.csv"
+
+
+class MembershipBuild(NamedTuple):
+    """Everything the offline half produced, for ``main`` and for tests."""
+
+    universe_id: str
+    deviations: list[str]
+    rows: pd.DataFrame
+    manifest: dict
+    summary: dict
+    result: MembershipImportResult
+
+
+def build_membership(
+    snapshot_dir: Path,
+    *,
+    sessions: Sequence[date],
+    requested_id: str,
+    output: Path | None = None,
+) -> MembershipBuild:
+    """Verify a sealed snapshot and turn it into imported membership facts.
+
+    Takes ``sessions`` and ``output`` explicitly rather than reading the
+    published calendar or choosing a path, so the whole offline half is
+    drivable from a fixture without a dataset or a publish round-trip.
+    ``output`` of ``None`` selects the operator default,
+    ``data/membership/<universe_id>.parquet``; the resolved id is only known
+    here, after the cardinality scan.
+    """
+    snapshot_dir = Path(snapshot_dir)
+    manifest, summary = verify_snapshot(snapshot_dir)
+    print(
+        f"verified snapshot {snapshot_dir}\n"
+        f"  manifest_sha256={summary['manifest_sha256']}\n"
+        f"  repairs_sha256={summary['repairs_sha256']}\n"
+        f"  package_version={manifest['package_version']}"
+    )
+    history = pd.read_csv(snapshot_dir / "csi300_history.csv")
+    repairs = read_repairs(snapshot_dir / REPAIRS_NAME)
+    repaired = apply_repairs(history, repairs)
+    print(
+        f"history rows={len(history)} repairs={len(repairs)} "
+        f"effective rows={len(repaired)}"
+    )
+    rows = membership_rows(repaired)
+
+    deviations = cardinality_deviations(rows, sessions)
+    universe_id = resolve_universe_id(deviations, requested=requested_id)
+    if deviations:
+        print(
+            f"cardinality deviates from {EXPECTED_MEMBERS} on "
+            f"{len(deviations)}/{len(sessions)} sessions "
+            f"(first: {deviations[:8]})"
+        )
+        if universe_id != requested_id:
+            print(
+                f"falling back to {universe_id}: a custom pool skips only the "
+                "cardinality check; the evidence chain is identical"
+            )
+    else:
+        print(f"cardinality exactly {EXPECTED_MEMBERS} on every session")
+
+    snapshot_csv = membership_snapshot_path(universe_id)
+    snapshot_csv.parent.mkdir(parents=True, exist_ok=True)
+    rows.to_csv(snapshot_csv, index=False)
+    if output is None:
+        output = ROOT / "data" / "membership" / f"{universe_id}.parquet"
+    result = prepare_membership_file(
+        snapshot_csv,
+        universe_id=universe_id,
+        source=SOURCE,
+        source_url=SOURCE_URL,
+        snapshot_sha256=manifest["files"]["csi300_history.csv"],
+        source_document_sha256=_sha256_file(snapshot_dir / EVIDENCE_NAME),
+        effective_date=pd.Timestamp(rows["raw_effective_from"].min()).date(),
+        announcement_date=pd.Timestamp(rows["raw_effective_from"].min()).date(),
+        reason="regular_rebalance",
+        output=output,
+    )
+    print(
+        f"membership rows={len(result.frame)} "
+        f"membership_table_sha256={result.content_hash}"
+    )
+    return MembershipBuild(
+        universe_id=universe_id,
+        deviations=deviations,
+        rows=rows,
+        manifest=manifest,
+        summary=summary,
+        result=result,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -432,22 +531,6 @@ def main() -> None:
         print(f"  repairs_sha256={summary['repairs_sha256']}")
         return
 
-    manifest, summary = verify_snapshot(snapshot_dir)
-    print(
-        f"verified snapshot {snapshot_dir}\n"
-        f"  manifest_sha256={summary['manifest_sha256']}\n"
-        f"  repairs_sha256={summary['repairs_sha256']}\n"
-        f"  package_version={manifest['package_version']}"
-    )
-    history = pd.read_csv(snapshot_dir / "csi300_history.csv")
-    repairs = read_repairs(snapshot_dir / REPAIRS_NAME)
-    repaired = apply_repairs(history, repairs)
-    print(
-        f"history rows={len(history)} repairs={len(repairs)} "
-        f"effective rows={len(repaired)}"
-    )
-    rows = membership_rows(repaired)
-
     publisher = DatasetPublisher(ROOT)
     with DatasetReader(ROOT).open(publisher.current().version) as dataset:
         calendar = dataset.read("trading_calendar")
@@ -458,48 +541,14 @@ def main() -> None:
             calendar.loc[calendar["is_trading_day"], "calendar_date"]
         )
     ]
-    deviations = cardinality_deviations(rows, sessions)
-    universe_id = resolve_universe_id(deviations, requested=args.universe_id)
-    if deviations:
-        print(
-            f"cardinality deviates from {EXPECTED_MEMBERS} on "
-            f"{len(deviations)}/{len(sessions)} sessions "
-            f"(first: {deviations[:8]})"
-        )
-        if universe_id != args.universe_id:
-            print(
-                f"falling back to {universe_id}: a custom pool skips only the "
-                "cardinality check; the evidence chain is identical"
-            )
-    else:
-        print(f"cardinality exactly {EXPECTED_MEMBERS} on every session")
-
-    snapshot_csv = membership_snapshot_path(universe_id)
-    snapshot_csv.parent.mkdir(parents=True, exist_ok=True)
-    rows.to_csv(snapshot_csv, index=False)
-    output = args.output or (
-        ROOT / "data" / "membership" / f"{universe_id}.parquet"
+    build = build_membership(
+        snapshot_dir,
+        sessions=sessions,
+        requested_id=args.universe_id,
+        output=args.output,
     )
-    result = prepare_membership_file(
-        snapshot_csv,
-        universe_id=universe_id,
-        source=SOURCE,
-        source_url=SOURCE_URL,
-        snapshot_sha256=manifest["files"]["csi300_history.csv"],
-        source_document_sha256=_sha256_file(snapshot_dir / EVIDENCE_NAME),
-        effective_date=pd.Timestamp(
-            rows["raw_effective_from"].min()
-        ).date(),
-        announcement_date=pd.Timestamp(
-            rows["raw_effective_from"].min()
-        ).date(),
-        reason="regular_rebalance",
-        output=output,
-    )
-    print(
-        f"membership rows={len(result.frame)} "
-        f"membership_table_sha256={result.content_hash}"
-    )
+    universe_id = build.universe_id
+    result = build.result
 
     tables["universe_membership"] = result.frame
     published = publisher.publish(tables, QualityReport())
@@ -512,8 +561,7 @@ def main() -> None:
         "schema_version": 1,
         "universe_id": universe_id,
         "rules_version": (
-            f"{SOURCE}-{manifest['package_version']}"
-            f"+repairs-{repairs_sha[:8]}"
+            f"{SOURCE}-{build.manifest['package_version']}+repairs-{repairs_sha[:8]}"
         ),
         "membership_table_sha256": result.content_hash,
         "evidence_summary_sha256": _sha256_file(snapshot_dir / EVIDENCE_NAME),
