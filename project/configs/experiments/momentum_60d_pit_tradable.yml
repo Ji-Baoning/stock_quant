@@ -1,0 +1,37 @@
+# 时点成分过滤的 ENGINEERING 验收规格。
+#
+# 与 momentum_60d_offline_real_extended.yml 相同的信任语义，唯一区别是启用
+# universe_definition：runner 在算实验身份之前先做预检，把每个信号日的候选
+# 收窄到「当时确实是 CSI300 成分」的标的上。
+#
+# 股票池仍是人工挑选的 30 只（裁剪后 28 只），所以幸存者偏差依然存在；
+# 本规格只消除池内的前视偏差。非投资建议，非可信绩效声明。
+hypothesis: >-
+  把选股候选限制在信号日当时确属 CSI300 成分的标的，会在同一批真实行情上
+  改变组合构成与绩效路径；本规格用于验证时点过滤确实生效并可复现。
+factor_versions:
+  momentum_60d: 2.0.0
+dataset_version: CURRENT
+universe_version: CURRENT
+universe_definition: custom_csi300_ic_tradable
+trust_mode: engineering
+data_acceptance_id: null
+date_range:
+  start_date: 2015-01-01
+  end_date: 2026-08-21
+train_validation_holdout_policy: not_applicable_engineering_mvp
+preprocessing:
+  winsorization: none
+  standardization: none
+portfolio_rule:
+  name: top_n_equal_weight
+  top_n: 10
+  lot_size: 100
+cost_scenarios:
+  - zero_cost
+  - commission_tax
+  - full_cost
+random_seed: 42
+code_commit: unversioned
+parent_experiment_ids: []
+agent_id: null
