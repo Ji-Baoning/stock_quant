@@ -67,6 +67,15 @@ def membership_rows(history: pd.DataFrame) -> pd.DataFrame:
     date.  Such rows are rejected loudly rather than dropped, because a
     silently dropped row is exactly how a missing inclusion hides -- and a
     missing inclusion is what makes a later removal never take effect.
+
+    The two sides use different interval conventions.  Upstream
+    (``index-constitution``) is half-open: ``opt-out`` is the first day the
+    stock is *no longer* a member, i.e. ``[opt-in, opt-out)``.  This repo is
+    inclusive: ``raw_effective_to`` is the *last* day the stock IS a member.
+    The exclusive upstream end is therefore shifted back by one day, which is
+    what stops a same-day rebalance -- the leaver's ``opt-out`` and the
+    joiner's ``opt-in`` falling on the same day -- from counting both
+    constituents on that day.  Do not "simplify" the subtraction away.
     """
     missing = history[history[OPT_IN].isna()]
     if not missing.empty:
@@ -81,7 +90,9 @@ def membership_rows(history: pd.DataFrame) -> pd.DataFrame:
         {
             "symbol": history["symbol"].map(to_canonical_symbol),
             "raw_effective_from": pd.to_datetime(history[OPT_IN]),
-            "raw_effective_to": pd.to_datetime(history[OPT_OUT]),
+            "raw_effective_to": (
+                pd.to_datetime(history[OPT_OUT]) - pd.Timedelta(days=1)
+            ).where(history[OPT_OUT].notna()),
             "announcement_date": pd.to_datetime(history[OPT_IN]),
         }
     )

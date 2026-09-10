@@ -96,6 +96,28 @@ def test_membership_rows_never_marks_a_removed_row_initial():
     assert rows.iloc[0]["reason"] == "regular_rebalance"
 
 
+def test_a_same_day_switch_over_does_not_double_count_the_date():
+    # an upstream rebalance: the leaver's opt-out and the joiner's opt-in
+    # fall on the same day, which is the first day the leaver is OUT.  If the
+    # exclusive upstream opt-out were copied straight into the inclusive
+    # raw_effective_to, both intervals would cover that day and the count
+    # would be 2 instead of 1.
+    module = _load_build_module()
+    rows = module.membership_rows(
+        pd.DataFrame(
+            {
+                "symbol": ["SZ000001", "SZ000002"],
+                "name": ["平安银行", "万科A"],
+                "opt-in": pd.to_datetime(["2005-04-08", "2006-08-14"]),
+                "opt-out": pd.to_datetime(["2006-08-14", None]),
+            }
+        )
+    )
+    switch_over = date(2006, 8, 14)
+    assert module.cardinality_deviations(rows, [switch_over], expected=1) == []
+    assert rows.iloc[0]["raw_effective_to"] == pd.Timestamp("2006-08-13")
+
+
 def test_membership_rows_sets_announcement_date_to_the_effective_date():
     module = _load_build_module()
     rows = module.membership_rows(
