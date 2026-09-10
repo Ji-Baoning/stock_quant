@@ -1336,7 +1336,7 @@ git commit -m "feat: seal and verify snapshot evidence hashes"
 
 **Interfaces:**
 - Consumes: Task 3 的 `membership_rows`、Task 4 的 `apply_repairs`/`read_repairs`、Task 5 的 `verify_snapshot`/`seal_evidence`/`_sha256_file`
-- Produces: `cardinality_deviations(rows: pd.DataFrame, sessions: Sequence[date], *, expected: int = 300) -> list[str]`；`resolve_universe_id(deviations: list[str], *, requested: str) -> str`；`build_parser() -> argparse.ArgumentParser`；`main() -> None`
+- Produces: `cardinality_deviations(rows: pd.DataFrame, sessions: Sequence[date], *, expected: int = 300) -> list[str]`；`resolve_universe_id(deviations: list[str], *, requested: str) -> str`；`membership_snapshot_path(universe_id: str) -> Path`；`build_parser() -> argparse.ArgumentParser`；`main() -> None`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1368,11 +1368,19 @@ def test_cardinality_reports_each_deviating_day_with_its_count():
     assert deviations == ["2010-01-04:301"]
 
 
-def test_cardinality_ignores_days_outside_every_interval():
+def test_cardinality_reports_a_session_before_every_interval_as_zero():
     module = _load_build_module()
     sessions = [date(2010, 1, 4), date(1999, 1, 4)]
     deviations = module.cardinality_deviations(_rows_for_count(300), sessions)
     assert deviations == ["1999-01-04:0"]
+
+
+def test_membership_snapshot_is_staged_outside_the_snapshot_dir():
+    module = _load_build_module()
+    path = module.membership_snapshot_path("custom_csi300_ic")
+    assert path.name == "custom_csi300_ic_membership_snapshot.csv"
+    assert path.parent.name == "csi"
+    assert "index_constitution" not in path.parts
 
 
 def test_resolve_universe_id_keeps_the_canonical_id_when_exact():
@@ -1458,6 +1466,14 @@ def cardinality_deviations(
     Erring strict is the safe direction here: a doubtful history is downgraded
     to ``custom_csi300_ic`` rather than allowed to masquerade as canonical.
 
+    This grid intentionally differs from the published-facts check
+    ``_cardinality_issues``, which starts counting at the universe's first
+    claimed start date.  This scan instead counts every session in the pinned
+    calendar, including sessions before the history's first inclusion.  That is
+    the strict choice: if the calendar ever reached before the history, every
+    such session would be flagged ``<day>:0`` and the history would always
+    downgrade to the custom id -- the intended safe outcome, not a bug.
+
     Officially sanctioned temporary exceptions are a separate, later concern
     owned by the dataset quality layer, which already models them via
     ``MembershipSizeException`` in
@@ -1468,7 +1484,6 @@ def cardinality_deviations(
     """
     intervals = [
         (
-            row.symbol,
             pd.Timestamp(row.raw_effective_from).date(),
             None
             if pd.isna(row.raw_effective_to)
@@ -1480,7 +1495,7 @@ def cardinality_deviations(
     for day in sessions:
         count = sum(
             1
-            for _, start, end in intervals
+            for start, end in intervals
             if start <= day and (end is None or day <= end)
         )
         if count != expected:
@@ -1498,6 +1513,16 @@ def resolve_universe_id(deviations: list[str], *, requested: str) -> str:
     if not deviations or requested != CANONICAL_ID:
         return requested
     return CUSTOM_ID
+
+
+def membership_snapshot_path(universe_id: str) -> Path:
+    """Staging path for the derived membership CSV handed to the importer.
+
+    Deliberately OUTSIDE the sealed snapshot directory: a snapshot holds only
+    the enumerated evidence files, and this derived artifact is legitimately
+    rewritten on every build.
+    """
+    return ROOT / "data" / "raw" / "csi" / f"{universe_id}_membership_snapshot.csv"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1591,7 +1616,8 @@ def main() -> None:
     else:
         print(f"cardinality exactly {EXPECTED_MEMBERS} on every session")
 
-    snapshot_csv = snapshot_dir / f"{universe_id}_membership_snapshot.csv"
+    snapshot_csv = membership_snapshot_path(universe_id)
+    snapshot_csv.parent.mkdir(parents=True, exist_ok=True)
     rows.to_csv(snapshot_csv, index=False)
     output = args.output or (
         ROOT / "data" / "membership" / f"{universe_id}.parquet"
@@ -1671,7 +1697,7 @@ from stock_quant.data_quality.models import QualityReport
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python -m pytest tests/unit/test_csi300_universe_build.py -q`
-Expected: 38 passed（Task 3/4/5 的 29 + 本任务的 9）
+Expected: 39 passed（Task 3/4/5 的 29 + 本任务的 10）
 
 - [ ] **Step 5: 跑 lint**
 
