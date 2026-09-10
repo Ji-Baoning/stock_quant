@@ -29,7 +29,7 @@
 
 本设计在官方渠道不可用的前提下，选择以该开源数据为主干。这是**对既有原则的一次显式偏离**，取舍如下：
 
-1. **产出明确标注来源。** `rules_version` 记录 `index-constitution` 的包版本与快照哈希；`source` 为 `index_constitution`。
+1. **产出明确标注来源。** `source` 为 `index_constitution`；`rules_version` 为 `index-constitution-<包版本>+repairs-<8hex>`（详见"溯源 schema 与哈希绑定"）。
 2. **能用官方证据裁定的行，提升到官方证据等级。** 已落盘的官方公告正文（`csi_index_announcements/*.json`）含完整的调入调出名单，属于可核验的一手证据。
 3. **不冒充 canonical。** 只要无法逐日恰好 300，就落 `custom_csi300_ic`，**不占用 `csi300` 这个 canonical id**。自定义池按既有 spec 要求携带组成规则、来源与内容版本。
 4. **canonical `csi300` 仍以官方证据为准。** 官方渠道恢复后，本快照可退回交叉核对角色。
@@ -38,18 +38,26 @@
 
 ## 数据落地结构
 
+每次导出一个**带日期的独立目录**，写入后不可变：
+
 ```
-data/raw/csi/index_constitution/
+data/raw/csi/index_constitution/2026-09-10/
   csi300_history.csv      # ic 原始：symbol,name,opt-in,opt-out（1225 行，原样不改）
   csi300_latest.csv       # ic 原始：symbol,name,opt-in（300 行，原样不改）
   cn_events.csv           # ic 原始：代码/名称变更事件（审计用）
   manifest.json           # 源包名+版本、三个 CSV 的 SHA-256、导出环境、导出日期
   repairs.csv             # 我们的裁定修正，非原始数据
+  evidence_summary.json   # 证据摘要：manifest 哈希 + repairs 哈希
+  adjudication_report.md  # 裁定报告，给人看
 ```
 
 `data/` 整个被 `.gitignore`，因此这与现有 `sina_history_component/`、`csi_index_announcements/` 一致：**证据落盘、不入库**。
 
-原始 CSV 一字不改；所有修正集中在 `repairs.csv`，使"哪些是上游数据、哪些是我们的改动、依据是什么"始终可分辨。
+**目录按导出日期隔离，不原地覆盖。** 上游发布新版本时新建一个日期目录，旧快照的哈希永远可回溯，历史构建保持可复现。`repairs.csv` 也随快照走——它针对的是该版本上游数据的具体缺陷，上游一变就需重新裁定；需要沿用旧裁定时显式复制并在报告中注明。
+
+原始 CSV 一字不改；所有修正集中在同目录的 `repairs.csv`，使"哪些是上游数据、哪些是我们的改动、依据是什么"始终可分辨。
+
+构建脚本用**显式** `--snapshot-dir` 参数指定快照，**不做隐式"取最新"**——隐式解析会让同一份实验在不同时间产生不同结果。
 
 ## 导出与运行时隔离
 
@@ -75,14 +83,17 @@ data/raw/csi/index_constitution/
 
 逐日（7736 个自然日）统计成员数，偏离恰好 300 的区段共 4 段、2602 天：
 
-| 区间 | 天数 | 只数 | 触发点 |
+| 区间 | 天数 | 只数 | 观测到的触发 |
 | --- | --- | --- | --- |
-| 2006-08-12 ~ 2007-04-29 | 261 | 301 | 大秦铁路 SH601006 单独调入，配对剔除缺失 |
-| 2008-06-14 ~ 2009-12-31 | 566 | 301 | 半年调样记 19 进 20 出，其中 2 条剔除行 `opt-in` 缺失故从未被计入 |
-| 2012-01-01 ~ 2014-07-09 | 921 | 301 | 2012-01-01 调样净 +1 |
-| 2017-02-13 ~ 2019-06-16 | 854 | 299 | 武钢股份 SH600005 因被宝钢吸收合并单独剔除，无补入 |
+| 2006-08-12 ~ 2007-04-29 | 261 | 301 | SH601006 大秦铁路单独调入，配对剔除缺失 |
+| 2008-06-14 ~ 2009-12-31 | 566 | 301 | 该日 19 进 20 出，但 2 条剔除行（SH600501、SH600786）`opt-in` 缺失 → 有效剔除 18 → 净 +1 |
+| 2012-01-01 ~ 2014-07-09 | 921 | 301 | 该日 24 进 24 出，但 SH600312 `opt-in` 缺失 → 有效剔除 23 → 净 +1 |
+| 2017-02-13 ~ 2019-06-16 | 854 | 299 | SH600005 武钢股份因被宝钢吸收合并单独剔除，无补入 |
+| 2019-06-17 起 | — | 回到 300 | SH600549 `opt-in` 缺失使其剔除不生效 → 净 +1，恰好补回上一段的 −1 |
 
-另有 4 行 `opt-in` 缺失：SH600312 平高电气、SH600501 航天晨光、SH600549 厦门钨业、SH600786 东方锅炉。这些行永远不会被计入成员，因此**不直接造成计数偏离**，但属于数据缺陷。
+**4 行 `opt-in` 缺失**（SH600312 平高电气、SH600501 航天晨光、SH600549 厦门钨业、SH600786 东方锅炉）中，有 3 行的缺失直接影响其剔除日的计数，是上表两段偏离的直接成因；SH600786 另有一行区间完整（2005-07-01 → 2008-03-20），缺失的那行是重复行。
+
+**注意：上表是"观测到的触发"，不是"已确定的修法"。** 以 SH600312 为例，`opt-in` 该补一个更早的日期、还是该整行丢弃，取决于它当时到底是不是成分股——两种改法对计数的影响不同。这正是裁定流程要解决的问题，不能凭推理填。`repairs.csv` 里只允许出现裁定完成的结论。
 
 ### 裁定证据发现
 
@@ -127,6 +138,27 @@ symbol, action, field, old_value, new_value, evidence_tier, evidence_source, evi
 - 构建后仍有偏离时：`csi300` 直接拒绝，落 `custom_csi300_ic`，并打印全部偏离天数。
 - `repairs.csv` 每条都能追溯到具体证据文件。
 
+## 溯源 schema 与哈希绑定
+
+`rules_version` 保持**字符串标签**，结构化信息全部外置。这是被现有契约逼出来的：`UniverseDefinition.rules_version` 的校验是"非空、无首尾空白的字符串"，且它进入定义的 canonical JSON、进而进入 `universe_version`。改成结构化对象要动 pydantic 模型及全部消费方，属于本任务范围外。
+
+分工如下：
+
+| 信息 | 落在哪里 |
+| --- | --- |
+| 修复集指纹 | `rules_version` 标签尾部，形如 `index-constitution-1.0.0+repairs-3f9a2c1b`（repairs.csv 哈希前 8 位） |
+| 包版本、Python/pandas 版本、导出日期 | `manifest.json` |
+| 三个上游 CSV 的 SHA-256 | `manifest.json` |
+| 每行的 `snapshot_sha256` | `csi300_history.csv` 的 SHA-256 |
+| 每行的 `source_document_sha256` | `evidence_summary.json` 的 SHA-256 |
+| 定义里的 `evidence_summary_sha256` | 同上，`evidence_summary.json` 的 SHA-256 |
+
+`evidence_summary.json` 是一份小文档，列出 `source`、`source_url`、`manifest.json` 的哈希、`repairs.csv` 的哈希。它同时充当每行的 `source_document_sha256` 和定义的 `evidence_summary_sha256`，语义一致。
+
+**这样做的关键效果：`rules_version` 尾部随 repairs 内容变化**，于是任何一条修复的增删改都会改变 `universe_version`，修复集被间接钉死。否则 `repairs.csv` 不受任何哈希覆盖，改一条修复而定义不变，是当前设计里的一处漏洞。
+
+各信息的归属是刻意的：能进标签的只有修复集指纹（因为它是"规则"的一部分）；环境与导出细节属于可复现性元数据，进 manifest；逐行证据绑定进 parquet 列。
+
 ## 构建、校验与发布
 
 两个脚本，职责分开。
@@ -140,7 +172,7 @@ symbol, action, field, old_value, new_value, evidence_tier, evidence_source, evi
 
 **`project/build_csi300_universe.py`（主环境跑）**
 
-1. **先验快照**：用 `manifest.json` 记的 SHA-256 校验三个 CSV，对不上直接拒绝构建。
+1. **先验快照**：入参为显式 `--snapshot-dir`。用 `manifest.json` 记的 SHA-256 校验三个 CSV，用 `evidence_summary.json` 校验 `manifest.json` 与 `repairs.csv` 的哈希，任一对不上直接拒绝构建。
 2. **读历史帧 + 应用 `repairs.csv`**，得到"生效帧"。
 3. **映射到 repo schema**：
 
@@ -152,9 +184,13 @@ symbol, action, field, old_value, new_value, evidence_tier, evidence_source, evi
    | — | `announcement_date` | 取 `raw_effective_from` |
    | — | `source` | `index_constitution` |
    | — | `source_url` | 包主页 URL |
-   | — | `snapshot_sha256` / `source_document_sha256` | 快照 CSV 与 manifest 的哈希 |
+   | — | `snapshot_sha256` | `csi300_history.csv` 的 SHA-256 |
+   | — | `source_document_sha256` | `evidence_summary.json` 的 SHA-256 |
+   | — | `rules_version` | `index-constitution-<版本>+repairs-<8hex>` |
 
    `announcement_date` 取生效日的含义是"生效当天才可见"，而真实公告通常提前约两周。方向是**宁可晚知、不可早知**，对回测安全（不引入前视），但确为近似，必须写入 `rules_version` 与报告。
+
+   这个近似的具体影响是：**在生效日之前的那两周里，回测会认为该股票还不属于成分**，而这可能低估早期的纳入。对动量/反转类信号会产生细微偏差。偏差方向是"晚知"而非"早知"，因此**不会产生"使用了未来信息"的严重错误**，属于可接受近似。报告里必须写明是"可能低估早期纳入"，而不是"高估"——方向写反会误导后续对结果的解读。
 
 4. **逐日校验**：用已发布 dataset 的交易日历统计每天成员数，偏离天数写进报告。
 5. `prepare_membership_file(...)` → 出 membership parquet。
@@ -167,7 +203,8 @@ symbol, action, field, old_value, new_value, evidence_tier, evidence_source, evi
 
 - **导出器**：三个 CSV 列名/行数与输入一致；`manifest.json` 的三个 SHA-256 与实际文件字节一致；pandas 主版本 < 3 时 `main()` 拒绝运行。
 - **修复表应用**：`set_field` / `insert_row` / `drop_row` 各自生效；未知 symbol、未知 action、未知字段 → 报错（不静默忽略）；空 `repairs.csv` → 生效帧与原始帧逐行相等。
-- **快照完整性**：manifest 哈希对不上 → 构建拒绝。
+- **快照完整性**：manifest 哈希对不上 → 构建拒绝；`evidence_summary.json` 校验失败（例如 `repairs.csv` 被改过）→ 同样拒绝。
+- **修复集指纹**：改动 `repairs.csv` 任一行 → `rules_version` 尾部变化 → `universe_version` 变化。
 - **逐日校验**：构造 301 只输入 → 判定偏离、canonical `csi300` 被拒并落 `custom_csi300_ic`；构造恰好 300 → 通过。
 - **确定性**：同一输入构建两次 → `membership_table_sha256` 相同。
 - **端到端（离线 fixture）**：小 fixture 快照 + 修复表 → 出 parquet，行数与预期一致；不碰真实大数据、不联网。
@@ -177,6 +214,6 @@ symbol, action, field, old_value, new_value, evidence_tier, evidence_source, evi
 ## 风险与未决
 
 1. **可能修不到恰好 300。** 官方离线证据只覆盖第一段；其余三段（尤其 2012-01-01 和 2017-02-13）没有权威依据。若最终仍有偏离，产出为 `custom_csi300_ic`，这由本设计预设，不算失败。
-2. **`announcement_date` 是近似。** 生效日可见 ≈ 最坏情况下晚知两周。规则版本中显式记录。
+2. **`announcement_date` 是近似。** 生效日可见 ≈ 最坏情况下晚知两周，影响是**可能低估早期纳入**（不是高估）。规则版本中显式记录，报告中写明方向。
 3. **聚合商来源的独立性弱。** `index-constitution` 自称来源为 csindex 官方公告，但未逐条给出公告日期。这既是它不能充当 canonical 依据的原因，也是官方渠道恢复后必须复核的原因。
-4. **上游数据变更。** 快照冻结后上游若发布新版本，需重新导出并重新走一遍裁定流程，不可原地覆盖。
+4. **上游数据变更。** 快照冻结后上游若发布新版本，新建一个 `data/raw/csi/index_constitution/<新日期>/` 目录，**绝不原地覆盖**旧的同名文件——否则旧快照的哈希找不回来，历史构建不可复现。新目录里的 `repairs.csv` 需重新裁定；沿用旧裁定时显式复制并在 `adjudication_report.md` 中注明来源目录。
