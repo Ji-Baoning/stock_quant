@@ -925,7 +925,7 @@ def test_missing_evidence_source_is_rejected():
     module = _load_build_module()
     with pytest.raises(ValueError) as excinfo:
         module.apply_repairs(_history(), _repairs(evidence_source=""))
-    assert "evidence" in str(excinfo.value)
+    assert "SZ000780" in str(excinfo.value)
 
 
 def test_repair_old_value_format_is_normalized():
