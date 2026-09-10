@@ -1354,6 +1354,20 @@ def cardinality_deviations(
 
     Checked globally rather than at the repaired interval: a locally plausible
     fix can move a +1 onto another date, and only a full re-scan catches that.
+
+    This answers a build-time question -- "is this history clean enough to
+    claim the canonical ``csi300`` id?" -- so it deliberately has no notion of
+    a sanctioned exception and treats every off-count day as a deviation.
+    Erring strict is the safe direction here: a doubtful history is downgraded
+    to ``custom_csi300_ic`` rather than allowed to masquerade as canonical.
+
+    Officially sanctioned temporary exceptions are a separate, later concern
+    owned by the dataset quality layer, which already models them via
+    ``MembershipSizeException`` in
+    ``stock_quant.data_quality.raw_checks._cardinality_issues``.  That check
+    runs on published facts and cannot be reused here without a publish
+    round-trip, which is why this scan is a local duplicate rather than a
+    call into it.
     """
     intervals = [
         (
