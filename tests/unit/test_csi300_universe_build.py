@@ -242,3 +242,42 @@ def test_set_field_on_an_absent_symbol_is_rejected():
     with pytest.raises(ValueError) as excinfo:
         module.apply_repairs(_history(), _repairs(symbol="SZ999999"))
     assert "SZ999999" in str(excinfo.value)
+
+
+def test_drop_row_with_a_stale_old_value_sets_nothing():
+    """A stale old_value is a no-op for drop_row too, not only set_field."""
+    module = _load_build_module()
+    result = module.apply_repairs(
+        _history(),
+        _repairs(action="drop_row", field="opt-in", old_value="1999-01-01"),
+    )
+    assert len(result) == 3
+    assert "SZ000780" in set(result["symbol"])
+
+
+def test_drop_row_on_an_absent_symbol_is_rejected():
+    module = _load_build_module()
+    with pytest.raises(ValueError) as excinfo:
+        module.apply_repairs(_history(), _repairs(action="drop_row", symbol="SZ999999"))
+    assert "SZ999999" in str(excinfo.value)
+
+
+def test_missing_evidence_source_is_rejected():
+    module = _load_build_module()
+    with pytest.raises(ValueError) as excinfo:
+        module.apply_repairs(_history(), _repairs(evidence_source=""))
+    assert "SZ000780" in str(excinfo.value)
+
+
+def test_repair_old_value_format_is_normalized():
+    """A repair's date may be written in any common format and still match.
+
+    Normalizing only the frame side would leave a mistyped or differently
+    formatted ``old_value`` matching nothing -- indistinguishable from a
+    genuinely stale repair -- so the correction would silently never apply.
+    """
+    module = _load_build_module()
+    for old_value in ("2013/12/16", "2013-12-16 00:00:00"):
+        result = module.apply_repairs(_history(), _repairs(old_value=old_value))
+        row = result[result["symbol"] == "SZ000780"].iloc[0]
+        assert row["opt-out"] == pd.Timestamp("2006-08-14")

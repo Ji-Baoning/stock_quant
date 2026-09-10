@@ -127,12 +127,25 @@ def _validated_repairs(repairs: pd.DataFrame) -> pd.DataFrame:
 
 
 def _cell(value: object) -> str:
-    """Comparable text for a frame cell; NaT/NaN read as empty."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    """Comparable text for one side of a repair comparison.
+
+    Both the frame cell and the repair's ``old_value`` are normalized here, so
+    ``2013-12-16``, ``2013/12/16`` and ``2013-12-16 00:00:00`` all compare
+    equal.  Normalizing only the frame side would let a mistyped date in
+    ``repairs.csv`` match nothing -- indistinguishable from a genuinely stale
+    repair, and this table is hand-written.  NaT/NaN/blank read as empty.
+    """
+    if value is None or value is pd.NaT:
         return ""
-    if value is pd.NaT:
+    if isinstance(value, float) and pd.isna(value):
         return ""
-    return str(pd.Timestamp(value).date()) if hasattr(value, "date") else str(value)
+    text = str(value).strip()
+    if not text:
+        return ""
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.isna(parsed):
+        return text
+    return str(pd.Timestamp(parsed).date())
 
 
 def apply_repairs(history: pd.DataFrame, repairs: pd.DataFrame) -> pd.DataFrame:
@@ -179,7 +192,7 @@ def apply_repairs(history: pd.DataFrame, repairs: pd.DataFrame) -> pd.DataFrame:
                 f"snapshot or the repair is stale"
             )
         matched = on_symbol & (
-            frame[row.field].map(_cell) == str(row.old_value).strip()
+            frame[row.field].map(_cell) == _cell(row.old_value)
         )
         if row.action == "set_field":
             if matched.any():
