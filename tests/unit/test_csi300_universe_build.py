@@ -421,7 +421,7 @@ def test_cardinality_reports_each_deviating_day_with_its_count():
     assert deviations == ["2010-01-04:301"]
 
 
-def test_cardinality_ignores_days_outside_every_interval():
+def test_cardinality_reports_a_session_before_every_interval_as_zero():
     module = _load_build_module()
     sessions = [date(2010, 1, 4), date(1999, 1, 4)]
     deviations = module.cardinality_deviations(_rows_for_count(300), sessions)
@@ -467,3 +467,11 @@ def test_parser_has_a_seal_only_mode(tmp_path: Path):
         ["--snapshot-dir", str(tmp_path), "--seal-evidence"]
     )
     assert args.seal_evidence is True
+
+
+def test_membership_snapshot_is_staged_outside_the_snapshot_dir():
+    module = _load_build_module()
+    path = module.membership_snapshot_path("custom_csi300_ic")
+    assert path.name == "custom_csi300_ic_membership_snapshot.csv"
+    assert path.parent.name == "csi"
+    assert "index_constitution" not in path.parts

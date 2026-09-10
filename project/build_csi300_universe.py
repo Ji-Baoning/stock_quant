@@ -313,6 +313,14 @@ def cardinality_deviations(
     Erring strict is the safe direction here: a doubtful history is downgraded
     to ``custom_csi300_ic`` rather than allowed to masquerade as canonical.
 
+    This grid intentionally differs from the published-facts check
+    ``_cardinality_issues``, which starts counting at the universe's first
+    claimed start date.  This scan instead counts every session in the pinned
+    calendar, including sessions before the history's first inclusion.  That is
+    the strict choice: if the calendar ever reached before the history, every
+    such session would be flagged ``<day>:0`` and the history would always
+    downgrade to the custom id -- the intended safe outcome, not a bug.
+
     Officially sanctioned temporary exceptions are a separate, later concern
     owned by the dataset quality layer, which already models them via
     ``MembershipSizeException`` in
@@ -323,7 +331,6 @@ def cardinality_deviations(
     """
     intervals = [
         (
-            row.symbol,
             pd.Timestamp(row.raw_effective_from).date(),
             None
             if pd.isna(row.raw_effective_to)
@@ -335,7 +342,7 @@ def cardinality_deviations(
     for day in sessions:
         count = sum(
             1
-            for _, start, end in intervals
+            for start, end in intervals
             if start <= day and (end is None or day <= end)
         )
         if count != expected:
@@ -353,6 +360,16 @@ def resolve_universe_id(deviations: list[str], *, requested: str) -> str:
     if not deviations or requested != CANONICAL_ID:
         return requested
     return CUSTOM_ID
+
+
+def membership_snapshot_path(universe_id: str) -> Path:
+    """Staging path for the derived membership CSV handed to the importer.
+
+    Deliberately OUTSIDE the sealed snapshot directory: a snapshot holds only
+    the enumerated evidence files, and this derived artifact is legitimately
+    rewritten on every build.
+    """
+    return ROOT / "data" / "raw" / "csi" / f"{universe_id}_membership_snapshot.csv"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -446,7 +463,8 @@ def main() -> None:
     else:
         print(f"cardinality exactly {EXPECTED_MEMBERS} on every session")
 
-    snapshot_csv = snapshot_dir / f"{universe_id}_membership_snapshot.csv"
+    snapshot_csv = membership_snapshot_path(universe_id)
+    snapshot_csv.parent.mkdir(parents=True, exist_ok=True)
     rows.to_csv(snapshot_csv, index=False)
     output = args.output or (
         ROOT / "data" / "membership" / f"{universe_id}.parquet"
