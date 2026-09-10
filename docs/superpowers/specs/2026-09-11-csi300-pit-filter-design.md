@@ -91,14 +91,28 @@
    `project/configs/universes/custom_csi300_ic_tradable.yml`。
 
 关键点：**逐行过滤保留全部证据字段**（`source_document_sha256`、
-`snapshot_sha256`、`source_url` 等），证据链不断。定义文件中
-`membership_table_sha256` 取过滤后 facts 的 `membership_content_hash`；
-其余字段沿用原定义——`schema_version`、`rules_version`、
-`evidence_summary_sha256`（快照未被改动）、以及按过滤后 facts 重新计算的
-`coverage` 起止日期。`universe_id` 改为 `custom_csi300_ic_tradable`。
+`snapshot_sha256`、`source_url` 等），证据链不断。定义文件的字段处置：
 
-裁剪结果预期为 **28 只唯一标的**。fact 行数不等于 28——同一标的可能有多段
-区间——所以验收断言的是**唯一 symbol 数**，不是行数。
+| 字段 | 取值 |
+| --- | --- |
+| `universe_id` | `custom_csi300_ic_tradable`（匹配 `custom_[a-z0-9_]+`）；**facts 行的 `universe_id` 必须同步重贴**，理由见下 |
+| `schema_version` | 沿用 `1` |
+| `rules_version` | 原值追加 `+tradable` 后缀 |
+| `membership_table_sha256` | 过滤后 facts 的 `membership_content_hash` |
+| `evidence_summary_sha256` | 沿用原值（快照未被改动） |
+| `coverage_start` / `coverage_end` | **沿用 `build_csi300_universe.py` 的既有语义**：取数据集 `daily_bar` 的 `trade_date` min/max，而非从 facts 推导 |
+
+裁剪结果预期为 **28 只唯一标的 / 31 行**（同一标的可能有多段区间），
+所以验收断言的是**唯一 symbol 数**，不是行数。
+
+**为什么必须重贴 `universe_id`：** `UniverseResolver.__init__`
+（`src/stock_quant/research/universe.py:180`）逐条比对 resolved fact 的
+`universe_id` 与定义的 `universe_id`，不一致直接 `ValueError`
+（实测消息：`resolved row belongs to universe_id 'custom_csi300_ic', not
+the definition's 'custom_csi300_ic_tradable'`）。只过滤行不重贴，实验必然在
+预检阶段崩掉。重贴只改这一个身份列，证据字段全部保留；
+`membership_table_sha256` 因此变为
+`756db257b6a13846c4452fd2e7504c54636705ca4f6acb4b712d092b549a4255`。
 
 ### ② 实验规格（新增）
 
