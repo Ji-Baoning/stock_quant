@@ -345,7 +345,7 @@ python -m stock_quant data acceptance show \
 - [ ] `data/runs/<run_id>/fold_schedule.json` 在**任何回测之前**已写入，且
   记录了 `fold_schedule_sha256`（`walk_forward_manifest.json` 与
   `stability_report.json.schedule` 均绑定它）。
-- [ ] schedule 只含**计划时已知事实**：fold 自然/交易日边界、三年预热边界、
+- [ ] schedule 只含**计划时已知事实**：fold 自然/交易日边界、预热边界（至少三个整年，不足 756 个确认交易日时按整年前延至满足，稀疏日历如实记录不足）、
   预热与 OOS 会话数、逐日成员快照计划；不携带任何运行后状态（status/reason
   只出现在 `fold_outcomes.json`）。
 - [ ] 首尾不成完整 12 个月的日期在 `boundaries` 中记录为

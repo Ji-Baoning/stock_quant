@@ -129,6 +129,66 @@ def test_warmup_window_is_three_calendar_years_before_the_fold(calendar):
     )
 
 
+def _limited_open_days(start: date, end: date, per_year: int) -> list[date]:
+    """Calendar with at most ``per_year`` open sessions per historical year.
+
+    The latest calendar year keeps full coverage so complete OOS folds can
+    form; only the warmup history is thinned.
+    """
+    by_year: dict[int, list[date]] = {}
+    for day in _open_days(start, end):
+        by_year.setdefault(day.year, []).append(day)
+    latest = max(by_year)
+    return [
+        day
+        for year in sorted(by_year)
+        for day in (by_year[year] if year == latest else by_year[year][:per_year])
+    ]
+
+
+def test_warmup_extends_back_until_confirmed_session_floor_is_met():
+    # Real A-share calendars hold ~242 sessions per year, so the exact
+    # three-calendar-year window can never reach the 756-session floor; the
+    # warmup start must extend back (whole years, January-1 anchored) until
+    # the floor is met while keeping the three-year minimum span.
+    calendar = TradingCalendar.from_open_days(
+        _limited_open_days(date(2014, 1, 1), date(2024, 12, 31), per_year=242)
+    )
+    schedule = materialize_schedule(
+        requested_start=date(2024, 1, 1),
+        requested_end=date(2024, 12, 31),
+        calendar=calendar,
+        policy=WalkForwardPolicy(),
+        membership_snapshots={},
+    )
+    fold = schedule.folds[0]
+    assert (fold.warmup_calendar_start, fold.warmup_calendar_end) == (
+        date(2020, 1, 1),
+        date(2023, 12, 31),
+    )
+    assert fold.warmup_session_count == 4 * 242
+    assert fold.warmup_session_count >= 756
+
+
+def test_warmup_extension_is_bounded_and_records_deficiency():
+    # A sparse calendar can never satisfy the floor; materialization must
+    # terminate at a bounded earliest start and record the deficiency (the
+    # runner preflight turns it into a loud failed preflight).
+    calendar = TradingCalendar.from_open_days(
+        _limited_open_days(date(2021, 1, 1), date(2024, 12, 31), per_year=100)
+    )
+    schedule = materialize_schedule(
+        requested_start=date(2024, 1, 1),
+        requested_end=date(2024, 12, 31),
+        calendar=calendar,
+        policy=WalkForwardPolicy(),
+        membership_snapshots={},
+    )
+    fold = schedule.folds[0]
+    assert fold.warmup_calendar_start == date(2011, 1, 1)
+    assert fold.warmup_session_count < 756
+
+
 def test_fold_id_is_deterministic_content_hash(calendar):
     left = materialize_schedule(
         requested_start=date(2020, 1, 1),

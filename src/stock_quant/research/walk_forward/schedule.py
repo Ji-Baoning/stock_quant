@@ -3,7 +3,10 @@
 ``materialize_schedule`` derives, once and deterministically, the complete
 January-December OOS folds fully contained in the requested evaluation range:
 each fold's natural calendar boundaries, its first/last *confirmed open*
-sessions from the pinned calendar, its three-calendar-year warmup window and
+sessions from the pinned calendar, its warmup window (three calendar years at
+minimum, extended back in whole January-1-anchored years when the exchange's
+per-year session count cannot reach the confirmed-session floor within the
+minimum span, bounded so a sparse calendar records a loud deficiency) and
 session counts, and a deterministic ``fold_id`` (the canonical SHA-256 of the
 fold's identifying inputs).  A complete fold year with no open session at all
 is retained with null trading boundaries so the runner must later produce
@@ -37,6 +40,12 @@ from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.research.walk_forward.policy import WalkForwardPolicy, canonical_sha256
+
+#: Hard bound on how many extra whole years the warmup window may extend back
+#: beyond its three-calendar-year minimum while reaching for the confirmed
+#: session floor.  A calendar that still cannot satisfy the floor records the
+#: deficient count; the runner preflight then fails the fold loudly.
+MAX_WARMUP_EXTENSION_YEARS = 10
 
 
 #: The one legal boundary disposition: dates that cannot form a complete
@@ -298,8 +307,25 @@ def materialize_schedule(
         sessions = open_days_within(calendar_start, calendar_end)
         first_trading_day = sessions[0] if sessions else None
         last_trading_day = sessions[-1] if sessions else None
-        warmup_calendar_start = date(year - policy.warmup_years, 1, 1)
         warmup_calendar_end = date(year - 1, 12, 31)
+        warmup_calendar_start = date(year - policy.warmup_years, 1, 1)
+        warmup_sessions = open_days_within(warmup_calendar_start, warmup_calendar_end)
+        # The three-calendar-year span is the warmup minimum, not its size:
+        # real exchange calendars may hold fewer sessions per year than the
+        # confirmed-session floor requires, so the window extends back in
+        # whole January-1-anchored years until the floor is met (bounded so a
+        # sparse calendar records a loud deficiency instead of looping).
+        earliest_warmup_start = date(
+            year - policy.warmup_years - MAX_WARMUP_EXTENSION_YEARS, 1, 1
+        )
+        while (
+            len(warmup_sessions) < policy.min_warmup_trading_days
+            and warmup_calendar_start > earliest_warmup_start
+        ):
+            warmup_calendar_start = date(warmup_calendar_start.year - 1, 1, 1)
+            warmup_sessions = open_days_within(
+                warmup_calendar_start, warmup_calendar_end
+            )
         snapshots = {
             day.isoformat(): membership_snapshots[day.isoformat()]
             for day in sorted(
@@ -324,9 +350,7 @@ def materialize_schedule(
                 last_trading_day=last_trading_day,
                 warmup_calendar_start=warmup_calendar_start,
                 warmup_calendar_end=warmup_calendar_end,
-                warmup_session_count=len(
-                    open_days_within(warmup_calendar_start, warmup_calendar_end)
-                ),
+                warmup_session_count=len(warmup_sessions),
                 oos_session_count=len(sessions),
                 membership_snapshot_sha256s=snapshots,
             )

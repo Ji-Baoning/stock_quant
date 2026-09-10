@@ -126,9 +126,11 @@ and the point-in-time universe preflight *before* the experiment identity is
 computed, freezes the three research snapshots, materializes the immutable
 `fold_schedule.json` (written and hashed before any fold executes, never
 modified afterwards), then executes each fold in isolation: a fresh account
-with the identical fixed initial cash per fold, warmup (3 calendar years,
->= 756 confirmed sessions, 60 stable-history sessions before the first OOS
-day) used only for factor history — never for orders or returns — and a
+with the identical fixed initial cash per fold, warmup (at least 3 calendar
+years and >= 756 confirmed sessions — the window extends back in whole years
+when an exchange's per-year session count cannot reach the floor, bounded so
+a sparse calendar records a loud deficiency; plus 60 stable-history sessions
+before the first OOS day) used only for factor history — never for orders or returns — and a
 12-month non-overlapping OOS window on a January-1 anchor. Results go to the
 separate, schedule-hash-bound `fold_outcomes.json`.
 

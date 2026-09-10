@@ -175,8 +175,11 @@ python -m stock_quant research run --spec configs/experiments/momentum_60d.yml -
 `momentum_60d.yml` 声明 `execution_pipeline: walk_forward_oos_v1`：正式研究走
 **固定日历 Walk-Forward 样本外稳定性** 管线。`date_range` 是请求的 OOS 评估
 范围（不含预热）：范围被切成完整的 1–12 月非重叠年度 fold，每年 1 月 1 日锚定；
-每个 fold 独立账户、独立持仓、相同的固定初始资金，三年日历预热（≥756 个确认
-交易日 + 首个 OOS 日前 60 个稳定历史日）只供因子历史，绝不产生订单或收益。
+每个 fold 独立账户、独立持仓、相同的固定初始资金，日历预热**至少三个整年**
+且预热窗口内 ≥756 个确认交易日：真实交易所有些年份开市日不足，预热起点按整年
+（1 月 1 日锚定）向前延伸直至满足 756 个确认交易日（有界；稀疏日历仍不足时
+如实记录不足并由 fold 预检 FAILED），另有首个 OOS 日前 60 个稳定历史日；
+预热只供因子历史，绝不产生订单或收益。
 首尾不成完整年度的日期在 schedule 中记录为 `not_evaluated_boundary`（记录但
 不评估，不是 skipped）。运行输出打印 `research_status=` 与
 `stability_conclusion=`：FAILED 非零退出且结论恒为 null（绝不降级为
