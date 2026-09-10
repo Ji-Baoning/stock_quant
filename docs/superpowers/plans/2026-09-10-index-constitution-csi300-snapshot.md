@@ -25,6 +25,9 @@
 - **`reason` 只能是** `initial_constituent | regular_rebalance | temporary_adjustment | delisting | merger_or_reorganization | correction`。
 - **测试通过 `importlib.util.spec_from_file_location` 加载 `project/` 脚本**（仓库既有惯例，见 `tests/unit/test_index_membership_checks.py:518`）。`project/` 不是 Python 包。
 - `python -m pytest` 在仓库根目录运行；`pyproject.toml` 已设 `pythonpath = ["src"]`。
+- **禁止跑全量测试。禁止跑 `tests/integration`。** 实测：单个新测试文件 0.8 秒，整个 `tests/unit`（769 个）24 秒，而 `tests/integration` 要 ~18.5 分钟。每个任务的测试步骤**只允许**跑本任务新增的那一个测试文件（用下面给出的具名命令），lint 也只允许跑本任务改动的文件。不得写 `python -m pytest`（无路径）、不得写 `python -m pytest tests/`、不得以「确认没有回归」为由扩大到 `tests/integration`。
+- **不需要回归全量套件的理由：** 本计划只新增两个文件（`project/collect_index_constitution.py`、`project/build_csi300_universe.py`）和两个测试文件，**不修改任何既有模块**。没有既有模块被改动，就没有回归面——全量套件验证的是本计划碰不到的东西。若执行中发现必须改动既有源码，先停下来报告，不要自行扩大测试范围。
+- **唯一例外（Task 7 Step 7 之后，单次、可选、需用户确认）：** Task 7 会真实 `publisher.publish(...)` 重发数据集，而 `tests/integration` 读的正是数据集，这是本链上唯一的真实回归面。因此**只在全部真实数据落地之后**，允许由用户决定是否跑一次 `python -m pytest tests/integration -q`（~18.5 分钟）。这一条不适用于 Task 1–6，也不适用于 Task 7 的前六步。
 
 ---
 
