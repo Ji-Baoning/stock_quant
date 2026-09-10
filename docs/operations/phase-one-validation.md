@@ -491,3 +491,52 @@ python -m stock_quant data acceptance show \
   表述为拒单。
 - [ ] 缺失数据、重复 signal/symbol 行或目标 outsiders 使 fold FAILED
   （`EXECUTION_INTEGRITY`，结论为空），系统绝不静默回退等权。
+
+## 10. 一次性策略挑战审计清单（strategy challenge，不可撤销）
+
+适用命令：`python -m stock_quant research challenge --declaration <strategy_challenge.json>`。
+产物根：`data/strategy_challenges/`（`declarations/`、`consumptions/`、
+`holdout_registry.parquet`、`.holdout.lock`、`results/<challenge_id>/`）。
+
+### 10.1 声明先于读取（consume-before-read）
+
+- [ ] 声明文件的 `declared_before_run_at`（UTC）与声明发布时间先于挑战者实验
+  产物的一切读取；服务顺序为 `declaration_published` → `holdout_consumed` →
+  才打开挑战者产物（该顺序由事件审计与集成测试固定）。
+- [ ] 声明包含基线实验 ID、挑战者策略快照哈希、政策及其重算哈希、fold 日历
+  哈希、完整股票池四元组、策略族与身份方案版本；所有 SHA-256 字段均为 64 位
+  小写十六进制，政策 Decimal 全为有限值；无任何运行期路径/PID/主机/worker 数
+  进入身份。
+- [ ] 基线规则为 `top_n_equal_weight`、挑战者规则为
+  `buffered_risk_weighted`；两侧在数据环境快照、股票池身份、fold 日历哈希、
+  因子信号哈希（不含组合规则）、初始资金、调仓频率与成本情景顺序上完全一致。
+
+### 10.2 消费键唯一与不可逆
+
+- [ ] `holdout_registry.parquet` 与 `consumptions/<challenge_id>.json` 中，
+  `strategy_family + fold_schedule_hash` 组合全局唯一；`.holdout.lock` 在
+  消费完成后不存在。
+- [ ] `strategy_challenge.json`、`holdout_consumption.json`、
+  `holdout_registry.parquet` 行与 `strategy_comparison.json` 四个 JSON/注册表
+  表面都携带**同一份**完整股票池身份（`universe_id`、`universe_version`、
+  `membership_table_sha256`、`evidence_summary_sha256`）与声明哈希。
+- [ ] 消费记录在任何结局（含崩溃、FAILED、REJECTED、INCONCLUSIVE）后保持
+  `consumed`，从不删除或改写；只有相同 `challenge_id` 及全部相同哈希可幂等
+  恢复。
+
+### 10.3 配对与结论
+
+- [ ] `paired_fold_metrics.parquet` 行数恰为 `已执行 fold 数 × 预声明成本
+  情景数`，`(fold_id, cost_scenario)` 无缺失、无重复；合法市场级跳过 fold
+  不出现在配对中，而是作为证据不足记录。
+- [ ] `strategy_comparison.json` 的 `result.scenario_results` 覆盖**每个**
+  预声明情景的全部九条阈值单元格；PROMOTED 当且仅当所有情景所有单元格
+  通过（无主情景、无事后挑选）。
+- [ ] `status == "FAILED"` 当且仅当 `conclusion == null`（并带脱敏
+  `error_code`）；任何失败单元格都在结果 JSON 与 HTML 报告中可见，报告不
+  隐藏失败项、不推荐任何新的参数组合。
+- [ ] `results/<challenge_id>/` 五个产物
+  （`strategy_challenge.json`、`holdout_consumption.json`、
+  `paired_fold_metrics.parquet`、`strategy_comparison.json`、
+  `strategy_comparison_report.html`）的哈希与 `strategy_comparison.json`
+  的 `artifacts` 映射逐一相符；重复运行仅在逐字节一致时复用。

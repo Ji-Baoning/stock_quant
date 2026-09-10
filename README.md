@@ -282,6 +282,69 @@ quantize down to `1e-12`) and confirm `sum(target_weight) + cash_weight ==
 **Parameters cannot be changed after viewing fold results** — any change is
 a new pre-registered identity that must be declared before its own run.
 
+## One-time strategy challenge (一次性样本外挑战)
+
+Out-of-sample evidence is consumed by every formal comparison, so a
+challenge is a **pre-registered, one-shot** act. A
+`ChallengeDeclaration` (see
+`src/stock_quant/research/strategy_challenge/models.py`) is published and
+the strategy-family/calendar holdout is **irreversibly consumed before any
+challenger result artifact is opened**. The holdout consumption key is
+exactly `strategy_family + fold_schedule_hash`: the complete four-field
+universe identity (`universe_id`, `universe_version`,
+`membership_table_sha256`, `evidence_summary_sha256`) is recorded and
+hashed into every record and into the content-derived `challenge_id`, but a
+new universe version never re-opens a consumed history as "unseen".
+
+**Declaration.** The operator authors one JSON declaration binding the
+baseline experiment id (`top_n_equal_weight`), the challenger strategy
+snapshot hash (`buffered_risk_weighted`), the frozen
+`StrategyComparisonPolicy` plus its recomputed hash, the fold schedule
+hash, the complete universe identity and a UTC `declared_before_run_at`.
+Every SHA-256 field must be 64 lowercase hex; the models are frozen with
+`extra="forbid"` so no runtime path/pid/host/worker count can enter the
+identity. Baseline and challenger must match on dataset/data-environment
+snapshot, universe identity, fold schedule, initial equity, factor signal
+(recomputed excluding the portfolio-rule hash), rebalance frequency and the
+ordered cost scenarios — only the portfolio construction rule may differ.
+
+**Run once.**
+
+```bash
+python -m stock_quant research challenge --declaration strategy_challenge.json --root <PROJECT_ROOT>
+```
+
+Ordering is auditable: the declaration is atomically published under
+`data/strategy_challenges/declarations/<challenge_id>.json`
+(`declaration_published`), the holdout is atomically consumed under an
+`O_CREAT|O_EXCL` lock (`holdout_consumed`, the record is immutable and
+survives crash/FAILED/REJECTED/INCONCLUSIVE), and only then are the
+published experiments opened. A terminal `FAILED` exits nonzero;
+`PROMOTED`, `REJECTED` and `INCONCLUSIVE_RESEARCH_ONLY` are completed
+research outcomes that exit zero with the exact label.
+
+**Outcomes.** `PROMOTED` — at least five unconsumed executed folds, no
+legal market-wide skip, challenger walk-forward `STABLE`, and every declared
+cost scenario passing every policy threshold (no preferred scenario exists).
+`REJECTED` — research complete but at least one threshold failed; every
+failed cell stays visible. `INCONCLUSIVE_RESEARCH_ONLY` — valid process,
+insufficient evidence (fewer folds, a legal skip, an undefined required
+metric, or a challenger walk-forward `INCONCLUSIVE`). `FAILED` — an
+identity/registry/pairing/system error with a null conclusion and a
+redacted error code.
+
+**Artifacts** (under `data/strategy_challenges/results/<challenge_id>/`):
+`strategy_challenge.json`, `holdout_consumption.json`,
+`paired_fold_metrics.parquet` (per-pair baseline/challenger values, deltas,
+thresholds and pass flags for every policy metric), `strategy_comparison.json`
+(both experiment ids, all three snapshot hashes per side, schedule/policy
+hashes, the consumption record and the result) and
+`strategy_comparison_report.html`. Re-running the identical declaration is
+an idempotent recovery; conflicting bytes under one id are never
+overwritten. Changing a universe version, a parameter, a cost scenario or
+having a failed result **never restores an already consumed historical
+holdout**: formal promotion must wait for genuinely unseen history.
+
 ## Reproducibility check
 
 Run the same frozen spec twice against any project that holds a published

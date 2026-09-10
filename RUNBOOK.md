@@ -356,6 +356,83 @@ for scenario in ("zero_cost", "commission_tax", "full_cost"):
 首期只有这一组预注册参数；不在 fold 之间调整、不依据结果选择参数、成本情景
 或调仓频率。要改任何参数，先写新的预注册规格（新实验身份），再跑新的运行。
 
+## 阶段 8 · 一次性样本外挑战（strategy challenge，不可撤销）
+
+样本外证据会被任何一次正式比较消耗，因此挑战是**预注册、一次性**的动作。
+代码在 `src/stock_quant/research/strategy_challenge/`（models / registry /
+compare / service / reporting），CLI 命令为
+`python -m stock_quant research challenge --declaration <strategy_challenge.json>`。
+**在做第 5 步之前不要打开任何挑战者的结果产物**（`fold_outcomes.json`、
+`stability_report.json`、`metrics.json` 等）——先看结果后补声明，就是数据窥视。
+
+### 1. 选一个未消费的 fold 日历
+
+消费键是 `strategy_family + fold_schedule_hash`。先查注册表确认该组合从未被
+消费过：
+
+```python
+from stock_quant.research.strategy_challenge.registry import HoldoutRegistry
+print(HoldoutRegistry("<PROJECT_ROOT>").lookup("momentum_60d", "<fold_schedule_hash>"))
+# None = 未消费；HoldoutConsumption = 已被 <challenge_id> 消费，换日历或等新历史
+```
+
+股票池版本**不参与**消费键：换 universe 版本不会产生新的"未消费"槽位。
+
+### 2. 取得两侧身份并发布声明
+
+- 基线：等权（`top_n_equal_weight`）正式实验的 `experiment_id`
+  （`research run` 输出或 `data/experiments/` 目录）。
+- 挑战者：缓冲式（`buffered_risk_weighted`）已发布实验清单中的
+  `strategy_snapshot_sha256`（64 位十六进制）。
+- fold 日历：`walk_forward_manifest.json` 的 `fold_schedule_sha256`。
+- 股票池四元组（`universe_id`/`universe_version`/`membership_table_sha256`/
+  `evidence_summary_sha256`）从挑战者 `metrics.json` 的 `meta.universe`
+  **原样复制**，不得手抄改写；比较政策用默认冻结值
+  （`StrategyComparisonPolicy`，`strategy-comparison-v1`），其
+  `comparison_policy_hash` 由代码重算校验。
+- `declared_before_run_at` 必须是 UTC 时刻。基线与挑战者必须在数据集/数据环境
+  快照、股票池身份、fold 日历、初始资金、因子信号（不含组合规则的策略输入哈希）、
+  调仓频率与成本情景顺序上完全一致；**唯一允许不同的只有组合构建规则**。
+
+### 3. 一次性运行
+
+```bash
+python -m stock_quant research challenge --declaration strategy_challenge.json --root .
+# challenge_id=<64-hex>
+# challenge_status=COMPLETED|FAILED
+# challenge_conclusion=PROMOTED|REJECTED|INCONCLUSIVE_RESEARCH_ONLY|none
+# COMPLETED 退出码 0（保留确切标签）；FAILED 退出码非 0。
+```
+
+执行顺序由服务固定并被事件审计：原子发布声明 → 原子消费 holdout →
+**之后**才读取两侧已发布实验。消费记录不可改写：崩溃、FAILED、REJECTED、
+INCONCLUSIVE 都已经消费该 holdout，没有任何回滚。
+
+### 4. 先核对消费，再看结果
+
+```bash
+ls data/strategy_challenges/declarations/<challenge_id>.json      # 声明已发布
+cat data/strategy_challenges/consumptions/<challenge_id>.json     # 消费记录（完整股票池身份+声明哈希）
+python -c "import pandas as pd; print(pd.read_parquet('data/strategy_challenges/holdout_registry.parquet'))"
+```
+
+然后才打开 `data/strategy_challenges/results/<challenge_id>/` 下的
+`strategy_comparison.json` 与 `strategy_comparison_report.html`，按
+`docs/operations/phase-one-validation.md` §10 审计清单核对。
+
+### 5. 结论解读与恢复
+
+- `PROMOTED`：≥5 个未消费已执行 fold、无合法市场级跳过、挑战者 STABLE，
+  且**每个**预锁定成本情景通过**每条**阈值（无主情景）。
+- `REJECTED`：研究完整但任一阈值失败；全部失败项在结果与报告中可见，
+  不自动生成新参数。
+- `INCONCLUSIVE_RESEARCH_ONLY`：流程有效但证据不足（fold 不足、合法跳过、
+  指标未定义或挑战者 walk-forward INCONCLUSIVE）；不代表接近晋级或拒绝。
+- `FAILED`：身份/注册/配对/系统完整性错误；比较结论为 null，含脱敏错误码。
+- 幂等恢复：只有**完全相同**的 `challenge_id`（即全部声明哈希一致）可以重入；
+  结果产物逐字节一致才可复用。**改变股票池版本、参数、成本情景或遭遇失败，
+  都不会归还已消费的历史 holdout**：正式晋级必须等待真正未见的新历史 fold。
+
 ## 已知边界（务必记住，不是 bug）
 
 1. **`data bootstrap` 发布首个基线；`data update` 只扩展**：首个基线由
@@ -388,3 +465,7 @@ for scenario in ("zero_cost", "commission_tax", "full_cost"):
    绝）；`external` 证据永不抓取。已发布的验收记录不可修改：拒绝记录永久
    留档但永不可被研究选中。
 7. **无盈利/实盘就绪声明**：本 MVP 是工程链路验收，不是投资建议。
+8. **一次性挑战的 holdout 不可逆**：`strategy_family + fold_schedule_hash`
+   一旦被消费即永久消费；失败、崩溃、拒绝结论都不会归还。挑战者结果产物
+   必须在声明发布与消费完成之后再打开；PROMOTED 只表示研究晋级，不表示
+   自动部署或投资许可。
