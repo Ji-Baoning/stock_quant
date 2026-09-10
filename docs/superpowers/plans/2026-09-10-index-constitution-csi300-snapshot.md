@@ -966,6 +966,8 @@ def apply_repairs(history: pd.DataFrame, repairs: pd.DataFrame) -> pd.DataFrame:
     Each repair identifies its target by ``symbol`` plus the current value in
     ``field`` (``old_value``); a repair whose ``old_value`` no longer matches
     does nothing, so a stale table cannot mis-edit a changed upstream frame.
+    A repair naming a ``symbol`` absent from the frame raises instead -- a row
+    that matches no target at all is a broken adjudication, not a stale value.
     Unknown actions, fields and tiers raise rather than being skipped: a typo
     in the adjudication must not silently drop a fix.  ``insert_row`` is the
     exception -- it has no target, and takes its start date from ``old_value``
@@ -995,24 +997,24 @@ def apply_repairs(history: pd.DataFrame, repairs: pd.DataFrame) -> pd.DataFrame:
                 ignore_index=True,
             )
             continue
-        matched = frame["symbol"].astype(str) == symbol
-        if row.action == "set_field":
-            matched &= frame[row.field].map(_cell) == str(row.old_value).strip()
-            if not matched.any():
-                raise ValueError(
-                    f"repair on {symbol} matches no row whose {row.field} is "
-                    f"{row.old_value!r}; the snapshot or the repair is stale"
-                )
-            frame.loc[matched, row.field] = pd.to_datetime(row.new_value or pd.NaT)
-            continue
-        # drop_row
-        matched &= frame[row.field].map(_cell) == str(row.old_value).strip()
-        if not matched.any():
+        on_symbol = frame["symbol"].astype(str) == symbol
+        if not on_symbol.any():
             raise ValueError(
-                f"drop_row on {symbol} matches no row whose {row.field} is "
-                f"{row.old_value!r}"
+                f"repair on {symbol} matches no row in the history; the "
+                f"snapshot or the repair is stale"
             )
-        frame = frame.loc[~matched].reset_index(drop=True)
+        matched = on_symbol & (
+            frame[row.field].map(_cell) == str(row.old_value).strip()
+        )
+        if row.action == "set_field":
+            if matched.any():
+                frame.loc[matched, row.field] = pd.to_datetime(
+                    row.new_value or pd.NaT
+                )
+            continue
+        # drop_row: a stale old_value is a no-op, not an error.
+        if matched.any():
+            frame = frame.loc[~matched].reset_index(drop=True)
     return frame
 ```
 
