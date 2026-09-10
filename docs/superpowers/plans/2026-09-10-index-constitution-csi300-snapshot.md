@@ -895,6 +895,50 @@ def test_set_field_on_an_absent_symbol_is_rejected():
     with pytest.raises(ValueError) as excinfo:
         module.apply_repairs(_history(), _repairs(symbol="SZ999999"))
     assert "SZ999999" in str(excinfo.value)
+
+
+def test_drop_row_with_a_stale_old_value_sets_nothing():
+    """The no-op behavior must hold for drop_row, not only set_field."""
+    module = _load_build_module()
+    result = module.apply_repairs(
+        _history(),
+        _repairs(action="drop_row", field="opt-in", old_value="1999-01-01"),
+    )
+    assert len(result) == 3
+    assert "SZ000780" in set(result["symbol"])
+
+
+def test_drop_row_on_an_absent_symbol_is_rejected():
+    module = _load_build_module()
+    with pytest.raises(ValueError) as excinfo:
+        module.apply_repairs(
+            _history(),
+            _repairs(
+                symbol="SZ999999", action="drop_row", field="opt-in",
+                old_value="2005-04-08",
+            ),
+        )
+    assert "SZ999999" in str(excinfo.value)
+
+
+def test_missing_evidence_source_is_rejected():
+    module = _load_build_module()
+    with pytest.raises(ValueError) as excinfo:
+        module.apply_repairs(_history(), _repairs(evidence_source=""))
+    assert "evidence" in str(excinfo.value)
+
+
+def test_repair_old_value_format_is_normalized():
+    """A non-ISO date in the hand-written table must still match.
+
+    Without this, a mistyped ``old_value`` matches nothing -- and because a
+    stale value is deliberately a no-op, the correction would silently never
+    apply rather than fail loudly.
+    """
+    module = _load_build_module()
+    result = module.apply_repairs(_history(), _repairs(old_value="2013/12/16"))
+    row = result[result["symbol"] == "SZ000780"].iloc[0]
+    assert row["opt-out"] == pd.Timestamp("2006-08-14")
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -952,12 +996,27 @@ def _validated_repairs(repairs: pd.DataFrame) -> pd.DataFrame:
 
 
 def _cell(value: object) -> str:
-    """Comparable text for a frame cell; NaT/NaN read as empty."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    """Comparable text for one side of a repair comparison.
+
+    Both the frame cell and the repair's ``old_value`` are normalized here, so
+    ``2013-12-16``, ``2013/12/16`` and ``2013-12-16 00:00:00`` all compare
+    equal.  Normalizing only the frame side would let a mistyped date in
+    ``repairs.csv`` match nothing -- indistinguishable from a genuinely stale
+    repair, and this table is hand-written.  NaT/NaN/blank read as empty; text
+    that will not parse as a date falls back to itself so non-date values
+    still compare literally.
+    """
+    if value is None or value is pd.NaT:
         return ""
-    if value is pd.NaT:
+    if isinstance(value, float) and pd.isna(value):
         return ""
-    return str(pd.Timestamp(value).date()) if hasattr(value, "date") else str(value)
+    text = str(value).strip()
+    if not text:
+        return ""
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.isna(parsed):
+        return text
+    return str(pd.Timestamp(parsed).date())
 
 
 def apply_repairs(history: pd.DataFrame, repairs: pd.DataFrame) -> pd.DataFrame:
@@ -1004,7 +1063,7 @@ def apply_repairs(history: pd.DataFrame, repairs: pd.DataFrame) -> pd.DataFrame:
                 f"snapshot or the repair is stale"
             )
         matched = on_symbol & (
-            frame[row.field].map(_cell) == str(row.old_value).strip()
+            frame[row.field].map(_cell) == _cell(row.old_value)
         )
         if row.action == "set_field":
             if matched.any():
@@ -1021,7 +1080,7 @@ def apply_repairs(history: pd.DataFrame, repairs: pd.DataFrame) -> pd.DataFrame:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python -m pytest tests/unit/test_csi300_universe_build.py -q`
-Expected: 18 passed
+Expected: 22 passed（Task 3 的 7 + 本任务的 15）
 
 - [ ] **Step 5: 提交**
 
