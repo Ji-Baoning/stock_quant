@@ -619,3 +619,104 @@ def test_walk_forward_fold_failure_exits_nonzero_and_publishes_nothing(
         set(p.name for p in experiments.iterdir()) if experiments.is_dir() else set()
     )
     assert published == before, "a failed fold can never publish an experiment"
+
+
+# --------------------------------------------------------------------------- #
+# One-time strategy challenge CLI: completed research exits zero with the
+# exact label; a terminal FAILED exits nonzero.
+# --------------------------------------------------------------------------- #
+
+
+def test_challenge_cli_completed_exits_zero_with_exact_label(
+    cli_runner, tmp_path
+):
+    """A completed challenge exits zero and prints the exact conclusion.
+
+    Both walk-forward experiments over the offline synthetic project publish
+    on identical inputs (only the portfolio rule differs); the single 2021
+    fold is valid-but-insufficient evidence, so the exact label is
+    INCONCLUSIVE_RESEARCH_ONLY -- a completed research outcome, never a
+    failure.
+    """
+    from test_strategy_challenge_service import build_challenge_project
+
+    project = build_challenge_project(tmp_path / "challenge")
+    result = cli_runner.invoke(
+        app,
+        [
+            "research",
+            "challenge",
+            "--declaration",
+            str(project.declaration_path),
+            "--root",
+            str(project.root),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "challenge_status=COMPLETED" in result.stdout
+    assert "challenge_conclusion=INCONCLUSIVE_RESEARCH_ONLY" in result.stdout
+
+
+def test_challenge_cli_failed_exits_nonzero(cli_runner, fixture_root, tmp_path):
+    """A terminal identity failure publishes FAILED and exits nonzero.
+
+    The declaration pins a baseline experiment id that was never published:
+    the holdout is still consumed (irreversibly), a FAILED
+    strategy_comparison.json is published with a null conclusion, and the
+    CLI exits nonzero.
+    """
+    from datetime import datetime, timezone
+
+    from stock_quant.research.strategy_challenge.models import (
+        ChallengeDeclaration,
+        StrategyComparisonPolicy,
+        canonical_challenge_json_text,
+        canonical_challenge_sha256,
+        compute_challenge_id,
+    )
+
+    policy = StrategyComparisonPolicy()
+    declaration = ChallengeDeclaration.model_validate({
+        "identity_scheme_version": "strategy-challenge-v1",
+        "strategy_family": "momentum_60d_cli_failure",
+        "baseline_experiment_id": "1a" * 32,
+        "challenger_strategy_hash": "2b" * 32,
+        "fold_schedule_hash": "3c" * 32,
+        "universe_definition": {
+            "universe_id": "csi300",
+            "universe_version": "a" * 64,
+            "membership_table_sha256": "b" * 64,
+            "evidence_summary_sha256": "c" * 64,
+        },
+        "comparison_policy": policy.model_dump(mode="json"),
+        "comparison_policy_hash": canonical_challenge_sha256(
+            policy.model_dump(mode="json")
+        ),
+        "declared_before_run_at": datetime(
+            2026, 9, 9, tzinfo=timezone.utc
+        ).isoformat(),
+    })
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(
+        canonical_challenge_json_text(declaration.model_dump(mode="json")),
+        encoding="utf-8",
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "research",
+            "challenge",
+            "--declaration",
+            str(declaration_path),
+            "--root",
+            str(fixture_root.root),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "challenge_status=FAILED" in result.stdout
+    assert "challenge_conclusion=none" in result.stdout
+    consumption = (
+        Path(fixture_root.root) / "data" / "strategy_challenges"
+        / "consumptions" / f"{compute_challenge_id(declaration)}.json"
+    )
+    assert consumption.is_file()

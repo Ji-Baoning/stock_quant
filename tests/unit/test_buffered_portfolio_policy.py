@@ -16,6 +16,7 @@ All tests are offline and in-memory.
 from dataclasses import FrozenInstanceError
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -40,7 +41,7 @@ from stock_quant.research.spec import (
 )
 from stock_quant.research.walk_forward.policy import canonical_sha256
 
-_REPO_ROOT = "/home/ji/work/program/stock-wt/buffered-risk-weighted-momentum"
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
 _EXAMPLE_SPEC = f"{_REPO_ROOT}/configs/experiments/momentum_60d.yml"
 
 _FROZEN_POLICY_DUMP = {

@@ -1,0 +1,191 @@
+{# One-time strategy challenge comparison report (self-contained, offline).
+
+   The template only lays out the pre-built page model; every dynamic value
+   is HTML-escaped by the Jinja autoescape.  The report is complete by
+   contract: declaration time/hash, the full universe identity, schedule and
+   policy hashes, the holdout consumption, both experiment identities with
+   all three snapshot hashes, every fold/scenario pair, every policy
+   metric's threshold and verdict, the failed items and the nullable
+   conclusion.  It never recommends another parameter set. #}
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>一次性策略挑战报告 {{ page.challenge_id }}</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+         margin: 2rem auto; max-width: 72rem; color: #1a1a2e; }
+  h1 { font-size: 1.4rem; } h2 { font-size: 1.15rem; margin-top: 2rem; }
+  table { border-collapse: collapse; width: 100%; margin: 0.6rem 0 1.2rem; }
+  th, td { border: 1px solid #c9c9d4; padding: 0.35rem 0.6rem;
+           font-size: 0.86rem; text-align: left; }
+  th { background: #eef0f6; }
+  code, .mono { font-family: "SFMono-Regular", Consolas, monospace;
+                font-size: 0.8rem; word-break: break-all; }
+  .conclusion { font-size: 1.2rem; font-weight: 700; padding: 0.6rem 1rem;
+                display: inline-block; border: 2px solid #444; }
+  .PROMOTED { background: #e6f6e6; border-color: #2e7d32 !important; }
+  .REJECTED { background: #fdecea; border-color: #c62828 !important; }
+  .INCONCLUSIVE_RESEARCH_ONLY { background: #fff8e1; border-color: #f9a825 !important; }
+  .FAILED { background: #eceff1; border-color: #546e7a !important; }
+  tr.failed td { background: #fdecea; }
+  td.pass-yes { color: #2e7d32; font-weight: 600; }
+  td.pass-no { color: #c62828; font-weight: 700; }
+  .note { color: #555; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<h1>一次性策略挑战比较报告</h1>
+<p>
+  challenge_id: <span class="mono">{{ page.challenge_id }}</span><br>
+  状态: <strong>{{ page.status }}</strong>
+  &mdash; 比较结论:
+  <span class="conclusion {{ page.conclusion or 'FAILED' }}">
+    {%- if page.conclusion %}{{ page.conclusion }}{% else %}null（FAILED，无比较结论）{% endif -%}
+  </span>
+</p>
+
+<h2>1. 预声明（读取任何挑战者结果之前已固定）</h2>
+<table>
+  <tr><th>strategy_family</th><td>{{ page.strategy_family }}</td></tr>
+  <tr><th>declared_before_run_at（UTC）</th><td class="mono">{{ page.declared_before_run_at }}</td></tr>
+  <tr><th>declaration sha256</th><td class="mono">{{ page.declaration_sha256 }}</td></tr>
+  <tr><th>fold_schedule_hash</th><td class="mono">{{ page.fold_schedule_hash }}</td></tr>
+  <tr><th>comparison_policy_hash</th><td class="mono">{{ page.comparison_policy_hash }}</td></tr>
+</table>
+
+<h2>2. 完整股票池身份（universe_definition）</h2>
+<table>
+  {% for row in page.universe %}
+  <tr><th class="mono">{{ row.field }}</th><td class="mono">{{ row.value }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>3. 冻结比较政策（strategy-comparison-v1）</h2>
+<table>
+  {% for row in page.policy %}
+  <tr><th class="mono">{{ row.name }}</th><td class="mono">{{ row.value }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>4. 一次性 holdout 消费（不可撤销）</h2>
+<table>
+  <tr><th>consumption_key</th><td class="mono">{{ page.consumption.key }}</td></tr>
+  <tr><th>status</th><td>{{ page.consumption.status }}</td></tr>
+  <tr><th>consumed_at（UTC）</th><td class="mono">{{ page.consumption.consumed_at }}</td></tr>
+  <tr><th>消费记录 challenge_id</th><td class="mono">{{ page.consumption.challenge_id }}</td></tr>
+  <tr><th>declaration sha256</th><td class="mono">{{ page.consumption.declaration_sha256 }}</td></tr>
+</table>
+
+<h2>5. 两侧实验身份与三类快照哈希</h2>
+<table>
+  <tr><th></th><th>baseline（等权基线）</th><th>challenger（缓冲式风险加权）</th></tr>
+  <tr><th>experiment_id</th>
+      <td class="mono">{{ page.baseline.experiment_id }}</td>
+      <td class="mono">{{ page.challenger.experiment_id }}</td></tr>
+  <tr><th>portfolio_rule</th>
+      <td>{{ page.baseline.rule }}</td>
+      <td>{{ page.challenger.rule }}</td></tr>
+  <tr><th>stability_conclusion</th>
+      <td>{{ page.baseline.stability_conclusion }}</td>
+      <td>{{ page.challenger.stability_conclusion }}</td></tr>
+  {% for index in [0, 1, 2] %}
+  <tr><th class="mono">{{ page.baseline.snapshots[index].field }}</th>
+      <td class="mono">{{ page.baseline.snapshots[index].value }}</td>
+      <td class="mono">{{ page.challenger.snapshots[index].value }}</td></tr>
+  {% endfor %}
+  <tr><th>initial_cash</th>
+      <td>{{ page.baseline.initial_cash }}</td>
+      <td>{{ page.challenger.initial_cash }}</td></tr>
+  <tr><th>rebalance_frequency</th>
+      <td>{{ page.baseline.rebalance_frequency }}</td>
+      <td>{{ page.challenger.rebalance_frequency }}</td></tr>
+  <tr><th>cost_scenarios（声明顺序）</th>
+      <td>{{ page.baseline.cost_scenarios | join(', ') }}</td>
+      <td>{{ page.challenger.cost_scenarios | join(', ') }}</td></tr>
+</table>
+
+<h2>6. 逐情景阈值判定（全部场景取合取，无主情景）</h2>
+{% if page.failed_cells %}
+<p>未通过的阈值单元格：
+  {% for cell in page.failed_cells %}
+    <strong>{{ cell.scenario }} / {{ cell.metric }}</strong>{% if not loop.last %}、{% endif %}
+  {% endfor %}
+</p>
+{% else %}
+<p>无未通过的阈值单元格。</p>
+{% endif %}
+{% for scenario in page.scenarios %}
+<h3>情景 {{ scenario.scenario }} —
+  {% if scenario.passed %}全部阈值通过{% else %}存在未通过阈值{% endif %}
+  （{{ scenario.executed_fold_count }} 个已执行 fold）</h3>
+<table>
+  <tr><th>指标</th><th>baseline</th><th>challenger</th><th>delta / ratio</th>
+      <th>阈值</th><th>判定</th></tr>
+  {% for cell in scenario.cells %}
+  <tr class="{{ 'failed' if not cell.passed else '' }}">
+    <td class="mono">{{ cell.metric }}</td>
+    <td>{{ cell.baseline }}</td><td>{{ cell.challenger }}</td><td>{{ cell.delta }}</td>
+    <td class="mono">{{ cell.threshold }}</td>
+    <td class="{{ 'pass-yes' if cell.passed else 'pass-no' }}">
+      {{ 'PASS' if cell.passed else 'FAIL' }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endfor %}
+
+<h2>7. 配对 fold / scenario 明细（{{ page.pair_count }} 对，
+    {{ page.executed_fold_count }} 个已执行 fold）</h2>
+{% if page.skipped_fold_ids %}
+<p class="note">合法市场级跳过 fold：{{ page.skipped_fold_ids | join(', ') }}</p>
+{% endif %}
+<table>
+  <tr><th>fold_id</th><th>scenario</th>
+      {% for name, label in [
+        ("baseline_fold_calendar_return", "基线 fold 收益"),
+        ("challenger_fold_calendar_return", "挑战者 fold 收益"),
+        ("fold_calendar_return_delta", "收益 delta"),
+        ("baseline_abs_max_drawdown", "基线 |回撤|"),
+        ("challenger_abs_max_drawdown", "挑战者 |回撤|"),
+        ("baseline_turnover", "基线换手"),
+        ("challenger_turnover", "挑战者换手"),
+        ("turnover_ratio", "换手比"),
+        ("baseline_reject_rate", "基线拒单率"),
+        ("challenger_reject_rate", "挑战者拒单率"),
+        ("baseline_invested_exposure", "基线投入暴露"),
+        ("challenger_invested_exposure", "挑战者投入暴露")] %}
+        <th>{{ label }}</th>
+      {% endfor %}</tr>
+  {% for row in page.pair_rows %}
+  <tr>
+    <td class="mono">{{ row.fold_id }}</td><td>{{ row.scenario }}</td>
+    {% for key in ["baseline_fold_calendar_return", "challenger_fold_calendar_return",
+                   "fold_calendar_return_delta", "baseline_abs_max_drawdown",
+                   "challenger_abs_max_drawdown", "baseline_turnover",
+                   "challenger_turnover", "turnover_ratio", "baseline_reject_rate",
+                   "challenger_reject_rate", "baseline_invested_exposure",
+                   "challenger_invested_exposure"] %}
+      <td>{{ row[key] }}</td>
+    {% endfor %}
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>8. 评估理由与失败项</h2>
+{% if page.reasons %}
+<ul>
+  {% for reason in page.reasons %}<li>{{ reason }}</li>{% endfor %}
+</ul>
+{% else %}<p>无。</p>{% endif %}
+{% if page.error_code %}
+<p>终端失败代码（已脱敏）：<strong class="mono">{{ page.error_code }}</strong></p>
+{% endif %}
+
+<p class="note">
+  本报告只呈现预声明比较政策下的判定：PROMOTED / REJECTED /
+  INCONCLUSIVE_RESEARCH_ONLY / FAILED（结论为空）。
+  本报告不会基于结果推荐任何新的参数组合，也不会基于结果选择情景或参数；
+  REJECTED 即研究结论为拒绝，不自动生成新参数。
+</p>
+</body>
+</html>

@@ -83,6 +83,10 @@ from stock_quant.research.reconcile import (
 )
 from stock_quant.research.registry import ExperimentRegistry, PublishedExperiment
 from stock_quant.research.runner import AnalyticsInput, ResearchRunner
+from stock_quant.research.strategy_challenge.service import (
+    ChallengeServiceError,
+    StrategyChallengeService,
+)
 from stock_quant.research.trust import DataTrustMode
 
 app = typer.Typer(
@@ -525,6 +529,37 @@ def _echo_stability(published: "PublishedExperiment") -> None:
     report = json.loads(report_path.read_text(encoding="utf-8"))
     typer.echo(f"research_status={report.get('research_status', 'COMPLETED')}")
     typer.echo(f"stability_conclusion={report.get('stability_conclusion')}")
+
+
+@research_app.command("challenge")
+def research_challenge(
+    declaration: Path = typer.Option(
+        ...,
+        "--declaration",
+        help="Strategy-challenge declaration JSON path.",
+    ),
+    root: Path = typer.Option(".", "--root", help="Project root."),
+) -> None:
+    """Run the one-time strategy challenge for one published declaration.
+
+    The declaration is durably published and the strategy-family/calendar
+    holdout irreversibly consumed *before* any challenger artifact is
+    opened; consumption survives every outcome, including a crash.  A
+    terminal FAILED exits nonzero; PROMOTED, REJECTED and
+    INCONCLUSIVE_RESEARCH_ONLY are completed research outcomes and exit
+    zero with the exact label.
+    """
+    service = StrategyChallengeService(Path(root))
+    try:
+        result = service.run(Path(declaration))
+    except ChallengeServiceError as error:
+        _echo_failure(str(error))
+        raise typer.Exit(code=1) from None
+    typer.echo(f"challenge_id={result.challenge_id}")
+    typer.echo(f"challenge_status={result.status}")
+    typer.echo(f"challenge_conclusion={result.conclusion or 'none'}")
+    if result.status == "FAILED":
+        raise typer.Exit(code=1)
 
 
 # --------------------------------------------------------------------------- #
