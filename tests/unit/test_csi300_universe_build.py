@@ -6,6 +6,7 @@ Loaded by path because ``project/`` is not a package (repo convention).
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -281,3 +282,89 @@ def test_repair_old_value_format_is_normalized():
         result = module.apply_repairs(_history(), _repairs(old_value=old_value))
         row = result[result["symbol"] == "SZ000780"].iloc[0]
         assert row["opt-out"] == pd.Timestamp("2006-08-14")
+
+
+def _sealed_snapshot(tmp_path: Path) -> Path:
+    """A minimal sealed snapshot: one CSV, a manifest and a repairs table."""
+    directory = tmp_path / "2026-09-10"
+    directory.mkdir()
+    (directory / "csi300_history.csv").write_text(
+        "symbol,name,opt-in,opt-out\nSZ000001,平安银行,2005-04-08,\n",
+        encoding="utf-8",
+    )
+    module = _load_build_module()
+    manifest = {
+        "source": "index_constitution",
+        "files": {
+            "csi300_history.csv": module._sha256_file(
+                directory / "csi300_history.csv"
+            )
+        },
+    }
+    (directory / "manifest.json").write_text(
+        json.dumps(manifest, indent=1, sort_keys=True), encoding="utf-8"
+    )
+    (directory / "repairs.csv").write_text(
+        "symbol,action,field,old_value,new_value,evidence_tier,"
+        "evidence_source,evidence_detail\n",
+        encoding="utf-8",
+    )
+    module.seal_evidence(directory)
+    return directory
+
+
+def test_seal_evidence_pins_the_manifest_and_the_repairs(tmp_path: Path):
+    module = _load_build_module()
+    directory = _sealed_snapshot(tmp_path)
+    summary = json.loads(
+        (directory / "evidence_summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["manifest_sha256"] == module._sha256_file(
+        directory / "manifest.json"
+    )
+    assert summary["repairs_sha256"] == module._sha256_file(
+        directory / "repairs.csv"
+    )
+
+
+def test_verify_snapshot_accepts_a_sealed_snapshot(tmp_path: Path):
+    module = _load_build_module()
+    directory = _sealed_snapshot(tmp_path)
+    manifest, summary = module.verify_snapshot(directory)
+    assert manifest["source"] == "index_constitution"
+    assert "repairs_sha256" in summary
+
+
+def test_verify_snapshot_rejects_a_tampered_csv(tmp_path: Path):
+    module = _load_build_module()
+    directory = _sealed_snapshot(tmp_path)
+    (directory / "csi300_history.csv").write_text(
+        "symbol,name,opt-in,opt-out\nSZ000001,平安银行,2005-04-08,2010-01-01\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as excinfo:
+        module.verify_snapshot(directory)
+    assert "csi300_history.csv" in str(excinfo.value)
+
+
+def test_verify_snapshot_rejects_an_edited_repairs_table(tmp_path: Path):
+    module = _load_build_module()
+    directory = _sealed_snapshot(tmp_path)
+    (directory / "repairs.csv").write_text(
+        "symbol,action,field,old_value,new_value,evidence_tier,"
+        "evidence_source,evidence_detail\n"
+        "SZ000001,set_field,opt-out,,2010-01-01,A,somewhere,note\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as excinfo:
+        module.verify_snapshot(directory)
+    assert "repairs.csv" in str(excinfo.value)
+
+
+def test_seal_evidence_requires_a_repairs_table(tmp_path: Path):
+    module = _load_build_module()
+    directory = tmp_path / "fresh"
+    directory.mkdir()
+    (directory / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FileNotFoundError):
+        module.seal_evidence(directory)

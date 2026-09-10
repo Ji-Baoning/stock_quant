@@ -15,6 +15,8 @@ underestimate early inclusion but can never leak future information.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date
 from pathlib import Path
 
@@ -204,3 +206,78 @@ def apply_repairs(history: pd.DataFrame, repairs: pd.DataFrame) -> pd.DataFrame:
         if matched.any():
             frame = frame.loc[~matched].reset_index(drop=True)
     return frame
+
+
+MANIFEST_NAME = "manifest.json"
+REPAIRS_NAME = "repairs.csv"
+EVIDENCE_NAME = "evidence_summary.json"
+
+SOURCE = "index_constitution"
+SOURCE_URL = "https://github.com/unliftedq/index-constitution"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def seal_evidence(snapshot_dir: Path) -> dict:
+    """Pin ``manifest.json`` and ``repairs.csv`` into ``evidence_summary.json``.
+
+    The summary is the row-level ``source_document_sha256`` and the
+    definition's ``evidence_summary_sha256``.  Binding the repair table here is
+    what makes the corrections tamper-evident: without it a repair could be
+    edited while every other hash still verified.
+    """
+    snapshot_dir = Path(snapshot_dir)
+    manifest_path = snapshot_dir / MANIFEST_NAME
+    repairs_path = snapshot_dir / REPAIRS_NAME
+    for path in (manifest_path, repairs_path):
+        if not path.is_file():
+            raise FileNotFoundError(f"snapshot is missing {path.name}: {path}")
+    summary = {
+        "source": SOURCE,
+        "source_url": SOURCE_URL,
+        "manifest_sha256": _sha256_file(manifest_path),
+        "repairs_sha256": _sha256_file(repairs_path),
+    }
+    (snapshot_dir / EVIDENCE_NAME).write_text(
+        json.dumps(summary, indent=1, sort_keys=True), encoding="utf-8"
+    )
+    return summary
+
+
+def verify_snapshot(snapshot_dir: Path) -> tuple[dict, dict]:
+    """Verify every recorded hash and return ``(manifest, evidence_summary)``.
+
+    Nothing is built until the whole evidence set matches: a snapshot that
+    cannot be verified must not produce facts.
+    """
+    snapshot_dir = Path(snapshot_dir)
+    manifest_path = snapshot_dir / MANIFEST_NAME
+    repairs_path = snapshot_dir / REPAIRS_NAME
+    summary_path = snapshot_dir / EVIDENCE_NAME
+    for path in (manifest_path, repairs_path, summary_path):
+        if not path.is_file():
+            raise FileNotFoundError(f"snapshot is missing {path.name}: {path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if _sha256_file(manifest_path) != summary["manifest_sha256"]:
+        raise ValueError(
+            f"{MANIFEST_NAME} does not match the recorded manifest_sha256"
+        )
+    if _sha256_file(repairs_path) != summary["repairs_sha256"]:
+        raise ValueError(
+            f"{REPAIRS_NAME} does not match the recorded repairs_sha256; the "
+            "repair table was edited after the snapshot was sealed"
+        )
+    for name, recorded in manifest["files"].items():
+        actual = _sha256_file(snapshot_dir / name)
+        if actual != recorded:
+            raise ValueError(
+                f"{name} hashes to {actual} but the manifest records {recorded}"
+            )
+    return manifest, summary
