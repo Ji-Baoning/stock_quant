@@ -712,6 +712,14 @@ def membership_rows(history: pd.DataFrame) -> pd.DataFrame:
     date.  Such rows are rejected loudly rather than dropped, because a
     silently dropped row is exactly how a missing inclusion hides -- and a
     missing inclusion is what makes a later removal never take effect.
+
+    Upstream ``opt-out`` is EXCLUSIVE -- the first day the stock is out, a
+    half-open ``[opt-in, opt-out)`` interval -- while this repo's
+    ``raw_effective_to`` is INCLUSIVE (``raw_checks`` counts ``probe <= end``).
+    The subtraction below is that conversion; do not "simplify" it away.
+    Measured on the 2026-09-10 snapshot: copying ``opt-out`` through unchanged
+    double-counts every rebalance's outgoing constituents (2016-12-12: 30 in /
+    30 out -> 330 that day instead of 300).
     """
     missing = history[history[OPT_IN].isna()]
     if not missing.empty:
@@ -726,7 +734,9 @@ def membership_rows(history: pd.DataFrame) -> pd.DataFrame:
         {
             "symbol": history["symbol"].map(to_canonical_symbol),
             "raw_effective_from": pd.to_datetime(history[OPT_IN]),
-            "raw_effective_to": pd.to_datetime(history[OPT_OUT]),
+            "raw_effective_to": (
+                pd.to_datetime(history[OPT_OUT]) - pd.Timedelta(days=1)
+            ).where(history[OPT_OUT].notna()),
             "announcement_date": pd.to_datetime(history[OPT_IN]),
         }
     )
@@ -1774,7 +1784,9 @@ Run:
 ```bash
 python - <<'PY'
 import pandas as pd
-h = pd.read_csv("data/raw/csi/index_constitution/2026-09-10/csi300_history.csv")
+h = pd.read_csv(
+    "project/data/raw/csi/index_constitution/2026-09-10/csi300_history.csv"
+)
 print("rows", len(h), "symbols", h["symbol"].nunique())
 print("missing opt-in rows:", h[h["opt-in"].isna()]["symbol"].tolist())
 PY
@@ -1787,14 +1799,15 @@ Run:
 ```bash
 python - <<'PY'
 from pathlib import Path
-d = Path("data/raw/csi/index_constitution/2026-09-10")
+d = Path("project/data/raw/csi/index_constitution/2026-09-10")
 (d / "repairs.csv").write_text(
     "symbol,action,field,old_value,new_value,evidence_tier,"
     "evidence_source,evidence_detail\n",
     encoding="utf-8",
 )
 PY
-python project/build_csi300_universe.py --snapshot-dir data/raw/csi/index_constitution/2026-09-10 --seal-evidence
+python project/build_csi300_universe.py \
+    --snapshot-dir project/data/raw/csi/index_constitution/2026-09-10 --seal-evidence
 ```
 Expected: 打印 `sealed .../evidence_summary.json` 与两个 sha256。
 
@@ -1802,20 +1815,39 @@ Expected: 打印 `sealed .../evidence_summary.json` 与两个 sha256。
 
 Run:
 ```bash
-python project/build_csi300_universe.py --snapshot-dir data/raw/csi/index_constitution/2026-09-10
+python project/build_csi300_universe.py \
+    --snapshot-dir project/data/raw/csi/index_constitution/2026-09-10
 ```
 Expected: `membership_rows` 会因 4 个缺失 `opt-in` 的 symbol **报错退出**。这是**预期行为**（Global Constraints：缺失行必须显式处理）。把报错信息里的 4 个 symbol 记下来。
 
 - [ ] **Step 5: 逐条裁定并写 `repairs.csv`**
 
-对 4 段偏离逐个裁定。已知证据起点：
+对偏离区间逐个裁定。**注意：本节原先预设的 4 段（2006-08-12~2007-04-29、
+2008-06-14~2009-12-31、2012-01-01~2014-07-09 各 301，2017-02-13~2019-06-16 为 299）
+与实际不符**——前三段完全落在 pinned 日历（2015-01-05 起）之外，是先前 `custom_csi300_sina`
+那一轮基于新浪表的产物。pinned 日历取自已发布的 `trading_calendar`（2015-01-05 ~ 2026-08-28，
+2833 个交易日），**只有落在其内的偏离才影响逐日基数闸门**。
 
-- **2006-08-12 ~ 2007-04-29（301）**：`data/raw/csi/csi_index_announcements/85.json` 的正文给出权威答案——2006-08-15 起调入 `601006` 大秦铁路、调出 `000780` 草原兴发。**注意**：ic 中 `SZ000780` 是单区间 `2005-04-08 → 2013-12-16`，直接改 end 会让 2013-12-16 少一只。裁定必须同时决定 `000780` 在 2006 之后的重新纳入区间，否则 ±1 只是被挪走。
-- **2008-06-14 ~ 2009-12-31（301）**：该日 19 进 20 出，`SH600501`、`SH600786` 的剔除因 `opt-in` 缺失而不生效。需裁定这两只的真实纳入日。新浪表（`data/raw/csi/sina_history_component/`）给出 `600501` 纳入 2007-04-30、`600786` 纳入 2005-07-01，与 ic 冲突，属 B 级旁证。
-- **2012-01-01 ~ 2014-07-09（301）**：`SH600312` 的 `opt-in` 缺失使其剔除不生效。需裁定真实纳入日。
-- **2017-02-13 ~ 2019-06-16（299）**：`SH600005` 武钢股份因被宝钢吸收合并单独剔除，无补入。`cn_events.csv` 里有 `SH600005 → SH600019` 的 merger 记录（2017-02-13）。
+实测（2026-09-10 快照）：
 
-每裁定一条就往 `repairs.csv` 追加一行；`evidence_tier` 只能是 `A`（官方公告正文）或 `B`（新浪表）。**裁定不出来的不写进表**，留在报告里。
+- **区间语义错配（非裁定项，已作为代码修复）**：上游 `opt-out` 排他、本仓 `raw_effective_to`
+  包容，直接照搬会在每个调仓生效日重复计入当日退出的成分股（2016-12-12：30 进 30 出 →
+  当日 330）。修正后 2262/2833 天恰好 300。详见 Task 3 的 `membership_rows` 与
+  `adjudication_report.md` §2。
+- **唯一残留偏离：2017-02-13 ~ 2019-06-14，连续 571 个交易日计数 299**。成因是
+  `SH600005` 武钢股份于 2017-02-13 被 **同为成分股** 的 `SH600019` 宝钢股份吸收合并，
+  当日无人补入（`cn_events.csv` 有该 merger 记录）。自然补位候选是上游那行
+  `SH600549: opt-in 缺失 → 2019-06-17`，其终点恰是缺口终点，且 2017-02-13 是被数据
+  唯一确定的取值；但**无 A/B 级证据**：盘上 24 份官方公告全部为 2005-2006（无一份覆盖
+  2015 年后），新浪表 7/7 页完整却不含 600549。**故不裁定、显式排除**，构建落
+  `custom_csi300_ic`。
+- **3 条 `opt-in` 缺失行**（`SH600501`、`SH600786` 第二条、`SH600312` 第二条）：其区间
+  完全早于日历，对逐日计数**零影响**，但会让 `membership_rows` 硬报错。新浪表虽给出
+  纳入日（2007-04-30 / 2005-07-01 / 2007-01-04）却与 ic 冲突且仍在日历之外，故统一
+  `drop_row` 显式排除，不引入无法验证的 B 级日期。
+
+每裁定一条就往 `repairs.csv` 追加一行；`evidence_tier` 只能是 `A`（官方公告正文）或 `B`（新浪表）。
+**裁定不出来的不写进表**，留在报告里。最终 `repairs.csv` 为 4 条 `drop_row`。
 
 - [ ] **Step 6: 写裁定报告**
 
@@ -1827,9 +1859,11 @@ Expected: `membership_rows` 会因 4 个缺失 `opt-in` 的 symbol **报错退�
 
 Run:
 ```bash
-python project/build_csi300_universe.py --snapshot-dir data/raw/csi/index_constitution/2026-09-10 --seal-evidence
-python project/build_csi300_universe.py --snapshot-dir data/raw/csi/index_constitution/2026-09-10
+python project/build_csi300_universe.py --snapshot-dir project/data/raw/csi/index_constitution/2026-09-10 --seal-evidence
+python project/build_csi300_universe.py --snapshot-dir project/data/raw/csi/index_constitution/2026-09-10
 ```
+
+（脚本 `ROOT` 为 `project/`，真实数据在 `project/data/`；快照路径必须以 `project/` 为前缀。）
 Expected: 要么 `cardinality exactly 300 on every session` 且 `universe_id=csi300`；要么打印偏离天数并落到 `custom_csi300_ic`。**两者都是成功**——按 spec 风险第 1 条，修不到恰好 300 是预设结果，不算失败。
 
 - [ ] **Step 8: 记录结果到记忆**
