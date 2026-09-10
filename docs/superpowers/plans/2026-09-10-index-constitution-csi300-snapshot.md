@@ -1290,7 +1290,7 @@ def verify_snapshot(snapshot_dir: Path) -> tuple[dict, dict]:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python -m pytest tests/unit/test_csi300_universe_build.py -q`
-Expected: 23 passed
+Expected: 27 passed（Task 3/4 的 22 + 本任务的 5）
 
 - [ ] **Step 5: 提交**
 
@@ -1644,7 +1644,7 @@ from stock_quant.data_quality.models import QualityReport
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python -m pytest tests/unit/test_csi300_universe_build.py -q`
-Expected: 32 passed
+Expected: 36 passed（Task 3/4/5 的 27 + 本任务的 9）
 
 - [ ] **Step 5: 跑 lint**
 
