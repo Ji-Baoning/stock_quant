@@ -68,7 +68,18 @@ data/raw/csi/index_constitution/2026-09-10/
 | py3.10 + pandas 2.3.3 | 失败 |
 | py3.11 + pandas 3.0.5 | 正常 |
 
-而本仓库 `pyproject.toml` 是 `requires-python >= 3.10`、`pandas>=2`。把主环境升到 pandas 3 的代价经实测评估为**中-高**：单元测试 767 通过 / 2 失败，两处失败均为 dtype 默认值变更（`datetime64[ns]`→`[s]`、`object`→`str`）；真正的问题是 dtype 默认值一变，parquet 序列化字节与内容哈希随之改变，会波及全部被哈希钉死的 dataset/universe 版本。
+而本仓库 `pyproject.toml` 是 `requires-python >= 3.10`、`pandas>=2`。
+
+在 py3.12 + pandas 3.0.5 下的实测兼容性：
+
+| 套件 | 结果 | 耗时 |
+| --- | --- | --- |
+| 单元测试 | 767 通过 / 2 失败 | 26s |
+| 集成测试 | 289 全部通过 | 18m30s |
+
+两处失败均为 dtype 默认值变更（`datetime64[ns]`→`[s]`、`object`→`str`）。**包括 `test_stable_membership_rerun_reproduces_the_same_snapshot_map`、`test_same_facts_freeze_the_same_definition_across_datasets` 在内的哈希与确定性测试全部通过**，说明该代码库对 pandas 3 的兼容性良好，迁移代价实为**低-中**而非不可承受。
+
+本设计仍选择隔离而非迁移，理由是：迁移是一次独立的基础设施变更，混入本任务会模糊变更边界；且冻结快照本身有独立价值（上游随时可能变更）。将来若迁移，dtype 应显式钉死而不是放宽断言。
 
 因此采用运行时隔离：
 
