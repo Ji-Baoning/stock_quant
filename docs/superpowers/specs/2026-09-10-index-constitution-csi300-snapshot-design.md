@@ -193,11 +193,18 @@ symbol, action, field, old_value, new_value, evidence_tier, evidence_source, evi
    | `opt-in` | `raw_effective_from` | |
    | `opt-out` | `raw_effective_to` | 空值 → null（仍未观察到移除） |
    | — | `announcement_date` | 取 `raw_effective_from` |
+   | — | `status` | opt-out 为空 → `active`，否则 `removed` |
+   | — | `reason` | 基准期（from = 2005-04-08）且 active → `initial_constituent`；其余 → `regular_rebalance` |
    | — | `source` | `index_constitution` |
    | — | `source_url` | 包主页 URL |
    | — | `snapshot_sha256` | `csi300_history.csv` 的 SHA-256 |
    | — | `source_document_sha256` | `evidence_summary.json` 的 SHA-256 |
-   | — | `rules_version` | `index-constitution-<版本>+repairs-<8hex>` |
+
+   **`rules_version` 不进 parquet。** `MembershipFact` 是 `extra="forbid"`，字段固定为上述 11 列，没有 `rules_version` 槽位；它只存在于 `UniverseDefinition`（即 `configs/universes/<id>.yml`）里。附录中的归属表已按此更正。
+
+   映射受 `MembershipFact` 的硬校验约束，实现时必须遵守：`status` 与 `raw_effective_to` 是否为空必须一致；`initial_constituent` 必须是 active；`delisting` / `merger_or_reorganization` 必须是 removed。同一 `universe_id`/`symbol` 的区间不得重叠——**实测 ic 数据无重叠**（949 个 symbol、1225 段区间，226 个 symbol 有多段合法的重复纳入），可直接映射。
+
+   **`opt-in` 缺失的行必须显式处理**：这类行没有 `raw_effective_from`，无法映射成 fact。构建时若遇到未被 `repairs.csv` 覆盖的缺失行，必须报错退出，不得静默丢弃——静默丢弃正是"某个剔除不生效"这类缺陷的藏身之处。
 
    `announcement_date` 取生效日的含义是"生效当天才可见"，而真实公告通常提前约两周。方向是**宁可晚知、不可早知**，对回测安全（不引入前视），但确为近似，必须写入 `rules_version` 与报告。
 
