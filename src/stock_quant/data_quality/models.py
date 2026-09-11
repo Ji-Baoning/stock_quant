@@ -58,6 +58,14 @@ CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH = "adjusted_bar_raw_close_mismatch"
 CODE_ADJUSTED_BAR_WRONG_BASIS = "adjusted_bar_wrong_basis"
 CODE_ADJUSTED_BAR_UNKNOWN_ACTION = "adjusted_bar_unknown_action"
 
+# Suspension bars materialized from the primary source's own pre_close chain:
+# a proven run is an audited INFO; a run with no anchor row is an honest
+# WARNING; a chain break no accepted action explains is real data loss and
+# blocks publication (all gap rows must be proven, never assumed).
+CODE_SUSPENSION_ROW = "suspension_row_materialized"
+CODE_SUSPENSION_RUN_UNVERIFIED = "suspension_run_unverified"
+CODE_UNEXPLAINED_PRIMARY_GAP = "unexplained_primary_gap"
+
 # Missing-row classification labels, in classification precedence order.
 MISSING_NOT_LISTED = "not_listed"
 MISSING_DELISTED = "delisted"
