@@ -1,10 +1,17 @@
 """Suspension-bar materialization proven by the primary source's pre_close chain."""
 
-from datetime import date
+import shutil
+from dataclasses import dataclass
+from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 
+from stock_quant.bootstrap import bootstrap_dataset
+from stock_quant.data_model.dataset import DatasetReader
 from stock_quant.data_model.suspensions import suspension_rows
+from stock_quant.data_model.universe import Universe
+from stock_quant.data_pipeline import DataPipeline, DataUpdateRequest
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import (
     CODE_SUSPENSION_ROW,
@@ -15,6 +22,13 @@ from stock_quant.data_quality.models import (
     Severity,
 )
 from stock_quant.data_quality.raw_checks import check_provenance
+from stock_quant.data_sources.base import DataRequest, FetchResult, request_key
+from stock_quant.research.acceptance.checks import (
+    _missing_row_failures,
+    _open_days,
+)
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 INGESTED = pd.Timestamp("2021-11-13", tz="UTC")
 
@@ -252,3 +266,148 @@ def test_missing_pre_close_column_disables_the_proof():
     rows, issues = _run("000333.SZ", chain)
     assert rows.empty
     assert [i.code for i in issues] == [CODE_SUSPENSION_RUN_UNVERIFIED]
+
+
+# --------------------------------------------------------------------------- #
+# End to end: the update materializes proven suspension bars and passes the
+# acceptance completeness recount without any policy change.
+# --------------------------------------------------------------------------- #
+
+_WINDOW_START = date(2021, 11, 1)
+_WINDOW_END = date(2021, 11, 30)
+_UNIVERSE_SYMBOLS = tuple(
+    Universe.from_yaml(_REPO_ROOT / "configs" / "universe.yml").symbols
+)
+_GAPPY_SYMBOL = "000001.SZ"
+_GAP_DAYS = {date(2021, 11, 2), date(2021, 11, 3), date(2021, 11, 4)}
+
+
+def _weekdays(start: date, end: date) -> list[date]:
+    days: list[date] = []
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            days.append(current)
+        current += timedelta(days=1)
+    return days
+
+
+@dataclass(frozen=True)
+class _SuspendStub:
+    """Stubs whose primary daily carries pre_close and one suspended name."""
+
+    name: str
+
+    def fetch(self, request: DataRequest) -> FetchResult:
+        return FetchResult(
+            source=self.name,
+            endpoint=request.endpoint,
+            request_key=request_key(request),
+            frame=self._frame(request),
+            metadata={
+                "source": self.name,
+                "response_timestamp": "2021-12-01T00:00:00Z",
+            },
+        )
+
+    def _frame(self, request: DataRequest) -> pd.DataFrame:
+        if request.endpoint == "stock_basic":
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": symbol,
+                        "name": f"stub_{symbol}",
+                        "list_date": "19910102",
+                        "delist_date": "",
+                        "list_status": "L",
+                    }
+                    for symbol in _UNIVERSE_SYMBOLS
+                ]
+            )
+        if request.endpoint == "index_history":
+            days = _weekdays(request.start_date, request.end_date)
+            return pd.DataFrame(
+                {
+                    "日期": days,
+                    "开盘": [4000.0] * len(days),
+                    "最高": [4000.0] * len(days),
+                    "最低": [4000.0] * len(days),
+                    "收盘": [4000.0] * len(days),
+                    "成交量": [0] * len(days),
+                }
+            )
+        if request.endpoint in (
+            "cninfo_corporate_actions",
+            "eastmoney_corporate_actions",
+        ):
+            return pd.DataFrame()
+        symbol = request.symbols[0]
+        days = [
+            day
+            for day in _weekdays(request.start_date, request.end_date)
+            if not (symbol == _GAPPY_SYMBOL and day in _GAP_DAYS)
+        ]
+        return pd.DataFrame(
+            [
+                {
+                    "code": symbol,
+                    "date": day.strftime("%Y%m%d"),
+                    "open": 55.0,
+                    "high": 55.0,
+                    "low": 55.0,
+                    "close": 55.0,
+                    "vol": 1000.0,
+                    "amount": 55000.0,
+                    "pre_close": 55.0,
+                }
+                for day in days
+            ]
+        )
+
+
+def test_update_materializes_proven_suspension_bars(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    configs = root / "configs"
+    configs.mkdir()
+    for name in (
+        "project.yml",
+        "sources.yml",
+        "costs.yml",
+        "trading_rules.yml",
+        "universe.yml",
+    ):
+        shutil.copy(_REPO_ROOT / "configs" / name, configs / name)
+    bootstrap_dataset(root)
+
+    stubs = {name: _SuspendStub(name) for name in ("tushare", "akshare")}
+    result = DataPipeline(root, sources=stubs).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+
+    assert result.dataset_ref is not None, result.quality_report
+    codes = {issue.code for issue in result.quality_report.issues}
+    assert CODE_UNEXPLAINED_PRIMARY_GAP not in codes
+    assert "unknown_or_suspended" not in codes
+    assert CODE_SUSPENSION_ROW in codes
+
+    with DatasetReader(root).open(result.dataset_ref.version) as dataset:
+        daily = dataset.read("daily_bar")
+        master = dataset.read("security_master")
+        calendar = dataset.read("trading_calendar")
+    carried = daily[
+        (daily["symbol"] == _GAPPY_SYMBOL)
+        & (daily["trade_date"] == pd.Timestamp("2021-11-02"))
+    ]
+    assert len(carried) == 1
+    row = carried.iloc[0]
+    assert row["source"] == "tushare_suspend"
+    assert row["volume"] == 0
+    assert row["close"] == 55.0
+
+    grid = [
+        day
+        for day in _open_days(calendar)
+        if _WINDOW_START <= day <= _WINDOW_END
+    ]
+    assert _missing_row_failures(daily, master, grid) == []

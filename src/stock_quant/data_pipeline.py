@@ -97,6 +97,7 @@ from stock_quant.data_model.security_master import (
     master_coverage_frame,
     master_coverage_record,
 )
+from stock_quant.data_model.suspensions import suspension_rows
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import (
@@ -631,6 +632,7 @@ class DataPipeline:
         equity_symbols = _equity_symbols(master)
         primary_rows: list[pd.DataFrame] = []
         primary_dates: set[tuple[str, date]] = set()
+        raw_daily_frames: dict[str, pd.DataFrame] = {}
         fatal = self._fetch_primary_stock(
             enabled,
             equity_symbols,
@@ -641,6 +643,7 @@ class DataPipeline:
             raw_snapshots,
             primary_rows,
             primary_dates,
+            raw_daily_frames,
         )
         if fatal:
             return self._result(
@@ -714,6 +717,19 @@ class DataPipeline:
 
         # ---- quality report over the merged canonical daily ------------- #
         ingested = pd.Timestamp.now(tz="UTC")
+        self._materialize_suspensions(
+            raw_daily_frames,
+            equity_symbols,
+            master,
+            calendar_open,
+            start,
+            end,
+            corporate_action,
+            primary_rows,
+            primary_dates,
+            issues,
+            ingested,
+        )
         new_daily = self._merge_daily(
             current_daily,
             primary_rows,
@@ -1108,6 +1124,7 @@ class DataPipeline:
         raw_snapshots,
         primary_rows,
         primary_dates,
+        raw_daily_frames,
     ) -> bool:
         if "tushare" not in enabled:
             return False
@@ -1127,6 +1144,9 @@ class DataPipeline:
                 )
                 return True
             raw_snapshots.append(self._record_raw(result))
+            # The raw response (pre_close in particular) is the suspension
+            # evidence consumed later by _materialize_suspensions.
+            raw_daily_frames[symbol] = result.frame
             clean = normalize_daily(
                 result.frame, "tushare", _ingest_time(result.metadata)
             )
@@ -1140,6 +1160,74 @@ class DataPipeline:
             "tushare", True, True, reason_code="ok"
         )
         return False
+
+    def _materialize_suspensions(
+        self,
+        raw_daily_frames,
+        equity_symbols,
+        master,
+        calendar_open,
+        start,
+        end,
+        corporate_action,
+        primary_rows,
+        primary_dates,
+        issues,
+        ingested,
+    ) -> None:
+        """Append proven suspension bars for every equity symbol in place.
+
+        The raw tushare ``daily`` response proves each absent open day: when
+        the next present row's ``pre_close`` chains to the last close, the
+        missing days were suspended, not lost.  See
+        ``data_model/suspensions.py`` for the proof rules; chain frames from
+        responses without ``pre_close`` (offline stubs) are skipped silently.
+        """
+        listing = {
+            str(row["symbol"]): (
+                _as_date(row.get("list_date")),
+                _as_date(row.get("delist_date")),
+            )
+            for row in master.to_dict("records")
+        }
+        window = [
+            day
+            for day in calendar_open
+            if isinstance(day, date) and start <= day <= end
+        ]
+        for symbol in equity_symbols:
+            raw = raw_daily_frames.get(symbol)
+            if raw is None or "pre_close" not in raw.columns:
+                continue
+            date_column = next(
+                (name for name in ("trade_date", "date") if name in raw.columns),
+                None,
+            )
+            if date_column is None or "close" not in raw.columns:
+                continue
+            chain = pd.DataFrame(
+                {
+                    "trade_date": pd.to_datetime(raw[date_column].astype(str)),
+                    "close": pd.to_numeric(raw["close"]),
+                    "pre_close": pd.to_numeric(raw["pre_close"]),
+                }
+            )
+            list_date, delist_date = listing.get(symbol, (None, None))
+            rows, suspension_issues = suspension_rows(
+                symbol,
+                chain,
+                window,
+                list_date=list_date,
+                delist_date=delist_date,
+                actions=corporate_action,
+                ingested_at=ingested,
+            )
+            if not rows.empty:
+                primary_rows.append(rows)
+                primary_dates.update(
+                    zip(rows["symbol"], rows["trade_date"].dt.date)
+                )
+            issues.extend(suspension_issues)
 
     def _fetch_benchmarks(
         self,

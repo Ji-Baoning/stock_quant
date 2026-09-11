@@ -496,6 +496,7 @@ def test_primary_stock_fetch_records_symbol_scoped_coverage_pairs(monkeypatch):
     raw_snapshots: list = []
     primary_rows: list = []
     primary_dates: set = set()
+    raw_daily_frames: dict = {}
 
     fatal = pipeline._fetch_primary_stock(
         ("tushare",),
@@ -507,7 +508,9 @@ def test_primary_stock_fetch_records_symbol_scoped_coverage_pairs(monkeypatch):
         raw_snapshots,
         primary_rows,
         primary_dates,
+        raw_daily_frames,
     )
+    assert set(raw_daily_frames) == {"000001.SZ"}
 
     assert fatal is False
     assert len(primary_rows) == 1
