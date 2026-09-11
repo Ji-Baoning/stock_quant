@@ -18,12 +18,17 @@ factor_versions:
   momentum_60d: 2.0.0
 dataset_version: CURRENT
 universe_version: CURRENT
+universe_definition: custom_csi300_ic_tradable
 trust_mode: engineering
 # 工程诊断不绑定真实数据验收记录（缺省 CURRENT_ACCEPTED 会触发验收门禁）。
 data_acceptance_id: null
-# 注意：walk_forward_oos_v1 要求冻结的时点宇宙定义（universe_definition），
-# 当前 csi300 历史成分证据被外部源阻断（东财 IP 封禁 / csindex 历史归档
-# 404 / baostock 下线），本规格在证据到位并完成 RUNBOOK 阶段 5 之前无法运行。
+# walk_forward_oos_v1 要求冻结的时点宇宙定义（universe_definition）来提供
+# 逐 fold 的时点成分；缺失时 runner 在 schedule 阶段直接失败（runner.py 中
+# "a formal walk-forward run requires a frozen universe definition"）。
+# 本规格绑定方案一产出的时点过滤定义，ENGINEERING 诊断模式下不绑定真实
+# 数据验收记录。但 fold preflight 仍无条件要求 ACCEPTED 且绑定当前数据集的
+# 验收审计（ACCEPTANCE_MISSING，engineering 无豁免分支），验收记录（方案二）
+# 落地前本规格在 folds 阶段失败（2026-09-12 实测）。
 date_range:
   start_date: 2020-01-01
   end_date: 2026-08-28
