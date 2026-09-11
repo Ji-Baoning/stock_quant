@@ -1,16 +1,19 @@
-# 成本情景费率表（操作者申报的简化模型）。2020-01-01 起的费率是项目原申报；
-# 2015-01-01 行为扩展历史窗口（2015-2020 回补数据）声明同一费率 schedule——
-# 印花税沿用文件既有口径（0.5‰ 卖出，未按 2023-08-28 前的 1‰ 区分），
-# 仅作 ENGINEERING 诊断假设，正式研究前需按真实费率历史重审。
+# 成本情景费率表（官方费率历史 + 操作者申报假设）。
+#
+# 印花税（官方，卖出单边）：1‰ 至 2023-08-27；2023-08-28 起减半为 0.5‰。
+#   来源见 docs/operations/2026-09-11-cost-basis.md 的"官方费率"段。
+# 过户费（官方，双向）：0.02‰ 自 2015-08-01，2022-04-29 起 0.01‰。本表**不建模**
+#   过户费——CostRate 目前没有该字段；在扩展窗口配置上量化为初始资金的 0.171%
+#   （印花税修正量的 1/11），决策记录见同一文档的"过户费量化"段。
+# 佣金 0.3‰ / 最低 ¥5、滑点 0.1%：**操作者申报假设，非官方费率**。实测该配置下
+#   1,852 笔成交每一笔都命中 ¥5 最低值，故 commission_rate 对结果零影响。
+#
+# 生效日语义：CostModel._select 取"生效日不晚于交易日的最新一条"，因此每个情景
+# 只需声明费率真正发生变化的日期。2020-01-01 曾用作分界但两侧数值相同，已删除。
 scenarios:
   - name: zero_cost
     rates:
       - effective_from: 2015-01-01
-        commission_rate: 0.0
-        minimum_commission: 0.0
-        stamp_tax_sell_rate: 0.0
-        slippage_rate: 0.0
-      - effective_from: 2020-01-01
         commission_rate: 0.0
         minimum_commission: 0.0
         stamp_tax_sell_rate: 0.0
@@ -20,9 +23,9 @@ scenarios:
       - effective_from: 2015-01-01
         commission_rate: 0.0003
         minimum_commission: 5
-        stamp_tax_sell_rate: 0.0005
+        stamp_tax_sell_rate: 0.001
         slippage_rate: 0.0
-      - effective_from: 2020-01-01
+      - effective_from: 2023-08-28
         commission_rate: 0.0003
         minimum_commission: 5
         stamp_tax_sell_rate: 0.0005
@@ -32,9 +35,9 @@ scenarios:
       - effective_from: 2015-01-01
         commission_rate: 0.0003
         minimum_commission: 5
-        stamp_tax_sell_rate: 0.0005
+        stamp_tax_sell_rate: 0.001
         slippage_rate: 0.001
-      - effective_from: 2020-01-01
+      - effective_from: 2023-08-28
         commission_rate: 0.0003
         minimum_commission: 5
         stamp_tax_sell_rate: 0.0005
