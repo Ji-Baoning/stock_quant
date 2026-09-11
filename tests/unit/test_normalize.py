@@ -181,6 +181,54 @@ def test_fractional_volume_is_rejected_as_not_representable():
     assert result.rejected.iloc[0]["volume"] == 100.5
 
 
+def test_tushare_two_decimal_lots_survive_the_share_scaling():
+    """Regression: 1263029.64 lots x 100 is 126302963.99999999 in float64.
+
+    The share scaling used to run ``float.is_integer()`` on that product, saw
+    the representation artifact and rejected the row as ``invalid_volume`` --
+    silently dropping about 11% of real trading days from every published
+    dataset and failing the acceptance completeness gate with 8,813 gaps.
+    """
+    raw = pd.DataFrame(
+        {
+            "trade_date": ["20150114"],
+            "ts_code": ["000001.SZ"],
+            "open": [14.78],
+            "high": [15.2],
+            "low": [14.7],
+            "close": [14.81],
+            "vol": [1263029.64],
+            "amount": [1889296.679],
+        }
+    )
+    result = normalize_daily(raw, "tushare", INGESTED_AT)
+
+    assert result.rejected.empty
+    assert len(result.valid) == 1
+    assert result.valid.iloc[0].to_dict()["volume"] == 126302964
+
+
+def test_tushare_fractional_share_volume_is_still_rejected():
+    """Lots that scale to fractional shares remain unrepresentable."""
+    raw = pd.DataFrame(
+        {
+            "trade_date": ["20150114"],
+            "ts_code": ["000001.SZ"],
+            "open": [14.78],
+            "high": [15.2],
+            "low": [14.7],
+            "close": [14.81],
+            "vol": [1263029.644],
+            "amount": [1889296.679],
+        }
+    )
+    result = normalize_daily(raw, "tushare", INGESTED_AT)
+
+    assert len(result.valid) == 0
+    assert result.rejected.iloc[0]["reason"] == "invalid_volume"
+    assert result.rejected.iloc[0]["vol"] == 1263029.644
+
+
 def test_empty_daily_frame_yields_typed_empty_clean_result():
     raw = pd.DataFrame(
         columns=["date", "code", "open", "high", "low", "close", "volume", "amount"]

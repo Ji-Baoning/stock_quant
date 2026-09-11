@@ -10,6 +10,7 @@ content differs are deliberately kept for the quality layer to reject.
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 import pandas as pd
 
@@ -92,8 +93,11 @@ def normalize_daily(
             rejected_indices.append(index)
             rejected_reasons.append(REASON_INVALID_VOLUME)
             continue
-        scaled_volume = raw_volume * volume_factor
-        if not scaled_volume.is_integer():
+        # Exact decimal scaling: float64 multiplication turns two-decimal
+        # lots like 1263029.64 into 126302963.99999999, so an is_integer()
+        # check here would reject about 11% of real trading days.
+        scaled_volume = Decimal(str(raw_volume)) * volume_factor
+        if scaled_volume != scaled_volume.to_integral_value():
             rejected_indices.append(index)
             rejected_reasons.append(REASON_INVALID_VOLUME)
             continue
