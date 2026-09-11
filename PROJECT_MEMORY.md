@@ -351,6 +351,24 @@ volume, amount, source, ingested_at
 
 **未解锁项与阻塞原因**：真实数据上的 walk-forward 正式研究与一次性挑战仍被**时点宇宙证据**阻塞，这不是代码缺口——`walk_forward_oos_v1` 硬性要求冻结宇宙定义（固定工程池是 2026-09-03 回溯选样，伪装成历史成员即伪造证据，被明确拒绝）；而真实 csi300 历史成分当前外部不可得：东财 IP 封禁、csindex OSS 历史月度 closeweight 归档 404、csindex 主站本网络不可达、baostock 下线、akshare 1.18 无历史成分变更接口、tushare `index_daily` 限 1 次/小时。解锁路径（2026-09-10 已识别并备好流水线）：tushare `index_weight`（官方指数成分权重月度快照）是当前最可行的时点成员证据源，但需要 2000 积分档 token（现有 token 无该接口权限，`index_daily` 的 1 次/小时限速同为低积分表现）。`project/collect_index_weight_membership.py` 已备好端到端流水线：逐月拉取快照存证 `data/raw/csi/index_weight/` + 证据清单哈希 → 合并快照 CSV（_attested-boundary 窗口约定：成员保持至首个不再列出它的快照前一日，新成员自首个列出它的快照日起，月末快照对月中调仓有至多约 1 个月的滞后，已文档化）→ 共享证据绑定导入 → 数据集重发布带成员表 → 生成冻结宇宙定义 YAML。默认 `custom_csi300_tw`（custom 前缀豁免每日恰 300 只的基数校验，证据链要求完全相同；若另持官方调仓生效日证据可改用 `csi300`）。换上有权限 token 后一条命令跑通，再按阶段 5b 完成真实数据验收，然后才能预注册执行阶段 8 的一次性挑战。工程信任模式另有设计约束：`research run` 恒为 RESEARCH 模式（无绕过），工程诊断只走 `backtest --engineering`；`buffered_risk_weighted` 只在 walk-forward 管线执行、单窗口工程管线会响亮拒绝。
 
+### 8.5 数据接口限制实测清单（2026-09-11）
+
+对本 token 与本机网络的实测结论，是长期运行约束，重跑数据链路前先对照：
+
+| 接口 | 限制 / 状态 | 影响 |
+| --- | --- | --- |
+| tushare `stock_basic` | 限流 1 次/分钟；连续触发后惩罚升级为 1 次/小时 | 每次 `data update` 恰调用一次；被拒调用也可能重置惩罚窗口，重跑须**静默等待 ≥1 小时**且不要轮询重试 |
+| tushare `daily` | 全窗口单次调用可用，30 标的连续调用未见限流；**不返回停牌日行** | 日线主源完整可用；停牌日在源侧天然缺席——2026-09-11 全窗口更新后 714 条真实停牌缺口即源于此（此前 8,813 条缺口的主因是管线浮点 bug，已修复，见运维报告） |
+| tushare `suspend_d` | 无访问权限（需更高积分档位） | 推荐的独立停牌证据源不可用，停牌回补建模被阻塞 |
+| tushare `index_daily` | 限 1 次/小时（低积分表现） | 指数行情拉取需长间隔 |
+| tushare `index_weight` | 无权限（需 2000 积分档 token） | 时点 csi300 成员证据主路径被阻塞（见 8.4 的解锁流水线） |
+| baostock | 服务器 2026-09-05 起停机，`sources.yml` 已禁用 | 交叉校验源与其原生停牌日行（`tradestatus=0`）不可用；复机后可同时解锁停牌回补 |
+| akshare `stock_tfp_em`（东财停复牌） | 忽略历史日期参数：查 2016-05-19 返回的是近期记录 | 对 2015–2016 停牌潮无历史覆盖，不能作为停牌证据 |
+| akshare cninfo / eastmoney 公司行为端点 | 可用（探针 31 / 28 行）；双源偶发单点冲突 | 冲突走 `configs/corporate_action_reviews.yml` 人工复核；601318.SH 2018-06-07 分红已裁定采信 cninfo |
+| csindex 官方渠道 | 本网络 500 / 404 / 不可达 | canonical `csi300` 官方证据不可得（见 8.4） |
+
+操作教训：`data update` 失败（`source_fetch_failed`）时不发布、`CURRENT` 不变，确认配额与限流窗口后重试即可；CLI 只回显错误计数，失败明细需进程内检查 `result.source_status` 与 FATAL issues。接口限制随积分档位与供应端状态变化，复跑前用 `project/verify_update_readiness.py` 探针确认；完整实测记录见 `docs/operations/2026-09-11-trusted-data-chain.md`。
+
 ## 9. 项目质量检查
 
 项目需要持续回答三个问题：
