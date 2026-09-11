@@ -630,7 +630,7 @@ class DataPipeline:
         # ---- required primary stock daily ------------------------------- #
         equity_symbols = _equity_symbols(master)
         primary_rows: list[pd.DataFrame] = []
-        primary_dates: set[date] = set()
+        primary_dates: set[tuple[str, date]] = set()
         fatal = self._fetch_primary_stock(
             enabled,
             equity_symbols,
@@ -1131,7 +1131,11 @@ class DataPipeline:
                 result.frame, "tushare", _ingest_time(result.metadata)
             )
             primary_rows.append(clean.valid)
-            primary_dates.update(clean.valid["trade_date"].dt.date)
+            # (symbol, date) pairs: _missing_issues tests tuple membership, so
+            # bare dates here would warn on every open day of every symbol.
+            primary_dates.update(
+                zip(clean.valid["symbol"], clean.valid["trade_date"].dt.date)
+            )
         statuses["tushare"] = SourceStatus(
             "tushare", True, True, reason_code="ok"
         )

@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 from stock_quant.data_model.schemas import DAILY_COLUMNS, DAILY_SCHEMA
+from stock_quant.data_pipeline import DataPipeline
 from stock_quant.data_quality.compare import (
     DEFAULT_THRESHOLDS,
     ComparisonThresholds,
@@ -449,4 +450,101 @@ def test_report_json_round_trip_is_deterministic():
     assert [i["code"] for i in first["issues"]] == [
         CODE_WITHIN_TOLERANCE,
         CODE_DUPLICATE_CONFLICT,
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# The update path's missing-day accounting (primary coverage membership)
+# --------------------------------------------------------------------------- #
+
+
+def _primary_fetch_pipeline(monkeypatch) -> SimpleNamespace:
+    """A ``DataPipeline`` skin whose tushare dispatch returns two fixed bars."""
+    pipeline = DataPipeline.__new__(DataPipeline)
+    frame = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "000001.SZ"],
+            "trade_date": ["20211101", "20211102"],
+            "open": [55.0, 55.0],
+            "high": [55.0, 55.0],
+            "low": [55.0, 55.0],
+            "close": [55.0, 55.0],
+            "vol": [1000.0, 1000.0],
+            "amount": [55000.0, 55000.0],
+        }
+    )
+    fetch_result = SimpleNamespace(
+        frame=frame, metadata={"response_timestamp": "2021-11-03T00:00:00Z"}
+    )
+    monkeypatch.setattr(pipeline, "_dispatch", lambda *args, **kwargs: fetch_result)
+    monkeypatch.setattr(
+        pipeline, "_adapter_or_fail", lambda name, statuses: object()
+    )
+    monkeypatch.setattr(pipeline, "_record_raw", lambda result: result)
+    return pipeline
+
+
+def test_primary_stock_fetch_records_symbol_scoped_coverage_pairs(monkeypatch):
+    """Regression: primary coverage must be ``(symbol, date)`` pairs.
+
+    The set used to hold bare dates, so the ``(symbol, date)`` membership test
+    in ``_missing_issues`` never matched and every listed symbol was warned on
+    every open day -- 56,660 spurious WARNINGs on the 2015-2026 update.
+    """
+    pipeline = _primary_fetch_pipeline(monkeypatch)
+    issues: list = []
+    raw_snapshots: list = []
+    primary_rows: list = []
+    primary_dates: set = set()
+
+    fatal = pipeline._fetch_primary_stock(
+        ("tushare",),
+        ["000001.SZ"],
+        date(2021, 11, 1),
+        date(2021, 11, 2),
+        issues,
+        {},
+        raw_snapshots,
+        primary_rows,
+        primary_dates,
+    )
+
+    assert fatal is False
+    assert len(primary_rows) == 1
+    assert primary_dates == {
+        ("000001.SZ", date(2021, 11, 1)),
+        ("000001.SZ", date(2021, 11, 2)),
+    }
+
+
+def test_missing_issues_flags_only_days_absent_from_primary_pairs(monkeypatch):
+    """A present ``(symbol, day)`` pair must never be warned as missing."""
+    pipeline = _primary_fetch_pipeline(monkeypatch)
+    master = pd.DataFrame(
+        [
+            {
+                "symbol": "000001.SZ",
+                "list_date": pd.Timestamp("2001-01-02"),
+                "delist_date": pd.NaT,
+            }
+        ]
+    )
+    primary_dates = {
+        ("000001.SZ", date(2021, 11, 1)),
+        ("000001.SZ", date(2021, 11, 2)),
+    }
+    issues = DataPipeline._missing_issues(
+        pipeline,
+        ["000001.SZ"],
+        master,
+        date(2021, 11, 1),
+        date(2021, 11, 3),
+        {date(2021, 11, 1), date(2021, 11, 2), date(2021, 11, 3)},
+        primary_dates,
+        set(),
+        None,
+    )
+
+    assert [(i.symbol, i.trade_date, i.code) for i in issues] == [
+        ("000001.SZ", date(2021, 11, 3), MISSING_UNKNOWN_OR_SUSPENDED)
     ]
