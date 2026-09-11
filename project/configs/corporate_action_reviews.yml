@@ -9,3 +9,15 @@
     CNINFO reports both the 2023 annual dividend (20.11 yuan per 10 shares)
     and special dividend (30.17 yuan per 10 shares) on the same record and
     ex-date. Eastmoney reports only the annual component.
+- symbol: 601318.SH
+  ex_date: 2018-06-07
+  selected_source: cninfo
+  record_date: 2018-06-06
+  cash_dividend_per_share: 1.2
+  bonus_share_ratio: 0.0
+  capitalization_ratio: 0.0
+  rationale: >-
+    Owner confirmed CNINFO as the authoritative source for this event
+    (2017 annual cash dividend). CNINFO reports 1.2 yuan per share; the
+    eastmoney record of 1.0 conflicts and stays quarantined.
+
