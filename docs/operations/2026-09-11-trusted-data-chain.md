@@ -160,5 +160,9 @@ PYTHONPATH=src python project/probe_dataset_gates.py
 `03a2ddb` / `61d1898`（本文两次版本）。
 
 运维留痕：tushare `stock_basic` 在本 token 上限流 1 次/分钟，连续触发会升级为
-1 次/小时（2026-09-11 实测）；重跑更新须与其余调用保持足够间隔，失败时
-`CURRENT` 不变，可安全重试。
+1 次/小时，且**每日配额仅 5 次**（2026-09-11 实测，超限次日重置）；重跑更新须与其余
+调用保持足够间隔，一天内重跑次数有限。失败时 `CURRENT` 不变，可安全重试；
+CLI 只回显错误计数，失败明细需进程内检查 `result.source_status` 与 FATAL issues。
+601318.SH 的 cninfo 复核条目（`69522b4`）已入库，**尚未被任何已发布数据集应用**——
+下次成功的 `data update` 会把它带进公司行为调和，届时该标的应转 `VERIFIED`、
+隔离区清空、`corporate_action_gate` 收口。
