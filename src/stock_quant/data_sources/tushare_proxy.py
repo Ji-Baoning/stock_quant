@@ -121,6 +121,17 @@ def _cache_ttl(body: Mapping[str, object]) -> float:
     return ttl if ttl > 0 else float(_CATALOG_TTL_SECONDS)
 
 
+def _lower_headers(response: requests.Response) -> dict[str, str]:
+    headers = getattr(response, "headers", None) or {}
+    return {str(key).lower(): str(value) for key, value in dict(headers).items()}
+
+
+def _cache_label(headers: Mapping[str, str]) -> str:
+    cache = headers.get("x-cache", "")
+    layer = headers.get("x-cache-layer", "")
+    return "/".join(part for part in (cache, layer) if part)
+
+
 class TushareProxyClient:
     """One authenticated GET session against the aggregation front."""
 
@@ -264,16 +275,19 @@ class TushareProxyClient:
             checked = self._verify_capability(endpoint, params)
         start_date = params.pop("start_date", None)
         end_date = params.pop("end_date", None)
+        log: list[dict[str, str]] = []
         frame, windows = self._paged(
-            endpoint, start_date=start_date, end_date=end_date, **params
+            endpoint, start_date=start_date, end_date=end_date, log=log, **params
         )
         self.last_query_metadata = {
             "endpoint": endpoint,
             "capability_checked": checked,
             "windows": [tuple(window) for window in windows],
             "rows": int(len(frame)),
-            "request_ids": [],
-            "cache": [],
+            "request_ids": [
+                entry["request_id"] for entry in log if entry["request_id"]
+            ],
+            "cache": [entry["cache"] for entry in log if entry["cache"]],
         }
         return frame
 
@@ -376,6 +390,7 @@ class TushareProxyClient:
         *,
         start_date: str | None = None,
         end_date: str | None = None,
+        log: list[dict[str, str]] | None = None,
         **params: object,
     ) -> tuple[pd.DataFrame, list[tuple[str | None, str | None]]]:
         """Fetch bounded date windows and enforce the range client-side."""
@@ -392,6 +407,7 @@ class TushareProxyClient:
                     endpoint,
                     start_date=window_start,
                     end_date=window_end,
+                    log=log,
                     **params,
                 )
             )
@@ -417,6 +433,7 @@ class TushareProxyClient:
         endpoint: str,
         *,
         read_timeout: int | None = None,
+        log: list[dict[str, str]] | None = None,
         **params: object,
     ) -> pd.DataFrame:
         """One data read; retry, throttling and recording live in `_request`."""
@@ -426,6 +443,7 @@ class TushareProxyClient:
                 f"{self.base_url}/{endpoint}",
                 self._parse,
                 read_timeout=read_timeout,
+                log=log,
                 **params,
             ),
         )
@@ -436,6 +454,7 @@ class TushareProxyClient:
         parse: Callable[[str, object], object],
         *,
         read_timeout: int | None = None,
+        log: list[dict[str, str]] | None = None,
         **params: object,
     ) -> object:
         """One GET with retry. ``parse(label, body)`` converts the JSON body.
@@ -455,6 +474,7 @@ class TushareProxyClient:
             except requests.exceptions.RequestException as error:
                 last_error = ServerError(f"proxy {url} transport failure: {error}")
             else:
+                self._record(log, response)
                 if response.status_code in _TRANSIENT_HTTP_STATUS:
                     last_error = ServerError(f"proxy {url} HTTP {response.status_code}")
                 elif response.status_code != 200:
@@ -480,6 +500,26 @@ class TushareProxyClient:
                 self._sleeper(_BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)])
         assert last_error is not None
         raise last_error
+
+    def _record(
+        self, log: list[dict[str, str]] | None, response: requests.Response
+    ) -> None:
+        """Keep the only after-the-fact handle on an un-attributable response.
+
+        Nothing in the body or headers names the answering upstream, so the
+        request id is what an operator can quote back to the proxy operator,
+        and the cache flags are the only clue whether the body was served
+        fresh or replayed.
+        """
+        if log is None:
+            return
+        headers = _lower_headers(response)
+        log.append(
+            {
+                "request_id": headers.get("x-request-id", ""),
+                "cache": _cache_label(headers),
+            }
+        )
 
     def _parse(self, label: str, body: object) -> pd.DataFrame:
         if isinstance(body, dict) and body.get("code") == 0:

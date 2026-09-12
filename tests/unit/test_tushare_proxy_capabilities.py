@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from stock_quant.data_sources.base import ContractError
+from stock_quant.data_sources.base import ContractError, ServerError
 from stock_quant.data_sources.tushare_proxy import TushareProxyClient
 
 BASE_URL = "https://proxy.example/tushare/pro"
@@ -270,3 +270,73 @@ def test_write_only_interfaces_are_never_read():
     with pytest.raises(ContractError):
         client.query("p_save", ts_code="000001.SZ")
     assert all("/pro/p_save" not in call["url"] for call in session.calls)
+
+
+def test_capability_checked_is_true_on_a_passed_live_preflight():
+    served = {"code": 0, "data": {"fields": ["ts_code"], "items": [["000333.SZ"]]}}
+    client, session, _ = _client(
+        [FakeResponse(body=_interface()), FakeResponse(body=served)]
+    )
+    client.query("suspend_d", ts_code="000333.SZ")
+    assert client.last_query_metadata["capability_checked"] is True
+    assert [call["url"] for call in session.calls] == [
+        f"{ROOT}/capabilities/suspend_d",
+        f"{BASE_URL}/suspend_d",
+    ]
+
+
+def test_query_records_request_ids_and_cache_layers():
+    headers = {"x-request-id": "abc-123", "x-cache": "HIT", "x-cache-layer": "redis"}
+    client, _, _ = _client([FakeResponse(body=_daily_body(), headers=headers)])
+    client.query(
+        "daily", ts_code="000001.SZ", start_date="20260901", end_date="20260912"
+    )
+    metadata = client.last_query_metadata
+    assert metadata["endpoint"] == "daily"
+    assert metadata["request_ids"] == ["abc-123"]
+    assert metadata["cache"] == ["HIT/redis"]
+    assert metadata["windows"] == [("20260901", "20260912")]
+    assert metadata["rows"] == 1
+
+
+def test_query_records_one_entry_per_outbound_window():
+    headers = {"x-request-id": "abc-123", "x-cache": "MISS"}
+    client, _, _ = _client([FakeResponse(body=_daily_body(), headers=headers)] * 3)
+    client.query(
+        "daily", ts_code="000001.SZ", start_date="20150101", end_date="20260828"
+    )
+    metadata = client.last_query_metadata
+    assert metadata["windows"] == [
+        ("20150101", "20191231"),
+        ("20200101", "20241231"),
+        ("20250101", "20260828"),
+    ]
+    assert metadata["request_ids"] == ["abc-123", "abc-123", "abc-123"]
+    assert metadata["cache"] == ["MISS", "MISS", "MISS"]
+
+
+def test_named_reads_never_write_query_metadata():
+    client, _, _ = _client([FakeResponse(body=_daily_body())])
+    assert client.last_query_metadata is None
+    client.daily(ts_code="000001.SZ", start_date="20260901", end_date="20260912")
+    assert client.last_query_metadata is None
+
+
+def test_failed_query_leaves_the_previous_metadata_untouched():
+    headers = {"x-request-id": "req-1", "x-cache": "MISS"}
+    client, _, _ = _client(
+        [
+            FakeResponse(
+                body=_daily_body(), headers={"x-request-id": "ok", "x-cache": "HIT"}
+            ),
+            FakeResponse(status_code=500, text="oops", headers=headers),
+        ],
+        max_retries=0,
+    )
+    client.query(
+        "daily", ts_code="000001.SZ", start_date="20260901", end_date="20260912"
+    )
+    good = client.last_query_metadata
+    with pytest.raises(ServerError):
+        client.query("suspend_d", verify_capability="none", ts_code="000333.SZ")
+    assert client.last_query_metadata is good
