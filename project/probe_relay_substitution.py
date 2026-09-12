@@ -13,11 +13,18 @@ with nothing:
 
 * ``daily`` for a code that does not exist,
 * ``daily`` for a real code over a window that ends before it listed,
-* ``index_daily`` for an index that does not exist,
 * an unknown ``api_name``, whose error text must match verbatim.
 
-No ``trade_cal`` case: the official token is limited to one call per hour on
-it, so it cannot be probed reliably.
+Two cases are deliberately absent.  ``trade_cal`` is limited to one official
+call per hour, and ``index_daily`` carries the same limit on a free official
+token; in the live run of 2026-09-12 that limit -- not the relay -- was what
+kept ``index_daily`` from producing evidence, on a gate that has to be
+repeatable before it is believable.  A hard gate that a quota turns into a
+random blocker is worse than no case at all.  ``index_daily``'s
+empty-result and substitution behaviour moves to the stage 3 transport
+fidelity script, where the official quota can be spent deliberately; it must
+not block stage 0.  Add no case whose official answer depends on a quota this
+token cannot sustain.
 
 Every verdict is a pure function of the two answers, so the classifiers are
 unit tested without a network.  This script deliberately does NOT use the
@@ -115,12 +122,6 @@ CASES: tuple[ProbeCase, ...] = (
         "window_before_listing",
         "daily",
         {"ts_code": "000001.SZ", "start_date": "19900101", "end_date": "19901231"},
-        "empty",
-    ),
-    ProbeCase(
-        "nonexistent_index",
-        "index_daily",
-        {"ts_code": "399999.SZ", "start_date": "20260801", "end_date": "20260828"},
         "empty",
     ),
     ProbeCase("unknown_api_name", _NOT_A_REAL_API, {}, "error"),
