@@ -3146,6 +3146,57 @@ class RawSnapshotBinding(BaseModel):
     transport_id: str | None = None
 ```
 
+**同一文件里 `_canonical_payload` 必须同步（补齐，2026-09-12）**：光给
+`RawSnapshotBinding` 加字段会让**所有已发布的 acceptance 记录读不出来**。
+`_canonical_payload` 取的是 `record.model_dump(mode="json")`，pydantic 会把带默认值的字段
+一并吐出来 —— 一条从没有过该键的旧证据行，现在 dump 出 `"transport_id": null`，
+`acceptance_id` 因此改变，而 `AcceptanceRegistry.get` 会重算并比对
+（`registry.py` 的 `compute_acceptance_id(record) != acceptance_id`），于是旧记录一律
+`AcceptanceIntegrityError`。这与本任务"不破坏向后兼容"的要求直接冲突，所以
+`_canonical_payload` 里对证据行做一次**只针对这一个字段**的处理：`transport_id` 为
+`None` 时把该键从行里去掉（`None` 的含义是"该记录早于本字段"，因为 Task 5 给这类证据写的
+是 `RESERVED_TRANSPORT_ID = "unknown"` 哨兵值），有真实取值时保留。**不要**用
+`exclude_none=True` 一把梭 —— 别的字段合法地取 `None`，一并丢掉会在别处改变 identity。
+
+```python
+def _evidence_row_payload(row: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """One evidence row as it enters identity.
+
+    A ``None`` ``transport_id`` is dropped rather than serialised: that value
+    means the record predates the field, and emitting the key would change
+    ``acceptance_id`` for every acceptance published before transport tracking
+    existed -- which is exactly the audit trail this field was added to serve.
+    A row that *has* a transport keeps it, so the field still separates two
+    otherwise identical records.
+    """
+    if row.get("transport_id") is None:
+        return {key: value for key, value in row.items() if key != "transport_id"}
+    return row
+```
+
+并把排序键补成五元组（`transport_id` 为 `None` 时按 `""` 排），这样 canonical 顺序不再
+依赖生产者的输入顺序：
+
+```python
+    payload["raw_snapshot_evidence"] = sorted(
+        (_evidence_row_payload(row) for row in payload["raw_snapshot_evidence"]),
+        key=lambda row: (
+            row["source"],
+            row["endpoint"],
+            row.get("transport_id") or "",
+            row["request_key"],
+            row["file_sha256"],
+        ),
+    )
+```
+
+旧记录不受排序键变化影响：它们的每一行都是 `None`，第五个分量全为 `""`，原四元组的并列
+关系不变，`sorted` 稳定，顺序与前一致。
+
+**并用一条测试把这件事钉住**：断言"改动前算出的 `acceptance_id` 现在仍然可验证"。
+测试里要用**独立的旧算法复现**（自己按旧形状重建 payload 再 sha256），不能调用
+`_canonical_payload` —— 否则两边一起变，测试什么也没钉住。
+
 - [ ] **Step 6: 跑测试确认通过**
 
 ```bash
