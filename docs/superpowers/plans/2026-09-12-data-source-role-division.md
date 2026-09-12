@@ -15,7 +15,11 @@
 - 门禁是 `ruff check` + **改动行**格式检查，不跑仓库级 `ruff format --check`（本仓库在已安装的 ruff 0.16.5 下从来不是 format-clean）。
 - Python 解释器：`/home/ji/miniconda3/envs/py310/bin/python`。
 - 绝不打印 token 值。`.env` 被 gitignore，`.env.example` 被跟踪 —— **绝不把真实密钥写进 `.env.example`**。
-- 历史泄露的 `TUSHARE_TOKEN` 已被视为失陷，轮换仍未完成；任何输出都不得包含 token 字面量。
+- 历史泄露的 `TUSHARE_TOKEN` 已于 2026-09-12 轮换（owner 确认），但新值同样敏感；任何输出都不得包含 token 字面量。
+- **传输角色的唯一权威说法**（`.env.example`、文档串、日志文案都以此为准）：
+  relay 是 `data update` 的**正常主传输**；proxy **只供开发/诊断**，永不被自动选中、published 路径上被拒绝；
+  official **只能 break-glass 进**（`TUSHARE_TRANSPORT=official` + `TUSHARE_ALLOW_OFFICIAL_PUBLISH=1` 两个变量同时具备）。
+  任何"relay 不参与管线"或"配置了 proxy 就自动走 proxy"的说法都是改造前的旧话，见到就要改。
 - `DATASET_BUILD_CONTRACT_VERSION` **保持 `1`，不 bump**。理由：`src/stock_quant/research/acceptance/checks.py:399-401` 对
   `pipeline_contract_version` 做的是**相等判定**，bump 会让所有已发布数据集的验收直接失败。新字段是**加性可选**的，旧记录继续可解析。
 - `_CONFIGURED_SOURCES` 不改、不新增源位；`_REQUIRED_ROLE` 本轮**不改**（那属于阶段 4）。
@@ -81,6 +85,7 @@
 | `tests/integration/test_source_contracts.py` | SDK 失败用例显式声明 transport |
 | `tests/external/test_live_source_contracts.py` | 显式声明 transport（诊断模式） |
 | `.env` | relay 两项去掉 `=` 两侧空格（§1.3 顺带修正；`.env` 不进 git） |
+| `.env.example` | relay「非管线传输」与 proxy「自动选中」两段注释改为与 design 一致（被 git 跟踪的模板，只放空占位，**绝不放真实密钥**） |
 
 **两个不需要改的既有位置**（已确认，避免实施者多做）：
 
@@ -662,6 +667,7 @@ Expected: 打印四行判定，退出码 `0`，并写出
 - Modify: `src/stock_quant/data_sources/base.py`（新增 `host_of`）
 - Modify: `src/stock_quant/data_sources/tushare_relay.py`（`host` 复用 `host_of`；新增 `.api`）
 - Modify: `src/stock_quant/data_sources/tushare_proxy.py`（`host` 复用 `host_of`）
+- Modify: `.env.example`（relay / proxy 两段注释改为与 design 一致）
 - Test: `tests/unit/test_tushare_transport.py`
 - Test: `tests/unit/test_tushare_relay.py`（追加一条）
 
@@ -1019,6 +1025,52 @@ def test_api_exposes_the_session_that_was_rewritten():
 
 （该文件已有的 `FakeSdk` 有 `.api` 属性；若其命名不同，按实际属性名调整这一条断言。）
 
+- [ ] **Step 4b: 更正 `.env.example` 的两段注释（同一句错话的第二处）**
+
+`.env.example` 现在有两个段落描述的是**改造前**的传输规则，改完代码后会与事实相反：
+
+- relay 段写着「Deliberately NOT a pipeline transport: the pipeline never reads these」—— 与上一步刚改掉的 `tushare_relay.py` 文档串是同一句错话；
+- proxy 段写着「When both are set, the tushare adapter routes through it and `TUSHARE_TOKEN` becomes unnecessary」—— 自动选中已经取消。
+
+把该文件整体替换为（`TUSHARE_TOKEN` 与 `BASIC_RDS_*` 两段保持原样，只是位置随之移动）：
+
+```dotenv
+# The relay is the normal tushare transport for `data update`.  A published
+# build must name its transport explicitly (TUSHARE_TRANSPORT=relay), and the
+# relay is the only kind it may name.  See
+# src/stock_quant/data_sources/tushare_transport.py.
+TUSHARE_RELAY_URL=
+TUSHARE_RELAY_KEY=
+
+TUSHARE_TOKEN=
+
+# Shared Tushare-compatible GET proxy (datahubco / mobcvb aggregation front).
+# Development and diagnostic use only: it is never selected automatically and
+# is refused for a published build.  Paste the personal X-API-Key value below.
+TUSHARE_PROXY_URL=https://pcd.mobcvb.cn/tushare/pro
+TUSHARE_PROXY_KEY=
+
+# Emergency-only override.  Sending a published build back to the official API
+# requires BOTH variables, so it cannot happen by accident.  See the break-glass
+# rules in src/stock_quant/data_sources/tushare_transport.py.
+# TUSHARE_TRANSPORT=official
+# TUSHARE_ALLOW_OFFICIAL_PUBLISH=1
+
+# datahubco RDS.  Consumed by the workbuddy project, NOT by this repository -
+# no code here reads it.  Kept in the template so the URL is not lost.
+BASIC_RDS_URL=http://datahubco.com/app-api/openapi/v1/tushare/stock-basic
+BASIC_RDS_KEY=
+```
+
+三条必须同时成立，缺一条这段注释就还是错的：
+
+1. **relay 是 `data update` 的正常主传输**，不是"离线脚本专用"；
+2. **pipeline 读的是进程环境**，本仓库不会自动加载 `.env` —— operator 必须自己导出
+   （Task 6 Step 4 用的就是 `set -a; . ./.env; set +a`）；
+3. **proxy 不再被自动选中，且 published 路径上被拒绝；official 只能 break-glass 进**。
+
+**绝不要把任何真实密钥写进这个文件** —— 它是被 git 跟踪的模板，`.env` 才是 gitignored 的那份。
+
 - [ ] **Step 5: 实现 `tushare_transport.py`**
 
 创建 `src/stock_quant/data_sources/tushare_transport.py`：
@@ -1317,9 +1369,12 @@ git add src/stock_quant/data_sources/tushare_transport.py \
         src/stock_quant/data_sources/base.py \
         src/stock_quant/data_sources/tushare_relay.py \
         src/stock_quant/data_sources/tushare_proxy.py \
+        .env.example \
         tests/unit/test_tushare_transport.py tests/unit/test_tushare_relay.py
 git commit -m "feat(provenance): resolve the tushare transport explicitly"
 ```
+
+提交前扫一眼 `.env.example` 的新增行，确认 `TUSHARE_RELAY_KEY=` / `TUSHARE_PROXY_KEY=` 右侧仍是空的 —— 它是被跟踪的文件，写进真实密钥就等于提交泄漏。
 
 ---
 
