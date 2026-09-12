@@ -27,8 +27,8 @@
   provider 分布：`tushare` **224** / `external` **58** / `aggregate` **8** /
   `clickhouse` **4** / `portfolio` **4**。
 - `GET /tushare/capabilities/{api_name}` 是**轻量单接口**能力查询（实测
-  0.7–3.0s，比整表轻）。整表 `capabilities()` 反而更慢（30–190s，且会
-  mid-body stall，见 §9）。
+  0.7–3.0s，比整表轻）。整表 `capabilities()` 反而更重：响应会 mid-body
+  stall（实测 114688/134194 字节处断，见 §9）。
 - `GET /tushare/upstreams/probe/{api_name}` 返回该接口**自报**的上游链
   （是诊断，不是归因——见 §2）。
 - `GET /tushare/pro/{api_name}` 同时暴露 **GET / POST / DELETE**：`p_save`
@@ -188,8 +188,6 @@ RDS 在**速度**与**名簿字段**上确实补得了 promax；在**溯源**上
 若接入应作为前置条件单独立项）。
 
 ## 9. 残留风险
-
-（照抄 spec「已知残留风险」五条。）
 
 - **上游不可溯源（最重）。** 见 §2。本方案只能把 `x-request-id` 记进
   provenance 以备申诉，**不能**让响应自证出身。任何需要"证明这条数据来自某
