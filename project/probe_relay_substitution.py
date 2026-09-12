@@ -128,13 +128,25 @@ CASES: tuple[ProbeCase, ...] = (
 
 
 def _load_env(path: Path) -> None:
-    """Load simple KEY=VALUE lines without evaluating shell code."""
+    """Load simple KEY=VALUE lines without evaluating shell code.
+
+    The file wins over an ambient value, and a disagreement is announced by
+    variable *name* only.  ``os.environ.setdefault`` was wrong here: the probe
+    is pointed at this file explicitly, so a stale exported ``TUSHARE_TOKEN``
+    silently outvoted it.  The run then reported the official server refusing
+    a credential, and the operator -- who had already replaced it in this very
+    file -- went looking in the wrong place.
+    """
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.removeprefix("export ").split("=", maxsplit=1)
-        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+        key, value = key.strip(), value.strip().strip("\"'")
+        previous = os.environ.get(key)
+        if previous is not None and previous != value:
+            print(f"environment: {key} is set and differs from {path}; the file wins")
+        os.environ[key] = value
 
 
 #: Every credential the probe holds.  A relay is free to echo the token it was

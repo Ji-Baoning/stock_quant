@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from probe_relay_substitution import (  # noqa: E402
     SUBSTITUTION,
     ProbeCase,
     ProbeResult,
+    _load_env,
     blocking,
     classify_empty_probe,
     classify_error_probe,
@@ -295,3 +297,34 @@ def test_report_scrubs_a_result_handed_to_it_directly():
     text = report([result], secrets=(SECRET,))
     assert SECRET not in text
     assert "<redacted>" in text
+
+
+def test_env_file_overrides_a_stale_ambient_value(tmp_path, monkeypatch, capsys):
+    """The file the operator named is the one that counts.
+
+    A stale exported TUSHARE_TOKEN outvoted .env once already: the probe then
+    blamed the official server for a credential the operator had replaced.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("TUSHARE_TOKEN=fresh-value\n", encoding="utf-8")
+    monkeypatch.setenv("TUSHARE_TOKEN", "stale-value")
+
+    _load_env(env_file)
+
+    out = capsys.readouterr().out
+    assert os.environ["TUSHARE_TOKEN"] == "fresh-value"
+    assert "TUSHARE_TOKEN" in out  # named, so the operator can find it
+    assert "stale-value" not in out  # values still never printed
+    assert "fresh-value" not in out
+
+
+def test_env_file_is_silent_when_the_ambient_value_agrees(
+    tmp_path, monkeypatch, capsys
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text("TUSHARE_TOKEN=same-value\n", encoding="utf-8")
+    monkeypatch.setenv("TUSHARE_TOKEN", "same-value")
+
+    _load_env(env_file)
+
+    assert capsys.readouterr().out == ""
