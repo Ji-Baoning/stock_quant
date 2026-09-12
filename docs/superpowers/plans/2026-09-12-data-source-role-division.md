@@ -2063,6 +2063,33 @@ def injected_transport(client: Any) -> TushareTransport:
     )
 ```
 
+**`fetch` 两个方法体同时要产出 `transport_id`（补齐，2026-09-12）**：本任务的测试
+（`test_source_uses_the_resolved_transport_label_and_id`）断言
+`result.metadata["transport_id"]`，但 Task 4 才让 `request_metadata` 接受 `transport_id`
+参数 —— 所以这一步先在本任务内直接补键，Task 4 再把它们收编进 `request_metadata`。
+`_fetch_symbol_series` 与 `_fetch_stock_basic` 各自把原来的
+`metadata=request_metadata(...)` 内联调用改为先赋值、再补一行：
+
+```python
+        metadata = request_metadata(
+            request,
+            self._supplier_endpoint(request.endpoint),
+            self._sdk_version,
+            request_timestamp=request_timestamp,
+            response_timestamp=response_timestamp,
+        )
+        metadata["transport_id"] = self._transport.transport_id
+        return FetchResult(
+            source=self.name,
+            endpoint=request.endpoint,
+            request_key=request_key(request),
+            frame=frame,
+            metadata=metadata,
+        )
+```
+
+（`_fetch_stock_basic` 那一处参数是 `self._supplier_endpoint("stock_basic")`。）
+
 - [ ] **Step 4: `data update` 打开传输日志**
 
 `src/stock_quant/cli.py`：导入区加 `import logging`（按 ruff 排序放在 `import json` 之前）。在 `data_update` 函数体第一行插入 `_enable_transport_logging()`，并在 `data_update` 定义之前加入：
@@ -2455,17 +2482,27 @@ def request_metadata(
 
 - [ ] **Step 4: 三个适配器传值**
 
-`src/stock_quant/data_sources/tushare.py` —— `_fetch_symbol_series` 与 `_fetch_stock_basic` 两处调用各加一行（其余参数不动）：
+`src/stock_quant/data_sources/tushare.py` —— `_fetch_symbol_series` 与 `_fetch_stock_basic`
+两处：在 `request_metadata(...)` 调用里加 `transport_id=` 一行，**并删掉 Task 3 补在它
+后面的那行 `metadata["transport_id"] = self._transport.transport_id`**（收编之后再留着
+就是重复赋值；留着也不会报错，但会让"值从哪来"有两个答案）。最终形状：
 
 ```python
-            metadata=request_metadata(
-                request,
-                self._supplier_endpoint(request.endpoint),
-                self._sdk_version,
-                transport_id=self._transport.transport_id,
-                request_timestamp=request_timestamp,
-                response_timestamp=response_timestamp,
-            ),
+        metadata = request_metadata(
+            request,
+            self._supplier_endpoint(request.endpoint),
+            self._sdk_version,
+            transport_id=self._transport.transport_id,
+            request_timestamp=request_timestamp,
+            response_timestamp=response_timestamp,
+        )
+        return FetchResult(
+            source=self.name,
+            endpoint=request.endpoint,
+            request_key=request_key(request),
+            frame=frame,
+            metadata=metadata,
+        )
 ```
 
 （`_fetch_stock_basic` 那一处把 `self._supplier_endpoint(request.endpoint)` 换成
