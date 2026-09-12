@@ -15,6 +15,8 @@ from audit_raw_provenance import (  # noqa: E402
     UNKNOWN,
     SkippedManifest,
     SnapshotRecord,
+    exit_code,
+    main,
     report,
     scan,
     summarise,
@@ -162,3 +164,125 @@ def test_report_names_every_manifest_it_could_not_read():
     assert "1 个 `manifest.json` 未能读取" in text
     assert "/store/data/raw/x/manifest.json" in text
     assert "not valid JSON" in text
+
+
+def test_report_declares_incompleteness_only_when_it_is_incomplete():
+    """A complete audit must not be able to look partial, or vice versa."""
+    skipped = [
+        SkippedManifest(
+            path=Path("/store/data/raw/x/manifest.json"), reason="not valid JSON"
+        )
+    ]
+    incomplete = report([], skipped=skipped)
+    assert "本次审计不完整" in incomplete
+    # In 结论, not only in the trailing listing: a reader who stops at the
+    # conclusion still has to learn the inventory is partial.
+    assert incomplete.index("本次审计不完整") < incomplete.index(
+        "## 未能读取的 manifest"
+    )
+
+    complete = report(
+        [SnapshotRecord("tushare", "daily", "tushare.pro.daily", "1.4.29", None, "e")]
+    )
+    assert "本次审计不完整" not in complete
+
+
+def _scan_exit_code(root: Path) -> int:
+    """The exit status ``main`` would return for a store, driving ``scan``."""
+    result = scan(root)
+    return exit_code(result.records, result.skipped)
+
+
+def test_exit_code_is_zero_for_a_store_whose_manifests_all_read(tmp_path):
+    _write_manifest(
+        tmp_path / "data" / "raw",
+        "tushare",
+        "daily",
+        "rk",
+        "aa" * 32,
+        manifest=TUSHARE_MANIFEST,
+    )
+    assert _scan_exit_code(tmp_path) == 0
+
+
+def test_exit_code_is_one_for_an_empty_or_absent_store(tmp_path):
+    # Store absent entirely...
+    assert _scan_exit_code(tmp_path) == 1
+    # ...and store present but with nothing under it: both are "found nothing".
+    (tmp_path / "data" / "raw").mkdir(parents=True)
+    assert _scan_exit_code(tmp_path) == 1
+
+
+def test_exit_code_is_two_when_every_manifest_is_unreadable(tmp_path):
+    raw = tmp_path / "data" / "raw"
+    for name in ("aa" * 32, "bb" * 32):
+        broken = raw / "tushare" / "daily" / "rk" / name
+        broken.mkdir(parents=True)
+        (broken / "manifest.json").write_text("{not json", encoding="utf-8")
+    # The all-unreadable store is *not* an empty store: 2, not 1.
+    assert _scan_exit_code(tmp_path) == 2
+
+
+def test_exit_code_is_two_when_only_some_manifests_are_readable(tmp_path):
+    """Partial readability must not masquerade as a complete inventory."""
+    raw = tmp_path / "data" / "raw"
+    _write_manifest(raw, "tushare", "daily", "rk", "aa" * 32, manifest=TUSHARE_MANIFEST)
+    broken = raw / "tushare" / "daily" / "rk" / ("bb" * 32)
+    broken.mkdir(parents=True)
+    (broken / "manifest.json").write_text("{not json", encoding="utf-8")
+    assert _scan_exit_code(tmp_path) == 2
+
+
+def test_main_writes_an_incomplete_report_and_returns_2(tmp_path, monkeypatch, capsys):
+    """The load-bearing claim: exit 2 still writes the report, paths and all."""
+    broken = tmp_path / "data" / "raw" / "tushare" / "daily" / "rk" / ("cc" * 32)
+    broken.mkdir(parents=True)
+    (broken / "manifest.json").write_text("{not json", encoding="utf-8")
+    out = tmp_path / "out.md"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_raw_provenance.py",
+            "--root",
+            str(tmp_path),
+            "--report",
+            str(out),
+        ],
+    )
+
+    code = main()
+
+    assert code == 2
+    assert out.is_file()
+    text = out.read_text(encoding="utf-8")
+    assert "本次审计不完整" in text
+    assert str(broken / "manifest.json") in text
+    assert "not valid JSON" in text
+    assert f"report: {out}" in capsys.readouterr().out
+
+
+def test_main_finds_nothing_prints_the_hint_and_writes_no_report(
+    tmp_path, monkeypatch, capsys
+):
+    """Exit 1 must not overwrite the committed report with a "0 snapshots" one."""
+    out = tmp_path / "out.md"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "audit_raw_provenance.py",
+            "--root",
+            str(tmp_path),
+            "--report",
+            str(out),
+        ],
+    )
+
+    code = main()
+
+    assert code == 1
+    assert not out.exists()
+    assert f"no snapshots found under {tmp_path / 'data' / 'raw'}" in (
+        capsys.readouterr().out
+    )

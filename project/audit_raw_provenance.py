@@ -28,7 +28,8 @@ Run from the repository root or the project directory:
     python project/audit_raw_provenance.py
     python project/audit_raw_provenance.py --no-report
 
-Exit codes: 0 = the report was produced; 1 = no snapshots were found.
+Exit codes: 0 = a complete audit (some manifest read, none skipped); 1 = no
+manifest was found at all; 2 = the audit is incomplete (a manifest was skipped).
 """
 
 from __future__ import annotations
@@ -233,6 +234,15 @@ def report(
         )
     unknown_rows = [row for row in summary.sdk_rows if row["provenance"] == UNKNOWN]
     lines += ["", "## 结论", ""]
+    if skipped:
+        # Stated here, not only in the trailing section: a reader who stops at
+        # the conclusion must still learn that the inventory is partial.
+        lines += [
+            f"**本次审计不完整**：{len(skipped)} 个 `manifest.json` 未能读取，"
+            "下面的总量与分布只覆盖读到的那部分。未读取的路径与原因见文末"
+            "「未能读取的 manifest」。",
+            "",
+        ]
     if unknown_rows:
         total_unknown = sum(int(row["count"]) for row in unknown_rows)
         lines.append(
@@ -257,6 +267,24 @@ def report(
     return "\n".join(lines)
 
 
+def exit_code(
+    records: Sequence[SnapshotRecord], skipped: Sequence[SkippedManifest]
+) -> int:
+    """The process status for a scan result.
+
+    ``1`` means *no manifest was found at all*, not "no record was read":
+    every manifest ``scan`` finds becomes either a record or a skipped entry,
+    so ``records or skipped`` being false is exactly "found nothing" -- an
+    empty store, or a ``--root`` that points somewhere else.  A non-empty
+    ``skipped`` is an incomplete audit whether or not records were also read,
+    so it outranks the success case; only a non-empty ``records`` with nothing
+    skipped is a complete inventory.
+    """
+    if skipped:
+        return 2
+    return 0 if records else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=PROJECT_ROOT)
@@ -265,16 +293,23 @@ def main() -> int:
     args = parser.parse_args()
 
     result = scan(args.root)
-    if not result.records:
-        print(f"no snapshots found under {args.root / 'data' / 'raw'}")
-        return 1
+    # Built unconditionally: even an all-unreadable store has something to say,
+    # and its report lists the paths and reasons instead of vanishing.
     text = report(result.records, skipped=result.skipped)
-    sys.stdout.write(text)
-    if not args.no_report:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(text, encoding="utf-8")
-        print(f"report: {args.report}")
-    return 0
+    if result.records or result.skipped:
+        sys.stdout.write(text)
+        if not args.no_report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(text, encoding="utf-8")
+            print(f"report: {args.report}")
+    else:
+        # Nothing found at all.  The default report path is a *committed*
+        # ``docs/operations/raw-provenance-audit-<today>.md``, so a wrong
+        # ``--root`` must not overwrite that audit with a "0 snapshots" one --
+        # hence no report file is written here, and this line is the whole
+        # behaviour.
+        print(f"no snapshots found under {args.root / 'data' / 'raw'}")
+    return exit_code(result.records, result.skipped)
 
 
 if __name__ == "__main__":

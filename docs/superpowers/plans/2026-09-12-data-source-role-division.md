@@ -3456,7 +3456,7 @@ Expected: 打印的标签全部以 `tushare_relay.` 开头，**无一为 `tushar
 
 **Interfaces:**
 - Consumes: `<store_root>/data/raw/**/manifest.json`（四段旧布局与五段新布局都要能读）
-- Produces: `UNKNOWN`、`INSTALLED`、`SnapshotRecord`、`SkippedManifest`、`Scan`、`Summary`、`scan(store_root) -> Scan`、`local_sdk_versions() -> dict[str, set[str]]`、`summarise(records, *, local_sdk_versions) -> Summary`、`report(records, *, skipped=(), today=None) -> str`
+- Produces: `UNKNOWN`、`INSTALLED`、`SnapshotRecord`、`SkippedManifest`、`Scan`、`Summary`、`scan(store_root) -> Scan`、`local_sdk_versions() -> dict[str, set[str]]`、`summarise(records, *, local_sdk_versions) -> Summary`、`report(records, *, skipped=(), today=None) -> str`、`exit_code(records, skipped) -> int`（三分退出码，owner 裁决 2026-09-12，见下）
 - **`store_root` 是数据仓库根，也就是 `project/`**，不是仓库根：真实数据在 `project/data/raw`。`--root` 默认 `project`，与 `cli.py` 的 `--root project` 同一约定。
 - `scan` 不静默丢文件：读不了或不像 manifest 的 `manifest.json` 进 `Scan.skipped`，报告必须把它们列出来，否则总量会假装完整。
 
@@ -3669,7 +3669,8 @@ Run from the repository root or the project directory:
     python project/audit_raw_provenance.py
     python project/audit_raw_provenance.py --no-report
 
-Exit codes: 0 = the report was produced; 1 = no snapshots were found.
+Exit codes: 0 = a complete audit (some manifest read, none skipped); 1 = no
+manifest was found at all; 2 = the audit is incomplete (a manifest was skipped).
 """
 
 from __future__ import annotations
@@ -3874,6 +3875,15 @@ def report(
         )
     unknown_rows = [row for row in summary.sdk_rows if row["provenance"] == UNKNOWN]
     lines += ["", "## 结论", ""]
+    if skipped:
+        # Stated here, not only in the trailing section: a reader who stops at
+        # the conclusion must still learn that the inventory is partial.
+        lines += [
+            f"**本次审计不完整**：{len(skipped)} 个 `manifest.json` 未能读取，"
+            "下面的总量与分布只覆盖读到的那部分。未读取的路径与原因见文末"
+            "「未能读取的 manifest」。",
+            "",
+        ]
     if unknown_rows:
         total_unknown = sum(int(row["count"]) for row in unknown_rows)
         lines.append(
@@ -3898,6 +3908,24 @@ def report(
     return "\n".join(lines)
 
 
+def exit_code(
+    records: Sequence[SnapshotRecord], skipped: Sequence[SkippedManifest]
+) -> int:
+    """The process status for a scan result.
+
+    ``1`` means *no manifest was found at all*, not "no record was read":
+    every manifest ``scan`` finds becomes either a record or a skipped entry,
+    so ``records or skipped`` being false is exactly "found nothing" -- an
+    empty store, or a ``--root`` that points somewhere else.  A non-empty
+    ``skipped`` is an incomplete audit whether or not records were also read,
+    so it outranks the success case; only a non-empty ``records`` with nothing
+    skipped is a complete inventory.
+    """
+    if skipped:
+        return 2
+    return 0 if records else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=PROJECT_ROOT)
@@ -3906,21 +3934,50 @@ def main() -> int:
     args = parser.parse_args()
 
     result = scan(args.root)
-    if not result.records:
-        print(f"no snapshots found under {args.root / 'data' / 'raw'}")
-        return 1
+    # Built unconditionally: even an all-unreadable store has something to say,
+    # and its report lists the paths and reasons instead of vanishing.
     text = report(result.records, skipped=result.skipped)
-    sys.stdout.write(text)
-    if not args.no_report:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(text, encoding="utf-8")
-        print(f"report: {args.report}")
-    return 0
+    if result.records or result.skipped:
+        sys.stdout.write(text)
+        if not args.no_report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(text, encoding="utf-8")
+            print(f"report: {args.report}")
+    else:
+        # Nothing found at all.  The default report path is a *committed*
+        # ``docs/operations/raw-provenance-audit-<today>.md``, so a wrong
+        # ``--root`` must not overwrite that audit with a "0 snapshots" one --
+        # hence no report file is written here, and this line is the whole
+        # behaviour.
+        print(f"no snapshots found under {args.root / 'data' / 'raw'}")
+    return exit_code(result.records, result.skipped)
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
 ```
+
+**退出语义三分（owner 裁决，2026-09-12）**：原 `main()`（本计划初版的正文，逐字）在
+`not result.records` 时直接 `return 1` 并打印 `no snapshots found ...`，于是"所有 manifest
+都读不出来"的 store（`records == []` 但 `skipped` 非空）与"真的空 store / `--root` 指错"
+输出一模一样、退出码也一样，`skipped` 被整条吞掉；反过来，"部分可读"的 store 又 `exit 0`，
+把不完整的盘点说成完整的。owner 于 2026-09-12 裁决改为三分退出码，`main()` 先出报告、
+再按 `records`/`skipped` 定码：
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 至少一份 manifest 成功读取，且 `skipped` 为空 —— 审计完整 |
+| `1` | 没找到任何 manifest（`records`、`skipped` 都为空）—— store 为空或 `--root` 指错 |
+| `2` | 存在 unreadable / malformed manifest —— 无论是否还读到其他记录，审计都不完整 |
+
+判别码 1 的是"**没找到** manifest"而非"没读到 record"：`scan` 发现的每一份 manifest 必然
+落进 `records` 或 `skipped` 之一，所以 `records or skipped` 为假恰好等价于"什么都没找到"。
+`skipped` 非空时照旧写出报告，报告在 `## 结论` 里写明 `本次审计不完整`（不能只写在文末的
+「未能读取的 manifest」一节），并照旧列出未读取的路径与原因；退出码 1 那条路径**不写报告
+文件**——默认路径是已提交的 `docs/operations/raw-provenance-audit-<today>.md`，`--root`
+指错不能拿一份"0 份快照"的报告把它盖掉。判定逻辑抽成纯函数 `exit_code(records, skipped)`，
+由 `main()` 调用，不重推规则；`tests/unit/test_audit_raw_provenance.py` 相应补上四条退出路径
+（各驱动真实文件系统与 `tmp_path`）以及报告文本双向契约的用例。上面的模块正文已按此定稿。
 
 - [ ] **Step 4: 跑测试确认通过**
 
