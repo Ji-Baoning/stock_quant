@@ -29,12 +29,17 @@ Run from the repository root or the project directory:
     python project/probe_relay_substitution.py --no-report
 
 Exit codes: 0 = every case agreed (the stage 1 gate is clear); 1 = the relay
-substituted an answer, or an error string diverged -- **do not start stage 1**;
-2 = the gate could not be opened, either because the probe could not run (relay
-or official credentials missing) or because some case produced no evidence
-(the official side rate-limited or unreachable).  Only 0 opens stage 1: this is
-a hard gate, so "unanswered" must never read as "passed".  Token values are
-never printed.
+substituted an answer, or the official side gave its reference error and the
+relay's error text diverged from it -- **do not start stage 1**; 2 = the gate
+could not be opened, either because the probe could not run (relay or official
+credentials missing) or because some case produced no evidence -- the official
+side rate-limited, unreachable, or failed for a reason of its own (a rejected
+credential, say), which makes the pair say nothing about the relay.  Only 0
+opens stage 1: this is a hard gate, so "unanswered" must never read as
+"passed", and an official-side failure of our own making must never be
+recorded as the relay's fault.  Token values are never printed or written:
+answers are scrubbed at the boundary where results are built and where the
+report is rendered, because a relay may echo back the key it was handed.
 """
 
 from __future__ import annotations
@@ -73,6 +78,11 @@ EXIT_BLOCKED = 1
 EXIT_NOT_CONFIGURED = 2
 
 _NOT_A_REAL_API = "not_a_real_tushare_endpoint"
+
+#: The official server's own answer for an unknown ``api_name``, recorded
+#: verbatim from a live call.  This is the only official error that makes the
+#: ``unknown_api_name`` case meaningful -- see ``classify_error_probe``.
+REFERENCE_UNKNOWN_API_ERROR = "请指定正确的接口名"
 
 
 @dataclass(frozen=True)
@@ -128,8 +138,10 @@ def _load_env(path: Path) -> None:
 
 
 #: Every credential the probe holds.  A relay is free to echo the token it was
-#: handed back inside an error string -- jiaoch.top does exactly that -- so no
-#: answer text may be printed or written until it has been scrubbed for these.
+#: handed back inside an error string -- jiaoch.top does exactly that, verified
+#: live on 2026-09-12 -- so no answer text may be printed or written until it
+#: has been scrubbed for these.  If a future credential can be echoed by a
+#: remote side, add its name here.
 _SECRET_ENV_VARS = ("TUSHARE_TOKEN", "TUSHARE_RELAY_KEY", "TUSHARE_PROXY_KEY")
 _REDACTED = "<redacted>"
 
@@ -146,9 +158,9 @@ def configured_secrets() -> tuple[str, ...]:
 def redact_secrets(text: str, secrets: Sequence[str]) -> str:
     """Replace every configured credential value in ``text`` with a placeholder.
 
-    Token values must never reach stdout or the operations report, even when a
-    remote side volunteers them back (resolution: the probe prints hosts and SDK
-    versions only).
+    ``str.replace``, not a regex: credential values may contain regex
+    metacharacters, and the failure mode of a bad pattern (silently matching
+    nothing) is exactly the one that leaks.
     """
     for secret in secrets:
         text = text.replace(secret, _REDACTED)
@@ -156,7 +168,13 @@ def redact_secrets(text: str, secrets: Sequence[str]) -> str:
 
 
 def redact_result(result: ProbeResult, secrets: Sequence[str]) -> ProbeResult:
-    """A copy of ``result`` with any leaked credential removed from its answers."""
+    """A copy of ``result`` with any leaked credential removed from its answers.
+
+    Applied where results are *built* and where they are *rendered*, never only
+    at the print site: a guard that lives at one call site is one refactor away
+    from being dropped, and the thing it protects is a credential written to a
+    file that gets committed.
+    """
     return replace(
         result,
         official=redact_secrets(result.official, secrets),
@@ -176,8 +194,25 @@ def classify_empty_probe(official: pd.DataFrame, relay: pd.DataFrame) -> str:
 
 
 def classify_error_probe(official: str, relay: str) -> str:
-    """Compare two failure messages; the relay must not invent its own."""
-    return AGREE_ERROR if official.strip() == relay.strip() else DIFFERS
+    """Verdict for one "official legitimately errors here" question.
+
+    Only the reference answer is evidence.  An official side that failed for a
+    reason of its own -- a rejected credential, a rate limit, a network fault
+    -- answered a different question, so the pair says nothing about the relay
+    and must never be allowed to feed ``DIFFERS``.  Doing otherwise would
+    disqualify a viable relay on the strength of our own stale ``.env``, and
+    would return exit 1 (playbook: send the relay-as-main decision back for
+    review) where this contract reserves exit 2 for a gate that cannot open.
+    Fails closed: if tushare ever rewords the reference message, the case
+    becomes ``INCONCLUSIVE`` and the gate stays shut until a human refreshes
+    the constant from a live run.
+    """
+    if REFERENCE_UNKNOWN_API_ERROR not in official:
+        return INCONCLUSIVE
+    # The reference is the signature both sides must carry.  The SDK wraps the
+    # server text in its own exception, so agreement is "the relay's message
+    # carries the same reference", not equality of the wrappers around it.
+    return AGREE_ERROR if REFERENCE_UNKNOWN_API_ERROR in relay else DIFFERS
 
 
 def _read(client: Any, case: ProbeCase) -> tuple[str, Any]:
@@ -208,20 +243,35 @@ def _verdict(case: ProbeCase, official: tuple, relay: tuple) -> str:
 
 
 def run_probe(
-    official: Any, relay: Any, cases: Sequence[ProbeCase] = CASES
+    official: Any,
+    relay: Any,
+    cases: Sequence[ProbeCase] = CASES,
+    *,
+    secrets: Sequence[str] = (),
 ) -> list[ProbeResult]:
-    """Run every case against both transports and classify the pair."""
+    """Run every case against both transports and classify the pair.
+
+    Redaction happens here, at the point the results are *built*, not at the
+    call site that prints them: a ``ProbeResult`` is what gets written into the
+    operations report, so scrubbing at construction means no downstream
+    consumer -- present or future -- can leak a credential a remote side echoed
+    back.  The verdict is computed on the *raw* answers first, so redaction can
+    never change a judgement.
+    """
     results: list[ProbeResult] = []
     for case in cases:
         official_answer = _read(official, case)
         relay_answer = _read(relay, case)
         results.append(
-            ProbeResult(
-                name=case.name,
-                endpoint=case.endpoint,
-                official=_describe(official_answer),
-                relay=_describe(relay_answer),
-                verdict=_verdict(case, official_answer, relay_answer),
+            redact_result(
+                ProbeResult(
+                    name=case.name,
+                    endpoint=case.endpoint,
+                    official=_describe(official_answer),
+                    relay=_describe(relay_answer),
+                    verdict=_verdict(case, official_answer, relay_answer),
+                ),
+                secrets,
             )
         )
     return results
@@ -244,8 +294,19 @@ def cleared(results: Sequence[ProbeResult]) -> bool:
     return bool(results) and all(result.verdict in AGREE for result in results)
 
 
-def report(results: Sequence[ProbeResult], *, today: date | None = None) -> str:
-    """Render the probe as a committable operations report."""
+def report(
+    results: Sequence[ProbeResult],
+    *,
+    secrets: Sequence[str] = (),
+    today: date | None = None,
+) -> str:
+    """Render the probe as a committable operations report.
+
+    Scrubs again on the way out, independently of ``run_probe``: the report is
+    the artifact that gets committed, so it is the boundary that must not
+    depend on its caller having remembered.
+    """
+    results = [redact_result(result, secrets) for result in results]
     day = (today or date.today()).isoformat()
     if blocking(results):
         headline = "命中阻断条件，阶段 1 不得开始"
@@ -265,12 +326,19 @@ def report(results: Sequence[ProbeResult], *, today: date | None = None) -> str:
         "或**逐字相同的错误串**。",
         "",
         "- `SUBSTITUTION` = relay 在官方无数据处返回了非空；",
-        "- `ERROR_DIFFERS` = 错误串与官方不一致。",
+        "- `ERROR_DIFFERS` = 官方给出了它**本该给出**的参照错误，而 relay 的错误串"
+        "与它不一致。",
         "",
         "两者都属于 spec §3 ④ 的阻断条件。`INCONCLUSIVE` 表示官方侧本身没给出"
         "可用答案（限流、网络失败，或该问法官方本来就有数据），该用例**不构成"
         "证据** —— 既不算通过，也不算失败。**闸门只在全部用例都给出证据时才放行**，"
         "所以 `INCONCLUSIVE` 同样让阶段 1 保持关闭。",
+        "",
+        "注意 `unknown_api_name` 的判定：只有官方答出参照错误串"
+        f"（`{REFERENCE_UNKNOWN_API_ERROR}`）时，relay 的错误串才成为证据。官方若因"
+        "自身原因报错 —— 凭据被拒、限流、网络故障 —— 它答的是另一个问题，该用例"
+        "一律记 `INCONCLUSIVE`（退出码 2），**不得**记 `ERROR_DIFFERS`。否则一份"
+        "过期的 `.env` 就足以把可用的 relay 判成阻断条件。",
         "",
         "| 用例 | endpoint | 官方作答 | relay 作答 | 判定 |",
         "| --- | --- | --- | --- | --- |",
@@ -338,17 +406,14 @@ def main() -> int:
     print(f"official: sdk={getattr(ts, '__version__', 'unknown')}")
 
     secrets = configured_secrets()
-    results = [
-        redact_result(result, secrets)
-        for result in run_probe(official_client, relay_client)
-    ]
+    results = run_probe(official_client, relay_client, secrets=secrets)
     for result in results:
         print(
             f"{result.name:22s} {result.verdict:14s} "
             f"official={result.official} relay={result.relay}"
         )
 
-    text = report(results)
+    text = report(results, secrets=secrets)
     if not args.no_report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(text, encoding="utf-8")

@@ -17,13 +17,15 @@ from probe_relay_substitution import (  # noqa: E402
     BLOCKING,
     DIFFERS,
     INCONCLUSIVE,
+    REFERENCE_UNKNOWN_API_ERROR,
     SUBSTITUTION,
     ProbeCase,
+    ProbeResult,
     blocking,
     classify_empty_probe,
     classify_error_probe,
     cleared,
-    redact_secrets,
+    redact_result,
     report,
     run_probe,
 )
@@ -68,18 +70,41 @@ def test_classify_empty_probe_is_inconclusive_when_official_is_not_empty():
 
 
 def test_classify_error_probe_compares_the_message_verbatim():
-    assert classify_error_probe("请指定正确的接口名", "请指定正确的接口名 ") == (
-        AGREE_ERROR
+    assert (
+        classify_error_probe(
+            REFERENCE_UNKNOWN_API_ERROR, REFERENCE_UNKNOWN_API_ERROR + " "
+        )
+        == AGREE_ERROR
     )
-    assert classify_error_probe("请指定正确的接口名", "bad api") == DIFFERS
+    assert classify_error_probe(REFERENCE_UNKNOWN_API_ERROR, "bad api") == DIFFERS
 
 
-def test_redact_secrets_masks_a_credential_the_relay_echoed_back():
-    # jiaoch.top echoes the token it was handed inside its error string, so the
-    # probe must scrub every configured credential before printing an answer.
-    assert redact_secrets("token abc123 rejected", ("abc123",)) == (
-        "token <redacted> rejected"
+def test_a_reference_error_wrapped_in_other_text_still_counts():
+    # The SDK wraps server text in its own exception; the question we asked is
+    # still the question that was answered.
+    assert (
+        classify_error_probe(
+            f"Exception: {REFERENCE_UNKNOWN_API_ERROR}", REFERENCE_UNKNOWN_API_ERROR
+        )
+        == AGREE_ERROR
     )
+
+
+def test_an_official_side_that_failed_on_its_own_is_never_evidence():
+    """A rejected credential must not be read as relay misconduct.
+
+    The official API answers an unusable token with its own message, which of
+    course differs from the relay's -- that difference is ours, not the
+    relay's.  Feeding it to ``DIFFERS`` would send a viable relay back for
+    review on the strength of a stale `.env`, and would return exit 1 (whose
+    playbook is "relay 主供决策回炉") instead of the exit 2 this contract
+    reserves for a gate that cannot be opened.
+    """
+    for official in ("您的token不对，请确认。", "抱歉，您每分钟最多访问该接口1次"):
+        assert classify_error_probe(official, REFERENCE_UNKNOWN_API_ERROR) == (
+            INCONCLUSIVE
+        )
+        assert classify_error_probe(official, "internal error") == INCONCLUSIVE
 
 
 def test_blocking_is_the_two_disqualifying_verdicts():
@@ -132,8 +157,8 @@ def test_an_empty_case_list_never_clears_the_gate():
 
 
 def test_run_probe_compares_error_strings_for_error_cases():
-    official = FakeClient(errors={"nope": "请指定正确的接口名"})
-    agreeing = FakeClient(errors={"nope": "请指定正确的接口名"})
+    official = FakeClient(errors={"nope": REFERENCE_UNKNOWN_API_ERROR})
+    agreeing = FakeClient(errors={"nope": REFERENCE_UNKNOWN_API_ERROR})
     results = run_probe(official, agreeing, (ERROR_CASE,))
     assert results[0].verdict == AGREE_ERROR
     assert cleared(results) is True
@@ -144,10 +169,23 @@ def test_run_probe_compares_error_strings_for_error_cases():
     assert blocking(results) is True
 
 
+def test_a_stale_official_credential_cannot_produce_a_blocking_verdict():
+    # End to end through run_probe: this is the shape the live run actually
+    # produced, and it must land as "no evidence", not "relay disqualified".
+    results = run_probe(
+        FakeClient(errors={"nope": "您的token不对，请确认。"}),
+        FakeClient(errors={"nope": "token不对，您传过来的是XXX请确认"}),
+        (ERROR_CASE,),
+    )
+    assert results[0].verdict == INCONCLUSIVE
+    assert blocking(results) is False
+    assert cleared(results) is False
+
+
 def test_an_error_case_is_inconclusive_when_one_side_succeeds():
     results = run_probe(
         FakeClient(frames={"nope": pd.DataFrame({"x": [1]})}),
-        FakeClient(errors={"nope": "请指定正确的接口名"}),
+        FakeClient(errors={"nope": REFERENCE_UNKNOWN_API_ERROR}),
         (ERROR_CASE,),
     )
     assert results[0].verdict == INCONCLUSIVE
@@ -164,3 +202,52 @@ def test_one_inconclusive_case_keeps_the_whole_run_from_clearing():
     assert [result.verdict for result in results] == [AGREE_EMPTY, INCONCLUSIVE]
     assert blocking(results) is False
     assert cleared(results) is False
+
+
+SECRET = "relay-key-that-the-remote-echoes"
+
+
+def test_redact_result_scrubs_both_answers():
+    result = ProbeResult(
+        name="n",
+        endpoint="e",
+        official=f"error: rejected {SECRET}",
+        relay=f"error: you sent {SECRET}",
+        verdict=INCONCLUSIVE,
+    )
+    scrubbed = redact_result(result, (SECRET,))
+    assert SECRET not in scrubbed.official
+    assert SECRET not in scrubbed.relay
+    assert scrubbed.verdict == result.verdict  # scrubbing never re-judges
+
+
+def test_run_probe_never_returns_a_credential():
+    """The guard sits at the emission boundary, not at the print site.
+
+    A caller that forgets to scrub would otherwise write the credential to the
+    committable report -- which is exactly how the live run leaked it once.
+    """
+    echoing = FakeClient(errors={"nope": f"token不对，您传过来的是{SECRET}请确认"})
+    results = run_probe(
+        FakeClient(errors={"nope": "您的token不对，请确认。"}),
+        echoing,
+        (ERROR_CASE,),
+        secrets=(SECRET,),
+    )
+    assert SECRET not in results[0].relay
+    assert "<redacted>" in results[0].relay
+
+
+def test_report_scrubs_a_result_handed_to_it_directly():
+    # Defense in depth: `report` is public and can be called with results that
+    # never went through `run_probe`.
+    result = ProbeResult(
+        name="n",
+        endpoint="e",
+        official="ok: 0 rows",
+        relay=f"error: you sent {SECRET}",
+        verdict=INCONCLUSIVE,
+    )
+    text = report([result], secrets=(SECRET,))
+    assert SECRET not in text
+    assert "<redacted>" in text
