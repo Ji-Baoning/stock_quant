@@ -58,7 +58,7 @@
 | `src/stock_quant/data_sources/tushare.py` | 持描述符、不再 `isinstance` 猜来源；产出 `transport_id` |
 | `src/stock_quant/data_sources/tushare_relay.py` | 公开 `.api`；`host` 复用 `host_of` |
 | `src/stock_quant/data_sources/tushare_proxy.py` | `host` 复用 `host_of`（仅此一处） |
-| `src/stock_quant/data_sources/akshare.py` | `_UPSTREAM_VENDOR` 表；`transport_id` = 回退链实际胜出者 |
+| `src/stock_quant/data_sources/akshare.py` | `_UPSTREAM_VENDOR` 表；`transport_id` = 回退链实际胜出**接口**（vendor + 接口名，同 vendor 的两个接口不得共用 id） |
 | `src/stock_quant/data_sources/baostock.py` | `transport_id="baostock"` |
 | `src/stock_quant/data_sources/raw_store.py` | `transport_id` 路径层、`RawSnapshotEvidence.transport_id`、`_manifest_for` 顶层字段、`verify_evidence` 旧路径回退 |
 | `src/stock_quant/data_pipeline.py` | `_raw_snapshot_evidence_rows` 去重键加入 `transport_id`（5 元组） |
@@ -102,7 +102,7 @@
 
 **Interfaces:**
 - Consumes: `stock_quant.data_sources.tushare_relay.TushareRelayClient.from_env()`（已存在）
-- Produces: 常量 `AGREE_EMPTY` / `AGREE_ERROR` / `SUBSTITUTION` / `DIFFERS` / `INCONCLUSIVE` / `BLOCKING` / `EXIT_CLEAR` / `EXIT_BLOCKED` / `EXIT_NOT_CONFIGURED`；`ProbeCase`、`ProbeResult`、`classify_empty_probe`、`classify_error_probe`、`run_probe`、`blocking`、`report`
+- Produces: 常量 `AGREE_EMPTY` / `AGREE_ERROR` / `SUBSTITUTION` / `DIFFERS` / `INCONCLUSIVE` / `BLOCKING` / `AGREE` / `EXIT_CLEAR` / `EXIT_BLOCKED` / `EXIT_NOT_CONFIGURED`；`ProbeCase`、`ProbeResult`、`classify_empty_probe`、`classify_error_probe`、`run_probe`、`blocking`、`cleared`、`report`
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -122,6 +122,7 @@ PROJECT = Path(__file__).resolve().parents[2] / "project"
 sys.path.insert(0, str(PROJECT))
 
 from probe_relay_substitution import (  # noqa: E402
+    AGREE,
     AGREE_EMPTY,
     AGREE_ERROR,
     BLOCKING,
@@ -132,6 +133,7 @@ from probe_relay_substitution import (  # noqa: E402
     blocking,
     classify_empty_probe,
     classify_error_probe,
+    cleared,
     report,
     run_probe,
 )
@@ -188,12 +190,17 @@ def test_blocking_is_the_two_disqualifying_verdicts():
     assert BLOCKING == frozenset({SUBSTITUTION, DIFFERS})
 
 
+def test_agree_is_the_two_evidential_verdicts():
+    assert AGREE == frozenset({AGREE_EMPTY, AGREE_ERROR})
+
+
 def test_run_probe_marks_a_substitution_as_blocking():
     relay = FakeClient(frames={"daily": pd.DataFrame({"ts_code": ["000001.SZ"]})})
     official = FakeClient()
     results = run_probe(official, relay, (EMPTY_CASE,))
     assert [result.verdict for result in results] == [SUBSTITUTION]
     assert blocking(results) is True
+    assert cleared(results) is False
     assert SUBSTITUTION in report(results)
 
 
@@ -201,21 +208,39 @@ def test_run_probe_passes_when_both_sides_are_empty():
     results = run_probe(FakeClient(), FakeClient(), (EMPTY_CASE,))
     assert results[0].verdict == AGREE_EMPTY
     assert blocking(results) is False
+    assert cleared(results) is True
 
 
 def test_run_probe_is_inconclusive_when_official_itself_raises():
     official = FakeClient(errors={"daily": "rate limited"})
     results = run_probe(official, FakeClient(), (EMPTY_CASE,))
     assert results[0].verdict == INCONCLUSIVE
-    # Inconclusive is not a pass, but neither is it evidence of substitution.
-    # Only SUBSTITUTION and DIFFERS close the gate.
+    # Inconclusive is not evidence of substitution, but it is not a pass
+    # either: a throttled official side must not open a hard gate.
     assert blocking(results) is False
+    assert cleared(results) is False
+
+
+def test_a_throttled_official_side_leaves_the_gate_closed_in_the_report():
+    results = run_probe(
+        FakeClient(errors={"daily": "rate limited"}), FakeClient(), (EMPTY_CASE,)
+    )
+    text = report(results)
+    assert "阶段 1 闸门保持关闭" in text
+    assert "闸门放行" not in text
+
+
+def test_an_empty_case_list_never_clears_the_gate():
+    assert blocking(()) is False
+    assert cleared(()) is False
 
 
 def test_run_probe_compares_error_strings_for_error_cases():
     official = FakeClient(errors={"nope": "请指定正确的接口名"})
     agreeing = FakeClient(errors={"nope": "请指定正确的接口名"})
-    assert run_probe(official, agreeing, (ERROR_CASE,))[0].verdict == AGREE_ERROR
+    results = run_probe(official, agreeing, (ERROR_CASE,))
+    assert results[0].verdict == AGREE_ERROR
+    assert cleared(results) is True
 
     diverging = FakeClient(errors={"nope": "internal error"})
     results = run_probe(official, diverging, (ERROR_CASE,))
@@ -230,6 +255,19 @@ def test_an_error_case_is_inconclusive_when_one_side_succeeds():
         (ERROR_CASE,),
     )
     assert results[0].verdict == INCONCLUSIVE
+    assert cleared(results) is False
+
+
+def test_one_inconclusive_case_keeps_the_whole_run_from_clearing():
+    # The gate is all-or-nothing: three agreements do not excuse one hole.
+    results = run_probe(
+        FakeClient(frames={"daily": pd.DataFrame()}, errors={"nope": "rate limited"}),
+        FakeClient(frames={"daily": pd.DataFrame()}),
+        (EMPTY_CASE, ERROR_CASE),
+    )
+    assert [result.verdict for result in results] == [AGREE_EMPTY, INCONCLUSIVE]
+    assert blocking(results) is False
+    assert cleared(results) is False
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -278,8 +316,11 @@ Run from the repository root or the project directory:
 
 Exit codes: 0 = every case agreed (the stage 1 gate is clear); 1 = the relay
 substituted an answer, or an error string diverged -- **do not start stage 1**;
-2 = the probe could not run (relay or official credentials missing), which also
-leaves the gate closed.  Token values are never printed.
+2 = the gate could not be opened, either because the probe could not run (relay
+or official credentials missing) or because some case produced no evidence
+(the official side rate-limited or unreachable).  Only 0 opens stage 1: this is
+a hard gate, so "unanswered" must never read as "passed".  Token values are
+never printed.
 """
 
 from __future__ import annotations
@@ -302,11 +343,16 @@ REPORT_DIR = ROOT / "docs" / "operations"
 AGREE_EMPTY = "AGREE_EMPTY"
 AGREE_ERROR = "AGREE_ERROR"
 SUBSTITUTION = "SUBSTITUTION"
+# Constant and verdict differ on purpose: the constant reads well inside the
+# ``BLOCKING`` set, and the string is what the report prints.
 DIFFERS = "ERROR_DIFFERS"
 INCONCLUSIVE = "INCONCLUSIVE"
 
-#: Verdicts that close the stage 1 gate.
+#: Verdicts that positively disqualify the relay.
 BLOCKING = frozenset({SUBSTITUTION, DIFFERS})
+#: Verdicts that count as evidence.  The gate opens only when *every* case is
+#: one of these: an unanswered question is not a passed question.
+AGREE = frozenset({AGREE_EMPTY, AGREE_ERROR})
 
 EXIT_CLEAR = 0
 EXIT_BLOCKED = 1
@@ -431,17 +477,31 @@ def run_probe(
 
 
 def blocking(results: Sequence[ProbeResult]) -> bool:
-    """True when any case disqualifies the relay as the primary transport."""
+    """True when any case positively disqualifies the relay."""
     return any(result.verdict in BLOCKING for result in results)
+
+
+def cleared(results: Sequence[ProbeResult]) -> bool:
+    """True only when every case produced evidence of agreement.
+
+    The gate is a hard gate, so it opens on *evidence*, not on the absence of
+    a refutation: ``INCONCLUSIVE`` -- the official side rate-limited, a
+    network failure on either side, a question the official API happened to
+    answer -- is not a pass.  Treating it as one would let a throttling window
+    open the gate.
+    """
+    return bool(results) and all(result.verdict in AGREE for result in results)
 
 
 def report(results: Sequence[ProbeResult], *, today: date | None = None) -> str:
     """Render the probe as a committable operations report."""
     day = (today or date.today()).isoformat()
-    cleared = not blocking(results)
-    headline = (
-        "未发现换源作答，阶段 1 闸门放行" if cleared else "命中阻断条件，阶段 1 不得开始"
-    )
+    if blocking(results):
+        headline = "命中阻断条件，阶段 1 不得开始"
+    elif cleared(results):
+        headline = "全部用例给出证据，阶段 1 闸门放行"
+    else:
+        headline = "存在未给出证据的用例，阶段 1 闸门保持关闭"
     lines = [
         f"# 静默换源探针报告（{day}）",
         "",
@@ -457,7 +517,9 @@ def report(results: Sequence[ProbeResult], *, today: date | None = None) -> str:
         "- `ERROR_DIFFERS` = 错误串与官方不一致。",
         "",
         "两者都属于 spec §3 ④ 的阻断条件。`INCONCLUSIVE` 表示官方侧本身没给出"
-        "可用答案，该用例**不构成证据**（既不算通过，也不算失败）。",
+        "可用答案（限流、网络失败，或该问法官方本来就有数据），该用例**不构成"
+        "证据** —— 既不算通过，也不算失败。**闸门只在全部用例都给出证据时才放行**，"
+        "所以 `INCONCLUSIVE` 同样让阶段 1 保持关闭。",
         "",
         "| 用例 | endpoint | 官方作答 | relay 作答 | 判定 |",
         "| --- | --- | --- | --- | --- |",
@@ -540,12 +602,14 @@ def main() -> int:
     if blocking(results):
         print("BLOCKED: the relay substituted an answer; do not start stage 1")
         return EXIT_BLOCKED
-    if any(result.verdict == INCONCLUSIVE for result in results):
+    if not cleared(results):
         print(
-            "note: at least one case was inconclusive; the report says so "
-            "explicitly and this run cannot be cited as a clean pass"
+            "NOT CLEARED: at least one case produced no evidence (official "
+            "side rate-limited or unreachable); the stage 1 gate stays closed "
+            "-- re-run the probe when the official API answers again"
         )
-    print("CLEAR: no substitution observed; the stage 1 gate is open")
+        return EXIT_NOT_CONFIGURED
+    print("CLEAR: every case agreed; the stage 1 gate is open")
     return EXIT_CLEAR
 
 
@@ -559,7 +623,7 @@ if __name__ == "__main__":
 /home/ji/miniconda3/envs/py310/bin/python -m pytest tests/unit/test_probe_relay_substitution.py -v
 ```
 
-Expected: PASS — 10 passed
+Expected: PASS — 14 passed
 
 - [ ] **Step 5: 提交**
 
@@ -581,9 +645,11 @@ Expected: 打印四行判定，退出码 `0`，并写出
 
 | 退出码 | 动作 |
 | --- | --- |
-| `0` | `git add docs/operations/relay-substitution-probe-*.md && git commit -m "docs: record the stage 0 substitution probe result"`，继续 Task 2 |
+| `0` | **只有这一种情况可以继续**。`git add docs/operations/relay-substitution-probe-*.md && git commit -m "docs: record the stage 0 substitution probe result"`，继续 Task 2 |
 | `1` | **停止**。不进入 Task 2；把报告交给 owner，relay 主供决策回炉（spec §3 ④） |
-| `2` | **停止**。先补齐凭据再跑；闸门未开 |
+| `2` | **停止**。闸门未开 —— 要么凭据缺失，要么有用例是 `INCONCLUSIVE`（多因官方 `trade_cal` 限流一类的节流）。补齐条件后**重跑探针**，不要带病进入 Task 2 |
+
+**退出码 0 的严格含义**：不是"没有发现问题"，而是"每个用例都拿到了证据且都同意"。四行里出现任何 `INCONCLUSIVE`，退出码就是 2 而不是 0 —— 官方侧被限流时，`daily` 的空窗口可能正是因为限流才为空的，那样的"两边都空"不构成证据。
 
 若命中的是 `ERROR_DIFFERS`，先确认探针没有把 relay 侧的临时网络故障误读成"错误串不同"（重跑一次）；可复现才按阻断处理。
 
@@ -768,7 +834,8 @@ def test_published_builds_reject_official_without_break_glass():
 def test_break_glass_releases_official_for_a_published_build(caplog):
     # Acceptance 2 names both places an emergency official publish must show
     # up: the run log and the supplier endpoint.
-    with caplog.at_level(logging.INFO, logger="stock_quant.data_sources.tushare_transport"):
+    log = "stock_quant.data_sources.tushare_transport"
+    with caplog.at_level(logging.INFO, logger=log):
         transport = resolve_transport(
             _config(),
             environ=dict(BREAK_GLASS_ENV, **{TRANSPORT_ENV: OFFICIAL}),
@@ -806,11 +873,17 @@ def test_half_configured_relay_fails_without_falling_back(env):
 def test_relay_initialization_failure_does_not_fall_back_to_official():
     class ExplodingSdk(FakeSdk):
         def pro_api(self, token="", timeout=30):
-            raise RuntimeError("relay handshake failed")
+            # A real SDK failure can echo what it was handed; the translation
+            # must not let that reach the caller.
+            raise RuntimeError(f"relay handshake failed for {token}")
 
     env = dict(RELAY_ENV, **{TRANSPORT_ENV: RELAY, "TUSHARE_TOKEN": "official-token"})
-    with pytest.raises(AuthenticationError):
+    with pytest.raises(AuthenticationError) as raised:
         resolve_transport(_config(), environ=env, sdk=ExplodingSdk())
+    assert "relay-key" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    # The host is not a secret and is what makes the failure diagnosable.
+    assert "jiaoch.example" in str(raised.value)
 
 
 def test_auto_order_prefers_the_relay_when_both_are_configured():
@@ -881,7 +954,30 @@ def host_of(url: str) -> str:
 
 - [ ] **Step 4: 让两个客户端复用 `host_of`，并给 relay 加上 `.api`**
 
-`src/stock_quant/data_sources/tushare_relay.py`：在导入区加入
+`src/stock_quant/data_sources/tushare_relay.py`：先把模块文档串里那段"范围边界"整段替换掉 —— 它现在说的是反的。
+
+原句（`This client exists for **offline collectors and cross-checks only** ... a separate, deliberate change with its own contract tests`）断言
+`TushareSource`/`DataPipeline` **永不**构造本类，并把"管线走中转"称为证据链存在的意义所在的那个归因错误。设计规格把这条边界**有意反转了**：relay 现在就是管线的 tushare 主传输，而归因问题改由"把 relay 路径如实记进证据"来解决（阶段 0 探针 + `transport_id` + `supplier_endpoint`），不是靠拒绝使用它。文档串不换，代码库就会自相矛盾。
+
+替换为：
+
+```python
+Scope boundary (revised 2026-09-12, design spec §1)
+--------------------------------------------------
+This client started as an offline-only collector helper precisely because
+routing a relay through the pipeline would have bound the relay's identity
+into the dataset version's ``supplier_endpoint`` evidence -- presenting
+relayed data as though it came from the source.  The role-division design
+resolves that concern the other way round: the relay is now the pipeline's
+primary tushare transport, and the attribution is kept honest by *recording*
+the relay path everywhere the evidence is read (``transport_id`` in the raw
+snapshot path and manifest, ``tushare_relay.<host>.<endpoint>`` as the
+supplier label) rather than by refusing to use it.  The stage 0
+silent-substitution probe gates that promotion.  What remains forbidden is
+the opposite error: labelling relay-answered data as ``tushare.pro.*``.
+```
+
+然后在导入区加入
 `from stock_quant.data_sources.base import host_of`，把 `host` 属性体替换为：
 
 ```python
@@ -1095,9 +1191,18 @@ def build_transport(
                 "the relay transport requires TUSHARE_RELAY_URL and "
                 "TUSHARE_RELAY_KEY"
             )
-        relay = TushareRelayClient(
-            base_url, token, timeout_seconds=config.timeout_seconds, sdk=sdk
-        )
+        try:
+            relay = TushareRelayClient(
+                base_url, token, timeout_seconds=config.timeout_seconds, sdk=sdk
+            )
+        except Exception:
+            # ``pro_api`` performs the handshake, so this is where a relay
+            # outage surfaces.  It must arrive as AuthenticationError -- never
+            # as a bare RuntimeError, and never with the SDK's own message,
+            # which may embed the token.
+            raise AuthenticationError(
+                f"tushare relay initialization failed for host {host_of(base_url)!r}"
+            ) from None
         transport = TushareTransport(
             kind=RELAY,
             client=relay.api,
@@ -1112,6 +1217,8 @@ def build_transport(
                 "the proxy transport requires TUSHARE_PROXY_URL and "
                 "TUSHARE_PROXY_KEY"
             )
+        # Not wrapped: this constructor only builds a requests.Session and sets
+        # headers -- it performs no network I/O, so it has nothing to fail with.
         proxy = TushareProxyClient(
             base_url,
             api_key,
@@ -1374,6 +1481,21 @@ def test_injected_relay_client_keeps_its_own_host():
     transport = injected_transport(TushareRelayClient(RELAY_URL, "key", sdk=FakeSdk()))
     assert transport.kind == RELAY
     assert transport.transport_id == "jiaoch.example"
+
+
+def test_an_injected_relay_client_actually_answers_a_fetch():
+    # ``TushareRelayClient`` only exposes ``query``; the adapter calls
+    # ``daily(...)``.  Describing the wrapper without unwrapping ``.api``
+    # would leave an AttributeError at fetch time, so this test exercises the
+    # path end to end rather than only inspecting the descriptor.
+    source = TushareSource(
+        _config(), client=TushareRelayClient(RELAY_URL, "key", sdk=RelaySdk())
+    )
+    result = source.fetch(_request())
+    assert result.frame["ts_code"].tolist() == ["000001.SZ"]
+    assert source.transport.kind == RELAY
+    assert source.transport.transport_id == "jiaoch.example"
+    assert result.metadata["supplier_endpoint"] == "tushare_relay.jiaoch.example.daily"
 ```
 
 替换 `tests/unit/test_verify_update_readiness.py` 的导入与两个凭据用例：把导入列表里的 `token_issue,` 换成 `transport_issue,`，并把第 64–80 行整体替换为：
@@ -1527,19 +1649,27 @@ def injected_transport(client: Any) -> TushareTransport:
     word; a stub that does not is labelled by its kind, and those kind labels
     (``proxy`` / ``relay`` / the official host) are documented as stub-only --
     ``resolve_transport`` never produces them.
+
+    The two wrappers do not expose the same surface, so the *request client*
+    is unwrapped per kind: ``TushareProxyClient`` answers the named endpoints
+    itself, while ``TushareRelayClient`` only has ``query`` -- its named
+    methods live on the SDK session it holds, which is why ``.api`` is used.
     """
     sdk_version = getattr(client, "sdk_version", None) or getattr(
         client, "__version__", "unknown"
     )
     if isinstance(client, TushareProxyClient):
         kind = PROXY
+        session = client
     elif isinstance(client, TushareRelayClient):
         kind = RELAY
+        session = client.api
     else:
         kind = OFFICIAL
+        session = client
     host = client_host(client) or _STUB_HOST[kind]
     return TushareTransport(
-        kind=kind, client=client, sdk_version=sdk_version, host=host
+        kind=kind, client=session, sdk_version=sdk_version, host=host
     )
 ```
 
@@ -1748,19 +1878,46 @@ def test_request_metadata_has_no_default_transport_id():
         request_metadata(REQUEST, "tushare.pro.daily", "1.4.24")
 
 
-def test_akshare_vendor_table_covers_every_reachable_endpoint():
-    assert _transport_id("akshare.stock_zh_index_daily_em") == "eastmoney"
-    assert _transport_id("akshare.stock_zh_index_hist_em") == "eastmoney"
-    assert _transport_id("akshare.stock_zh_index_daily") == "sina"
-    assert _transport_id("akshare.stock_zh_index_daily_tx") == "tencent"
-    assert _transport_id("akshare.stock_fhps_detail_ths") == "ths"
-    assert _transport_id("akshare.stock_dividend_cninfo") == "cninfo"
+def test_akshare_id_names_both_the_vendor_and_the_interface():
+    assert (
+        _transport_id("akshare.stock_zh_index_daily_em")
+        == "eastmoney.stock-zh-index-daily-em"
+    )
+    assert (
+        _transport_id("akshare.stock_zh_index_hist_em")
+        == "eastmoney.stock-zh-index-hist-em"
+    )
+    assert (
+        _transport_id("akshare.stock_zh_index_daily") == "sina.stock-zh-index-daily"
+    )
+    assert (
+        _transport_id("akshare.stock_zh_index_daily_tx")
+        == "tencent.stock-zh-index-daily-tx"
+    )
+    assert (
+        _transport_id("akshare.stock_fhps_detail_ths") == "ths.stock-fhps-detail-ths"
+    )
+    assert (
+        _transport_id("akshare.stock_dividend_cninfo")
+        == "cninfo.stock-dividend-cninfo"
+    )
+
+
+def test_two_interfaces_behind_one_vendor_never_collide():
+    # Both serve the same logical ``index_history`` request from EastMoney; if
+    # the fallback chain switches between them, byte-identical frames must
+    # still land on two paths, each keeping its own label.
+    daily = _transport_id("akshare.stock_zh_index_daily_em")
+    hist = _transport_id("akshare.stock_zh_index_hist_em")
+    assert daily != hist
+    assert daily.startswith("eastmoney.") and hist.startswith("eastmoney.")
 
 
 def test_akshare_unmapped_endpoint_still_gets_its_own_distinct_id():
     # A shared constant would be exactly the collision this design exists to
     # prevent, so an unmapped endpoint names itself.
     got = _transport_id("akshare.stock_zh_a_hist")
+    assert got == "akshare.stock-zh-a-hist"
     assert got not in {"", "unknown", "akshare"}
     assert got != _transport_id("akshare.stock_zh_a_hist_tx")
 
@@ -1797,10 +1954,11 @@ def test_akshare_transport_id_agrees_with_the_endpoint_that_answered():
     )
     result = source.fetch(request)
     endpoint = result.metadata["supplier_endpoint"]
-    # The pairing is what matters: the id must name the vendor behind the
-    # endpoint that really answered, never a fixed constant.
+    # The pairing is what matters: the id must name the interface that really
+    # answered, never a fixed constant.
     assert result.metadata["transport_id"] == _transport_id(endpoint)
-    assert result.metadata["transport_id"] in {"eastmoney", "sina", "tencent"}
+    vendor = result.metadata["transport_id"].split(".", 1)[0]
+    assert vendor in {"eastmoney", "sina", "tencent"}
 
 
 class FakeBaoSession:
@@ -1956,15 +2114,23 @@ _UPSTREAM_VENDOR = {
 
 
 def _transport_id(supplier_endpoint: str) -> str:
-    """The upstream that answered, as a path-safe id (design §2.3).
+    """The interface that answered, as a path-safe id (design §2.3).
 
-    An endpoint with no vendor mapping names itself rather than sharing a
-    constant, so a new endpoint can never silently reuse another's evidence.
+    The vendor alone is **not** enough.  ``stock_zh_index_daily_em`` and
+    ``stock_zh_index_hist_em`` are two different EastMoney interfaces serving
+    the same logical ``index_history`` endpoint, and ``_index_history``'s
+    fallback chain can switch between them run to run.  If both were labelled
+    ``eastmoney``, two byte-identical frames would land on one
+    content-addressed path and the second save would silently keep the first
+    one's ``supplier_endpoint`` -- precisely the collision the transport layer
+    exists to prevent.  So the id carries the vendor *and* the interface.
+
+    An endpoint with no vendor mapping names itself under an ``akshare``
+    prefix rather than sharing a constant.
     """
-    vendor = _UPSTREAM_VENDOR.get(supplier_endpoint)
-    if vendor is not None:
-        return vendor
-    return supplier_endpoint.rsplit(".", 1)[-1].replace("_", "-")
+    slug = supplier_endpoint.rsplit(".", 1)[-1].replace("_", "-")
+    vendor = _UPSTREAM_VENDOR.get(supplier_endpoint, "akshare")
+    return f"{vendor}.{slug}"
 ```
 
 并把 `fetch()` 末尾的 `metadata=request_metadata(...)` 替换为：
@@ -2003,7 +2169,8 @@ stub 源本身就是它自己的传输，所以用 `self.name`：
 ```
 
 （第 579 行的第二份 tushare 夹具同样改法；第 584 行的 akshare 夹具用
-`metadata={"source": "akshare", "sdk_version": "fixture", "transport_id": "sina"},`。）
+`metadata={"source": "akshare", "sdk_version": "fixture", "transport_id": "sina.stock-zh-index-daily"},`
+—— 与适配器真实产出的形状保持一致。）
 
 - [ ] **Step 6: 跑测试确认通过**
 
@@ -2121,6 +2288,16 @@ Expected: PASS — 9 passed
 追加到 `tests/unit/test_raw_store.py`：
 
 ```python
+#: design §1.1: the label names the *answering* path, so the official host keeps
+#: ``tushare.pro.*`` and only the relay's host wears the relay prefix.  Deriving
+#: the label from the transport id instead would paint the official host as a
+#: relay -- the very attribution error this layer exists to prevent.
+LABEL_FOR_HOST = {
+    "api.waditu.com": "tushare.pro",
+    "jiaoch.top": "tushare_relay.jiaoch.top",
+}
+
+
 def _transport_result(
     frame: pd.DataFrame,
     *,
@@ -2132,7 +2309,11 @@ def _transport_result(
     metadata: dict[str, Any] = {"source": "tushare", "sdk_version": "1.4.24"}
     if transport_id is not _OMIT:
         metadata["transport_id"] = transport_id
-        metadata["supplier_endpoint"] = f"tushare_relay.{transport_id}.{endpoint}"
+        # Only the hosts this fixture knows get a label.  The deliberately
+        # invalid transport ids below (blank, reserved, ``../etc``) are refused
+        # by ``save`` before the label could matter, so they get none.
+        if transport_id in LABEL_FOR_HOST:
+            metadata["supplier_endpoint"] = f"{LABEL_FOR_HOST[transport_id]}.{endpoint}"
     return FetchResult(
         source="tushare",
         endpoint=endpoint,
@@ -2153,7 +2334,8 @@ def test_two_transports_with_identical_bytes_coexist(tmp_path):
     assert official.path != relay.path  # ...two snapshots
     assert official.path.parent.parent.name == "api.waditu.com"
     assert relay.path.parent.parent.name == "jiaoch.top"
-    assert official.manifest["supplier_endpoint"] == "tushare_relay.api.waditu.com.daily"
+    # The labels differ, and neither is derived from the other's identity.
+    assert official.manifest["supplier_endpoint"] == "tushare.pro.daily"
     assert relay.manifest["supplier_endpoint"] == "tushare_relay.jiaoch.top.daily"
 
 
@@ -2162,7 +2344,7 @@ def test_the_relay_label_survives_an_existing_official_snapshot(tmp_path):
 
     This is the bug the extra path layer exists to fix: the manifest is
     content-addressed, so without a transport layer the second save found the
-    first snapshot and returned its ``tushare_relay.api.waditu.com.daily``.
+    first snapshot and returned its ``tushare.pro.daily``.
     """
     store = RawStore(tmp_path)
     frame = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
@@ -2594,7 +2776,18 @@ from stock_quant.data_sources.raw_store import (
 from stock_quant.research.acceptance.models import RawSnapshotBinding
 
 
-def _result(frame, *, transport_id, request_key="rk-1"):
+#: What each host's snapshot must be labelled, per design §1.1.  The fixture
+#: looks the label up rather than deriving it from the transport id: the two
+#: are independent, and conflating them is how the official host would end up
+#: wearing a relay label.
+LABEL_FOR_HOST = {
+    "api.waditu.com": "tushare.pro.daily",
+    "jiaoch.top": "tushare_relay.jiaoch.top.daily",
+}
+
+
+def _result_for(frame, host, *, request_key="rk-1"):
+    """A fetch result for one host, labelled the way the adapter would."""
     return FetchResult(
         source="tushare",
         endpoint="daily",
@@ -2603,8 +2796,8 @@ def _result(frame, *, transport_id, request_key="rk-1"):
         metadata={
             "source": "tushare",
             "sdk_version": "1.4.24",
-            "supplier_endpoint": f"tushare_relay.{transport_id}.daily",
-            "transport_id": transport_id,
+            "supplier_endpoint": LABEL_FOR_HOST[host],
+            "transport_id": host,
         },
     )
 
@@ -2622,19 +2815,21 @@ def test_evidence_rows_carry_every_transport_and_the_labels_resolve(tmp_path):
     store = RawStore(tmp_path)
     frame = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
     # Identical bytes, two transports, one request key: the case the whole
-    # design exists for.
+    # design exists for.  Each keeps its own label -- the relay gets the relay
+    # label, and the official path stays ``tushare.pro.*``.
     snapshots = [
-        store.save(_result(frame, transport_id="api.waditu.com")),
-        store.save(_result(frame, transport_id="jiaoch.top")),
+        store.save(_result_for(frame, "api.waditu.com")),
+        store.save(_result_for(frame, "jiaoch.top")),
     ]
     rows = _raw_snapshot_evidence_rows(snapshots)
     assert len(rows) == 2
     assert {row["transport_id"] for row in rows} == {"api.waditu.com", "jiaoch.top"}
     assert all(row["request_key"] == "rk-1" for row in rows)
 
-    assert {_resolve_label(tmp_path, row) for row in rows} == {
-        "tushare_relay.api.waditu.com.daily",
-        "tushare_relay.jiaoch.top.daily",
+    labels = {row["transport_id"]: _resolve_label(tmp_path, row) for row in rows}
+    assert labels == {
+        "api.waditu.com": "tushare.pro.daily",
+        "jiaoch.top": "tushare_relay.jiaoch.top.daily",
     }
 
 
@@ -2643,8 +2838,8 @@ def test_request_key_stays_a_pure_idempotency_key(tmp_path):
     # request" would stop meaning one thing.
     store = RawStore(tmp_path)
     frame = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
-    official = store.save(_result(frame, transport_id="api.waditu.com"))
-    relay = store.save(_result(frame, transport_id="jiaoch.top"))
+    official = store.save(_result_for(frame, "api.waditu.com"))
+    relay = store.save(_result_for(frame, "jiaoch.top"))
     assert official.manifest["request_key"] == relay.manifest["request_key"] == "rk-1"
     assert official.sha256 == relay.sha256
 
@@ -2653,7 +2848,7 @@ def test_a_five_field_row_resolves_the_legacy_layout(tmp_path):
     """A pre-transport build_config row must keep resolving to its snapshot."""
     store = RawStore(tmp_path)
     frame = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
-    snapshot = store.save(_result(frame, transport_id="jiaoch.top"))
+    snapshot = store.save(_result_for(frame, "jiaoch.top"))
 
     legacy_dir = tmp_path / "data" / "raw" / "tushare" / "daily" / "rk-1"
     legacy_dir.mkdir(parents=True, exist_ok=True)
@@ -2698,11 +2893,13 @@ git commit -m "test(provenance): prove the evidence chain resolves each transpor
 
 - [ ] **Step 4: 真实发布（人工，阶段 1 验收的一部分，不能由测试代替）**
 
+> **`--root project` 是必须的。** `data_update` 的 `--root` 默认是 `.`（`cli.py:234`），而真实数据在 `project/data/` 下；不加这个参数会写到仓库根的新目录里，既不是本次发布、也不会被后续任何东西读到。
+
 ```bash
 cd /home/ji/work/program/stock
 set -a; . ./.env; set +a
 export TUSHARE_TRANSPORT=relay
-/home/ji/miniconda3/envs/py310/bin/python -m stock_quant data update
+/home/ji/miniconda3/envs/py310/bin/python -m stock_quant data update --root project
 ```
 
 Expected:
@@ -2714,45 +2911,40 @@ Expected:
 ```bash
 cd /home/ji/work/program/stock
 set -a; . ./.env; set +a
-env -u TUSHARE_TRANSPORT /home/ji/miniconda3/envs/py310/bin/python -m stock_quant data update
+env -u TUSHARE_TRANSPORT /home/ji/miniconda3/envs/py310/bin/python -m stock_quant data update --root project
 ```
 
 Expected: 退出码 1，报错含 `TUSHARE_TRANSPORT must be set explicitly`，数据集版本不变。
 
 - [ ] **Step 6: 从证据侧自证（不能只看终端）**
 
-先确认数据集目录的实际布局：
+真实布局是 `project/data/standardized/<version>/`，版本号记在 `project/data/standardized/CURRENT` 里；`build_config` 不是独立文件，而是 `dataset_manifest.json` 的一个字段。下面这段把这三件事都按真实布局来读，不需要人工填版本号：
 
 ```bash
 cd /home/ji/work/program/stock
-ls project/data/datasets/
-```
-
-再以真实版本号跑（把 `<version>` 换成上一步 `ls` 出的版本）：
-
-```bash
-cd /home/ji/work/program/stock
-VERSION=<version> /home/ji/miniconda3/envs/py310/bin/python - <<'PY'
+/home/ji/miniconda3/envs/py310/bin/python - <<'PY'
 import json
-import os
 from pathlib import Path
 
 from stock_quant.data_sources.raw_store import RawSnapshotEvidence, RawStore
 from stock_quant.research.acceptance.models import RawSnapshotBinding
 
 root = Path("project")
-version = os.environ["VERSION"]
-dataset = root / "data" / "datasets" / version
-config = json.loads((dataset / "build_config.json").read_text())
+version = (root / "data" / "standardized" / "CURRENT").read_text().strip()
+manifest = json.loads(
+    (root / "data" / "standardized" / version / "dataset_manifest.json").read_text()
+)
+rows = manifest["build_config"]["raw_snapshots"]
 store = RawStore(root)
 labels = set()
-for row in config["raw_snapshots"]:
+for row in rows:
     if row["source"] != "tushare":
         continue
     binding = RawSnapshotBinding.model_validate(row)
     snapshot = store.verify_evidence(RawSnapshotEvidence(**binding.model_dump()))
     labels.add(snapshot.manifest["supplier_endpoint"])
 
+print(f"version={version} tushare_rows={sum(r['source'] == 'tushare' for r in rows)}")
 print(sorted(labels))
 assert labels, "no tushare snapshots were bound"
 assert all(label.startswith("tushare_relay.") for label in labels), labels
@@ -2760,9 +2952,9 @@ print(f"OK: all {len(labels)} distinct tushare labels resolve to the relay")
 PY
 ```
 
-Expected: 打印的标签全部以 `tushare_relay.` 开头，**无一为 `tushare.pro.`**。
+Expected: 打印的标签全部以 `tushare_relay.` 开头，**无一为 `tushare.pro.`**。同理，`transport_id` 全部是 relay 的作答 host，没有 `api.waditu.com`。
 
-（若 `build_config.json` 不在该目录下，先 `ls project/data/datasets/<version>/` 确认实际文件名再替换。）
+（若断言失败，直接 `ls project/data/standardized/` 与 `ls project/data/standardized/<version>/` 核对实际布局，再改脚本——不要改断言。）
 
 ---
 
@@ -2773,8 +2965,10 @@ Expected: 打印的标签全部以 `tushare_relay.` 开头，**无一为 `tushar
 - Test: `tests/unit/test_audit_raw_provenance.py`
 
 **Interfaces:**
-- Consumes: `data/raw/**/manifest.json`（四段旧布局与五段新布局都要能读）
-- Produces: `UNKNOWN`、`SnapshotRecord`、`Summary`、`scan(store_root) -> list[SnapshotRecord]`、`local_sdk_versions() -> dict[str, set[str]]`、`summarise(records, *, local_sdk_versions) -> Summary`、`report(records, *, today=None) -> str`
+- Consumes: `<store_root>/data/raw/**/manifest.json`（四段旧布局与五段新布局都要能读）
+- Produces: `UNKNOWN`、`INSTALLED`、`SnapshotRecord`、`SkippedManifest`、`Scan`、`Summary`、`scan(store_root) -> Scan`、`local_sdk_versions() -> dict[str, set[str]]`、`summarise(records, *, local_sdk_versions) -> Summary`、`report(records, *, skipped=(), today=None) -> str`
+- **`store_root` 是数据仓库根，也就是 `project/`**，不是仓库根：真实数据在 `project/data/raw`。`--root` 默认 `project`，与 `cli.py` 的 `--root project` 同一约定。
+- `scan` 不静默丢文件：读不了或不像 manifest 的 `manifest.json` 进 `Scan.skipped`，报告必须把它们列出来，否则总量会假装完整。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -2792,8 +2986,11 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parents[2] / "project"
 sys.path.insert(0, str(PROJECT))
 
+import audit_raw_provenance  # noqa: E402
 from audit_raw_provenance import (  # noqa: E402
+    INSTALLED,
     UNKNOWN,
+    SkippedManifest,
     SnapshotRecord,
     report,
     scan,
@@ -2801,31 +2998,38 @@ from audit_raw_provenance import (  # noqa: E402
 )
 
 
-def _write(root: Path, *parts: str, manifest: dict) -> None:
+def _write(root: Path, *parts: str, text: str) -> None:
     target = root.joinpath(*parts)
     target.mkdir(parents=True, exist_ok=True)
-    (target / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (target / "manifest.json").write_text(text, encoding="utf-8")
+
+
+def _write_manifest(root: Path, *parts: str, manifest: dict) -> None:
+    _write(root, *parts, text=json.dumps(manifest))
+
+
+TUSHARE_MANIFEST = {
+    "source": "tushare",
+    "endpoint": "daily",
+    "supplier_endpoint": "tushare_relay.jiaoch.top.daily",
+    "sdk_version": "1.4.24",
+    "transport_id": "jiaoch.top",
+    "request_timestamp": "2026-09-12T00:00:00Z",
+}
 
 
 def test_scan_reads_both_path_shapes(tmp_path):
     raw = tmp_path / "data" / "raw"
-    _write(
+    _write_manifest(
         raw,
         "tushare",
         "daily",
         "jiaoch.top",
         "rk",
         "aa" * 32,
-        manifest={
-            "source": "tushare",
-            "endpoint": "daily",
-            "supplier_endpoint": "tushare_relay.jiaoch.top.daily",
-            "sdk_version": "1.4.24",
-            "transport_id": "jiaoch.top",
-            "request_timestamp": "2026-09-12T00:00:00Z",
-        },
+        manifest=TUSHARE_MANIFEST,
     )
-    _write(
+    _write_manifest(
         raw,
         "tushare",
         "daily",
@@ -2839,33 +3043,56 @@ def test_scan_reads_both_path_shapes(tmp_path):
             "request_timestamp": "2026-09-10T00:00:00Z",
         },
     )
-    records = scan(tmp_path)
-    assert len(records) == 2
-    assert {record.transport_id for record in records} == {"jiaoch.top", None}
-    assert {record.sdk_version for record in records} == {"1.4.24", "1.4.29"}
+    result = scan(tmp_path)
+    assert result.skipped == []
+    assert len(result.records) == 2
+    assert {record.transport_id for record in result.records} == {"jiaoch.top", None}
+    assert {record.sdk_version for record in result.records} == {"1.4.24", "1.4.29"}
 
 
-def test_scan_skips_unreadable_and_non_manifest_json(tmp_path):
+def test_scan_reports_what_it_could_not_read_instead_of_dropping_it(tmp_path):
+    """A silently skipped manifest makes every total below it a lie."""
     raw = tmp_path / "data" / "raw"
-    _write(raw, "tushare", "daily", "rk", "cc" * 32, manifest={"unrelated": True})
+    _write_manifest(
+        raw, "tushare", "daily", "rk", "cc" * 32, manifest={"unrelated": True}
+    )
     broken = raw / "tushare" / "daily" / "rk" / ("dd" * 32)
     broken.mkdir(parents=True)
     (broken / "manifest.json").write_text("{not json", encoding="utf-8")
-    assert scan(tmp_path) == []
+
+    result = scan(tmp_path)
+    assert result.records == []
+    reasons = {skipped.path.name: skipped.reason for skipped in result.skipped}
+    assert len(result.skipped) == 2
+    assert all(skipped.path.is_absolute() for skipped in result.skipped)
+    assert "not valid JSON" in reasons["manifest.json"]
+    assert "no 'source' field" in reasons["manifest.json"]
 
 
 def test_scan_returns_nothing_for_a_store_that_does_not_exist(tmp_path):
-    assert scan(tmp_path) == []
+    result = scan(tmp_path)
+    assert result.records == []
+    assert result.skipped == []
 
 
-def test_summarise_flags_environments_absent_from_this_machine():
+def test_the_default_root_is_the_project_directory():
+    # Real data lives in ``project/data/raw``; a repo-root default would find
+    # nothing and report an empty audit as if it were the truth.
+    assert audit_raw_provenance.PROJECT_ROOT == PROJECT
+    assert (PROJECT / "data" / "raw").is_dir()
+    assert audit_raw_provenance.DEFAULT_REPORT.parent == (
+        PROJECT.parent / "docs" / "operations"
+    )
+
+
+def test_summarise_flags_environments_absent_from_this_interpreter():
     records = [
         SnapshotRecord("tushare", "daily", "tushare.pro.daily", "1.4.29", None, "e"),
         SnapshotRecord("tushare", "daily", "tushare_relay.x.daily", "1.4.24", "x", "e"),
     ]
     summary = summarise(records, local_sdk_versions={"tushare": {"1.4.24"}})
     provenance = {row["sdk_version"]: row["provenance"] for row in summary.sdk_rows}
-    assert provenance["1.4.24"] == "local"
+    assert provenance["1.4.24"] == INSTALLED
     assert provenance["1.4.29"] == UNKNOWN
     assert summary.total == 2
     assert summary.by_source == {"tushare": 2}
@@ -2881,6 +3108,32 @@ def test_report_states_the_limit_of_what_it_can_conclude():
     # discriminating power, and must say so in so many words.
     assert "不对历史 provider 下结论" in text
     assert UNKNOWN in text
+
+
+def test_report_does_not_claim_a_missing_environment_is_absent_from_the_machine():
+    """``local_sdk_versions`` only sees the running interpreter.
+
+    Concluding "不在本机" would require scanning other environments and caches,
+    which this script does not do -- so it must not say it.
+    """
+    text = report(
+        [SnapshotRecord("tushare", "daily", "tushare.pro.daily", "1.4.29", None, "e")]
+    )
+    assert "当前解释器未安装" in text
+    assert "不在本机" not in text
+    assert "不能在本机原样复现" not in text
+
+
+def test_report_names_every_manifest_it_could_not_read():
+    skipped = [
+        SkippedManifest(
+            path=Path("/store/data/raw/x/manifest.json"), reason="not valid JSON"
+        )
+    ]
+    text = report([], skipped=skipped)
+    assert "1 个 `manifest.json` 未能读取" in text
+    assert "/store/data/raw/x/manifest.json" in text
+    assert "not valid JSON" in text
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -2903,8 +3156,14 @@ Design spec §5.  This report is deliberately **not** an answer to "which
 provider produced each snapshot": the historical manifests carry no
 discriminating evidence, and the design refuses to pretend otherwise.  What it
 *can* say is the distribution of producing environments -- which SDK versions
-appear, and whether those versions exist on this machine -- and that directly
-decides whether these datasets are reproducible locally at all.
+appear, and whether those versions are installed in the interpreter running this
+script -- which decides whether these datasets can be rebuilt as-is, here and
+now.
+
+That last claim is deliberately narrow.  A version missing from this
+interpreter is *not* evidence that it is absent from the machine: it may live in
+another conda env, another virtualenv, or an uninstalled cache.  This script
+scans none of those, so it says "当前解释器未安装" and stops there.
 
 The ``tushare.pro.*`` label is the clearest case of why: it proves neither that
 the producer was the official API nor that it was not, because the official SDK
@@ -2929,16 +3188,28 @@ import argparse
 import json
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+#: The repository root.  Reports are committed there (``docs/operations``).
+REPO_ROOT = Path(__file__).resolve().parents[1]
+#: The data store root.  Real snapshots live in ``project/data/raw``, never in
+#: ``<repo>/data/raw`` -- defaulting ``--root`` to the repository would scan an
+#: empty tree and produce a confident, wrong report.
+PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_REPORT = (
-    ROOT / "docs" / "operations" / f"raw-provenance-audit-{date.today().isoformat()}.md"
+    REPO_ROOT
+    / "docs"
+    / "operations"
+    / f"raw-provenance-audit-{date.today().isoformat()}.md"
 )
 
 UNKNOWN = "unknown"
+#: Present in the *running interpreter* -- not "present on this machine".
+#: The two are different claims, and this script can only make the first.
+INSTALLED = "installed"
 
 
 @dataclass(frozen=True)
@@ -2954,13 +3225,33 @@ class SnapshotRecord:
 
 
 @dataclass(frozen=True)
+class SkippedManifest:
+    """A ``manifest.json`` that could not be counted."""
+
+    path: Path
+    reason: str
+
+
+@dataclass(frozen=True)
+class Scan:
+    """Everything ``scan`` managed to read, and everything it did not.
+
+    Both halves are returned.  Dropping the unreadable ones would make every
+    count derived from ``records`` look complete when it is not.
+    """
+
+    records: list[SnapshotRecord]
+    skipped: list[SkippedManifest]
+
+
+@dataclass(frozen=True)
 class Summary:
     total: int
     by_source: dict[str, int]
     sdk_rows: list[dict[str, object]]
 
 
-def scan(store_root: Path) -> list[SnapshotRecord]:
+def scan(store_root: Path) -> Scan:
     """Read every ``manifest.json`` below ``<store_root>/data/raw``.
 
     Both the four-segment legacy layout and the five-segment layout that
@@ -2969,18 +3260,24 @@ def scan(store_root: Path) -> list[SnapshotRecord]:
     """
     raw = Path(store_root) / "data" / "raw"
     records: list[SnapshotRecord] = []
+    skipped: list[SkippedManifest] = []
     if not raw.is_dir():
-        return records
+        return Scan(records=records, skipped=skipped)
     for manifest_path in sorted(raw.rglob("manifest.json")):
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except OSError as exc:
+            skipped.append(SkippedManifest(manifest_path, f"unreadable: {exc}"))
+            continue
+        except json.JSONDecodeError as exc:
+            skipped.append(SkippedManifest(manifest_path, f"not valid JSON: {exc}"))
             continue
         if not isinstance(manifest, dict) or "source" not in manifest:
+            skipped.append(SkippedManifest(manifest_path, "no 'source' field"))
             continue
         records.append(
             SnapshotRecord(
-                source=str(manifest.get("source", UNKNOWN)),
+                source=str(manifest["source"]),
                 endpoint=str(manifest.get("endpoint", UNKNOWN)),
                 supplier_endpoint=str(
                     manifest.get("supplier_endpoint", manifest.get("endpoint", UNKNOWN))
@@ -2990,7 +3287,7 @@ def scan(store_root: Path) -> list[SnapshotRecord]:
                 request_timestamp=manifest.get("request_timestamp"),
             )
         )
-    return records
+    return Scan(records=records, skipped=skipped)
 
 
 def local_sdk_versions() -> dict[str, set[str]]:
@@ -3025,7 +3322,7 @@ def summarise(
                 "source": source,
                 "sdk_version": sdk_version,
                 "count": count,
-                "provenance": "local" if installed else UNKNOWN,
+                "provenance": INSTALLED if installed else UNKNOWN,
             }
         )
     return Summary(
@@ -3035,7 +3332,12 @@ def summarise(
     )
 
 
-def report(records: list[SnapshotRecord], *, today: date | None = None) -> str:
+def report(
+    records: list[SnapshotRecord],
+    *,
+    skipped: Sequence[SkippedManifest] = (),
+    today: date | None = None,
+) -> str:
     """Render the audit as a committable operations report."""
     day = (today or date.today()).isoformat()
     summary = summarise(records, local_sdk_versions=local_sdk_versions())
@@ -3050,8 +3352,11 @@ def report(records: list[SnapshotRecord], *, today: date | None = None) -> str:
         "  本审计**不对历史 provider 下结论**。`tushare.pro.*` 这个标签既证明不了",
         "  是官方、也证明不了不是官方 —— 官方 SDK 与会话基址被改写的中转是同一个",
         "  客户端、不同的 host，标签本身不具判别力。",
-        "- **能**判定产出环境的分布：哪些 SDK 版本组合出现在本机、哪些不出现。",
-        "  这直接决定这些数据集能否在本机复现。",
+        "- **能**判定产出环境的分布：哪些 SDK 版本出现在**当前解释器**、哪些不出现。",
+        "- 本脚本只检查运行它的那个解释器。SDK 装在别的 conda 环境、别的虚拟环境或",
+        "  缓存里，本报告看不见，因此**只断言「当前解释器未安装」**，不断言「本机",
+        "  不存在」；也不据此断言数据集不能复现——那需要扫描多环境与缓存，本脚本",
+        "  不做这件事。",
         "- 反查不出产出环境的记 `unknown`（本报告的**结论字段**，与 §2.3 的保留字",
         "  `transport_id` 无关），不猜、不重标。是否需要用新标注重建，由 owner 决定，",
         "  不在本脚本内自动进行。",
@@ -3069,7 +3374,7 @@ def report(records: list[SnapshotRecord], *, today: date | None = None) -> str:
         "",
         "## SDK 版本分布与产出环境",
         "",
-        "| 源 | SDK 版本 | 份数 | 产出环境 |",
+        "| 源 | SDK 版本 | 份数 | 当前解释器 |",
         "| --- | --- | --- | --- |",
     ]
     for row in summary.sdk_rows:
@@ -3082,28 +3387,39 @@ def report(records: list[SnapshotRecord], *, today: date | None = None) -> str:
     if unknown_rows:
         total_unknown = sum(int(row["count"]) for row in unknown_rows)
         lines.append(
-            f"{total_unknown} 份快照的产出环境**不在本机**（SDK 版本组合与本机"
-            "安装不符），记 `unknown`。这些数据集**不能在本机原样复现** —— 是否"
-            "用新标注重建，由 owner 决定。"
+            f"{total_unknown} 份快照的产出环境**当前解释器未安装**（SDK 版本组合与"
+            "本解释器安装的不符），记 `unknown`。这不等于本机没有该环境：SDK 可能"
+            "装在别的环境或缓存里，本脚本不扫描那些位置。是否需要用新标注重建，由"
+            "owner 决定。"
         )
     else:
-        lines.append("所有快照的 SDK 版本组合都能在本机找到，均可复现。")
+        lines.append("所有快照的 SDK 版本组合都出现在当前解释器里。")
+    if skipped:
+        lines += [
+            "",
+            "## 未能读取的 manifest",
+            "",
+            f"{len(skipped)} 个 `manifest.json` 未能读取，**未计入上面的总量**：",
+            "",
+        ]
+        for item in skipped:
+            lines.append(f"- `{item.path}` —— {item.reason}")
     lines.append("")
     return "\n".join(lines)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--root", type=Path, default=PROJECT_ROOT)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--no-report", action="store_true")
     args = parser.parse_args()
 
-    records = scan(args.root)
-    if not records:
+    result = scan(args.root)
+    if not result.records:
         print(f"no snapshots found under {args.root / 'data' / 'raw'}")
         return 1
-    text = report(records)
+    text = report(result.records, skipped=result.skipped)
     sys.stdout.write(text)
     if not args.no_report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
@@ -3133,6 +3449,8 @@ git commit -m "feat(provenance): audit the existing raw snapshots' origins"
 
 - [ ] **Step 6: 跑审计并提交报告**
 
+`--root` 默认就是 `project/`（与 `cli.py` 的 `--root project` 同一约定），所以不需要额外传参；脚本自身位置也从 `__file__` 推出，与当前工作目录无关。
+
 ```bash
 cd /home/ji/work/program/stock
 /home/ji/miniconda3/envs/py310/bin/python project/audit_raw_provenance.py
@@ -3140,7 +3458,7 @@ git add docs/operations/raw-provenance-audit-*.md
 git commit -m "docs: record the raw snapshot provenance audit"
 ```
 
-Expected: 报告中 tushare 与 akshare 各有不止一组 SDK 版本，不在本机的那几组标 `unknown`。
+Expected: 报告中 tushare 与 akshare 各有不止一组 SDK 版本；当前解释器未安装的那几组标 `unknown`。若终端出现 `no snapshots found under ...`，说明 `--root` 指错了地方——真实快照在 `project/data/raw`，先 `ls project/data/raw` 核对，不要改断言。
 
 ---
 
@@ -3182,7 +3500,7 @@ cd /home/ji/work/program/stock
 | 1 阶段 0 先行，是硬闸门 | Task 1 Step 6/7 |
 | 2 发布必须显式指定 transport，且只允许 relay；break-glass 放行时日志与 `supplier_endpoint` 两处都显示官方直连 | Task 2（`resolve_transport` + `caplog` 断言）+ Task 3（接线）+ Task 6 Step 5 |
 | 3 证据链能自证用了 jiaoch | Task 6 Step 1（`_resolve_label`）+ Step 6（真实发布上的自证脚本） |
-| 4 传输身份进入寻址，且新快照不出现 `unknown`；akshare 的 id 是回退链实际胜出者 | Task 5 + Task 4（`_UPSTREAM_VENDOR`） |
+| 4 传输身份进入寻址，且新快照不出现 `unknown`；akshare 的 id 是回退链实际胜出者 | Task 5 + Task 4（`_UPSTREAM_VENDOR`）。标签按**作答 host** 取，不由 `transport_id` 推导 —— Task 5 与 Task 6 各自的 `LABEL_FOR_HOST` 就是这条断言的落点：官方 host 恒为 `tushare.pro.*`，只有 relay 的 host 带 relay 前缀 |
 | 5 向后兼容不被破坏（旧五字段仍可解析并回落四段旧路径；开发/诊断走 official 时行为与改造前一致） | Task 5（旧路径回落）+ Task 6（五字段行用例）+ Task 3（`injected_transport` 保持 8 处注入调用点行为不变） |
 | 7 探针有结论并驱动阻断动作 | **阶段 0 最小版本**：Task 1。常态化版本（四接口）属阶段 3 |
 | 12 `audit_raw_provenance.py` 产出报告，不对历史 provider 下结论 | Task 7 |
