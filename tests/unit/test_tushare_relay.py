@@ -86,3 +86,10 @@ def test_base_url_is_preserved_verbatim_for_the_sdk():
     sdk = FakeSdk()
     TushareRelayClient("https://relay.example/", "secret", sdk=sdk)
     assert getattr(sdk.api, "_DataApi__http_url") == "https://relay.example/"
+
+
+def test_api_exposes_the_session_that_was_rewritten():
+    sdk = FakeSdk()
+    client = TushareRelayClient(RELAY_URL, "secret", sdk=sdk)
+    assert client.api is sdk.api
+    assert getattr(client.api, "_DataApi__http_url") == RELAY_URL

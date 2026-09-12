@@ -42,6 +42,7 @@ from stock_quant.data_sources.base import (
     AuthenticationError,
     ContractError,
     ServerError,
+    host_of,
 )
 
 _TRANSIENT_MARKERS = (
@@ -215,8 +216,7 @@ class TushareProxyClient:
     @property
     def host(self) -> str:
         """The bare host of the configured base URL (audit metadata only)."""
-        without_scheme = self.base_url.split("//", 1)[-1]
-        return without_scheme.split("/", 1)[0]
+        return host_of(self.base_url)
 
     # ------------------------------------------------------------------ #
     # SDK-mirroring surface (the methods TushareSource calls)             #

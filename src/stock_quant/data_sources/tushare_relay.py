@@ -1,14 +1,18 @@
 """Offline relay client: the tushare SDK protocol pointed at a third-party relay.
 
-Scope boundary (deliberate -- do not expand casually)
-----------------------------------------------------
-This client exists for **offline collectors and cross-checks only**.  It is
-not a ``DataSource`` and ``TushareSource``/``DataPipeline`` never constructs
-it.  Routing a relay through the pipeline would bind the relay's identity into
-the dataset version's ``supplier_endpoint`` evidence -- presenting relayed data
-as though it came from the source, which is exactly the attribution error the
-evidence chain exists to prevent.  A pipeline relay is a separate, deliberate
-change with its own contract tests, not a side effect of adding this module.
+Scope boundary (revised 2026-09-12, design spec §1)
+--------------------------------------------------
+This client started as an offline-only collector helper precisely because
+routing a relay through the pipeline would have bound the relay's identity
+into the dataset version's ``supplier_endpoint`` evidence -- presenting
+relayed data as though it came from the source.  The role-division design
+resolves that concern the other way round: the relay is now the pipeline's
+primary tushare transport, and the attribution is kept honest by *recording*
+the relay path everywhere the evidence is read (``transport_id`` in the raw
+snapshot path and manifest, ``tushare_relay.<host>.<endpoint>`` as the
+supplier label) rather than by refusing to use it.  The stage 0
+silent-substitution probe gates that promotion.  What remains forbidden is
+the opposite error: labelling relay-answered data as ``tushare.pro.*``.
 
 Why the SDK protocol, not a custom HTTP client
 ----------------------------------------------
@@ -26,6 +30,8 @@ import os
 from typing import Any
 
 import pandas as pd
+
+from stock_quant.data_sources.base import host_of
 
 
 class TushareRelayClient:
@@ -77,8 +83,18 @@ class TushareRelayClient:
     @property
     def host(self) -> str:
         """The bare host of the relay (audit metadata only)."""
-        without_scheme = self.base_url.split("//", 1)[-1]
-        return without_scheme.split("/", 1)[0].split("?", 1)[0]
+        return host_of(self.base_url)
+
+    @property
+    def api(self) -> Any:
+        """The official SDK session this relay is.
+
+        The relay IS the official ``DataApi`` with its base URL rewritten, so
+        it is simultaneously the request client (``.daily`` / ``.index_daily``
+        / ``.stock_basic`` all work) and -- by definition -- not the official
+        transport.  That is why provenance cannot be an ``isinstance`` test.
+        """
+        return self._api
 
     def query(self, endpoint: str, **params: object) -> pd.DataFrame:
         """One relay read; transport and JSON parsing belong to the SDK."""

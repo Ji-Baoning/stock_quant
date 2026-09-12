@@ -242,6 +242,22 @@ def _comparison_symbol(value: object) -> str:
     return symbol
 
 
+def host_of(url: str) -> str:
+    """The bare host of a base URL, or ``""`` when there is none.
+
+    Transport provenance is derived from the URL a client will actually
+    reach, never from the client's type, so this is the single place that
+    answers "which host is this?".  It is deliberately lenient: an
+    unparseable or empty URL yields ``""`` and the caller decides whether
+    that is fatal.
+    """
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    without_scheme = text.split("//", 1)[-1]
+    return without_scheme.split("/", 1)[0].split("?", 1)[0].strip()
+
+
 def _utc_timestamp() -> str:
     from datetime import datetime, timezone
 
