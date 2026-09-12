@@ -225,7 +225,11 @@ class RawSnapshotBinding(BaseModel):
 
     ``transport_id`` is optional on purpose: bindings written before transport
     tracking existed carry five fields and resolve on the older four-segment
-    ``<source>/<endpoint>/<request_key>/<file_sha256>`` layout.  Both shapes are
+    ``<source>/<endpoint>/<request_key>/<file_sha256>`` layout.  A row with no
+    transport contributes no ``transport_id`` key to the canonical identity
+    payload (see :func:`_canonical_payload`), so a five-field binding's
+    pre-change ``acceptance_id`` still verifies; a row with a real transport
+    keeps the key and the value stays identity-bearing.  Both shapes are
     readable under ``DATASET_BUILD_CONTRACT_VERSION = 1``.
     """
 
@@ -352,7 +356,20 @@ class AcceptanceRecord(BaseModel):
 
 
 def _canonical_payload(record: AcceptanceRecord) -> dict[str, JsonValue]:
-    """The identity-bearing payload: no ``acceptance_id``, stable array order."""
+    """The identity-bearing payload: no ``acceptance_id``, stable array order.
+
+    A ``raw_snapshot_evidence`` row whose ``transport_id`` is ``None``
+    predates transport tracking, so its ``transport_id`` key is dropped from
+    the payload.  ``None`` is the correct signal for "predates the field": the
+    store writes the reserved id for snapshots that existed before transport
+    tracking, so a ``None`` here never means a real transport we failed to
+    name.  Dropping the key keeps every legacy ``acceptance_id`` bit-identical
+    to the value computed before ``transport_id`` existed, while a row with a
+    real ``transport_id`` keeps the key and stays identity-bearing.  The drop
+    is deliberately scoped to this one field instead of a blanket
+    ``exclude_none=True``: other fields legitimately take ``None`` and must
+    keep affecting identity.
+    """
     payload = record.model_dump(mode="json")
     payload.pop("acceptance_id", None)
     payload["automated_checks"] = sorted(
@@ -361,10 +378,20 @@ def _canonical_payload(record: AcceptanceRecord) -> dict[str, JsonValue]:
     payload["manual_checks"] = sorted(
         payload["manual_checks"], key=lambda row: row["code"]
     )
+    evidence = [
+        {key: value for key, value in row.items() if key != "transport_id"}
+        if row.get("transport_id") is None
+        else row
+        for row in payload["raw_snapshot_evidence"]
+    ]
     payload["raw_snapshot_evidence"] = sorted(
-        payload["raw_snapshot_evidence"],
+        evidence,
         key=lambda row: (
-            row["source"], row["endpoint"], row["request_key"], row["file_sha256"]
+            row["source"],
+            row["endpoint"],
+            row["request_key"],
+            row["file_sha256"],
+            row.get("transport_id") or "",
         ),
     )
     return payload

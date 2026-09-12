@@ -10,6 +10,8 @@ error codes.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
@@ -42,6 +44,7 @@ from stock_quant.research.acceptance.models import (
     canonical_record_json,
     compute_acceptance_id,
 )
+from stock_quant.research.acceptance.registry import AcceptanceRegistry
 from stock_quant.research.universe import UniverseDefinition
 
 
@@ -433,3 +436,108 @@ def test_canonical_record_json_roundtrips_and_requires_matching_id(record):
     assert AcceptanceRecord.model_validate_json(text) == consistent
     with pytest.raises(ValueError, match="acceptance_id"):
         canonical_record_json(record)
+
+
+def _legacy_canonical_payload(record: AcceptanceRecord) -> dict[str, object]:
+    """The canonical payload exactly as the pre-``transport_id`` code built it.
+
+    Reconstructed from the raw field values, not by calling the production
+    :func:`_canonical_payload`: every evidence row loses the ``transport_id``
+    key (the field did not exist) and rows sort by their four-component
+    location key.  ``acceptance_id`` is retained; callers drop it to hash.
+    """
+    payload = record.model_dump(mode="json")
+    payload["automated_checks"] = sorted(
+        payload["automated_checks"], key=lambda row: row["code"]
+    )
+    payload["manual_checks"] = sorted(
+        payload["manual_checks"], key=lambda row: row["code"]
+    )
+    payload["raw_snapshot_evidence"] = sorted(
+        (
+            {key: value for key, value in row.items() if key != "transport_id"}
+            for row in payload["raw_snapshot_evidence"]
+        ),
+        key=lambda row: (
+            row["source"],
+            row["endpoint"],
+            row["request_key"],
+            row["file_sha256"],
+        ),
+    )
+    return payload
+
+
+def _legacy_acceptance_id(record: AcceptanceRecord) -> str:
+    """The pre-``transport_id`` ``acceptance_id``, an explicit test oracle."""
+    payload = _legacy_canonical_payload(record)
+    payload.pop("acceptance_id", None)
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def test_a_pre_change_record_still_verifies_and_transport_still_bears_identity(
+    record, tmp_path
+):
+    """A record published before ``transport_id`` keeps its ``acceptance_id``.
+
+    The other identity tests are self-consistent (they hash with the new
+    model), so only an independent legacy oracle can pin read compatibility.
+    A pre-change ``acceptance.json`` has no ``transport_id`` key at all, so the
+    test writes those exact bytes and requires ``get`` to still verify the id.
+    """
+    legacy_id = _legacy_acceptance_id(record)
+    assert record.raw_snapshot_evidence[0].transport_id is None
+    assert compute_acceptance_id(record) == legacy_id
+
+    published = record.model_copy(update={"acceptance_id": legacy_id})
+    # The pre-change ``canonical_record_json`` dumped the record as-is (no
+    # array re-sorting); only the ``transport_id`` key did not exist.  Those
+    # exact bytes are what a pre-change producer wrote.
+    legacy_text = record.model_dump(mode="json")
+    legacy_text["acceptance_id"] = legacy_id
+    legacy_text["raw_snapshot_evidence"] = [
+        {key: value for key, value in row.items() if key != "transport_id"}
+        for row in legacy_text["raw_snapshot_evidence"]
+    ]
+    path = (
+        tmp_path
+        / "data"
+        / "acceptances"
+        / published.dataset_version
+        / legacy_id
+        / "acceptance.json"
+    )
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            legacy_text,
+            sort_keys=True,
+            ensure_ascii=False,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert (
+        AcceptanceRegistry(tmp_path).get(published.dataset_version, legacy_id)
+        == published
+    )
+
+    current = record.model_copy(
+        update={
+            "raw_snapshot_evidence": (
+                record.raw_snapshot_evidence[0].model_copy(
+                    update={"transport_id": "jiaoch.example"}
+                ),
+            )
+        }
+    )
+    assert compute_acceptance_id(current) != legacy_id
