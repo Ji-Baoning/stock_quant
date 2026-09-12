@@ -116,7 +116,9 @@
 - **不实现全接口 source policy 表**（逐接口声明传输）。这是方案三的内容，
   本轮只做"全局传输选择 + 诚实标注"。
 - **不集成公司行为第三源**（tushare `dividend`）。涉及对账重设计，单独立项。
-- **不改 `_ACCEPTED_MISSING_CODES`、验收口径、数据契约。**
+- **不改 `_ACCEPTED_MISSING_CODES`、验收口径。**
+- **不 bump `DATASET_BUILD_CONTRACT_VERSION`。** 见 §2.3：bump 会立刻判所有
+  已发布数据集 FAIL；`transport_id` 按可选增量字段处理。
 - **不删 promax 的代码路径。** 它的问题只在窗口语义，代码本身可用（见选型）。
 - **不改 `_CONFIGURED_SOURCES`**（不新增源位）。jiaoch 是 `tushare` 源的
   transport，不是新源位。
@@ -175,14 +177,20 @@
 
 | 场景 | 行为 |
 | --- | --- |
-| published 构建（`data update` 及一切会写数据集的路径） | **必须显式设置 `TUSHARE_TRANSPORT=relay`**；未设置 → 直接失败，不回退 |
+| published 构建（`data update` 及一切会写数据集的路径）· 正常路径 | **必须显式设置 `TUSHARE_TRANSPORT=relay`**；未设置 → 直接失败，不回退 |
+| published 构建 · `TUSHARE_TRANSPORT=proxy` | **禁止**。proxy（promax）窗口语义已知不可靠（capability-surface spec §8 判"绝不作证据源"），published 只允许 relay |
+| published 构建 · break-glass 走官方 | `TUSHARE_TRANSPORT=official` 单独使用 → **失败**；只有同时设 `TUSHARE_ALLOW_OFFICIAL_PUBLISH=1` 才放行，且**留痕三处**：运行日志、`supplier_endpoint`（自然变为 `tushare.pro.*`）、运维报告。用于 relay 全面不可用时的应急 |
 | 显式指定但凭据缺失或**半配置**（只设 URL 或只设 KEY）或初始化失败 | 直接失败，**不回退** |
-| 自动序 `relay → proxy → official` | **只允许开发与诊断脚本**使用，且须显式传 `allow_auto_transport=True`（默认 `False`） |
+| 自动序 **`relay → official`** | **只允许开发与诊断脚本**使用，且须显式传 `allow_auto_transport=True`（默认 `False`）；**proxy 不在自动序内** |
 
 - 解析结果**必须打印进运行日志**，并作为 `dataset_build_config` 的一部分
   （经 `supplier_endpoint`）落盘 —— 验收要能**同时从日志与证据两头**证明走了 jiaoch。
-- **promax 保留分支但不参与自动序**：要它必须显式写 `TUSHARE_TRANSPORT=proxy`。
-  它仍是唯一已知可用的第三方传输，问题只在窗口语义，删掉分支是净损失。
+- **promax 保留分支但不参与自动序，也不允许用于 published**：要它必须显式写
+  `TUSHARE_TRANSPORT=proxy`，且只在开发/诊断脚本里。它仍是唯一已知可用的
+  第三方传输，问题只在窗口语义，删掉分支是净损失。
+- break-glass 的开关刻意做成**第二个变量**而非 `=official` 一个值：官方直连是
+  本方案唯一允许 published 离开 relay 的口子，它必须是"刻意多敲一个变量"的动作，
+  不可能因为拼错 transport 值而意外发生。
 
 #### 1.3 传输选择读的是进程环境，不是 `.env`
 
@@ -259,16 +267,55 @@ if snapshot_path.exists():
 例外。此时 `manifest_sha256` 不变 → **数据集版本不变，且新标签被静默丢弃**：
 数据集带着 `tushare.pro.*` 的旧标签，数据却取自 relay。
 
-**这正是本方案要堵的洞，却在去重逻辑里原样复现了一遍。** 处置二选一：
+**这正是本方案要堵的洞，却在去重逻辑里原样复现了一遍。** 处置（已定案）：
 
-- **A（推荐）：把 transport 身份并入快照键。** 让 `request_key`（或路径）带上
-  transport 标识，使"同一查询、不同来源"成为两条独立证据。语义正确 ——
-  来源不同即证据不同 —— 且天然 bump 版本；
-- **B：去重时校验标签。** 复用前比对 manifest 里的 `supplier_endpoint`，
-  不一致则拒绝复用（报错或另写快照），绝不静默沿用旧标签。
+**新增一层 `transport_id` 路径分量，并把它加进 `RawSnapshotEvidence`；
+`request_key` 保持"纯请求的幂等键"语义，不被污染。**
 
-无论选哪个，都要有一条测试：**同一 `DataRequest` 先经 official、再经 relay，
-断言最终证据里的标签是 relay 的**，而不是被复用的 official 标签。
+- 路径形状 `data/raw/<source>/<endpoint>/<request_key>/<file_sha256>/`
+  → `data/raw/<source>/<endpoint>/<transport_id>/<request_key>/<file_sha256>/`。
+  内容寻址只在这**一层之内**生效：同源同请求、不同传输 = 两条独立快照，
+  字节相同也各存各的。
+- `transport_id` 是**路径安全**的来源标识（`tushare` 取实际 base URL 的 host：
+  `jiaoch.top` / `api.waditu.com` / promax 的 host），由 transport descriptor
+  在解析时给出，与 `supplier_endpoint`（§2.1）同源，一并进 `FetchResult.metadata`。
+  `_manifest_for` 把它提升为 manifest 顶层字段，`from_snapshot` 读回。
+  取不到 host 时用 `unknown`，**不允许留空**。
+- **为什么不用方案 A（把 transport 并进 `request_key`）**：`request_key` 现在是
+  请求的幂等键（`_path_component(result.request_key, "request key")`），
+  把来源塞进去会让"同一个请求"在不同传输下变成两个不同请求，
+  幂等语义与来源标注混为一谈。方案 B（复用时校验标签）只堵了静默沿用，
+  两份同字节、不同来源的证据仍然**无法共存** —— 后到的会覆盖前者的证据行。
+
+**必须同步改的点（漏一个就白改）**：
+
+| 位置 | 改动 |
+| --- | --- |
+| `raw_store.py:27` `RawSnapshotEvidence` | 新增 `transport_id` 字段；`from_snapshot` 从 manifest 读 |
+| `raw_store.py:59` `RawStore.save` | 路径插入 `transport_id` 分量 |
+| `raw_store.py:89` `verify_evidence` | 按新路径解析；manifest 一致性回环里加入 `transport_id` |
+| `raw_store.py:122` `_manifest_for` | 顶层写 `"transport_id": metadata.get("transport_id", "unknown")` |
+| `data_pipeline.py:255` `_raw_snapshot_evidence_rows` | 去重键加入 `transport_id`（现为 4 元组） |
+| `acceptance/models.py:218` `RawSnapshotBinding` | 加字段（`extra="forbid"`，不加就解析失败）；文档串"five-field"同步改 |
+
+**向后兼容（必须显式处理，不能靠运气）**：存量 389 份快照在旧路径上，
+已发布数据集的 `build_config.raw_snapshots[]` 是五字段记录。
+`transport_id` 因此**必须带默认值**（缺省 = 旧布局），`verify_evidence`
+在缺省时回落到四段旧路径。否则改完代码读不了任何历史数据集。
+必配一条测试：**旧五字段记录仍能解析并解析到旧路径**。
+
+必配的第二条测试：**同一 `DataRequest` 先经 official、再经 relay，
+两份证据共存且各自标签正确**（不是"后者覆盖前者"）。
+
+**`DATASET_BUILD_CONTRACT_VERSION` 保持 `1`，不 bump —— 这是有意的，不是漏掉。**
+`checks.py:399-401` 是 `contract != DATASET_BUILD_CONTRACT_VERSION → FAIL`，
+所以 bump 到 2 会让**每一份已发布数据集**在 `source_role_health` 上立刻失败
+（旧验收记录按版本绑定、不受影响，但历史数据集从此无法重跑验收）。
+`transport_id` 是对既有 payload 的**可选增量字段**（缺省即旧布局），
+读取侧两种形状都能解析，故按增量而非破坏性变更处理。
+代价要写明：**同一版本号下从此存在两种 payload 形状**，判据是
+`raw_snapshots[]` 行里有没有 `transport_id`。若将来需要区分，再单独 bump 并
+同时给出历史数据集的处置方案（重发布或豁免），不在本轮顺手做。
 
 #### 2.4 代价
 
@@ -319,8 +366,13 @@ EastMoney，有 IP 级封禁史）。**口径不写死就会被误报成数据�
 
 | 字段 | 容差 |
 | --- | --- |
-| 开 / 收 / 高 / 低 | 相对误差 ≤ 1e-4（覆盖 3dp vs 4dp 舍入） |
-| vol / amount | 相对误差 ≤ 1e-3（单位换算 + 不同源的舍入与汇总口径） |
+| 开 / 收 / 高 / 低 | 绝对 ≤ 1e-4 **且** 相对 ≤ 1e-4（覆盖 3dp vs 4dp 舍入） |
+| vol / amount | 绝对 ≤ 1e-3 **且** 相对 ≤ 1e-3（单位换算 + 不同源的舍入与汇总口径） |
+
+**必须 `abs_tol + rel_tol` 并用，不能只看相对误差**：低价股（0.01 元级别的
+价差在 1 元股票上是 1% 相对误差）和接近零的成交额（`amount ≈ 0` 时相对误差
+发散）都会被纯相对判据误判。判定式为 `diff <= abs_tol + rel_tol * |expected|`，
+两个容差都由夹具验证（构造一对"刚好通过"与"刚好不通过"的样本）。
 
 **边界情形必须显式分类，不能一律当差异**：
 
@@ -344,7 +396,8 @@ promax 的教训是 `fallback_on_empty` 让"空"不再等于"确实为空"。jia
 - 取官方**合法返回空**的请求（如对不存在代码的 `daily`、超出区间的窗口），
   对比 jiaoch 是返回空、还是返回了非空（= 换源作答）。
 - 取官方**明确报错**的请求，对比错误串（已知未知接口名逐字相同）。
-- 结论写进运维报告，并驱动 §3 ④ 的阻断动作。
+- 结论写进运维报告，并驱动 §3 ④ 的阻断动作。**最小版本即阶段 0**，
+  必须在阶段 1 首次真实发布之前跑完并留痕。
 
 **④ 发现异常后的强制动作（owner 修正 4）**
 
@@ -420,36 +473,45 @@ relay 路径两者都不是：它是 URL 改写过的官方 `pro_api`，`__getat
 
 ## 落地顺序
 
-本方案含四个可独立验收的交付物，**顺序不可颠倒**：
+本方案含五个可独立验收的交付物（阶段 0 是前置闸门），**顺序不可颠倒**：
 
 | 阶段 | 交付物 | 为什么是这个位置 |
 | --- | --- | --- |
+| 0 | **最小静默换源探针**（§3 ③ 的最小版本） | **必须在阶段 1 首次真实发布之前跑。** 阶段 1 一发布，数据集就指向 relay；若探针之后才否掉 relay，那份数据已经被污染了。探针只查"官方合法空结果 relay 是否返回非空"，不依赖本方案任何代码改动，**今天就能跑** |
 | 1 | §1 传输层 + §2 证据标注 | 必须最先：否则 `data update` 会用旧标注产出一个"看起来是官方直连"的数据集，后续全部白做 |
 | 2 | §5 出处审计 | 紧接着做：它给阶段 1 的新标注提供基线对照 |
-| 3 | §3 证伪体系 | 主传输换好之后才有意义；**其中静默换源探针是阶段 4 的放行闸门** |
+| 3 | §3 证伪体系（阶段 0 探针的完整版） | 主传输换好之后才有意义；常态化后**阻断语义继续生效，仍是阶段 4 的放行闸门** |
 | 4 | §4 覆盖缺口与基准 | **仅在阶段 3 探针未发现换源时开始**；影响历史实验结论（重跑），单独一轮 |
 
 阶段 1+2 是一个自然的提交边界，3、4 各自独立成轮。
+
+**阶段 0 是阶段 1 的硬闸门**：探针一旦命中"jiaoch 对官方合法空结果返回非空"，
+**不进入阶段 1**，relay 主供的决策回炉重新评估（§3 ④ 第一行阻断语义）。
+把探针提到这里，是因为现在的顺序会让"最重要的一条验证"发生在"已经用了它"
+之后 —— 那就是先上车后验证。
 
 **阶段 1 的验收必须包含一次真实发布**：显式设 `TUSHARE_TRANSPORT=relay` 跑通
 `data update`，再从运行日志与 `build_config` 两侧证明 jiaoch 确实被使用
 （§2.2 的链）；不设该变量时同一命令必须失败。这两条要在阶段 1 就落地，
 不能推迟到最后。
 
-**阶段 3 的探针具有阻断语义（§3 ④）**：一旦出现"jiaoch 对官方空结果返回非空"，
-或任何可复现的 relay-vs-official 差异，**立即禁用 relay 主供**，阶段 4 不得开始，
-回到信任边界重新评估。这不是"写进报告再继续"。
+**阶段 3 把阶段 0 的探针常态化**（扩到轴 1 四接口 + akshare 跨族对照 + §3 ④
+的完整阻断动作表）。此后任何时候命中阻断条件，**立即禁用 relay 主供**，
+阶段 4 不得开始，回到信任边界重新评估。这不是"写进报告再继续"。
 
 ## 测试
 
 | 层 | 用例 |
 | --- | --- |
 | relay 传输（单元，不联网） | 沿用 `tests/unit/test_tushare_relay.py` 的 `FakeSdk`；`TushareSource` 在 `TUSHARE_TRANSPORT=relay` 下把官方 `DataApi` 交给 `_client`，`fetch()` 行为与 official 分支一致（§1.1） |
-| 传输解析 · 严格模式 | published 路径未设 `TUSHARE_TRANSPORT` → 失败；设为 `relay` 但凭据缺失 / 半配置 / init 失败 → 失败且**零回退** |
-| 传输解析 · 开发模式 | `allow_auto_transport=True` 时自动序 relay → proxy → official；**promax 不参与自动序** |
+| 传输解析 · 严格模式 | published 路径未设 `TUSHARE_TRANSPORT` → 失败；设为 `proxy` → 失败；设为 `official` 而无 `TUSHARE_ALLOW_OFFICIAL_PUBLISH=1` → 失败；设为 `relay` 但凭据缺失 / 半配置 / init 失败 → 失败且**零回退** |
+| 传输解析 · break-glass | `official` + `TUSHARE_ALLOW_OFFICIAL_PUBLISH=1` → published 放行，证据标签为 `tushare.pro.*` 且日志留痕 |
+| 传输解析 · 开发模式 | `allow_auto_transport=True` 时自动序 **relay → official**；**proxy 不参与自动序** |
 | 证据标注 | relay 下 `supplier_endpoint` 含真实 host；official 仍 `tushare.pro.*`；proxy 仍 `tushare_proxy.*` |
-| 标签不被去重吞掉 | 同一 `DataRequest` 先 official 后 relay → 最终证据标签是 relay 的（§2.3） |
-| akshare 对照契约 | 五类结果各一条夹具；单位换算因子由夹具钉死；腾讯源跳过成交量；`.BJ` 记 `UNSUPPORTED` |
+| 传输身份寻址 | 同一 `DataRequest` 先 official 后 relay → 两份快照共存于各自 `transport_id` 目录，标签各自正确（§2.3） |
+| 旧证据兼容 | 五字段 `RawSnapshotBinding` 记录仍能解析并回落到四段旧路径；`request_key` 仍是纯请求幂等键 |
+| build_config 两种形状 | 五键（旧）与六键（新）`raw_snapshots[]` 行都能解析；`pipeline_contract_version` 仍为 `1` |
+| akshare 对照契约 | 六类结果各一条夹具；单位换算因子由夹具钉死；容差用 `abs_tol + rel_tol` 且配一对边界样本；腾讯源跳过成交量；`.BJ` 记 `UNSUPPORTED` |
 | 基准换源 | tushare `index_daily` 形状的规范化器单测（含 4dp 与空窗口） |
 | required 角色 | `_REQUIRED_ROLE["akshare"] is False`；禁用 akshare 的发布**不被** `_require_available` 阻塞（stub 适配器，不联网） |
 | 空结果守卫 | 采集器层：空表必须带列名，否则拒收（relay 空表无列名已实测） |
@@ -464,8 +526,10 @@ relay 路径两者都不是：它是 URL 改写过的官方 `pro_api`，`__getat
 1. **jiaoch 的上游身份未证实（最重）。** 逐位一致只能证明"输出与官方不可区分"。
    第 3 节 ③ 的探针是唯一检测手段，且它只能证伪、不能证实。
 2. **jiaoch 是外部单点。** 单主机、第三方运营、有账号封停风险。
-   缓解：官方 token 路径完整保留（`TUSHARE_TRANSPORT=official` 一行切回），
-   但**切换会造成数据集版本变化**（标注不同）。
+   缓解：官方直连路径完整保留，作为**留痕的 break-glass**
+   （`TUSHARE_TRANSPORT=official` + `TUSHARE_ALLOW_OFFICIAL_PUBLISH=1`，
+   正常发布禁止）。**切换会造成数据集版本变化**（标注变为 `tushare.pro.*`），
+   且应急发布期间轴 1 的传输保真校验失去意义（两边同一路径）。
 3. **基准换源会改数值。** 3dp → 4dp，历史实验结论重跑。这是本轮最大的
    隐性成本，必须在报告里显式陈述，不能悄悄改。
 4. **出处债无法完全清偿。** 199 份快照的 provider 永久不可知。
@@ -476,30 +540,38 @@ relay 路径两者都不是：它是 URL 改写过的官方 `pro_api`，`__getat
 
 ## 验收标准
 
-1. **发布必须显式使用 relay**：未设置 `TUSHARE_TRANSPORT` 时 published 构建
-   **失败**；设为 `relay` 而凭据缺失 / 半配置 / 初始化失败时**失败且不回退**；
-2. **证据链能自证用了 jiaoch**：由
+1. **阶段 0 先行**：首次 relay 真实发布**之前**，"官方合法空结果"探针已跑完并
+   留痕；若命中换源作答，relay 主供已被禁用，且**未发生任何 relay 发布**；
+2. **发布必须显式指定 transport，且只允许 relay**：未设置 `TUSHARE_TRANSPORT`
+   时 published 构建**失败**；设为 `relay` 而凭据缺失 / 半配置 / 初始化失败时
+   **失败且不回退**；设为 `proxy` 时**失败**；设为 `official` 而未设
+   `TUSHARE_ALLOW_OFFICIAL_PUBLISH=1` 时**失败**，break-glass 放行时
+   日志与 `supplier_endpoint` 两处都必须显示走的是官方直连；
+3. **证据链能自证用了 jiaoch**：由
    `build_config.raw_snapshots[].manifest_sha256` 解析到 raw manifest，
    其 `supplier_endpoint` 全部为 `tushare_relay.<host>.*`，**无一为 `tushare.pro.*`**；
    运行日志打印同一结论（标签不直接进 `build_config`，故走 manifest 解析，见 §2.2）；
-3. **去重不吞新标签**：同一 `DataRequest` 先经 official 再经 relay，
-   最终证据里的标签是 relay 的，旧标签未被复用（§2.3）；
-4. `TUSHARE_TRANSPORT=official` 时行为与改造前**完全一致**（回归测试）；
-5. `verify_transport_fidelity.py` 四接口全部 `AGREE`；出现 `DIFFER` 时必须
+4. **传输身份进入快照寻址**：同一 `DataRequest` 先经 official 再经 relay，
+   两份快照在 `data/raw/<source>/<endpoint>/<transport_id>/...` 下**共存**，
+   各自 manifest 标签正确，且 `request_key` 仍是纯请求幂等键（§2.3）；
+5. **向后兼容不被破坏**：存量五字段 `RawSnapshotBinding` 记录仍能解析并回落到
+   四段旧路径（§2.3）；开发/诊断路径走 official 时行为与改造前**完全一致**
+   （回归测试）；
+6. `verify_transport_fidelity.py` 四接口全部 `AGREE`；出现 `DIFFER` 时必须
    **已解释并获人工批准（留痕）**，否则**发布失败**；`UNAVAILABLE` 允许发布，
    但报告必须写明"本轮未校验"；
-6. 静默换源探针有结论并驱动 §3 ④ 的阻断动作；若发现换源作答，
+7. 静默换源探针有结论并驱动 §3 ④ 的阻断动作；若发现换源作答，
    relay 主供已被禁用；
-7. akshare 个股日线对照跑通，五类结果（`AGREE` / `DIFFER` / `UNAVAILABLE` /
+8. akshare 个股日线对照跑通，六类结果（`AGREE` / `DIFFER` / `UNAVAILABLE` /
    `ABSENT_EXPECTED` / `AGREE_EMPTY` / `UNSUPPORTED`）均有夹具覆盖，
-   **单位换算由夹具钉死**而非推断；
-8. `_REQUIRED_ROLE["akshare"] is False`，且**禁用 akshare 不再阻塞发布**
+   **单位换算与 abs_tol+rel_tol 容差均由夹具钉死**而非推断；
+9. `_REQUIRED_ROLE["akshare"] is False`，且**禁用 akshare 不再阻塞发布**
    （用 stub 适配器验证）；
-9. 基准指数由 tushare 主供、akshare 对照，规范化器单测通过；
-10. `collect_index_weight_membership.py` 经 relay 成功采集；
-11. `audit_raw_provenance.py` 产出报告：给出产出环境分布，反查不出的显式标
+10. 基准指数由 tushare 主供、akshare 对照，规范化器单测通过；
+11. `collect_index_weight_membership.py` 经 relay 成功采集；
+12. `audit_raw_provenance.py` 产出报告：给出产出环境分布，反查不出的显式标
     `unknown`，**不对历史 provider 下结论**；
-12. 运维报告明确陈述"基准换数导致历史结论需重跑"。
+13. 运维报告明确陈述"基准换数导致历史结论需重跑"。
 
 ## 决策记录
 
@@ -535,10 +607,37 @@ owner 复审初稿后提出五条修正，**均不推翻"jiaoch 作为 tushare �
 4. **补上发现异常后的强制动作**（→ §3 ④）。官方不可用/限流 → 记 `UNAVAILABLE`，
    **不等于校验通过**；可复现差异 → 停止发布或要求人工豁免并留痕；
    探针发现 jiaoch 对官方合法空结果返回非空 → **立即禁用 relay 主供**并重新评估。
-   验收标准第 3 条相应改为"差异已解释并批准，否则发布失败"。
+   验收标准中相应一条改为"差异已解释并批准，否则发布失败"（现第 6 条）。
 5. **补全 AkShare 个股日线对照契约**（→ §3 ②）。原稿只写"用 akshare 对照"，
    缺少接口与回退序、复权口径、单位换算、代码/日期映射、停牌退市空窗处理、
    容差与 `supplier_endpoint` 的实际记录方式 —— 缺任何一项都无法实施。
+
+### 2026-09-12 二审修正（owner，六条）
+
+owner 对上一版再审，提出三条高/中优先级问题与三处文字契约问题，全部采纳：
+
+1. **RawStore 去重方案定案**（→ §2.3）。上一版仍留 A/B 二选一，且两条都不成立：
+   方案 A 把 transport 并入 `request_key` 会毁掉它的纯幂等语义，方案 B 只堵了
+   静默沿用、同字节不同来源的两份证据仍无法共存。**定案为新增 `transport_id`
+   路径分量并加入 `RawSnapshotEvidence`**，`request_key` 不动；同时列全必须同步
+   改的六处（含 `acceptance/models.py:218` 那个 `extra="forbid"` 的
+   `RawSnapshotBinding`）与存量五字段记录的向后兼容约束。
+2. **首次 relay 发布挪到探针之后**（→ 落地顺序新增阶段 0）。上一版让阶段 1
+   先真实发布、阶段 3 才跑"本轮最重要"的探针 —— 探针若随后否掉 relay，
+   那份数据集已被污染。**阶段 0 因此成为阶段 1 的硬闸门**，且它不需要本方案
+   任何代码改动，今天就能跑。
+3. **published 只允许 relay，official 收窄为留痕 break-glass**（→ §1.2、
+   残留风险 2、验收 2）。上一版"发布必须 relay"与"可 `=official` 应急切回"
+   自相矛盾。**proxy 亦明确禁止用于 published**。
+4. **自动序笔误**（→ §1.2）。上一版写 `relay → proxy → official`，下一句却说
+   promax 不参与自动序。**统一为 `relay → official`**。
+5. **容差改为 `abs_tol + rel_tol` 并用**（→ §3 ②）。纯相对误差会误判低价股与
+   接近零的成交额，两种容差都由夹具验证。
+6. **验收文案笔误**（→ 验收 8）。上一版写"五类结果"却列了六类，已改。
+7. **（自查补充）`DATASET_BUILD_CONTRACT_VERSION` 明确不 bump**（→ §2.3）。
+   `checks.py:399-401` 是相等判据，bump 会让所有历史数据集在
+   `source_role_health` 上立刻 FAIL，故按可选增量字段处理；
+   代价是同一版本号下存在两种 payload 形状，已在 §2.3 写明判据。
 
 ## 实测证据（2026-09-12）
 
