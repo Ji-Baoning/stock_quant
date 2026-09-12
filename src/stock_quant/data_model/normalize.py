@@ -37,6 +37,9 @@ _NUMERIC_COLUMNS = ("open", "high", "low", "close", "amount")
 # amount in thousand-yuan) declare a deterministic scale factor here.
 _UNIT_FACTORS = {
     "tushare": (100, 1000),
+    # The GET aggregation proxy serves tushare-layout frames over a different
+    # transport; units are identical by contract (lots / thousand-yuan).
+    "tushare_proxy": (100, 1000),
     "baostock": (1, 1),
 }
 

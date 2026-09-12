@@ -86,13 +86,24 @@ def baseline_issues(
 def token_issue(
     environ: Mapping[str, str] | None = None,
 ) -> ReadinessIssue | None:
-    """Require a non-empty ``TUSHARE_TOKEN`` before any fetch is attempted."""
+    """Require Tushare credentials before any fetch is attempted.
+
+    Either the official ``TUSHARE_TOKEN`` or the shared-proxy pair
+    (``TUSHARE_PROXY_URL`` + ``TUSHARE_PROXY_KEY``) satisfies the gate; the
+    adapter picks the proxy transport whenever the pair is configured.
+    """
     source = os.environ if environ is None else environ
-    if not str(source.get("TUSHARE_TOKEN", "")).strip():
-        return ReadinessIssue(
-            "TUSHARE_TOKEN_MISSING", "TUSHARE_TOKEN is unset or empty"
-        )
-    return None
+    if str(source.get("TUSHARE_TOKEN", "")).strip():
+        return None
+    if str(source.get("TUSHARE_PROXY_URL", "")).strip() and str(
+        source.get("TUSHARE_PROXY_KEY", "")
+    ).strip():
+        return None
+    return ReadinessIssue(
+        "TUSHARE_TOKEN_MISSING",
+        "neither TUSHARE_TOKEN nor TUSHARE_PROXY_URL/TUSHARE_PROXY_KEY "
+        "is configured",
+    )
 
 
 def probe_endpoint(

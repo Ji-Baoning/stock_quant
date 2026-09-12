@@ -67,6 +67,19 @@ def test_token_issue_flags_a_missing_token() -> None:
     assert token_issue({"TUSHARE_TOKEN": "abc"}) is None
 
 
+def test_token_issue_accepts_proxy_credentials_without_a_token() -> None:
+    assert token_issue({"TUSHARE_PROXY_URL": "https://proxy.example"}) is not None
+    assert (
+        token_issue(
+            {
+                "TUSHARE_PROXY_URL": "https://proxy.example",
+                "TUSHARE_PROXY_KEY": "key-123",
+            }
+        )
+        is None
+    )
+
+
 def test_probe_endpoint_reports_a_raising_supplier() -> None:
     def boom(endpoint, symbol, start, end):
         raise RuntimeError("endpoint down")

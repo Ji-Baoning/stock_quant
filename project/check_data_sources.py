@@ -1,11 +1,15 @@
 #!/usr/bin/env python
-"""Read-only connectivity check for the three market-data suppliers.
+"""Read-only connectivity check for the configured market-data suppliers.
 
 Run from the repository root or project directory:
     python project/check_data_sources.py
 
 The default environment file is the phase-one worktree's ``.env.example``.
-Use ``--env-file`` to override it.  Token values are never printed.
+Use ``--env-file`` to override it.  Token values are never printed.  The
+``tushare`` line reports whichever transport is active (official SDK or the
+shared GET proxy, visible in the ``endpoint`` label); when the proxy
+credentials are configured, an ``index_daily`` probe exercises the
+proxy-specific surface as well.
 """
 
 from __future__ import annotations
@@ -14,12 +18,14 @@ import argparse
 import os
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Callable
 
 from stock_quant.config import SourceConfig
 from stock_quant.data_sources.akshare import AkShareSource
 from stock_quant.data_sources.baostock import BaoStockSource
 from stock_quant.data_sources.base import DataRequest
 from stock_quant.data_sources.tushare import TushareSource
+from stock_quant.data_sources.tushare_proxy import TushareProxyClient
 
 
 def _load_env(path: Path) -> None:
@@ -50,6 +56,18 @@ def _check(name: str, source: object, request: DataRequest) -> bool:
     return True
 
 
+def _try_check(
+    name: str, build: Callable[[], object], request: DataRequest
+) -> bool:
+    """Check one supplier; a source that cannot even be built reports FAIL."""
+    try:
+        source = build()
+    except Exception as error:  # noqa: BLE001 - diagnostic boundary
+        print(f"{name}: FAIL {type(error).__name__}: {error}")
+        return False
+    return _check(name, source, request)
+
+
 def main() -> int:
     default_env = (
         Path(__file__).resolve().parents[1]
@@ -68,23 +86,31 @@ def main() -> int:
 
     start, end = _window()
     config = SourceConfig()
-    results = (
-        _check(
+    results = [
+        _try_check(
             "tushare",
-            TushareSource(config),
+            lambda: TushareSource(config),
             DataRequest("daily", ("600000.SH",), start, end, {}),
         ),
-        _check(
+        _try_check(
             "akshare",
-            AkShareSource(config),
+            lambda: AkShareSource(config),
             DataRequest("index_history", ("000300.SH",), start, end, {}),
         ),
-        _check(
+        _try_check(
             "baostock",
-            BaoStockSource(config),
+            lambda: BaoStockSource(config),
             DataRequest("daily", ("sh.600000",), start, end, {}),
         ),
-    )
+    ]
+    if TushareProxyClient.from_env(timeout_seconds=config.timeout_seconds) is not None:
+        results.append(
+            _try_check(
+                "tushare_proxy",
+                lambda: TushareSource(config),
+                DataRequest("index_daily", ("000300.SH",), start, end, {}),
+            )
+        )
     return 0 if all(results) else 1
 
 

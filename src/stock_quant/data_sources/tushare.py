@@ -19,17 +19,31 @@ from stock_quant.data_sources.base import (
     translate_supplier_error,
     validate_supplier_frame,
 )
+from stock_quant.data_sources.tushare_proxy import TushareProxyClient
 
 
 class TushareSource:
-    """Fetch raw Tushare `daily` responses without column normalization."""
+    """Fetch raw Tushare `daily` responses without column normalization.
+
+    The transport is chosen once at construction: the shared GET proxy when
+    ``TUSHARE_PROXY_URL``/``TUSHARE_PROXY_KEY`` are configured, otherwise the
+    official SDK against ``api.tushare.pro`` (which requires
+    ``TUSHARE_TOKEN``).  Frames carry the tushare layout either way, so the
+    normalization contract is transport-independent; the proxy transport is
+    recorded in ``supplier_endpoint``/``sdk_version`` for provenance.
+    """
 
     name = "tushare"
 
     def __init__(self, config: SourceConfig, client: Any | None = None) -> None:
         self.config = config
-        token = os.environ["TUSHARE_TOKEN"]
         if client is None:
+            client = TushareProxyClient.from_env(
+                timeout_seconds=config.timeout_seconds,
+                max_retries=config.max_retries,
+            )
+        if client is None:
+            token = os.environ["TUSHARE_TOKEN"]
             import tushare as ts
 
             try:
@@ -40,23 +54,37 @@ class TushareSource:
                 ) from None
             self._sdk_version = getattr(ts, "__version__", "unknown")
         else:
-            self._sdk_version = getattr(client, "__version__", "unknown")
+            self._sdk_version = getattr(client, "sdk_version", None) or getattr(
+                client, "__version__", "unknown"
+            )
         self._client = client
+
+    def _supplier_endpoint(self, endpoint: str) -> str:
+        if isinstance(self._client, TushareProxyClient):
+            return f"tushare_proxy.{endpoint}"
+        return f"tushare.pro.{endpoint}"
 
     def fetch(self, request: DataRequest) -> FetchResult:
         if request.endpoint == "stock_basic":
             return self._fetch_stock_basic(request)
-        if request.endpoint != "daily":
-            raise ValueError(
-                "TushareSource supports only the unadjusted daily endpoint"
-            )
+        if request.endpoint in ("daily", "index_daily"):
+            return self._fetch_symbol_series(request)
+        raise ValueError(
+            "TushareSource supports only the daily, index_daily, and "
+            "stock_basic endpoints"
+        )
+
+    def _fetch_symbol_series(self, request: DataRequest) -> FetchResult:
+        """Fetch one symbol-scoped unadjusted series (stock or index daily)."""
         if len(request.symbols) != 1:
-            raise ValueError("Tushare daily requests require exactly one symbol")
+            raise ValueError(
+                f"Tushare {request.endpoint} requests require exactly one symbol"
+            )
         if request.params.get("adjustment", "unadjusted") != "unadjusted":
             raise ValueError("Tushare daily data is available only unadjusted")
         request_timestamp = _utc_timestamp()
         try:
-            frame = self._client.daily(
+            frame = getattr(self._client, request.endpoint)(
                 ts_code=request.symbols[0],
                 start_date=request.start_date.strftime("%Y%m%d"),
                 end_date=request.end_date.strftime("%Y%m%d"),
@@ -75,7 +103,7 @@ class TushareSource:
             frame=frame,
             metadata=request_metadata(
                 request,
-                "tushare.pro.daily",
+                self._supplier_endpoint(request.endpoint),
                 self._sdk_version,
                 request_timestamp=request_timestamp,
                 response_timestamp=response_timestamp,
@@ -113,7 +141,7 @@ class TushareSource:
             frame=frame,
             metadata=request_metadata(
                 request,
-                "tushare.pro.stock_basic",
+                self._supplier_endpoint("stock_basic"),
                 self._sdk_version,
                 request_timestamp=request_timestamp,
                 response_timestamp=response_timestamp,
