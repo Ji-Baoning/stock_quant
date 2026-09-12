@@ -252,6 +252,44 @@ def _published_project(root: Path) -> AcceptanceProject:
         "universe.yml",
     ):
         shutil.copy(_REPO_ROOT / "configs" / name, configs / name)
+    # The fixture's baseline window must equal the stubbed update window: on
+    # the repository's wide baseline the bootstrap would seed weekday
+    # approximations far beyond November 2021, and a relay update can never
+    # replace them -- the acceptance chain's ``calendar_coverage_evidence``
+    # check then fails closed on the leftover seed inside the version-bound
+    # full-history window (by design).  With equal windows the single relay
+    # span replaces the seed entirely.
+    project_config = yaml.safe_load(
+        (configs / "project.yml").read_text(encoding="utf-8")
+    )
+    project_config["start_date"] = _WINDOW_START
+    project_config["end_date"] = _WINDOW_END
+    (configs / "project.yml").write_text(
+        yaml.safe_dump(project_config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    # One enabled universe definition, so the update binds a real
+    # ``full_history_acceptance_start``: without ``configs/universes/`` the
+    # criterion scan is empty and the acceptance chain's
+    # ``calendar_coverage_evidence`` check must fail closed.  Mirrors the
+    # integration fixture's definition (``tests/integration/conftest.py``).
+    universes = configs / "universes"
+    universes.mkdir()
+    (universes / "custom_acceptance_fixture.yml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "universe_id": "custom_acceptance_fixture",
+                "rules_version": "fixture-rules-v1",
+                "membership_table_sha256": "ab" * 32,
+                "coverage_start": _WINDOW_START.isoformat(),
+                "coverage_end": _WINDOW_END.isoformat(),
+                "evidence_summary_sha256": "cd" * 32,
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
     bootstrap_dataset(root)
     result = DataPipeline(root, sources=_all_stubs()).update(
         DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)

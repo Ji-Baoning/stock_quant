@@ -63,6 +63,9 @@ import pandas as pd
 
 from stock_quant.config import load_project_config
 from stock_quant.data_model.calendar import TradingCalendar
+from stock_quant.data_model.calendar_coverage import (
+    validate_build_calendar_evidence,
+)
 from stock_quant.data_model.dataset import STANDARDIZED_SCHEMAS, DatasetReader
 from stock_quant.data_model.security_master import (
     missing_master_coverage_symbols,
@@ -195,6 +198,7 @@ def run_automated_checks(value: AcceptanceCheckInput) -> tuple[CheckResult, ...]
         "security_master_evidence": _check_security_master,
         "corporate_action_evidence": _check_corporate_actions,
         "raw_snapshot_traceability": _check_raw_snapshots,
+        "calendar_coverage_evidence": _check_calendar_coverage,
         "source_role_health": _check_source_roles,
     }
     results = []
@@ -381,6 +385,45 @@ def _check_raw_snapshots(value: AcceptanceCheckInput) -> CheckResult:
                 ]
             )
     return _result("raw_snapshot_traceability", failures)
+
+
+def _check_calendar_coverage(value: AcceptanceCheckInput) -> CheckResult:
+    """Require every published calendar day to name its source, and no seed
+    inside the version-bound full-history window.
+
+    The criterion is read from the dataset's own ``build_config`` (the
+    ``full_history_acceptance_start`` fixed at publish time), never recomputed
+    from the current ``configs/universes`` tree: a later definition change must
+    not retroactively re-judge an already-published version.
+    """
+    evidence = dataset_evidence(value)
+    build = _build_config(evidence.manifest)
+    with DatasetReader(value.project_root).open(value.dataset_version) as (
+        context
+    ):
+        calendar = context.read("trading_calendar")
+    violations = validate_build_calendar_evidence(
+        build, open_days=_open_days(calendar)
+    )
+    failures = [
+        [code, _calendar_subject(details)] for code, details in violations
+    ]
+    return _result("calendar_coverage_evidence", failures)
+
+
+def _calendar_subject(details: Mapping[str, Any]) -> str:
+    """A deterministic ``key=value`` subject for one calendar violation.
+
+    Mirrors the other checks' ``[reason_code, subject]`` failure rows: only
+    stable string detail values are rendered, so identical evidence always
+    yields identical rows and no path or exception text can leak.
+    """
+    parts = [
+        f"{key}={value}"
+        for key, value in sorted(details.items())
+        if isinstance(value, str)
+    ]
+    return " ".join(parts) if parts else "trading_calendar"
 
 
 def _check_source_roles(value: AcceptanceCheckInput) -> CheckResult:

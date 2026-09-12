@@ -356,6 +356,18 @@ def _apply_mutation(
                 row["reason_code"] = "source_fetch_failed"
     elif mutation == "mark_bootstrap_origin":
         build_config["origin"] = "bootstrap"
+    elif mutation == "strip_calendar_coverage":
+        build_config.pop("calendar_coverage")
+        build_config.pop("full_history_acceptance_start")
+    elif mutation == "seed_inside_full_history":
+        spans = build_config["calendar_coverage"]
+        build_config["calendar_coverage"] = [
+            {
+                "start_date": spans[0]["start_date"],
+                "end_date": spans[-1]["end_date"],
+                "source": "bootstrap_seed",
+            }
+        ]
     else:
         raise AssertionError(f"unknown mutation {mutation!r}")
 
@@ -398,9 +410,22 @@ def mutated_project(project):
         ("remove_raw_snapshot", "raw_snapshot_traceability"),
         ("fail_required_source", "source_role_health"),
         ("mark_bootstrap_origin", "source_role_health"),
+        ("strip_calendar_coverage", "calendar_coverage_evidence"),
+        ("seed_inside_full_history", "calendar_coverage_evidence"),
     ],
 )
 def test_semantic_check_fails_closed(mutated_project, mutation, code):
     project = mutated_project(mutation)
     checks = _checks_by_code(run_automated_checks(_input(project)))
     assert checks[code].status is CheckStatus.FAIL
+
+
+def test_calendar_coverage_evidence_names_the_missing_manifest_key(
+    mutated_project,
+):
+    """A manifest without calendar evidence fails with a stable, parseable code."""
+    project = mutated_project("strip_calendar_coverage")
+    checks = _checks_by_code(run_automated_checks(_input(project)))
+    result = checks["calendar_coverage_evidence"]
+    assert result.status is CheckStatus.FAIL
+    assert result.details["code"] == "calendar_coverage_missing"

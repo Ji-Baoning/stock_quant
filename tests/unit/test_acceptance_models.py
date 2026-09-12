@@ -339,6 +339,7 @@ def test_policy_check_codes_are_fixed():
         "security_master_evidence",
         "corporate_action_evidence",
         "raw_snapshot_traceability",
+        "calendar_coverage_evidence",
         "source_role_health",
     )
     assert MANUAL_CHECK_CODES == (
