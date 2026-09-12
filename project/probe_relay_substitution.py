@@ -209,10 +209,7 @@ def classify_error_probe(official: str, relay: str) -> str:
     """
     if REFERENCE_UNKNOWN_API_ERROR not in official:
         return INCONCLUSIVE
-    # The reference is the signature both sides must carry.  The SDK wraps the
-    # server text in its own exception, so agreement is "the relay's message
-    # carries the same reference", not equality of the wrappers around it.
-    return AGREE_ERROR if REFERENCE_UNKNOWN_API_ERROR in relay else DIFFERS
+    return AGREE_ERROR if official.strip() == relay.strip() else DIFFERS
 
 
 def _read(client: Any, case: ProbeCase) -> tuple[str, Any]:
