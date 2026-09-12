@@ -5,8 +5,9 @@
 > **本地直连**仍然成立，但经共享代理可读：实测 `suspend_d`
 > `000333.SZ` 2016-05-01..06-30 返回 10 行 = `2016-05-18..05-31`，正是本文
 > 判定无源的那段区间。**这不改变本方案取向**——用主源 `pre_close` 链合成
-> 停牌行仍是既成事实；`suspend_d` 现在可以充当**独立交叉校验**（见
-> `docs/operations/2026-09-12-tushare-proxy-assessment.md` §6）。
+> 停牌行仍是既成事实；`suspend_d` 现在可以充当**同源自洽交叉校验**——它抓不到
+> 整条上游链的系统性错误（见
+> `docs/operations/2026-09-12-tushare-proxy-assessment.md` §2）。
 
 > **For agentic workers:** 按 TDD 顺序实施；先写失败测试再实现。步骤用 checkbox 跟踪。
 
