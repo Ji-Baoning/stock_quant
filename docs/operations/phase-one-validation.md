@@ -101,7 +101,9 @@ python -m stock_quant data validate --root <ROOT>
 
 记录 `run_id` 与 `dataset_version`。`data update` 打印的 `resolved_end_date` 与
 `resolved_end_is_fallback` 体现“latest-complete-date 规则”（§14）：当任一必需数据
-角色未达最新开市日时回退到上一个确认完整交易日并注明。
+角色未达最新开市日时回退到上一个确认完整交易日并注明。日历证据由 `calendar_coverage`
+span 与版本绑定的 `full_history_acceptance_start` 提供，`resolved_end_is_fallback` 已
+删除；旧 manifest 会被 `data validate` 报 `calendar_coverage_missing`，处置方式是重发布。
 
 ### 步骤 E：指数成分（csi300）证据导入、定义冻结与预检
 
@@ -149,6 +151,9 @@ python -m stock_quant report build --root <ROOT>
 
 1. **最新完整日期规则**：核对 `data update` 的 `resolved_end_date` /
    `resolved_end_is_fallback` 与官方交易所日历一致（目标区间内停市日无误判）。
+   日历证据由 `calendar_coverage` span 与版本绑定的 `full_history_acceptance_start`
+   提供，`resolved_end_is_fallback` 已删除；旧 manifest 会被 `data validate` 报
+   `calendar_coverage_missing`，处置方式是重发布。
 2. **来源行数**：对照 `data/standardized/<version>/daily_bar.parquet` 与原始库
    `data/raw/<source>/<endpoint>/<request_key>/data.parquet` 的行数与窗口交易日数。
 3. **隔离/缺失原因**：阅读质量报告 issue 的缺失行分类原因

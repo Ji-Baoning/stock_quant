@@ -1,7 +1,8 @@
 start_date: 2021-01-01
 end_date: 2026-08-30
-initial_cash: 100000
+initial_cash: 1000000
 benchmark_symbols:
   - 000300.SH
   - 000905.SH
+# 仅记录用途；更新终点来自已发布交易日历，不再使用时钟。
 publication_time: "15:00"

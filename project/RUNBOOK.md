@@ -13,10 +13,19 @@
 conda activate py310
 # 包安装（已做）：
 python -m pip install -e ~/work/program/stock
+
+# 密钥只从仓库根的 .env 读入（该文件已被 gitignore）。.env.example 是模板、
+# 值恒为空，**绝不把真实值写进任何被跟踪的文件**；KEY=value 且等号两侧不留空格。
+cd ~/work/program/stock
+set -a; . ./.env; set +a
+
 cd ~/work/program/stock/project
 cp -r ~/work/program/stock/configs .   # 若无 configs
-export TUSHARE_TOKEN='<你的轮换后token>'      # 只进环境变量，绝不入库
 ```
+
+> `.env` 只在当前 shell 生效。**每次发布前都要重新 source 一次并显式导出
+> `TUSHARE_TRANSPORT=relay`** —— 见阶段 4。别把 token 写成 `export TUSHARE_TOKEN=...`
+> 打进 shell 历史里。
 
 **必查 configs/project.yml**：
 - `start_date`/`end_date` = 你想拉的数据区间。
@@ -50,28 +59,68 @@ python -m stock_quant data validate --root .   # 应 PASS（空数据集自检�
 ```bash
 cd ~/work/program/stock
 conda run -n py310 python -m pytest -m external -v    # 三供应商原始帧契约
-conda run -n py310 python -m pytest -m smoke -v       # 600000.SH 小窗口真实 update
+set -a; . ./.env; set +a
+export TUSHARE_TRANSPORT=relay
+conda run -n py310 python -m pytest -m smoke -v -o log_cli=true --log-cli-level=INFO
 ```
+
+> smoke 那条跑的是 `DataPipeline.update` —— 一条**发布路径**，所以同样要
+> `TUSHARE_TRANSPORT=relay`。缺了它不会报错退出，而是 tushare 源初始化失败、
+> 门禁读作 `BLOCK`，而该测试对 `BLOCK` 是放行的 —— 于是这条 smoke **看着绿、
+> 实际没验到联网**。判据是两条：输出里有 `kind=relay` 那行（上面的
+> `log_cli` 就是为它开的），且这次是以 `PASS` 结束（`BLOCK` 只说明"没通过"，
+> 分不清是数据问题还是传输没起来）。
 
 ## 阶段 4 · 正式拉数 + 质量门禁
 
 **建议先小窗口试一次**（半天拉得动、问题暴露快），确认门禁能过再铺全区间：
 
 ```bash
+cd ~/work/program/stock
+set -a; . ./.env; set +a
+export TUSHARE_TRANSPORT=relay        # 发布必须显式声明传输，缺了必失败（见下）
 cd ~/work/program/stock/project
 python -m stock_quant data update --start 2024-01-01 --end 2024-03-31 --root .
 python -m stock_quant data validate --root .
-# PASS  → data/dataset/<版本哈希>/ 新增不可变版本
+# PASS  → data/standardized/<版本哈希>/ 新增不可变版本（CURRENT 指向它）
 # BLOCK → 数据集不变；看上方 redacted 原因行（ERROR/FATAL 计数、source 状态）
 ```
+
+- **`TUSHARE_TRANSPORT=relay` 是发布的硬前提。** 不导出它就退出码 1、报
+  `TUSHARE_TRANSPORT must be set explicitly for a published build`，数据集不变。
+  这是设计而非故障：发布路径上的 `resolve_transport` 永不回退。反向自检就是
+  「把 `TUSHARE_TRANSPORT` 摘掉，同一条命令必须失败且 `data/standardized/CURRENT`
+  不变」，完整三步人工验收见 `docs/operations/relay-publish-runbook.md`。
 
 - 门禁与策略无关：非正价格/schema 冲突/必需源不可用 → BLOCK；跨源价差、复权缺失
   只记录不阻断（设计 §13.5）。
 - **`data update` 必须先刷新 tushare `stock_basic` 全市场快照**：该必需步骤刷新
   `security_master` 的上市事实并发布 `security_master_coverage`（每标的一行 = 研究冻结
   的证据）；拉取失败或快照缺某股票池标的 → 阻断发布。
-- 全区间再跑：`--start 2021-01-01 --end 2026-08-30`（= configs 范围；也可不给 --end，
-  由"最新完整交易日 + 发布时间 15:00"规则自动发现）。
+- `data update` 不带 `--end` 时，终点只能取已发布 `trading_calendar.calendar_date`
+  的最大值；已发布日历为空时必须显式传 `--end`。
+- 每次 unmarked `data update` 都会向 relay 分别请求 SSE / SZSE 的
+  `trade_cal`（halo `[start-1, end+1]`），两份响应都进 raw store。任一请求、
+  原始校验、两市比对或 `pretrade_date` 连续性失败都会 FATAL，`CURRENT` 不动。
+- 全历史验收：从 manifest 绑定的 `full_history_acceptance_start` 到已发布日历
+  最大日期之间，不允许出现 `bootstrap_seed` span。种子只允许留在该起点之前。
+- 消除 bootstrap 种子日历的唯一方式：提交一次覆盖全历史的更新窗口，例如
+  `data update --start 2015-01-05 --end <已发布日历最大日期>`；窗口必须覆盖
+  整个已发布日历范围，否则发布被 `calendar_coverage_gap` / `calendar_uncovered`
+  阻断，错误详情里会给出需要覆盖的 `first_open_day` / `last_open_day`。
+- **公司行为复核只看本轮窗口。** 只把 `ex_date` 落在本轮 `[start, end]` 的 review
+  传给复核器；窗口外的已审历史事实由当前数据集保留，不要求供应商本轮重现 ——
+  所以小窗口试用（如上面的 2024Q1）不会因为 2018 年的已审冲突而失败。窗口**内**
+  仍严格 fail-closed：缺冲突行、来源或经济字段变化都继续阻断。
+- 若出现 `FAILED: reviewed corporate action <symbol>#<ex_date> has 0 matching
+  <source> conflicts`（`<source>` 是该条 review 的 `selected_source`：`cninfo` 或
+  `eastmoney`）：这是**窗口问题，不是传输或数据问题** —— 该 review 的 `ex_date` 落在
+  了你请求的 `[start, end]` 内，但供应商那两行冲突没取到。先核对你请求的窗口，
+  **不要**去改 `configs/corporate_action_reviews.yml`，也不要放宽闸门。
+- **怎么读「这次刷新从哪天开始」**：`data/standardized/<版本>/dataset_manifest.json`
+  的 `build_config` 里，`requested_start_date` 是命令行写的（没写就是 `null`），
+  `effective_start_date` 是配置回退后的**实际起点**。别把 `requested_start_date:
+  null` 误读成"没有起点"。改造前发布的旧版本没有 `effective_start_date` 字段。
 
 ## 阶段 5 · 正式研究（唯一发布者）
 

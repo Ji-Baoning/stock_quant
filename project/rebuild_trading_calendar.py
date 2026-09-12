@@ -1,4 +1,13 @@
 """Rebuild the published calendar from benchmark sessions (no network access)."""
+
+# This one-off script rebuilds the calendar from benchmark sessions and drops
+# every build-evidence field, so the republished dataset can no longer explain
+# its calendar provenance.  Use `data update` with an explicit window instead.
+raise SystemExit(
+    "rebuild_trading_calendar.py is superseded: run "
+    "`data update --start <coverage_start> --end <last published calendar day>`"
+)
+
 from pathlib import Path
 
 import pandas as pd

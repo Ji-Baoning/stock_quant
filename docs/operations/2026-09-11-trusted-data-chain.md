@@ -24,6 +24,10 @@
   剩 **3 项外部佐证 FAIL 留给 owner**（`exchange_calendar_sample`、
   `cross_source_price_sample`、`trading_rule_effective_dates`），签署后即可发布 ACCEPTED。
 
+日历证据说明：更新终点的日历证据由 `calendar_coverage` span 与版本绑定的
+`full_history_acceptance_start` 提供，`resolved_end_is_fallback` 已删除；
+旧 manifest 会被 `data validate` 报 `calendar_coverage_missing`，处置方式是重发布。
+
 ## 1. 从失败到全绿：三个被修复的真问题
 
 | # | 问题 | 根因 | 修复 |
