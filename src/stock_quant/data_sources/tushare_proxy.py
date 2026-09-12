@@ -1,6 +1,6 @@
 """GET transport for the shared Tushare-compatible aggregation front.
 
-The proxy fronts Tushare Pro data with one GET endpoint per API
+The proxy fronts Tushare-shaped data with one GET endpoint per API
 (``<base>/daily?ts_code=...``) authenticated by an ``X-API-Key`` header; it
 does not speak the official SDK's POST protocol.  ``TushareProxyClient``
 mirrors the small SDK surface the adapters consume (``daily``,
@@ -11,10 +11,17 @@ nature demands (each observed live on 2026-09-12):
   bounded windows and concatenated;
 - the upstream pool intermittently answers ``upstream_pool_exhausted`` or
   stalls mid-body, so transient failures retry with backoff;
-- some endpoints apply ``start_date``/``end_date`` differently from the
-  official API (observed: ``dividend`` filtered to empty, ``suspend_d``
-  losing rows when given ``suspend_type``), so symbol-scoped reads pass
-  simple parameters only and post-filter the returned rows client-side.
+- the service rate-limits by **shared IP budget** and reports the remaining
+  allowance in response headers, so pacing follows the headers rather than
+  the catalog's declaration (which was measured wrong: it claimed
+  60 requests/min per IP where the headers said 200).
+
+Outside the SDK surface, ``query()`` reaches any of the ~298 catalog
+interfaces behind a GET-only assertion and a capability pre-flight.  That
+pre-flight checks the interface's **declared shape** and nothing else: it is
+not a trust signal, because no response -- body or header -- names the
+upstream that answered.  ``capabilities()`` / ``capability(name)`` /
+``upstreams(name)`` expose the declarations for diagnostics.
 
 It is a transport for Tushare-format data, not an evidence source: frames
 keep the tushare layout (``vol`` lots, ``amount`` thousand-yuan) so the

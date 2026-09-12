@@ -2,6 +2,15 @@ tushare:
   enabled: true
   timeout_seconds: 30
   max_retries: 3
+# The shared Tushare-compatible aggregation front (GET transport) inherits
+# this segment's timeout_seconds/max_retries.  It is deliberately NOT its own
+# source: `_CONFIGURED_SOURCES` (data_pipeline.py) is the closed registry the
+# availability gate walks, and the proxy must not add a name to it.  When
+# TUSHARE_PROXY_URL + TUSHARE_PROXY_KEY are set in the environment the tushare
+# adapter routes through the proxy (windowed pages, transient retry); the
+# official SDK stays the fallback.  Data source only - never an evidence
+# source: universe/corporate-action evidence chains keep their official
+# filings regardless of this switch.
 akshare:
   enabled: true
   timeout_seconds: 30
