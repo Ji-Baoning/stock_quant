@@ -247,18 +247,22 @@ def test_a_credential_straddling_the_clip_is_not_partially_leaked():
     Clipping before scrubbing leaves the credential's opening characters in the
     output: too short to match the full value any more, so ``redact_secrets``
     never removes them.  A partial secret is still a secret.
+
+    Driven through ``run_probe`` rather than ``redact_result`` on purpose: the
+    leak lives in the *interaction* between the clipping and the scrubbing, so
+    a test that hands ``redact_result`` an untruncated message would pass under
+    the old code too and pin nothing.
     """
     padding = "x" * 105
-    result = ProbeResult(
-        name="n",
-        endpoint="e",
-        official=f"error: {padding}{SECRET} tail",
-        relay="ok: 0 rows",
-        verdict=INCONCLUSIVE,
+    echoing = FakeClient(errors={"nope": f"{padding}{SECRET} tail"})
+    results = run_probe(
+        FakeClient(errors={"nope": "rate limited"}),
+        echoing,
+        (ERROR_CASE,),
+        secrets=(SECRET,),
     )
-    scrubbed = redact_result(result, (SECRET,))
-    assert SECRET[:8] not in scrubbed.official
-    assert len(scrubbed.official) <= 120  # still clipped for the report
+    assert SECRET[:8] not in results[0].relay
+    assert len(results[0].relay) <= 120  # still clipped for the report
 
 
 def test_run_probe_never_returns_a_credential():
