@@ -20,9 +20,27 @@ Run from the repository root or the project directory:
 from __future__ import annotations
 
 import argparse
+import os
 from collections import Counter
+from pathlib import Path
 
 from stock_quant.data_sources.tushare_proxy import TushareProxyClient
+
+
+def _load_env(path: Path) -> None:
+    """Load simple KEY=VALUE lines without evaluating shell code.
+
+    Mirrors ``project/check_data_sources.py``: parsing beats ``source``, which
+    chokes on this repo's ``.env`` (line 4 is ``BASIC_RDS_KEY = ...`` with
+    spaces, which bash reads as a command).
+    """
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.removeprefix("export ").split("=", maxsplit=1)
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
 
 #: Interfaces this repository has an open problem for.  See the assessment
 #: report's "可解锁卡点索引" for what each one unblocks.
@@ -41,7 +59,11 @@ WATCHED = (
 
 
 def _print_catalog(client: TushareProxyClient) -> None:
-    frame = client.capabilities()
+    try:
+        frame = client.capabilities()
+    except Exception as error:  # noqa: BLE001 - diagnostic boundary
+        print(f"catalog: FAIL {type(error).__name__}: {error}")
+        return
     enabled = frame[frame["enabled"].astype(bool)]
     print(f"interfaces: {len(frame)} (enabled {len(enabled)})")
     print("\nby category (enabled/total):")
@@ -54,10 +76,11 @@ def _print_catalog(client: TushareProxyClient) -> None:
 def _print_chain(client: TushareProxyClient, name: str) -> None:
     try:
         chain = client.upstreams(name)
+        results = chain.get("results") or []
     except Exception as error:  # noqa: BLE001 - diagnostic boundary
         print(f"      upstreams: ERROR {type(error).__name__}: {error}")
         return
-    for entry in chain.get("results") or []:
+    for entry in results:
         status = "ok" if entry.get("ok") else "FAIL"
         detail = entry.get("message") or entry.get("error") or ""
         print(
@@ -90,11 +113,22 @@ def _print_watched(client: TushareProxyClient) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / ".env",
+        help="KEY=VALUE file to load first (default: repo-root .env)",
+    )
+    parser.add_argument(
         "--probe",
         metavar="NAME",
         help="smoke-read one interface with __probe=1 (max 5 rows, server-side)",
     )
     args = parser.parse_args()
+    if args.env_file.is_file():
+        _load_env(args.env_file)
+        print(f"environment: loaded {args.env_file}")
+    else:
+        print(f"environment: not found ({args.env_file}); using current environment")
 
     client = TushareProxyClient.from_env()
     if client is None:
