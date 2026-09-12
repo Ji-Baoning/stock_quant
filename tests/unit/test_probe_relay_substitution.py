@@ -241,6 +241,26 @@ def test_redact_result_scrubs_both_answers():
     assert scrubbed.verdict == result.verdict  # scrubbing never re-judges
 
 
+def test_a_credential_straddling_the_clip_is_not_partially_leaked():
+    """Redact first, cut second.
+
+    Clipping before scrubbing leaves the credential's opening characters in the
+    output: too short to match the full value any more, so ``redact_secrets``
+    never removes them.  A partial secret is still a secret.
+    """
+    padding = "x" * 105
+    result = ProbeResult(
+        name="n",
+        endpoint="e",
+        official=f"error: {padding}{SECRET} tail",
+        relay="ok: 0 rows",
+        verdict=INCONCLUSIVE,
+    )
+    scrubbed = redact_result(result, (SECRET,))
+    assert SECRET[:8] not in scrubbed.official
+    assert len(scrubbed.official) <= 120  # still clipped for the report
+
+
 def test_run_probe_never_returns_a_credential():
     """The guard sits at the emission boundary, not at the print site.
 

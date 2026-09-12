@@ -167,19 +167,31 @@ def redact_secrets(text: str, secrets: Sequence[str]) -> str:
     return text
 
 
-def redact_result(result: ProbeResult, secrets: Sequence[str]) -> ProbeResult:
+def redact_result(
+    result: ProbeResult, secrets: Sequence[str], *, limit: int = 120
+) -> ProbeResult:
     """A copy of ``result`` with any leaked credential removed from its answers.
 
     Applied where results are *built* and where they are *rendered*, never only
     at the print site: a guard that lives at one call site is one refactor away
     from being dropped, and the thing it protects is a credential written to a
     file that gets committed.
+
+    Scrubbing runs on the *whole* message and the cut happens after, in that
+    order.  Clipping first would let a credential that straddles the cut
+    survive as a prefix -- which no longer matches the full value in
+    ``redact_secrets``, and so is never scrubbed at all.
     """
     return replace(
         result,
-        official=redact_secrets(result.official, secrets),
-        relay=redact_secrets(result.relay, secrets),
+        official=_clip(redact_secrets(result.official, secrets), limit),
+        relay=_clip(redact_secrets(result.relay, secrets), limit),
     )
+
+
+def _clip(text: str, limit: int) -> str:
+    """Shorten one rendered answer for the report table."""
+    return text if len(text) <= limit else text[:limit]
 
 
 def classify_empty_probe(official: pd.DataFrame, relay: pd.DataFrame) -> str:
@@ -224,8 +236,13 @@ def _read(client: Any, case: ProbeCase) -> tuple[str, Any]:
 
 
 def _describe(answer: tuple) -> str:
+    """Render one answer in full.
+
+    Deliberately untruncated: the cut belongs after redaction, in
+    ``redact_result``, or a credential straddling it escapes scrubbing.
+    """
     if answer[0] == "error":
-        return f"error: {answer[1][:120]}"
+        return f"error: {answer[1]}"
     return f"ok: {len(answer[1])} rows"
 
 
