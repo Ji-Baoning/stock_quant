@@ -73,7 +73,7 @@
 
 **陷阱（必须处理）**：现文件每个情景都有 `2015-01-01` 与 `2020-01-01` 两行**数值完全相同**的行（`costs.yml:8-41`）。若只把 `2015-01-01` 行的印花税改成 `0.001` 而保留 `2020-01-01` 行，`_select` 会在 2020-01-01 起选中那条 0.0005 的行，**1‰ 段被完全遮蔽**，2020-2023 仍然算错。`2020-01-01` 这个分界没有真实含义（费率相同），必须**删除**，让费率表只剩两个真实分段：`2015-01-01`（1‰）与 `2023-08-28`（0.5‰）。
 
-- [ ] **Step 1: 写失败测试——锁定生产配置的印花税时间轴**
+- [x] **Step 1: 写失败测试——锁定生产配置的印花税时间轴**
 
 在 `tests/unit/test_costs.py` 顶部 import 段补两行：
 
@@ -132,12 +132,12 @@ def test_production_costs_yml_rejects_dates_before_the_window():
         model.stamp_tax_rate(date(2014, 12, 31))
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `python -m pytest tests/unit/test_costs.py -q`
 Expected: 3 个新测试 FAIL。`..._splits_stamp_tax_at_the_2023_cut` 在 `date(2023, 8, 25)` 断言处失败（现配置给 0.0005，期望 0.001）。
 
-- [ ] **Step 3: 改写 `project/configs/costs.yml`**
+- [x] **Step 3: 改写 `project/configs/costs.yml`**
 
 全文件替换为（注意：删除了三行无意义的 `2020-01-01` 重复段，这是**修正的一部分**，不是顺手清理）：
 
@@ -188,7 +188,7 @@ scenarios:
         slippage_rate: 0.001
 ```
 
-- [ ] **Step 4: 更新测试里的配置镜像**
+- [x] **Step 4: 更新测试里的配置镜像**
 
 把 `tests/unit/test_costs.py:42-73` 的 `_cost_config()` 整体替换为：
 
@@ -224,11 +224,11 @@ def _cost_config() -> CostConfig:
     )
 ```
 
-- [ ] **Step 5: 更新参数化测试的印花税期望**
+- [x] **Step 5: 更新参数化测试的印花税期望**
 
 `test_three_cost_scenarios_price_and_tax_exactly` 的 `trade_date = date(2020, 1, 2)` 现在落在 **1‰ 段**。把参数表（`tests/unit/test_costs.py:159-197`）里 `commission_tax` 与 `full_cost` 两个 case 的 `sell_stamp` 从 `Decimal("0.50")` 改为 `Decimal("1.00")`（100 股 × ¥10.00 × 0.001 = ¥1.00）。`zero_cost` 保持 `Decimal("0.00")`。
 
-- [ ] **Step 6: 补一个减半段的定价测试**
+- [x] **Step 6: 补一个减半段的定价测试**
 
 在同一文件的参数化测试之后追加：
 
@@ -242,17 +242,17 @@ def test_full_cost_prices_the_reduced_stamp_tax_from_the_cut_day():
     assert day_before.stamp_tax == Decimal("1.00")
 ```
 
-- [ ] **Step 7: 跑测试确认全绿**
+- [x] **Step 7: 跑测试确认全绿**
 
 Run: `python -m pytest tests/unit/test_costs.py -q`
 Expected: PASS，无失败。
 
-- [ ] **Step 8: 确认没有别的测试直接依赖被删的 2020-01-01 行**
+- [x] **Step 8: 确认没有别的测试直接依赖被删的 2020-01-01 行**
 
 Run: `grep -rn "2020-01-01\|2020, 1, 1" tests/unit/test_costs.py`
 Expected: 只剩 `rate()` 的默认参数值与 `test_picks_the_latest_rate_...`、`test_no_rate_effective_...` 这两个显式用 `date(2020, 1, 1)` 的、各自构造独立 `CostRate` 的测试——它们不读 `costs.yml`，不受影响。
 
-- [ ] **Step 9: 提交**
+- [x] **Step 9: 提交**
 
 ```bash
 cd /home/ji/work/program/stock
@@ -275,7 +275,7 @@ git commit -m "fix: price the sell stamp tax from the official 2023-08-28 rate c
 
 **为什么对照有效**：规格、数据集（`CURRENT` = `af5799ae…`）、初始资金、种子全都没变，唯一变量是 `costs.yml`。**`zero_cost` 情景是内置对照组**——它的费率在新旧口径下都是全零，若它的 `end_equity` 发生变化，说明除成本外还有别的变量在动，测量作废，必须停下来查。
 
-- [ ] **Step 1: 记录重跑前的 debug registry 状态**
+- [x] **Step 1: 记录重跑前的 debug registry 状态**
 
 ```bash
 cd /home/ji/work/program/stock
@@ -284,7 +284,7 @@ python -c "import pandas as pd; print(pd.read_parquet('project/data/runs/debug/r
 
 Expected: `['a64b961afa…', 'ab378f9d235…']`（两个已知 id）。
 
-- [ ] **Step 2: 用修正后的成本口径重跑**
+- [x] **Step 2: 用修正后的成本口径重跑**
 
 ```bash
 cd /home/ji/work/program/stock
@@ -298,7 +298,7 @@ Expected: 三行输出 `experiment_id=<40+ 位十六进制>`、`debug=project/da
 
 若 `trust=TRUSTED` 或命令非零退出：停止，报告实际输出。这条诊断路径应当恒为 UNTRUSTED。
 
-- [ ] **Step 3: 对照基线与新口径**
+- [x] **Step 3: 对照基线与新口径**
 
 把 `<new_id>` 替成 Step 2 打印的 id：
 
@@ -327,7 +327,7 @@ Expected（预测量级，实际以输出为准）：
 - `n_fills` 三情景**都保持 1,852**（成本不改变成交路径，只改变现金）。
 - `commission` 三情景保持 9,260.00（每笔 ¥5 下限）。
 
-- [ ] **Step 4: 判读并停下**
+- [x] **Step 4: 判读并停下**
 
 若 `zero_cost` 的 Δ ≠ 0.00 或 `n_fills` 有变：**测量作废**。说明 `CURRENT` 数据集或代码自 `ab378f9d` 以后发生了变化，先查清再继续，不要把它当作成本影响报告出去。
 
@@ -344,7 +344,7 @@ Expected（预测量级，实际以输出为准）：
 - Consumes: Task 2 Step 3 的实测输出
 - Produces: 供 Task 5 报告引用的费率来源与决策记录
 
-- [ ] **Step 1: 写文档**
+- [x] **Step 1: 写文档**
 
 内容须覆盖全部六节（缺一不可）：
 
@@ -357,11 +357,11 @@ Expected（预测量级，实际以输出为准）：
 
 文档不得包含 token、绝对路径、账号。
 
-- [ ] **Step 2: 自审——数字与代码一致**
+- [x] **Step 2: 自审——数字与代码一致**
 
 逐条核对：文中的官方费率与 `project/configs/costs.yml` 的生效日/数值**逐字一致**；引用的行号（如 `src/stock_quant/config.py:20-27`）在当前代码中确实是 `CostRate` 定义。发现不一致就地改掉。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 cd /home/ji/work/program/stock
@@ -384,7 +384,7 @@ git commit -m "docs: record the official cost rates and the transfer-fee decisio
 - Consumes: 方案一产出的 `project/configs/universes/<tradable>.yml`；Task 1 的 `costs.yml`
 - Produces: 两侧各一份 debug 运行目录，内含 `stability_report.json`
 
-- [ ] **Step 1: 确认前置宇宙定义存在**
+- [x] **Step 1: 确认前置宇宙定义存在**
 
 ```bash
 cd /home/ji/work/program/stock
@@ -394,7 +394,7 @@ ls project/configs/universes/
 Expected: 至少含 `custom_csi300_ic.yml` **和**方案一产出的时点过滤定义（设计中的 id 是 `custom_csi300_ic_tradable`）。
 若第二个文件不存在或名字不同：**停止**，把 `ls` 输出报给 owner，用实际文件名继续。
 
-- [ ] **Step 2: 修正两份规格的过期头部**
+- [x] **Step 2: 修正两份规格的过期头部**
 
 两份规格（`momentum_60d_wf_real_baseline.yml:29-31`、`momentum_60d_wf_real_challenger.yml:24-26`）都写着"本规格在证据到位并完成 RUNBOOK 阶段 5 之前无法运行"。把这段替换为事实陈述：
 
@@ -406,7 +406,7 @@ Expected: 至少含 `custom_csi300_ic.yml` **和**方案一产出的时点过滤
 # 数据验收记录。
 ```
 
-- [ ] **Step 3: 给两份规格加上宇宙定义绑定**
+- [x] **Step 3: 给两份规格加上宇宙定义绑定**
 
 在两份规格的 `universe_version: CURRENT` 之后各加一行（id 用 Step 1 确认的实际值）：
 
@@ -454,7 +454,7 @@ python -m stock_quant backtest momentum_60d \
 
 Expected: 同 Step 4 的三行输出，退出码 0。**记下 id**，重复 Step 5 读它的 `stability_report.json`。
 
-- [ ] **Step 7: 提交规格改动**
+- [x] **Step 7: 提交规格改动**
 
 ```bash
 cd /home/ji/work/program/stock
