@@ -23,9 +23,11 @@ from stock_quant.data_model.universe_membership import (
     resolve_memberships,
 )
 from stock_quant.research.universe import (
+    UniverseCoverageCriterion,
     UniverseCoverageError,
     UniverseDefinition,
     UniverseResolver,
+    load_universe_coverage_criterion,
     load_universe_definition,
 )
 
@@ -491,3 +493,57 @@ def test_load_universe_definition_rejects_malformed_documents(tmp_path, document
     path.write_text(yaml.safe_dump(document), encoding="utf-8")
     with pytest.raises((ValueError, ValidationError)):
         load_universe_definition(path)
+
+
+def _write_definition(directory, name: str, *, start: str, enabled=None, **overrides):
+    payload = {
+        "schema_version": 1,
+        "universe_id": f"custom_{name.replace('.', '_')}",
+        "rules_version": "fixture-rules-v1",
+        "membership_table_sha256": "ab" * 32,
+        "coverage_start": start,
+        "coverage_end": "2022-01-07",
+        "evidence_summary_sha256": "cd" * 32,
+    }
+    payload.update(overrides)
+    if enabled is not None:
+        payload["enabled"] = enabled
+    (directory / name).write_text(yaml.safe_dump(payload), encoding="utf-8")
+    return payload
+
+
+def test_coverage_criterion_takes_the_earliest_enabled_start(tmp_path):
+    _write_definition(tmp_path, "b_second.yml", start="2019-01-02")
+    _write_definition(tmp_path, "a_first.yml", start="2015-01-05")
+    criterion = load_universe_coverage_criterion(tmp_path)
+    assert criterion.acceptance_start == date(2015, 1, 5)
+    assert criterion.skipped == ()
+    assert set(criterion.definition_hashes) == {"custom_a_first_yml", "custom_b_second_yml"}
+    assert all(len(value) == 64 for value in criterion.definition_hashes.values())
+
+
+def test_coverage_criterion_skips_explicitly_disabled_definitions(tmp_path):
+    _write_definition(tmp_path, "csi300.yml", start="2005-01-03", enabled=False)
+    _write_definition(tmp_path, "custom_live.yml", start="2015-01-05")
+    criterion = load_universe_coverage_criterion(tmp_path)
+    assert criterion.acceptance_start == date(2015, 1, 5)
+    assert criterion.skipped == ("csi300.yml",)
+    assert set(criterion.definition_hashes) == {"custom_custom_live_yml"}
+
+
+def test_coverage_criterion_blocks_an_enabled_definition_that_cannot_parse(tmp_path):
+    _write_definition(tmp_path, "custom_broken.yml", start="2015-01-05",
+                      membership_table_sha256="PLACEHOLDER")
+    with pytest.raises(UniverseCoverageError):
+        load_universe_coverage_criterion(tmp_path)
+
+
+def test_coverage_criterion_blocks_a_non_mapping_document(tmp_path):
+    (tmp_path / "custom_bad.yml").write_text("- just\n- a list\n", encoding="utf-8")
+    with pytest.raises(UniverseCoverageError):
+        load_universe_coverage_criterion(tmp_path)
+
+
+def test_coverage_criterion_is_empty_without_any_definition(tmp_path):
+    criterion = load_universe_coverage_criterion(tmp_path / "missing")
+    assert criterion == UniverseCoverageCriterion(None, {}, ())

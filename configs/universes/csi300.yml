@@ -35,8 +35,13 @@
 # The definition `version` (`universe_version`) is derived, not stored: it is
 # the SHA-256 of this document's canonical JSON once values are real.
 # Tests never read this file; they build temporary explicit definitions.
+#
+# `enabled: false` keeps this template out of the publish-time full-history
+# criterion (`load_universe_coverage_criterion`); fill in real values and set
+# `enabled: true` when the definition becomes usable.
 # ---------------------------------------------------------------------------
 
+enabled: false   # TEMPLATE ONLY: never counted into full-history acceptance
 schema_version: 1
 universe_id: csi300
 rules_version: "PLACEHOLDER_RULES_VERSION"

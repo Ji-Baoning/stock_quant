@@ -30,12 +30,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 import yaml
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
 from stock_quant.data_model.universe_membership import (
     MembershipFact,
@@ -280,6 +281,71 @@ def _validated_fact_rows(
                 + type(item).__name__
             )
     return validated
+
+
+@dataclass(frozen=True)
+class UniverseCoverageCriterion:
+    """The version-bound full-history criterion of one publish moment.
+
+    ``acceptance_start`` is the earliest ``coverage_start`` over the enabled
+    universe definitions; ``None`` means the scan found no enabled definition,
+    and full-history acceptance then has no criterion and cannot be claimed.
+    ``definition_hashes`` pins the exact definition versions the criterion was
+    computed from, so a later ``configs/universes`` change never re-judges an
+    already-published dataset.  ``skipped`` records the explicitly disabled
+    files so the manifest shows what was ignored on purpose.
+    """
+
+    acceptance_start: date | None
+    definition_hashes: Mapping[str, str]
+    skipped: tuple[str, ...]
+
+
+def load_universe_coverage_criterion(
+    directory: str | Path,
+) -> UniverseCoverageCriterion:
+    """Scan ``*.yml`` universe definitions for the full-history start.
+
+    A definition that is not in the enabled set (``enabled: false``) is skipped
+    and recorded.  Every other file must load and validate: a parse or schema
+    failure blocks publication rather than silently shrinking the criterion.
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return UniverseCoverageCriterion(None, {}, ())
+    hashes: dict[str, str] = {}
+    starts: list[date] = []
+    skipped: list[str] = []
+    for path in sorted(directory.glob("*.yml")):
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise UniverseCoverageError(
+                f"universe definition {path.name} must be a YAML mapping"
+            )
+        if document.get("enabled", True) is False:
+            skipped.append(path.name)
+            continue
+        payload = {
+            key: value for key, value in document.items() if key != "enabled"
+        }
+        try:
+            definition = UniverseDefinition.model_validate(payload)
+        except ValidationError as error:
+            raise UniverseCoverageError(
+                f"enabled universe definition {path.name} does not validate: "
+                f"{error.error_count()} error(s)"
+            ) from None
+        if definition.universe_id in hashes:
+            raise UniverseCoverageError(
+                f"duplicate universe_id {definition.universe_id!r} in {directory}"
+            )
+        hashes[definition.universe_id] = definition.version
+        starts.append(definition.coverage_start)
+    return UniverseCoverageCriterion(
+        acceptance_start=min(starts) if starts else None,
+        definition_hashes=dict(sorted(hashes.items())),
+        skipped=tuple(skipped),
+    )
 
 
 def load_universe_definition(path: str | Path) -> UniverseDefinition:
