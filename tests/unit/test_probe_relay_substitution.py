@@ -23,6 +23,7 @@ from probe_relay_substitution import (  # noqa: E402
     classify_empty_probe,
     classify_error_probe,
     cleared,
+    redact_secrets,
     report,
     run_probe,
 )
@@ -71,6 +72,14 @@ def test_classify_error_probe_compares_the_message_verbatim():
         AGREE_ERROR
     )
     assert classify_error_probe("请指定正确的接口名", "bad api") == DIFFERS
+
+
+def test_redact_secrets_masks_a_credential_the_relay_echoed_back():
+    # jiaoch.top echoes the token it was handed inside its error string, so the
+    # probe must scrub every configured credential before printing an answer.
+    assert redact_secrets("token abc123 rejected", ("abc123",)) == (
+        "token <redacted> rejected"
+    )
 
 
 def test_blocking_is_the_two_disqualifying_verdicts():

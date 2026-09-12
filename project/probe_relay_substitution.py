@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
@@ -125,6 +125,43 @@ def _load_env(path: Path) -> None:
             continue
         key, value = line.removeprefix("export ").split("=", maxsplit=1)
         os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+#: Every credential the probe holds.  A relay is free to echo the token it was
+#: handed back inside an error string -- jiaoch.top does exactly that -- so no
+#: answer text may be printed or written until it has been scrubbed for these.
+_SECRET_ENV_VARS = ("TUSHARE_TOKEN", "TUSHARE_RELAY_KEY", "TUSHARE_PROXY_KEY")
+_REDACTED = "<redacted>"
+
+
+def configured_secrets() -> tuple[str, ...]:
+    """The credential values present in the environment, for scrubbing."""
+    return tuple(
+        value
+        for name in _SECRET_ENV_VARS
+        if (value := os.environ.get(name, "").strip())
+    )
+
+
+def redact_secrets(text: str, secrets: Sequence[str]) -> str:
+    """Replace every configured credential value in ``text`` with a placeholder.
+
+    Token values must never reach stdout or the operations report, even when a
+    remote side volunteers them back (resolution: the probe prints hosts and SDK
+    versions only).
+    """
+    for secret in secrets:
+        text = text.replace(secret, _REDACTED)
+    return text
+
+
+def redact_result(result: ProbeResult, secrets: Sequence[str]) -> ProbeResult:
+    """A copy of ``result`` with any leaked credential removed from its answers."""
+    return replace(
+        result,
+        official=redact_secrets(result.official, secrets),
+        relay=redact_secrets(result.relay, secrets),
+    )
 
 
 def classify_empty_probe(official: pd.DataFrame, relay: pd.DataFrame) -> str:
@@ -300,7 +337,11 @@ def main() -> int:
     print(f"relay: host={relay_client.host} sdk={relay_client.sdk_version}")
     print(f"official: sdk={getattr(ts, '__version__', 'unknown')}")
 
-    results = run_probe(official_client, relay_client)
+    secrets = configured_secrets()
+    results = [
+        redact_result(result, secrets)
+        for result in run_probe(official_client, relay_client)
+    ]
     for result in results:
         print(
             f"{result.name:22s} {result.verdict:14s} "
