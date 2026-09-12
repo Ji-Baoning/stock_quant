@@ -350,6 +350,26 @@ def test_redact_result_scrubs_both_answers():
     assert scrubbed.verdict == result.verdict  # scrubbing never re-judges
 
 
+def test_a_credential_straddling_the_clip_is_not_partially_leaked():
+    """Redact first, cut second.
+
+    Clipping before scrubbing leaves the credential's opening characters in the
+    output: too short to match the full value any more, so ``redact_secrets``
+    never removes them.  A partial secret is still a secret.
+    """
+    padding = "x" * 105
+    result = ProbeResult(
+        name="n",
+        endpoint="e",
+        official=f"error: {padding}{SECRET} tail",
+        relay="ok: 0 rows",
+        verdict=INCONCLUSIVE,
+    )
+    scrubbed = redact_result(result, (SECRET,))
+    assert SECRET[:8] not in scrubbed.official
+    assert len(scrubbed.official) <= 120  # still clipped for the report
+
+
 def test_run_probe_never_returns_a_credential():
     """The guard sits at the emission boundary, not at the print site.
 
@@ -565,19 +585,31 @@ def redact_secrets(text: str, secrets: Sequence[str]) -> str:
     return text
 
 
-def redact_result(result: ProbeResult, secrets: Sequence[str]) -> ProbeResult:
+def redact_result(
+    result: ProbeResult, secrets: Sequence[str], *, limit: int = 120
+) -> ProbeResult:
     """A copy of ``result`` with any leaked credential removed from its answers.
 
     Applied where results are *built* and where they are *rendered*, never only
     at the print site: a guard that lives at one call site is one refactor away
     from being dropped, and the thing it protects is a credential written to a
     file that gets committed.
+
+    Scrubbing runs on the *whole* message and the cut happens after, in that
+    order.  Clipping first would let a credential that straddles the cut
+    survive as a prefix -- which no longer matches the full value in
+    ``redact_secrets``, and so is never scrubbed at all.
     """
     return replace(
         result,
-        official=redact_secrets(result.official, secrets),
-        relay=redact_secrets(result.relay, secrets),
+        official=_clip(redact_secrets(result.official, secrets), limit),
+        relay=_clip(redact_secrets(result.relay, secrets), limit),
     )
+
+
+def _clip(text: str, limit: int) -> str:
+    """Shorten one rendered answer for the report table."""
+    return text if len(text) <= limit else text[:limit]
 
 
 def classify_empty_probe(official: pd.DataFrame, relay: pd.DataFrame) -> str:
@@ -622,8 +654,13 @@ def _read(client: Any, case: ProbeCase) -> tuple[str, Any]:
 
 
 def _describe(answer: tuple) -> str:
+    """Render one answer in full.
+
+    Deliberately untruncated: the cut belongs after redaction, in
+    ``redact_result``, or a credential straddling it escapes scrubbing.
+    """
     if answer[0] == "error":
-        return f"error: {answer[1][:120]}"
+        return f"error: {answer[1]}"
     return f"ok: {len(answer[1])} rows"
 
 
@@ -838,7 +875,7 @@ if __name__ == "__main__":
 /home/ji/miniconda3/envs/py310/bin/python -m pytest tests/unit/test_probe_relay_substitution.py -v
 ```
 
-Expected: PASS — 21 passed
+Expected: PASS — 22 passed
 
 - [ ] **Step 5: 提交**
 
