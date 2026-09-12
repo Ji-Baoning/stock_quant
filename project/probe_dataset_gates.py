@@ -36,7 +36,11 @@ from stock_quant.research.trust import evaluate_corporate_action_trust
 
 ROOT = Path(__file__).resolve().parent
 #: The window the update must be requested with; asserted, never assumed.
-WINDOW_START = date(2015, 1, 1)
+# The acceptance checker requires the requested window to start on or
+# after the calendar's first open day, so the 2015 window is requested
+# from 2015-01-05, the first open day (data coverage is identical:
+# 2015-01-01..04 were non-trading days).
+WINDOW_START = date(2015, 1, 5)
 WINDOW_END = date(2026, 8, 28)
 
 
