@@ -22,8 +22,9 @@ import pandas as pd
 from stock_quant.config import SourceConfig
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_sources.akshare import AkShareSource
-from stock_quant.data_sources.base import DataRequest
+from stock_quant.data_sources.base import AuthenticationError, DataRequest
 from stock_quant.data_sources.tushare import TushareSource
+from stock_quant.data_sources.tushare_transport import resolve_transport
 
 ROOT = Path(__file__).resolve().parent
 UPDATE_START = date(2015, 1, 1)
@@ -83,27 +84,23 @@ def baseline_issues(
     return issues
 
 
-def token_issue(
+def transport_issue(
     environ: Mapping[str, str] | None = None,
 ) -> ReadinessIssue | None:
-    """Require Tushare credentials before any fetch is attempted.
+    """Require the published build's own transport gate to pass.
 
-    Either the official ``TUSHARE_TOKEN`` or the shared-proxy pair
-    (``TUSHARE_PROXY_URL`` + ``TUSHARE_PROXY_KEY``) satisfies the gate; the
-    adapter picks the proxy transport whenever the pair is configured.
+    Delegates to the adapter's resolver rather than re-deriving the rules, so
+    this probe can never be weaker than what ``data update`` will enforce: a
+    missing explicit transport, a forbidden proxy, or an unlogged official
+    fallback all surface here first, as a readiness issue rather than a
+    traceback halfway through the run.
     """
     source = os.environ if environ is None else environ
-    if str(source.get("TUSHARE_TOKEN", "")).strip():
-        return None
-    if str(source.get("TUSHARE_PROXY_URL", "")).strip() and str(
-        source.get("TUSHARE_PROXY_KEY", "")
-    ).strip():
-        return None
-    return ReadinessIssue(
-        "TUSHARE_TOKEN_MISSING",
-        "neither TUSHARE_TOKEN nor TUSHARE_PROXY_URL/TUSHARE_PROXY_KEY "
-        "is configured",
-    )
+    try:
+        resolve_transport(SourceConfig(), environ=source)
+    except AuthenticationError as error:
+        return ReadinessIssue("TUSHARE_TRANSPORT_UNUSABLE", str(error))
+    return None
 
 
 def probe_endpoint(
@@ -158,11 +155,11 @@ def main() -> int:
             else None
         )
     issues = baseline_issues(membership)
-    missing_token = token_issue()
-    if missing_token is not None:
-        issues.append(missing_token)
+    missing_transport = transport_issue()
+    if missing_transport is not None:
+        issues.append(missing_transport)
     probes: dict[str, int] = {}
-    if missing_token is None:
+    if missing_transport is None:
         sources = {
             "tushare.daily": (TushareSource(SourceConfig()), "daily"),
             "cninfo_corporate_actions": (

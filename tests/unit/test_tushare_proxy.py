@@ -262,20 +262,23 @@ def test_tushare_source_labels_proxy_transport():
 
 
 def test_tushare_source_env_selects_proxy_without_token(monkeypatch):
+    monkeypatch.setenv("TUSHARE_TRANSPORT", "proxy")
     monkeypatch.setenv("TUSHARE_PROXY_URL", BASE_URL)
     monkeypatch.setenv("TUSHARE_PROXY_KEY", "key-123")
     monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
-    stub = ProxyStub(_daily_frame([("600000.SH", "20260901")]))
-    monkeypatch.setattr(
-        TushareProxyClient, "from_env", classmethod(lambda cls, **kw: stub)
-    )
-    source = TushareSource(SourceConfig())
-    request = DataRequest(
-        "daily", ("600000.SH",), date(2026, 9, 1), date(2026, 9, 12), {}
-    )
-    assert source.fetch(request).metadata["supplier_endpoint"] == (
-        "tushare_proxy.daily"
-    )
+    source = TushareSource(SourceConfig(), allow_auto_transport=True)
+    # The proxy pair alone selects the transport -- no token -- and this time
+    # the adapter reports the choice instead of inferring it.
+    assert source.transport.kind == "proxy"
+    assert source.transport.transport_id == "proxy.example"
+
+
+def test_injected_proxy_stub_is_labelled_by_kind():
+    # A stub with no URL cannot name a host, so it is labelled by its kind;
+    # that label is stub-only and resolve_transport never produces it.
+    source = TushareSource(SourceConfig(), client=ProxyStub(_daily_frame([])))
+    assert source.transport.kind == "proxy"
+    assert source.transport.transport_id == "proxy"
 
 
 def test_tushare_source_keeps_official_labels_for_sdk_client():

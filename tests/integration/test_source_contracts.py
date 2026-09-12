@@ -235,6 +235,8 @@ def test_tushare_constructor_redacts_token_when_sdk_initialization_fails(
     """An SDK setup error must not retain or expose the caller's credential."""
     token = "super-secret-token"
     monkeypatch.setenv("TUSHARE_TOKEN", token)
+    monkeypatch.setenv("TUSHARE_TRANSPORT", "official")
+    monkeypatch.setenv("TUSHARE_ALLOW_OFFICIAL_PUBLISH", "1")
 
     def pro_api(_: str) -> None:
         raise RuntimeError(f"SDK rejected {token}")

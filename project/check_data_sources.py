@@ -26,6 +26,7 @@ from stock_quant.data_sources.baostock import BaoStockSource
 from stock_quant.data_sources.base import DataRequest
 from stock_quant.data_sources.tushare import TushareSource
 from stock_quant.data_sources.tushare_proxy import TushareProxyClient
+from stock_quant.data_sources.tushare_transport import build_transport
 
 
 def _load_env(path: Path) -> None:
@@ -89,7 +90,7 @@ def main() -> int:
     results = [
         _try_check(
             "tushare",
-            lambda: TushareSource(config),
+            lambda: TushareSource(config, allow_auto_transport=True),
             DataRequest("daily", ("600000.SH",), start, end, {}),
         ),
         _try_check(
@@ -107,7 +108,9 @@ def main() -> int:
         results.append(
             _try_check(
                 "tushare_proxy",
-                lambda: TushareSource(config),
+                lambda: TushareSource(
+                    config, transport=build_transport("proxy", config)
+                ),
                 DataRequest("index_daily", ("000300.SH",), start, end, {}),
             )
         )

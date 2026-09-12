@@ -114,7 +114,11 @@ def main() -> None:
 
     # ---- step 1: pull and store every monthly snapshot --------------------
     if not args.skip_pull:
-        source = TushareSource(SourceConfig())
+        # ``allow_auto_transport=True`` keeps this offline collector working
+        # after the published path became strict.  Rewiring it to consume the
+        # relay as its transport (and dropping the TUSHARE_TOKEN gate above) is
+        # design spec §4, stage 4 -- not this change.
+        source = TushareSource(SourceConfig(), allow_auto_transport=True)
         client = source._client
         for index, yearmonth in enumerate(months):
             target = snapshot_dir / f"{args.index_code}_{yearmonth}.csv"

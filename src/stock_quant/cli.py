@@ -35,6 +35,7 @@ dataset's benchmark closes.  Nothing here is investment advice.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import date
 from pathlib import Path
@@ -220,6 +221,18 @@ def data_bootstrap(
     )
 
 
+def _enable_transport_logging() -> None:
+    """Surface the resolved transport on the operator's terminal.
+
+    The transport resolver logs one INFO line per resolution; without a
+    handler it would be invisible, and the design requires the run log --
+    not only the evidence chain -- to show which transport answered.
+    """
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
+    )
+
+
 @data_app.command("update")
 def data_update(
     start: str | None = typer.Option(
@@ -234,6 +247,7 @@ def data_update(
     root: Path = typer.Option(".", "--root", help="Project root."),
 ) -> None:
     """Fetch one window into the raw-store and publish when the gate passes."""
+    _enable_transport_logging()
     project_root = Path(root)
     request = DataUpdateRequest(
         start_date=date.fromisoformat(start) if start else None,

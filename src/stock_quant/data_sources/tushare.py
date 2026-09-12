@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import os
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 
 from stock_quant.config import SourceConfig
 from stock_quant.data_sources.base import (
-    AuthenticationError,
     ContractError,
     DataRequest,
     FetchResult,
@@ -20,49 +18,67 @@ from stock_quant.data_sources.base import (
     validate_supplier_frame,
 )
 from stock_quant.data_sources.tushare_proxy import TushareProxyClient
+from stock_quant.data_sources.tushare_relay import TushareRelayClient
+from stock_quant.data_sources.tushare_transport import (
+    _STUB_HOST,
+    OFFICIAL,
+    PROXY,
+    RELAY,
+    TushareTransport,
+    client_host,
+    resolve_transport,
+)
 
 
 class TushareSource:
-    """Fetch raw Tushare `daily` responses without column normalization.
+    """Fetch raw Tushare ``daily`` responses without column normalization.
 
-    The transport is chosen once at construction: the shared GET proxy when
-    ``TUSHARE_PROXY_URL``/``TUSHARE_PROXY_KEY`` are configured, otherwise the
-    official SDK against ``api.tushare.pro`` (which requires
-    ``TUSHARE_TOKEN``).  Frames carry the tushare layout either way, so the
-    normalization contract is transport-independent; the proxy transport is
-    recorded in ``supplier_endpoint``/``sdk_version`` for provenance.
+    The transport is resolved once, explicitly, at construction (see
+    :mod:`stock_quant.data_sources.tushare_transport`): a published build must
+    name it and may only name the relay, while development and diagnostic
+    callers opt into the ``relay -> official`` auto-order with
+    ``allow_auto_transport=True``.  The request client is always an object
+    that really has ``daily`` / ``index_daily`` / ``stock_basic``; provenance
+    comes from ``self.transport``, never from the client's type -- an official
+    session and a relay session are the same class, and only the base URL
+    tells them apart.
     """
 
     name = "tushare"
 
-    def __init__(self, config: SourceConfig, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        config: SourceConfig,
+        client: Any | None = None,
+        *,
+        transport: TushareTransport | None = None,
+        sdk: Any | None = None,
+        allow_auto_transport: bool = False,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
         self.config = config
-        if client is None:
-            client = TushareProxyClient.from_env(
-                timeout_seconds=config.timeout_seconds,
-                max_retries=config.max_retries,
+        if transport is None:
+            transport = (
+                resolve_transport(
+                    config,
+                    allow_auto_transport=allow_auto_transport,
+                    sdk=sdk,
+                    environ=environ,
+                )
+                if client is None
+                else injected_transport(client)
             )
-        if client is None:
-            token = os.environ["TUSHARE_TOKEN"]
-            import tushare as ts
+        self._transport = transport
+        self._client = transport.client
+        self._sdk_version = transport.sdk_version
 
-            try:
-                client = ts.pro_api(token)
-            except Exception:
-                raise AuthenticationError(
-                    "Tushare client initialization failed"
-                ) from None
-            self._sdk_version = getattr(ts, "__version__", "unknown")
-        else:
-            self._sdk_version = getattr(client, "sdk_version", None) or getattr(
-                client, "__version__", "unknown"
-            )
-        self._client = client
+    @property
+    def transport(self) -> TushareTransport:
+        """The resolved transport, for diagnostics and tests."""
+        return self._transport
 
     def _supplier_endpoint(self, endpoint: str) -> str:
-        if isinstance(self._client, TushareProxyClient):
-            return f"tushare_proxy.{endpoint}"
-        return f"tushare.pro.{endpoint}"
+        return self._transport.supplier_endpoint(endpoint)
 
     def fetch(self, request: DataRequest) -> FetchResult:
         if request.endpoint == "stock_basic":
@@ -96,18 +112,20 @@ class TushareSource:
             raise translated from None
         response_timestamp = _utc_timestamp()
         self._validate(frame, request)
+        metadata = request_metadata(
+            request,
+            self._supplier_endpoint(request.endpoint),
+            self._sdk_version,
+            request_timestamp=request_timestamp,
+            response_timestamp=response_timestamp,
+        )
+        metadata["transport_id"] = self._transport.transport_id
         return FetchResult(
             source=self.name,
             endpoint=request.endpoint,
             request_key=request_key(request),
             frame=frame,
-            metadata=request_metadata(
-                request,
-                self._supplier_endpoint(request.endpoint),
-                self._sdk_version,
-                request_timestamp=request_timestamp,
-                response_timestamp=response_timestamp,
-            ),
+            metadata=metadata,
         )
 
     def _fetch_stock_basic(self, request: DataRequest) -> FetchResult:
@@ -134,18 +152,20 @@ class TushareSource:
             raise translated from None
         response_timestamp = _utc_timestamp()
         self._validate_stock_basic(frame)
+        metadata = request_metadata(
+            request,
+            self._supplier_endpoint("stock_basic"),
+            self._sdk_version,
+            request_timestamp=request_timestamp,
+            response_timestamp=response_timestamp,
+        )
+        metadata["transport_id"] = self._transport.transport_id
         return FetchResult(
             source=self.name,
             endpoint=request.endpoint,
             request_key=request_key(request),
             frame=frame,
-            metadata=request_metadata(
-                request,
-                self._supplier_endpoint("stock_basic"),
-                self._sdk_version,
-                request_timestamp=request_timestamp,
-                response_timestamp=response_timestamp,
-            ),
+            metadata=metadata,
         )
 
     @staticmethod
@@ -175,3 +195,36 @@ class TushareSource:
             )
         except ContractError:
             raise
+
+
+def injected_transport(client: Any) -> TushareTransport:
+    """Describe a caller-injected request client (tests and local stubs).
+
+    Injection is not a published path: the caller hands over the object, so a
+    stub may have no URL to derive an identity from.  A client that declares a
+    reachable ``host`` (the relay and proxy clients both do) is taken at its
+    word; a stub that does not is labelled by its kind, and those kind labels
+    (``proxy`` / ``relay`` / the official host) are documented as stub-only --
+    ``resolve_transport`` never produces them.
+
+    The two wrappers do not expose the same surface, so the *request client*
+    is unwrapped per kind: ``TushareProxyClient`` answers the named endpoints
+    itself, while ``TushareRelayClient`` only has ``query`` -- its named
+    methods live on the SDK session it holds, which is why ``.api`` is used.
+    """
+    sdk_version = getattr(client, "sdk_version", None) or getattr(
+        client, "__version__", "unknown"
+    )
+    if isinstance(client, TushareProxyClient):
+        kind = PROXY
+        session = client
+    elif isinstance(client, TushareRelayClient):
+        kind = RELAY
+        session = client.api
+    else:
+        kind = OFFICIAL
+        session = client
+    host = client_host(client) or _STUB_HOST[kind]
+    return TushareTransport(
+        kind=kind, client=session, sdk_version=sdk_version, host=host
+    )

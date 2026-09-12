@@ -18,7 +18,7 @@ from verify_update_readiness import (  # noqa: E402
     baseline_issues,
     probe_endpoint,
     report,
-    token_issue,
+    transport_issue,
 )
 
 
@@ -61,22 +61,40 @@ def test_baseline_issues_flags_an_empty_membership() -> None:
     )
 
 
-def test_token_issue_flags_a_missing_token() -> None:
-    assert token_issue({}) is not None
-    assert token_issue({"TUSHARE_TOKEN": "   "}) is not None
-    assert token_issue({"TUSHARE_TOKEN": "abc"}) is None
+def test_transport_issue_flags_a_missing_transport() -> None:
+    # The published path must name its transport; the readiness probe mirrors
+    # that gate instead of re-deriving a weaker one.
+    assert transport_issue({}) is not None
+    assert transport_issue({"TUSHARE_TOKEN": "abc"}) is not None
 
 
-def test_token_issue_accepts_proxy_credentials_without_a_token() -> None:
-    assert token_issue({"TUSHARE_PROXY_URL": "https://proxy.example"}) is not None
+def test_transport_issue_accepts_a_configured_relay() -> None:
     assert (
-        token_issue(
+        transport_issue(
             {
-                "TUSHARE_PROXY_URL": "https://proxy.example",
-                "TUSHARE_PROXY_KEY": "key-123",
+                "TUSHARE_TRANSPORT": "relay",
+                "TUSHARE_RELAY_URL": "https://relay.example/",
+                "TUSHARE_RELAY_KEY": "relay-key",
             }
         )
         is None
+    )
+
+
+def test_transport_issue_rejects_the_proxy_and_unlogged_official() -> None:
+    assert (
+        transport_issue(
+            {
+                "TUSHARE_TRANSPORT": "proxy",
+                "TUSHARE_PROXY_URL": "https://proxy.example/tushare/pro",
+                "TUSHARE_PROXY_KEY": "proxy-key",
+            }
+        )
+        is not None
+    )
+    assert (
+        transport_issue({"TUSHARE_TRANSPORT": "official", "TUSHARE_TOKEN": "abc"})
+        is not None
     )
 
 
