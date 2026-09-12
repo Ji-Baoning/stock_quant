@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
+from stock_quant.data_model.calendar_coverage import coverage_payload, seed_span
 from stock_quant.data_model.dataset import DatasetPublisher
 from stock_quant.data_model.schemas import (
     ADJUSTED_BAR_COLUMNS,
@@ -72,6 +73,15 @@ def bootstrap_dataset(
         build_config={
             "origin": "bootstrap",
             "pipeline_contract_version": DATASET_BUILD_CONTRACT_VERSION,
+            # The offline seed is the only calendar source a brand-new project
+            # has.  It is published as an explicit bootstrap_seed span so the
+            # first data update can tell "approximated weekdays" apart from
+            # relay facts -- and so full-history acceptance can refuse to call
+            # a seed day a verified trading day.  No universe scan happens here
+            # (bootstrap must stay offline): the acceptance start is bound by
+            # the first data update that actually scans the definitions.
+            "calendar_coverage": coverage_payload([seed_span(start, end)]),
+            "full_history_acceptance_start": None,
         },
     ).version
     return BootstrapResult(version, len(universe.entries), len(days), start, end)

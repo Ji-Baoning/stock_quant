@@ -28,6 +28,7 @@ import pytest
 import yaml
 
 from stock_quant.data_model.adjusted_bar import build_adjusted_bars
+from stock_quant.data_model.calendar_coverage import coverage_payload, seed_span
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COLUMNS,
@@ -37,7 +38,11 @@ from stock_quant.data_model.schemas import (
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
 )
-from stock_quant.data_pipeline import DataPipeline, DataUpdateRequest
+from stock_quant.data_pipeline import (
+    DATASET_BUILD_CONTRACT_VERSION,
+    DataPipeline,
+    DataUpdateRequest,
+)
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import QualityReport
 
@@ -238,7 +243,18 @@ def build_smoke_project(root: Path) -> Path:
         "corporate_action_quarantine": empty_quarantine,
         "trading_calendar": _trading_calendar(sessions),
     }
-    DatasetPublisher(root).publish(tables, QualityReport())
+    DatasetPublisher(root).publish(
+        tables,
+        QualityReport(),
+        build_config={
+            "origin": "bootstrap",
+            "pipeline_contract_version": DATASET_BUILD_CONTRACT_VERSION,
+            "calendar_coverage": coverage_payload(
+                [seed_span(baseline_start, window_end)]
+            ),
+            "full_history_acceptance_start": None,
+        },
+    )
     return root
 
 

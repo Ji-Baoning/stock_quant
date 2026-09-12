@@ -24,7 +24,7 @@ import shutil
 import tempfile
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -191,6 +191,7 @@ class DatasetReader:
             path=version_dir,
             tables=tables,
             connection=connection,
+            manifest=manifest,
         )
 
 
@@ -202,6 +203,10 @@ class DatasetContext:
     path: Path
     tables: tuple[str, ...]
     connection: duckdb.DuckDBPyConnection
+    #: The parsed ``dataset_manifest.json`` of this version.  Exposed so the
+    #: pipeline and the acceptance chain can read the sanitized build
+    #: evidence (calendar coverage, raw bindings) without re-reading bytes.
+    manifest: Mapping[str, Any] = field(default_factory=dict)
 
     def read(self, table: str) -> pd.DataFrame:
         """Read one standardized table through its pinned DuckDB view."""
