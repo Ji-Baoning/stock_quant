@@ -17,10 +17,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import yaml
-from conftest import build_fixture_project  # noqa: E402
+from conftest import CAL_END, CAL_START, build_fixture_project  # noqa: E402
 
+from stock_quant.data_model.calendar_coverage import CODE_CALENDAR_COVERAGE_GAP
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.security_master import master_coverage_frame
+from stock_quant.data_model.trade_calendar_facts import (
+    CODE_CALENDAR_EXCHANGE_MISMATCH,
+    CODE_CALENDAR_PRETRADE_CONTINUITY_BROKEN,
+)
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_model.universe_membership import membership_frame
 from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
@@ -98,6 +103,8 @@ class StubAdapter:
     ``stock_basic_symbols`` narrows the whole-market ``stock_basic`` response
     to a subset (defaults to the fixture universe) and
     ``stock_basic_list_date_by_symbol`` overrides a symbol's ``list_date``.
+    The ``trade_cal_*`` knobs shape the per-exchange ``trade_cal`` halo
+    responses (see ``_trade_cal_frame``).
     """
 
     name: str
@@ -107,6 +114,10 @@ class StubAdapter:
     action_frames: dict[str, dict[str, pd.DataFrame]] | None = None
     stock_basic_symbols: tuple[str, ...] | None = None
     stock_basic_list_date_by_symbol: dict[str, date] | None = None
+    trade_cal_is_open_by_exchange: dict[tuple[str, date], int] | None = None
+    trade_cal_failing_exchanges: tuple[str, ...] = ()
+    trade_cal_missing_dates: tuple[date, ...] = ()
+    trade_cal_pretrade_overrides: dict[date, str] | None = None
     calls: list = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -116,6 +127,16 @@ class StubAdapter:
             self,
             "stock_basic_list_date_by_symbol",
             self.stock_basic_list_date_by_symbol or {},
+        )
+        object.__setattr__(
+            self,
+            "trade_cal_is_open_by_exchange",
+            self.trade_cal_is_open_by_exchange or {},
+        )
+        object.__setattr__(
+            self,
+            "trade_cal_pretrade_overrides",
+            self.trade_cal_pretrade_overrides or {},
         )
 
     def fetch(self, request: DataRequest) -> FetchResult:
@@ -127,6 +148,11 @@ class StubAdapter:
             raise failure(f"{self.name} supplier failure on {request.endpoint}")
         if self.raise_with is not None:
             raise self.raise_with(f"{self.name} supplier failure")
+        if (
+            request.endpoint == "trade_cal"
+            and request.params.get("exchange") in self.trade_cal_failing_exchanges
+        ):
+            raise AuthenticationError(f"{self.name} supplier failure on trade_cal")
         frame = self._frame(request)
         return FetchResult(
             source=self.name,
@@ -143,6 +169,8 @@ class StubAdapter:
     def _frame(self, request: DataRequest) -> pd.DataFrame:
         if request.endpoint == "stock_basic":
             return self._stock_basic_frame()
+        if request.endpoint == "trade_cal":
+            return self._trade_cal_frame(request)
         symbol = request.symbols[0]
         sessions = _weekdays(request.start_date, request.end_date)
         if request.endpoint == "index_history":
@@ -212,6 +240,37 @@ class StubAdapter:
                 for symbol in symbols
             ]
         )
+
+    def _trade_cal_frame(self, request: DataRequest) -> pd.DataFrame:
+        """One row per halo natural day; weekends closed, pretrade chained.
+
+        ``trade_cal_is_open_by_exchange`` is keyed by ``(exchange, date)`` so a
+        test can make exactly one exchange disagree; the response carries no
+        symbol scope, so the exchange is read from ``request.params``.
+        """
+        exchange = str(request.params.get("exchange"))
+        assert exchange in ("SSE", "SZSE")
+        rows: list[dict[str, object]] = []
+        current = request.start_date
+        while current <= request.end_date:
+            if current not in self.trade_cal_missing_dates:
+                previous = current - timedelta(days=1)
+                while previous.weekday() >= 5:
+                    previous -= timedelta(days=1)
+                rows.append(
+                    {
+                        "exchange": exchange,
+                        "cal_date": current.strftime("%Y%m%d"),
+                        "is_open": self.trade_cal_is_open_by_exchange.get(
+                            (exchange, current), 1 if current.weekday() < 5 else 0
+                        ),
+                        "pretrade_date": self.trade_cal_pretrade_overrides.get(
+                            current, previous.strftime("%Y%m%d")
+                        ),
+                    }
+                )
+            current += timedelta(days=1)
+        return pd.DataFrame(rows)
 
 
 def _all_stubs(**overrides) -> dict[str, DataSource]:
@@ -968,6 +1027,148 @@ def test_update_without_end_fails_when_no_calendar_is_published(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Relay trading-calendar refresh, manifest evidence and the publish span gate
+# --------------------------------------------------------------------------- #
+
+
+def test_update_records_two_trade_cal_snapshots_and_binds_a_relay_span(project):
+    """A successful update binds both exchanges' raw calendars into the manifest."""
+    stub = StubAdapter("tushare")
+    result = DataPipeline(project.root, sources=_all_stubs(tushare=stub)).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+    assert result.dataset_ref is not None
+    assert [call for call in stub.calls if call[0] == "trade_cal"] == [
+        ("trade_cal", None),
+        ("trade_cal", None),
+    ]
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        build = context.manifest["build_config"]
+        calendar = context.read("trading_calendar")
+    relay = [
+        span
+        for span in build["calendar_coverage"]
+        if span["source"] == "tushare_relay"
+    ]
+    assert len(relay) == 1
+    # The fixture's carried span already covers [CAL_START, CAL_END] and the
+    # window sits inside it, so the merged span keeps those bounds.
+    assert relay[0]["start_date"] == CAL_START.isoformat()
+    assert relay[0]["end_date"] == CAL_END.isoformat()
+    assert sorted(relay[0]["snapshot_sha256s"]) == ["SSE", "SZSE"]
+    fresh = set(result.raw_snapshots)
+    for hashes in relay[0]["snapshot_sha256s"].values():
+        assert set(hashes) & fresh, "this round's snapshot hash must be bound"
+    assert build["full_history_acceptance_start"] == CAL_START.isoformat()
+    assert build["universe_coverage_definition_hashes"]
+    assert build["universe_coverage_skipped"] == []
+    assert "resolved_end_is_fallback" not in build
+    assert max(calendar["calendar_date"]).date() == CAL_END
+
+
+def test_update_fails_when_the_two_exchanges_disagree(project):
+    """One exchange calling 2021-11-10 closed is an SSE/SZSE conflict."""
+    stub = StubAdapter(
+        "tushare", trade_cal_is_open_by_exchange={("SZSE", date(2021, 11, 10)): 0}
+    )
+    result = DataPipeline(project.root, sources=_all_stubs(tushare=stub)).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+    assert result.dataset_ref is None
+    assert CODE_CALENDAR_EXCHANGE_MISMATCH in result.quality_report.by_code()
+
+
+def test_update_blocks_on_a_broken_pretrade_chain(project):
+    """Both exchanges agree on a wrong pretrade link; the chain kills the run."""
+    stub = StubAdapter(
+        "tushare",
+        trade_cal_pretrade_overrides={date(2021, 11, 10): "20211101"},
+    )
+    result = DataPipeline(project.root, sources=_all_stubs(tushare=stub)).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+    assert result.dataset_ref is None
+    assert CODE_CALENDAR_PRETRADE_CONTINUITY_BROKEN in result.quality_report.by_code()
+    assert result.raw_snapshots, "a blocked calendar run still records raw responses"
+
+
+def test_update_keeps_current_and_raw_when_the_calendar_fetch_fails(project):
+    """A half-fetched calendar is fatal: raw kept, CURRENT untouched, no replay."""
+    before = DatasetPublisher(project.root).current().version
+    partial = StubAdapter("tushare", trade_cal_failing_exchanges=("SZSE",))
+    result = DataPipeline(project.root, sources=_all_stubs(tushare=partial)).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+    assert result.dataset_ref is None
+    assert CODE_SOURCE_FETCH_FAILED in result.quality_report.by_code()
+    assert DatasetPublisher(project.root).current().version == before
+    assert result.raw_snapshots, "the SSE response was already written to the raw store"
+    # The next run asks the supplier again for both exchanges; old raw bytes are
+    # never replayed as a calendar cache.
+    retry = StubAdapter("tushare")
+    DataPipeline(project.root, sources=_all_stubs(tushare=retry)).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+    assert [call for call in retry.calls if call[0] == "trade_cal"] == [
+        ("trade_cal", None),
+        ("trade_cal", None),
+    ]
+
+
+def test_update_blocks_a_window_that_leaves_a_hole_in_calendar_coverage(project):
+    """A left-side window that is not adjacent to coverage fails the span gate.
+
+    Continuity passes here (the merged table holds no earlier open day at all,
+    so the boundary rows land in ``allowed_pre_coverage``), which is how this
+    case isolates the post-merge span gate from the chain check.
+    """
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(start_date=date(2017, 12, 4), end_date=date(2017, 12, 29))
+    )
+    assert result.dataset_ref is None
+    assert CODE_CALENDAR_COVERAGE_GAP in result.quality_report.by_code()
+
+
+def test_rerun_merges_adjacent_relay_spans_and_keeps_every_snapshot_hash(project):
+    """A window that extends coverage merges into the carried relay span."""
+    first = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+    assert first.dataset_ref is not None
+    with DatasetReader(project.root).open(first.dataset_ref.version) as context:
+        before = [
+            span
+            for span in context.manifest["build_config"]["calendar_coverage"]
+            if span["source"] == "tushare_relay"
+        ]
+    assert len(before) == 1
+    before_hashes = {
+        exchange: set(hashes)
+        for exchange, hashes in before[0]["snapshot_sha256s"].items()
+    }
+    extended_end = CAL_END + timedelta(days=20)
+    second = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(
+            start_date=CAL_END + timedelta(days=1), end_date=extended_end
+        )
+    )
+    assert second.dataset_ref is not None
+    with DatasetReader(project.root).open(second.dataset_ref.version) as context:
+        after = [
+            span
+            for span in context.manifest["build_config"]["calendar_coverage"]
+            if span["source"] == "tushare_relay"
+        ]
+    assert len(after) == 1, "adjacent same-source spans merge into one"
+    assert after[0]["start_date"] == CAL_START.isoformat()
+    assert after[0]["end_date"] == extended_end.isoformat()
+    fresh = set(second.raw_snapshots)
+    for exchange, hashes in after[0]["snapshot_sha256s"].items():
+        assert before_hashes[exchange] < set(hashes), "merging never drops evidence"
+        assert fresh & set(hashes), "this round's snapshot is bound as well"
+
+
+# --------------------------------------------------------------------------- #
 # Master fact-vs-bar boundary and coverage-consistency checks (Task 5)
 # --------------------------------------------------------------------------- #
 
@@ -1166,19 +1367,30 @@ def _membership_fixture_frame() -> pd.DataFrame:
 
 
 def _publish_baseline_with_membership(root: Path, membership: pd.DataFrame):
-    """Republish CURRENT with the membership table added to its tables."""
+    """Republish CURRENT with the membership table added to its tables.
+
+    The carried ``build_config`` is bound again unchanged: only the membership
+    table differs, and stripping the build evidence would turn the baseline
+    into a legacy manifest whose calendar coverage the update span gate
+    rejects (``calendar_uncovered``) -- which is not what this helper tests.
+    """
     publisher = DatasetPublisher(root)
     reader = DatasetReader(root)
     with reader.open(publisher.current().version) as context:
         tables = {name: context.read(name) for name in context.tables}
+        build_config = context.manifest.get("build_config")
     tables["universe_membership"] = membership
-    return publisher.publish(tables, QualityReport()).version
+    return publisher.publish(
+        tables, QualityReport(), build_config=build_config
+    ).version
 
 
 def _publish_legacy_baseline_without_membership(root: Path):
     """Republish CURRENT without the membership table (a pre-membership
     legacy baseline that post-dates bootstrap but predates the membership
-    era and carries no universe_membership table at all)."""
+    era and carries no universe_membership table at all).  The carried
+    ``build_config`` is bound again unchanged; only the membership table
+    differs, so the update span gate still sees relay calendar coverage."""
     publisher = DatasetPublisher(root)
     reader = DatasetReader(root)
     with reader.open(publisher.current().version) as context:
@@ -1187,7 +1399,10 @@ def _publish_legacy_baseline_without_membership(root: Path):
             for name in context.tables
             if name != "universe_membership"
         }
-    return publisher.publish(tables, QualityReport()).version
+        build_config = context.manifest.get("build_config")
+    return publisher.publish(
+        tables, QualityReport(), build_config=build_config
+    ).version
 
 
 def test_update_carries_universe_membership_table_unchanged(project):

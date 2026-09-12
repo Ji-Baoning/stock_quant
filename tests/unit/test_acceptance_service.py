@@ -25,6 +25,7 @@ from stock_quant.bootstrap import bootstrap_dataset
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_pipeline import DataPipeline, DataUpdateRequest
 from stock_quant.data_sources.base import (
+    AuthenticationError,
     DataRequest,
     DataSource,
     FetchResult,
@@ -83,11 +84,37 @@ def _weekdays(start: date, end: date) -> list[date]:
 
 @dataclass(frozen=True)
 class StubAdapter:
-    """A ``DataSource`` whose ``fetch`` returns deterministic raw frames."""
+    """A ``DataSource`` whose ``fetch`` returns deterministic raw frames.
+
+    The ``trade_cal_*`` knobs shape the per-exchange ``trade_cal`` halo
+    responses (see ``_trade_cal_frame``); they mirror the Step 1 knobs of the
+    ``test_data_pipeline`` stub so every suite drives the calendar step alike.
+    """
 
     name: str
+    trade_cal_is_open_by_exchange: dict[tuple[str, date], int] | None = None
+    trade_cal_failing_exchanges: tuple[str, ...] = ()
+    trade_cal_missing_dates: tuple[date, ...] = ()
+    trade_cal_pretrade_overrides: dict[date, str] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "trade_cal_is_open_by_exchange",
+            self.trade_cal_is_open_by_exchange or {},
+        )
+        object.__setattr__(
+            self,
+            "trade_cal_pretrade_overrides",
+            self.trade_cal_pretrade_overrides or {},
+        )
 
     def fetch(self, request: DataRequest) -> FetchResult:
+        if (
+            request.endpoint == "trade_cal"
+            and request.params.get("exchange") in self.trade_cal_failing_exchanges
+        ):
+            raise AuthenticationError(f"{self.name} supplier failure on trade_cal")
         frame = self._frame(request)
         return FetchResult(
             source=self.name,
@@ -104,6 +131,8 @@ class StubAdapter:
     def _frame(self, request: DataRequest) -> pd.DataFrame:
         if request.endpoint == "stock_basic":
             return self._stock_basic_frame()
+        if request.endpoint == "trade_cal":
+            return self._trade_cal_frame(request)
         sessions = _weekdays(request.start_date, request.end_date)
         if request.endpoint == "index_history":
             return self._index_frame(sessions)
@@ -157,6 +186,37 @@ class StubAdapter:
                 for symbol in _FIXTURE_UNIVERSE_SYMBOLS
             ]
         )
+
+    def _trade_cal_frame(self, request: DataRequest) -> pd.DataFrame:
+        """One row per halo natural day; weekends closed, pretrade chained.
+
+        ``trade_cal_is_open_by_exchange`` is keyed by ``(exchange, date)`` so a
+        test can make exactly one exchange disagree; the response carries no
+        symbol scope, so the exchange is read from ``request.params``.
+        """
+        exchange = str(request.params.get("exchange"))
+        assert exchange in ("SSE", "SZSE")
+        rows: list[dict[str, object]] = []
+        current = request.start_date
+        while current <= request.end_date:
+            if current not in self.trade_cal_missing_dates:
+                previous = current - timedelta(days=1)
+                while previous.weekday() >= 5:
+                    previous -= timedelta(days=1)
+                rows.append(
+                    {
+                        "exchange": exchange,
+                        "cal_date": current.strftime("%Y%m%d"),
+                        "is_open": self.trade_cal_is_open_by_exchange.get(
+                            (exchange, current), 1 if current.weekday() < 5 else 0
+                        ),
+                        "pretrade_date": self.trade_cal_pretrade_overrides.get(
+                            current, previous.strftime("%Y%m%d")
+                        ),
+                    }
+                )
+            current += timedelta(days=1)
+        return pd.DataFrame(rows)
 
 
 def _all_stubs() -> dict[str, DataSource]:

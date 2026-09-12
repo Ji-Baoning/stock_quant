@@ -31,6 +31,10 @@ import pytest
 import yaml
 
 from stock_quant.data_model.adjusted_bar import build_adjusted_bars
+from stock_quant.data_model.calendar_coverage import (
+    SOURCE_TUSHARE_RELAY,
+    supplier_span,
+)
 from stock_quant.data_model.corporate_action_coverage import (
     CoverageReason,
     CoverageStatus,
@@ -79,6 +83,7 @@ from stock_quant.research.acceptance.models import (
     compute_acceptance_id,
 )
 from stock_quant.research.acceptance.registry import AcceptanceRegistry
+from stock_quant.research.universe import load_universe_coverage_criterion
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -418,14 +423,27 @@ def fixture_build_config(project_root: Path) -> dict[str, object]:
     """The sanitized data-update build evidence bound into trusted fixtures.
 
     Saves deterministic ``FetchResult`` frames for every required source role
-    (tushare primary daily + security master, akshare benchmark) through the
-    real ``RawStore`` and assembles the payload through the pipeline's own
-    ``dataset_build_config`` primitive, so fixture datasets carry exactly the
-    provenance shape an operator update produces.
+    (tushare primary daily + security master + both ``trade_cal`` exchanges,
+    akshare benchmark) through the real ``RawStore`` and assembles the payload
+    through the pipeline's own ``dataset_build_config`` primitive, so fixture
+    datasets carry exactly the provenance shape an operator update produces --
+    including one relay calendar span over the whole fixture calendar and the
+    full-history criterion scanned from the project's universe definitions.
     """
     store = RawStore(project_root)
-    snapshots = tuple(
-        store.save(result) for result in _fixture_fetch_results()
+    results = _fixture_fetch_results()
+    snapshots = tuple(store.save(result) for result in results)
+    calendar_hashes = {
+        exchange: [
+            snapshot.sha256
+            for snapshot, result in zip(snapshots, results)
+            if result.endpoint == "trade_cal"
+            and result.frame["exchange"].iloc[0] == exchange
+        ]
+        for exchange in ("SSE", "SZSE")
+    }
+    criterion = load_universe_coverage_criterion(
+        project_root / "configs" / "universes"
     )
     return dataset_build_config(
         run_id=_UPDATE_RUN_ID,
@@ -436,6 +454,17 @@ def fixture_build_config(project_root: Path) -> dict[str, object]:
         resolved_end_date=_UPDATE_WINDOW_END,
         statuses=_fixture_source_statuses(),
         raw_snapshots=snapshots,
+        calendar_spans=(
+            supplier_span(
+                CAL_START,
+                CAL_END,
+                source=SOURCE_TUSHARE_RELAY,
+                snapshots_by_exchange=calendar_hashes,
+            ),
+        ),
+        acceptance_start=criterion.acceptance_start,
+        definition_hashes=criterion.definition_hashes,
+        skipped_definitions=criterion.skipped,
     )
 
 
@@ -595,6 +624,50 @@ def _fixture_fetch_results() -> tuple[FetchResult, ...]:
                 "transport_id": "sina.stock-zh-index-daily",
             },
         ),
+        _tushare_trade_cal_result("SSE", _UPDATE_WINDOW_START, _UPDATE_WINDOW_END),
+        _tushare_trade_cal_result("SZSE", _UPDATE_WINDOW_START, _UPDATE_WINDOW_END),
+    )
+
+
+def _tushare_trade_cal_result(exchange: str, start: date, end: date) -> FetchResult:
+    """A recorded ``trade_cal`` halo response for one exchange.
+
+    Weekends are closed and ``pretrade_date`` chains to the previous weekday,
+    matching the fixture ``trading_calendar`` (see ``_weekdays``), so a fixture
+    window's continuity check passes.
+    """
+    request = DataRequest(
+        "trade_cal",
+        (),
+        start - timedelta(days=1),
+        end + timedelta(days=1),
+        {"exchange": exchange},
+    )
+    rows: list[dict[str, object]] = []
+    current = request.start_date
+    while current <= request.end_date:
+        previous = current - timedelta(days=1)
+        while previous.weekday() >= 5:
+            previous -= timedelta(days=1)
+        rows.append(
+            {
+                "exchange": exchange,
+                "cal_date": current.strftime("%Y%m%d"),
+                "is_open": 1 if current.weekday() < 5 else 0,
+                "pretrade_date": previous.strftime("%Y%m%d"),
+            }
+        )
+        current += timedelta(days=1)
+    return FetchResult(
+        source="tushare",
+        endpoint="trade_cal",
+        request_key=request_key(request),
+        frame=pd.DataFrame(rows),
+        metadata={
+            "source": "tushare",
+            "sdk_version": "fixture",
+            "transport_id": "api.waditu.com",
+        },
     )
 
 

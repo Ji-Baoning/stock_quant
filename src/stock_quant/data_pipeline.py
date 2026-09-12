@@ -20,10 +20,13 @@ Role model (kept deliberately small and explicit):
   publishes.
 
 ``DataPipeline.update`` always fetches into the immutable raw-store *before*
-normalizing, merges the fresh canonical bars/corporate actions over the existing
-immutable dataset (security master and trading calendar are carried unchanged),
-renders the shared quality report, and publishes **only** when the neutral gate
-passes and no ``FATAL`` pipeline issue exists.  A blocked or failed update
+normalizing, refreshes the trading calendar for the window from the required
+relay ``trade_cal`` responses, merges the fresh canonical bars/corporate
+actions over the existing immutable dataset (the security master carries over
+with refreshed listing facts, and the immutable ``universe_membership`` table
+is carried unchanged), renders the shared quality report, and publishes
+**only** when the neutral gate passes and no ``FATAL`` pipeline issue exists.
+A blocked or failed update
 returns ``dataset_ref is None`` while remaining diagnosable through
 ``quality_report`` / ``source_status`` / ``raw_snapshots``.
 
@@ -41,7 +44,7 @@ import json
 import time as _sleep_module
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
@@ -53,6 +56,20 @@ from stock_quant.data_model.adjusted_bar import (
     build_adjusted_bars,
 )
 from stock_quant.data_model.calendar import TradingCalendar
+from stock_quant.data_model.calendar_coverage import (
+    ACCEPTANCE_START_KEY,
+    COVERAGE_KEY,
+    COVERAGE_WARNING_CODES,
+    DEFINITION_HASHES_KEY,
+    SKIPPED_DEFINITIONS_KEY,
+    SOURCE_TUSHARE_RELAY,
+    CalendarCoverageError,
+    CalendarCoverageSpan,
+    coverage_from_payload,
+    coverage_payload,
+    merge_window,
+    supplier_span,
+)
 from stock_quant.data_model.corporate_action_coverage import (
     OUTCOME_FAILED,
     OUTCOME_SUCCESS_EMPTY,
@@ -97,6 +114,17 @@ from stock_quant.data_model.security_master import (
     master_coverage_record,
 )
 from stock_quant.data_model.suspensions import suspension_rows
+from stock_quant.data_model.trade_calendar_facts import (
+    EXCHANGES as CALENDAR_EXCHANGES,
+)
+from stock_quant.data_model.trade_calendar_facts import (
+    ExchangeCalendarFacts,
+    TradeCalendarFactError,
+    check_exchange_agreement,
+    check_pretrade_continuity,
+    materialize_open_days,
+    parse_trade_cal_frame,
+)
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import (
@@ -131,6 +159,10 @@ from stock_quant.data_sources.raw_store import (
     RawSnapshotEvidence,
     RawStore,
 )
+from stock_quant.research.universe import (
+    UniverseCoverageError,
+    load_universe_coverage_criterion,
+)
 
 # --------------------------------------------------------------------------- #
 # Pipeline-level issue codes (kept out of the shared neutral-gate vocabulary:
@@ -146,6 +178,7 @@ CODE_UNIVERSE_MASTER_MISMATCH = "universe_master_mismatch"
 CODE_MASTER_SNAPSHOT_INCOMPLETE = "master_snapshot_incomplete"
 CODE_MASTER_BAR_BOUNDARY = "master_bar_boundary"
 CODE_MASTER_COVERAGE_MISMATCH = "master_coverage_mismatch"
+CODE_UNIVERSE_DEFINITION_INVALID = "universe_definition_invalid"
 CODE_ADJUSTED_BAR_MISSING_FROM_DATASET = "adjusted_bar_missing_from_dataset"
 
 #: Canonical standardized table holding untrusted corporate-action rows.
@@ -254,12 +287,20 @@ def dataset_build_config(
     resolved_end_date: date,
     statuses: Mapping[str, SourceStatus],
     raw_snapshots: Sequence[RawSnapshot],
+    calendar_spans: Sequence[CalendarCoverageSpan],
+    acceptance_start: date | None,
+    definition_hashes: Mapping[str, str],
+    skipped_definitions: Sequence[str],
 ) -> dict[str, object]:
     """The exact sanitized payload hashed into a published dataset version.
 
     Carries hashes, identifiers, dates and stable status codes only -- never
     exception text, URLs, local paths or reason prose -- so the dataset
-    version is bound to the raw evidence it was built from.
+    version is bound to the raw evidence it was built from.  The calendar
+    evidence keys (``calendar_coverage`` and siblings) are the shape marker
+    for the build-config contract: ``DATASET_BUILD_CONTRACT_VERSION`` stays
+    ``1`` on purpose, so a manifest without ``calendar_coverage`` is a legacy
+    payload read compatibly but never accepted as fully evidenced.
     """
     return {
         "origin": "data_update",
@@ -275,7 +316,42 @@ def dataset_build_config(
         "resolved_end_date": resolved_end_date.isoformat(),
         "source_status": _source_evidence(statuses),
         "raw_snapshots": _raw_snapshot_evidence_rows(raw_snapshots),
+        COVERAGE_KEY: coverage_payload(calendar_spans),
+        ACCEPTANCE_START_KEY: (
+            acceptance_start.isoformat() if acceptance_start is not None else None
+        ),
+        DEFINITION_HASHES_KEY: dict(definition_hashes),
+        SKIPPED_DEFINITIONS_KEY: list(skipped_definitions),
     }
+
+
+def _calendar_open_days(calendar_frame: pd.DataFrame) -> tuple[date, ...]:
+    """The published open days of one ``trading_calendar`` frame, sorted."""
+    return tuple(
+        sorted(
+            day.date()
+            for day, flag in zip(
+                calendar_frame["calendar_date"],
+                calendar_frame["is_trading_day"],
+            )
+            if bool(flag)
+        )
+    )
+
+
+def _calendar_issues(
+    violations: Sequence[tuple[str, Mapping[str, object]]],
+) -> list[QualityIssue]:
+    """Pipeline issues for calendar violations (one shared severity map)."""
+    return [
+        _issue(
+            Severity.WARNING if code in COVERAGE_WARNING_CODES else Severity.FATAL,
+            code,
+            table="trading_calendar",
+            details=dict(details),
+        )
+        for code, details in violations
+    ]
 
 
 def master_bar_boundary_issues(
@@ -464,8 +540,14 @@ class DataPipeline:
             return self._result(
                 issues, None, run_id, None, statuses, raw_snapshots
             )
-        master, calendar_open, current_daily, current_ca, membership, (
-            current_quarantine
+        (
+            master,
+            published_open_days,
+            current_daily,
+            current_ca,
+            membership,
+            current_quarantine,
+            baseline_spans,
         ) = baseline
         issues.extend(self._universe_master_issues(master))
 
@@ -484,7 +566,7 @@ class DataPipeline:
         # ---- end resolution: the published calendar is the only clock ----- #
         end = request.end_date
         if end is None:
-            if not calendar_open:
+            if not published_open_days:
                 issues.append(
                     _issue(
                         Severity.FATAL,
@@ -500,7 +582,7 @@ class DataPipeline:
                 return self._result(
                     issues, None, run_id, None, statuses, raw_snapshots
                 )
-            end = calendar_open[-1]
+            end = published_open_days[-1]
         start = request.start_date or self._project_config.start_date
         if end < start:
             issues.append(
@@ -516,6 +598,25 @@ class DataPipeline:
             return self._result(
                 issues, None, run_id, end, statuses, raw_snapshots
             )
+
+        # ---- required trading-calendar refresh --------------------------- #
+        # Runs before every other fetch so a calendar failure blocks the run
+        # before any window data is pulled, and so the whole update publishes
+        # as one atomic unit with its calendar evidence.
+        refreshed = self._refresh_calendar(
+            start,
+            end,
+            published_open_days,
+            issues,
+            statuses,
+            raw_snapshots,
+            baseline_spans,
+        )
+        if refreshed is None:
+            return self._result(
+                issues, None, run_id, end, statuses, raw_snapshots
+            )
+        calendar_open, calendar_spans = refreshed
 
         # ---- required security-master reference (tushare stock_basic) ----- #
         master, master_coverage = self._refresh_security_master(
@@ -685,6 +786,19 @@ class DataPipeline:
             )
 
         # ---- publish ---------------------------------------------------- #
+        try:
+            criterion = load_universe_coverage_criterion(
+                self._project_root / "configs" / "universes"
+            )
+        except UniverseCoverageError as error:
+            issues.append(
+                _issue(
+                    Severity.FATAL,
+                    CODE_UNIVERSE_DEFINITION_INVALID,
+                    details={"message": str(error)},
+                )
+            )
+            return self._result(issues, None, run_id, end, statuses, raw_snapshots)
         tables = {
             "daily_bar": new_daily,
             "adjusted_bar": adjusted,
@@ -721,6 +835,10 @@ class DataPipeline:
                     resolved_end_date=end,
                     statuses=statuses,
                     raw_snapshots=raw_snapshots,
+                    calendar_spans=calendar_spans,
+                    acceptance_start=criterion.acceptance_start,
+                    definition_hashes=criterion.definition_hashes,
+                    skipped_definitions=criterion.skipped,
                 ),
             )
         except PublicationBlocked as error:
@@ -889,16 +1007,7 @@ class DataPipeline:
         """
         if membership is None:
             return []
-        open_days = tuple(
-            sorted(
-                day.date()
-                for day, flag in zip(
-                    calendar_frame["calendar_date"],
-                    calendar_frame["is_trading_day"],
-                )
-                if bool(flag)
-            )
-        )
+        open_days = _calendar_open_days(calendar_frame)
         return validate_membership_facts(
             membership,
             calendar=TradingCalendar.from_open_days(open_days),
@@ -922,14 +1031,18 @@ class DataPipeline:
             ) from None
 
     def _read_baseline(self, issues: list[QualityIssue]):
-        """The carried master/calendar/daily/action/membership/quarantine tables.
+        """The carried master/calendar/daily/action/membership/quarantine state.
 
-        Returns the carried frames, or ``None`` after a FATAL issue when
-        no dataset exists yet.  The immutable ``universe_membership`` raw
-        table is carried too when the baseline dataset already has one
-        (older datasets simply update without it), and a pre-migration
-        dataset without a ``corporate_action_quarantine`` table yields an
-        empty canonical frame so it stays updatable.
+        Returns ``(master, open_days, daily, ca, membership, quarantine,
+        baseline_spans)``, or ``None`` after a FATAL issue when no dataset
+        exists yet.  The immutable ``universe_membership`` raw table is
+        carried too when the baseline dataset already has one (older datasets
+        simply update without it), and a pre-migration dataset without a
+        ``corporate_action_quarantine`` table yields an empty canonical frame
+        so it stays updatable.  ``baseline_spans`` parses the manifest's
+        ``calendar_coverage`` evidence; a legacy manifest without the key
+        yields no spans and the publish-time span gate then requires this
+        window to cover the whole published calendar range.
         """
         try:
             ref = DatasetPublisher(self._project_root).current()
@@ -948,7 +1061,9 @@ class DataPipeline:
             )
             return None
         reader = DatasetReader(self._project_root)
+        manifest: Mapping[str, Any] | None = None
         with reader.open(ref.version) as context:
+            manifest = context.manifest
             master = context.read("security_master")
             calendar_frame = context.read("trading_calendar")
             daily = context.read("daily_bar")
@@ -966,17 +1081,15 @@ class DataPipeline:
                 quarantine = pd.DataFrame(
                     columns=CORPORATE_ACTION_QUARANTINE_COLUMNS
                 )
-        open_days = tuple(
-            sorted(
-                day.date()
-                for day, flag in zip(
-                    calendar_frame["calendar_date"],
-                    calendar_frame["is_trading_day"],
-                )
-                if bool(flag)
-            )
-        )
-        return master, open_days, daily, ca, membership, quarantine
+        open_days = _calendar_open_days(calendar_frame)
+        build = manifest.get("build_config") if isinstance(manifest, Mapping) else None
+        raw_spans = build.get(COVERAGE_KEY, []) if isinstance(build, Mapping) else []
+        try:
+            spans = coverage_from_payload(raw_spans)
+        except CalendarCoverageError as error:
+            issues.extend(_calendar_issues(error.violations))
+            return None
+        return master, open_days, daily, ca, membership, quarantine, spans
 
     def _require_available(
         self,
@@ -1178,6 +1291,156 @@ class DataPipeline:
             "akshare", True, True, reason_code="ok"
         )
         return False
+
+    def _refresh_calendar(
+        self,
+        start,
+        end,
+        published_open_days,
+        issues,
+        statuses,
+        raw_snapshots,
+        baseline_spans,
+    ) -> tuple[tuple[date, ...], tuple[CalendarCoverageSpan, ...]] | None:
+        """Fetch, validate and materialise this window's trading calendar.
+
+        Both exchanges are requested over the validation halo ``[start - 1,
+        end + 1]`` and saved to the raw store as ordinary responses (also on
+        the failure path).  Values are validated per exchange, then compared
+        day by day, then used to replace the window's open days and to check
+        the ``pretrade_date`` chain over the merged candidate table.  Returns
+        ``(open_days, spans)`` or ``None`` after a FATAL issue: a raised
+        calendar never publishes, never writes a partial span, and never
+        reuses a previous run's raw response (the supplier is re-requested on
+        every run).
+        """
+        source = self._adapter_or_fail("tushare", statuses)
+        if source is None:
+            issues.append(
+                _issue(
+                    Severity.FATAL,
+                    CODE_SOURCE_FETCH_FAILED,
+                    details={
+                        "source": "tushare",
+                        "endpoint": "trade_cal",
+                        "message": (
+                            statuses["tushare"].reason or "adapter unavailable"
+                        ),
+                    },
+                )
+            )
+            return None
+        halo_start = start - timedelta(days=1)
+        halo_end = end + timedelta(days=1)
+        config = self._project_config.sources.get("tushare", SourceConfig())
+        policy = RetryPolicy(
+            max_attempts=min(config.max_retries + 1, 3),
+            maximum_wait_seconds=min(config.timeout_seconds, 30),
+        )
+        facts: dict[str, ExchangeCalendarFacts] = {}
+        hashes: dict[str, list[str]] = {
+            exchange: [] for exchange in CALENDAR_EXCHANGES
+        }
+        for exchange in CALENDAR_EXCHANGES:
+            request = DataRequest(
+                "trade_cal", (), halo_start, halo_end, {"exchange": exchange}
+            )
+            try:
+                result = fetch_with_retry(
+                    source, request, policy, sleeper=self._sleeper
+                )
+            except Exception as error:  # noqa: BLE001 - required calendar
+                issues.append(
+                    _issue(
+                        Severity.FATAL,
+                        CODE_SOURCE_FETCH_FAILED,
+                        details={
+                            "source": "tushare",
+                            "endpoint": "trade_cal",
+                            "exchange": exchange,
+                            "message": str(translate_supplier_error(error)),
+                        },
+                    )
+                )
+                statuses["tushare"] = SourceStatus(
+                    "tushare", True, False,
+                    reason=f"trade_cal fetch failed: {error}",
+                    reason_code="source_fetch_failed",
+                )
+                return None
+            snapshot = self._record_raw(result)
+            raw_snapshots.append(snapshot)
+            hashes[exchange].append(snapshot.sha256)
+            try:
+                facts[exchange] = parse_trade_cal_frame(
+                    result.frame,
+                    exchange=exchange,
+                    halo_start=halo_start,
+                    halo_end=halo_end,
+                )
+            except TradeCalendarFactError as error:
+                issues.extend(_calendar_issues(error.violations))
+                statuses["tushare"] = SourceStatus(
+                    "tushare", True, False,
+                    reason=f"trade_cal {exchange} raw validation failed",
+                    reason_code="partial_fetch_failure",
+                )
+                return None
+        violations = check_exchange_agreement(facts["SSE"], facts["SZSE"])
+        if violations:
+            issues.extend(_calendar_issues(violations))
+            statuses["tushare"] = SourceStatus(
+                "tushare", True, False,
+                reason="SSE and SZSE calendars disagree",
+                reason_code="partial_fetch_failure",
+            )
+            return None
+        open_days = materialize_open_days(
+            published_open_days, facts=facts["SSE"], start=start, end=end
+        )
+        continuity = check_pretrade_continuity(
+            facts["SSE"].rows, open_days, start=start, end=end
+        )
+        if continuity.violations:
+            issues.extend(_calendar_issues(continuity.violations))
+            statuses["tushare"] = SourceStatus(
+                "tushare", True, False,
+                reason="calendar pretrade chain is broken",
+                reason_code="partial_fetch_failure",
+            )
+            return None
+        for boundary in continuity.allowed_pre_coverage:
+            issues.append(
+                _issue(
+                    Severity.INFO,
+                    "calendar_pre_coverage_boundary",
+                    trade_date=boundary,
+                    details={"calendar_date": boundary.isoformat()},
+                )
+            )
+        # SOURCE_TUSHARE_RELAY is the only allowed span source: this pipeline
+        # has no official break-glass branch.  If break-glass ever ships, the
+        # span source must be decided by the transport's ``kind``, never
+        # filled in freely by the caller.
+        replacement = supplier_span(
+            start,
+            end,
+            source=SOURCE_TUSHARE_RELAY,
+            snapshots_by_exchange=hashes,
+        )
+        try:
+            spans = merge_window(
+                baseline_spans,
+                start=start,
+                end=end,
+                replacement=replacement,
+                open_days=open_days,
+            )
+        except CalendarCoverageError as error:
+            issues.extend(_calendar_issues(error.violations))
+            return None
+        statuses["tushare"] = SourceStatus("tushare", True, True, reason_code="ok")
+        return open_days, spans
 
     def _refresh_security_master(
         self, start, end, issues, statuses, raw_snapshots, master,
