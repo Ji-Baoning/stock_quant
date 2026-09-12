@@ -444,12 +444,13 @@ def main() -> int:
         return EXIT_BLOCKED
     if not cleared(results):
         print(
-            "NOT CLEARED: at least one case produced no evidence.  The official "
-            "side rate-limited, was unreachable, or failed for a reason of its "
-            "own -- a rejected credential is the common one, and it is why the "
-            "live run of 2026-09-12 read INCONCLUSIVE.  Read the official "
-            "answers above before re-running: if they are all the same error, "
-            "the fix is the credential, not a retry.  The stage 1 gate stays "
+            "NOT CLEARED: at least one case produced no evidence, and either "
+            "side can be the one that failed -- the official side "
+            "rate-limited, was unreachable, or refused the credential; the "
+            "relay side failed or was unreachable; or a side answered a "
+            "different question than the case asked.  Read the answers above "
+            "before re-running: when two sides fail with the same error, the "
+            "fix is that credential, not a retry.  The stage 1 gate stays "
             "closed until every case agrees."
         )
         return EXIT_NOT_CONFIGURED
