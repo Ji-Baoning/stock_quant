@@ -54,6 +54,14 @@ _MAX_ATTEMPTS = len(_BACKOFF_SECONDS) + 1
 # stay two orders of magnitude below the ~6000-row response truncation.
 _WINDOW_YEARS = 5
 _WINDOW_PAUSE_SECONDS = 0.2
+_RATE_LIMIT_REMAINING_HEADER = "x-ratelimit-ip-remaining"
+#: Below this many remaining calls in the current window, back off.  The
+#: window size itself comes from the headers, not the catalog.
+_RATE_LIMIT_LOW_WATERMARK = 10
+#: Used when we must throttle but have no header to size the wait: 60/min is
+#: the more conservative of the falsified declaration (60) and the measured
+#: header (200).
+_FALLBACK_MIN_INTERVAL_SECONDS = 1.0
 #: Interfaces the code itself pins, so their names need no runtime check.
 _NAMED_ENDPOINTS = ("daily", "index_daily", "stock_basic")
 #: The catalog table carries no TTL of its own; 21600 is the value the
@@ -154,6 +162,8 @@ class TushareProxyClient:
         self.max_attempts = min(max_retries + 1, _MAX_ATTEMPTS)
         self._sleeper = sleeper
         self._clock = clock
+        self._rate_limited = False
+        self._next_allowed_at = 0.0
         self._session = session or requests.Session()
         self._session.headers["X-API-Key"] = api_key
         # Metadata lives one level above the data plane:
@@ -465,6 +475,7 @@ class TushareProxyClient:
         payload = {key: value for key, value in params.items() if value is not None}
         last_error: ServerError | None = None
         for attempt in range(self.max_attempts):
+            self._throttle()
             try:
                 response = self._session.get(
                     url,
@@ -474,6 +485,7 @@ class TushareProxyClient:
             except requests.exceptions.RequestException as error:
                 last_error = ServerError(f"proxy {url} transport failure: {error}")
             else:
+                self._observe_rate_limit(response)
                 self._record(log, response)
                 if response.status_code in _TRANSIENT_HTTP_STATUS:
                     last_error = ServerError(f"proxy {url} HTTP {response.status_code}")
@@ -500,6 +512,55 @@ class TushareProxyClient:
                 self._sleeper(_BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)])
         assert last_error is not None
         raise last_error
+
+    def _observe_rate_limit(self, response: requests.Response) -> None:
+        """Throttle from what the server reports, never from the catalog.
+
+        The catalog declares 60 requests/min per IP while the live headers
+        said 200 -- the declaration has been falsified, so only headers are
+        trusted here, and the budget is **shared across every user of this
+        IP**, so "we don't ask for much" is not a reason to skip it.
+
+        A response carrying no rate-limit header at all teaches nothing, so
+        until one arrival is seen this client does not throttle.  Once seen,
+        a later header-less response falls back to the conservative interval
+        rather than opening up.
+        """
+        headers = _lower_headers(response)
+        has_signal = any(
+            key.startswith("x-ratelimit") or key == "retry-after" for key in headers
+        )
+        if not has_signal and not self._rate_limited:
+            return
+        self._rate_limited = True
+        now = self._clock()
+        retry_after = headers.get("retry-after")
+        if retry_after is not None:
+            try:
+                self._next_allowed_at = now + max(float(retry_after), 0.0)
+                return
+            except ValueError:
+                pass
+        interval = _FALLBACK_MIN_INTERVAL_SECONDS
+        remaining = headers.get(_RATE_LIMIT_REMAINING_HEADER)
+        if remaining is not None:
+            try:
+                remaining_value = int(float(remaining))
+            except ValueError:
+                remaining_value = 0
+            interval = (
+                _FALLBACK_MIN_INTERVAL_SECONDS
+                if remaining_value < _RATE_LIMIT_LOW_WATERMARK
+                else 0.0
+            )
+        self._next_allowed_at = now + interval
+
+    def _throttle(self) -> None:
+        if not self._rate_limited:
+            return
+        wait = self._next_allowed_at - self._clock()
+        if wait > 0:
+            self._sleeper(wait)
 
     def _record(
         self, log: list[dict[str, str]] | None, response: requests.Response

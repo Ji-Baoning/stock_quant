@@ -5,7 +5,10 @@ from __future__ import annotations
 import pytest
 
 from stock_quant.data_sources.base import ContractError, ServerError
-from stock_quant.data_sources.tushare_proxy import TushareProxyClient
+from stock_quant.data_sources.tushare_proxy import (
+    _FALLBACK_MIN_INTERVAL_SECONDS,
+    TushareProxyClient,
+)
 
 BASE_URL = "https://proxy.example/tushare/pro"
 ROOT = "https://proxy.example/tushare"
@@ -316,9 +319,11 @@ def test_query_records_one_entry_per_outbound_window():
 
 
 def test_named_reads_never_write_query_metadata():
-    client, _, _ = _client([FakeResponse(body=_daily_body())])
+    client, _, _ = _client([FakeResponse(body=_daily_body())] * 2)
     assert client.last_query_metadata is None
     client.daily(ts_code="000001.SZ", start_date="20260901", end_date="20260912")
+    assert client.last_query_metadata is None
+    client.index_daily(ts_code="000300.SH", start_date="20260901", end_date="20260912")
     assert client.last_query_metadata is None
 
 
@@ -340,3 +345,115 @@ def test_failed_query_leaves_the_previous_metadata_untouched():
     with pytest.raises(ServerError):
         client.query("suspend_d", verify_capability="none", ts_code="000333.SZ")
     assert client.last_query_metadata is good
+
+
+# --------------------------------------------------------------------------- #
+# Throttling: the server's rate-limit headers, never the catalog declaration.  #
+# --------------------------------------------------------------------------- #
+
+
+def _read(client):
+    return client.query(
+        "daily", ts_code="000001.SZ", start_date="20260901", end_date="20260912"
+    )
+
+
+def test_low_remaining_throttles_the_next_request():
+    sleeps = []
+    outcomes = [
+        FakeResponse(body=_daily_body(), headers={"x-ratelimit-ip-remaining": "3"}),
+        FakeResponse(body=_daily_body()),
+    ]
+    client, _, _ = _client(outcomes, sleeps=sleeps)
+    _read(client)
+    _read(client)
+    assert sleeps == [_FALLBACK_MIN_INTERVAL_SECONDS]
+
+
+def test_high_remaining_does_not_throttle():
+    sleeps = []
+    outcomes = [
+        FakeResponse(body=_daily_body(), headers={"x-ratelimit-ip-remaining": "199"}),
+        FakeResponse(body=_daily_body()),
+    ]
+    client, _, _ = _client(outcomes, sleeps=sleeps)
+    _read(client)
+    _read(client)
+    assert sleeps == []
+
+
+def test_missing_headers_fall_back_once_a_limit_has_been_seen():
+    sleeps = []
+    outcomes = [
+        FakeResponse(body=_daily_body(), headers={"x-ratelimit-ip-remaining": "199"}),
+        FakeResponse(body=_daily_body()),  # no headers at all
+        FakeResponse(body=_daily_body()),
+    ]
+    client, _, _ = _client(outcomes, sleeps=sleeps)
+    _read(client)
+    _read(client)
+    _read(client)
+    assert sleeps == [_FALLBACK_MIN_INTERVAL_SECONDS]
+
+
+def test_retry_after_takes_priority_over_remaining():
+    sleeps = []
+    outcomes = [
+        FakeResponse(
+            body=_daily_body(),
+            headers={"Retry-After": "5", "x-ratelimit-ip-remaining": "199"},
+        ),
+        FakeResponse(body=_daily_body()),
+    ]
+    client, _, _ = _client(outcomes, sleeps=sleeps)
+    _read(client)
+    _read(client)
+    assert sleeps == [5.0]
+
+
+def test_requests_without_any_rate_limit_header_are_never_throttled():
+    sleeps = []
+    client, _, _ = _client([FakeResponse(body=_daily_body())] * 3, sleeps=sleeps)
+    _read(client)
+    _read(client)
+    _read(client)
+    assert sleeps == []
+
+
+# --------------------------------------------------------------------------- #
+# Provenance: what named reads and transient attempts leave (or do not leave)  #
+# in the audit trail.                                                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_stock_basic_never_writes_query_metadata():
+    payload = {
+        "code": 0,
+        "data": {
+            "fields": ["ts_code", "name"],
+            "items": [["000001.SZ", "平安银行"]],
+        },
+    }
+    client, session, _ = _client([FakeResponse(body=payload)])
+    client.stock_basic(fields="ts_code,name")
+    assert client.last_query_metadata is None
+    assert session.calls[0]["url"] == f"{BASE_URL}/stock_basic"
+
+
+def test_a_transient_attempt_still_leaves_its_request_id_in_the_trail():
+    sleeps: list[float] = []
+    client, session, _ = _client(
+        [
+            FakeResponse(
+                body={"ok": False, "error": "upstream_pool_exhausted"},
+                headers={"x-request-id": "first", "x-cache": "MISS"},
+            ),
+            FakeResponse(body=_daily_body(), headers={"x-request-id": "second"}),
+        ],
+        sleeps=sleeps,
+    )
+    client.query(
+        "daily", ts_code="000001.SZ", start_date="20260901", end_date="20260912"
+    )
+    metadata = client.last_query_metadata
+    assert metadata["request_ids"] == ["first", "second"]
