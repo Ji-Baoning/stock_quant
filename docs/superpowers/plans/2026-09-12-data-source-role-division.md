@@ -3434,6 +3434,18 @@ Expected: 打印的标签全部以 `tushare_relay.` 开头，**无一为 `tushar
 
 （若断言失败，直接 `ls project/data/standardized/` 与 `ls project/data/standardized/<version>/` 核对实际布局，再改脚本——不要改断言。）
 
+> **不要拿现存的那条 acceptance 记录来验 Step 6（2026-09-12 记）。** 本检出里已有一条
+> 发布过的记录（`project/data/acceptances/<CURRENT 版本>/acceptance.json`，93 条证据行），
+> 它**全部是五字段旧行、不含 `transport_id`** —— 那是 Task 5 之前发布的，Step 6 的
+> 「标签全部以 `tushare_relay.` 开头」在它身上**必然不成立**，因为 relay 正是改造后才
+> 成为主传输的。Step 6 只对**改造后新发布的那一版**成立。别为了让旧记录"通过"去改它，
+> 也别去重写 `data/` 下的任何东西：那条记录的价值恰恰在于它老。
+
+> **Step 4–6 是阶段 1 的人工验收，不能由任务 6 的测试代替。** 任务 6 交付的
+> `tests/integration/test_raw_provenance_chain.py` 覆盖的是证据链的**内部一致性**
+> （两条传输各自成行、标签各自正确、旧形状仍可解析）；它不覆盖真实供应商下的发布，
+> 也不覆盖"未指定 transport 必须失败"。**这三步在上线当天由人工执行并留痕。**
+
 ---
 
 ### Task 7: 阶段 2 —— 存量快照出处审计（§5）
