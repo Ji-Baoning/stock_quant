@@ -118,9 +118,11 @@
 - **不集成公司行为第三源**（tushare `dividend`）。涉及对账重设计，单独立项。
 - **不改 `_ACCEPTED_MISSING_CODES`、验收口径、数据契约。**
 - **不删 promax 的代码路径。** 它的问题只在窗口语义，代码本身可用（见选型）。
-- **不改 `_CONFIGURED_SOURCES`，也不改 `_REQUIRED_ROLE` 的取值。** jiaoch 是
-  `tushare` 源的 transport，不是新源位；akshare 的 `required` 语义是否仍准确，
-  留给验收口径那条线一并处理（见 §4）。
+- **不改 `_CONFIGURED_SOURCES`**（不新增源位）。jiaoch 是 `tushare` 源的
+  transport，不是新源位。
+- **`_REQUIRED_ROLE` 只改 akshare 一项**（`True` → `False`，见 §4）。
+  `tushare` 保持 `True`，`baostock` 保持 `False`。这是 §4 的角色变更的
+  必要组成部分，不是顺手改动。
 
 ## 选型
 
@@ -143,65 +145,135 @@
 
 ### 1. 传输层
 
-`TushareSource.__init__` 现在是一条隐式链（`tushare.py:38-60`）：
-`TushareProxyClient.from_env()` → 官方 SDK。改为显式解析：
+#### 1.1 请求客户端与来源描述分离（owner 修正 3）
 
-```
-client 参数（测试注入，最高优先）
-  → TUSHARE_TRANSPORT 显式指定（"relay" | "proxy" | "official"）
-  → 未指定时的自动序：relay → proxy → official
-```
+现在 `TushareSource` 持有一个**既当客户端、又当来源标识**的对象：`self._client`
+既要能被 `fetch()` 当作 SDK 调用（`.daily(...)` / `.index_daily(...)` /
+`.stock_basic(...)`），又要回答"你是谁"。两个职责分开：
 
-- **relay 分支**：用 `TushareRelayClient`（`data_sources/tushare_relay.py`）构造
-  **一个 `_DataApi__http_url` 被改写过的官方 `pro_api`**。
-  关键性质：它与 official 产出**同一个客户端类型**，因此
-  `fetch()` 里的 `self._client.daily(...)` / `index_daily(...)` / `stock_basic(...)`
-  **一行都不用改**，shape 与契约不变，差异只进证据。
-- **显式配置优先于环境变量存在性**（采纳 D 的反面）。`TUSHARE_TRANSPORT` 未设时
-  才走自动序，且解析结果**必须在启动日志里打印一次**。
-- **传输选择读的是进程环境（`os.environ`），不是 `.env`。** 管线侧
-  （`src/stock_quant/cli.py`）只读 `os.environ`，从不加载 `.env`；
-  自带 `_load_env` 的全是离线脚本（`project/` 下的
-  `crosscheck_calendar_relay.py`、`collect_index_weight_membership.py`、
-  `check_data_sources.py`、`verify_update_readiness.py` 等）。
-  实测印证：`.env` 里 `TUSHARE_PROXY_*` 一直有值，但 126 份 tushare 快照
-  **全部标 `tushare.pro.*`** —— 说明管线实际走的是官方 SDK，
-  `.env` 的 proxy 配置从未生效。
-  **因此"换到 relay"不是改一行代码就自动发生的**：它要求运行环境真正导出
-  `TUSHARE_RELAY_*`（或显式 `TUSHARE_TRANSPORT=relay`）。
-  这一点不写清楚，"jiaoch 上位"会是个假动作。
-- **这条也解释了离线脚本与管线可能走不同传输**：前者加载 `.env`、后者不加载。
-  同一批数据可能一半来自 relay、一半来自 official，而标注此前区分不了。
-  修 §2 的标注正是为了让这种分叉**可见**。
-- **显式指定而凭据缺失 → `AuthenticationError` 快速失败，不静默回退。**
-  `TUSHARE_TRANSPORT=relay` 但 `TUSHARE_RELAY_URL`/`KEY` 未设，必须报错而不是
-  悄悄降级去官方——静默降级会让标注与事实再次脱节。
-- **promax 保留分支但默认不参与自动序**：要它必须显式写
-  `TUSHARE_TRANSPORT=proxy`。它仍是唯一已知可用的第三方传输，
-  问题只在窗口语义，删掉分支是净损失。
-- 顺带修正：`.env` 里 relay 两项写成了 `TUSHARE_RELAY_URL = <值>`（`=` 两侧有空格），
-  本仓库的 `_load_env` 能容忍，但 shell `source` 会失败。统一成无空格写法。
+- `self._client` —— **请求客户端**，永远是真正有那三个方法的对象：
+  - relay / official → 官方 `DataApi` 实例。`DataApi.__getattr__` 返回
+    `partial(self.query, name)`，所以任意接口名都可调用；relay 与 official 的
+    区别**只在 `_DataApi__http_url` 的取值**。
+  - proxy → `TushareProxyClient`（普通类，只有三个具名方法，无 `__getattr__`）。
+- `self._transport` —— **来源描述符**，只管 provenance：`label(endpoint)`、
+  `sdk_version`、`kind`。`TushareSource` 不再用 `isinstance(self._client, ...)`
+  去猜来源。
+
+**上一版设计在这里是错的，必须记下来**：它写"`fetch()` 一行都不用改"，
+理由是"relay 与 official 产出同一个客户端类型"。**这不成立** ——
+`TushareRelayClient` 目前只有 `.query()`，`fetch()` 的
+`self._client.daily(...)` 会直接 AttributeError。正确说法是：**relay 的请求
+客户端就是官方 `DataApi`**（即 `TushareRelayClient` 内部持有的 `self._api`），
+把它交给 `_client`，`fetch()` 才确实不用改；而 `TushareRelayClient` 自身
+降级为**工厂 + 描述符**，不再被 `fetch()` 直接调用。
+
+#### 1.2 发布环境禁止自动选择 transport（owner 修正 1）
+
+管线不加载 `.env`，所以"未设置就走自动序"在凭据没导出时会**静默走 official**，
+让"jiaoch 已上位"停留在设计上。规则改为：
+
+| 场景 | 行为 |
+| --- | --- |
+| published 构建（`data update` 及一切会写数据集的路径） | **必须显式设置 `TUSHARE_TRANSPORT=relay`**；未设置 → 直接失败，不回退 |
+| 显式指定但凭据缺失或**半配置**（只设 URL 或只设 KEY）或初始化失败 | 直接失败，**不回退** |
+| 自动序 `relay → proxy → official` | **只允许开发与诊断脚本**使用，且须显式传 `allow_auto_transport=True`（默认 `False`） |
+
+- 解析结果**必须打印进运行日志**，并作为 `dataset_build_config` 的一部分
+  （经 `supplier_endpoint`）落盘 —— 验收要能**同时从日志与证据两头**证明走了 jiaoch。
+- **promax 保留分支但不参与自动序**：要它必须显式写 `TUSHARE_TRANSPORT=proxy`。
+  它仍是唯一已知可用的第三方传输，问题只在窗口语义，删掉分支是净损失。
+
+#### 1.3 传输选择读的是进程环境，不是 `.env`
+
+管线侧（`src/stock_quant/cli.py`）只读 `os.environ`，**从不加载 `.env`**；
+自带 `_load_env` 的全是离线脚本（`project/` 下的 `crosscheck_calendar_relay.py`、
+`collect_index_weight_membership.py`、`check_data_sources.py`、
+`verify_update_readiness.py` 等）。实测印证：`.env` 里 `TUSHARE_PROXY_*` 一直有值，
+但 126 份 tushare 快照**全部标 `tushare.pro.*`** —— 说明管线实际走的是官方 SDK，
+`.env` 的 proxy 配置从未生效。
+
+**两个后果**：
+
+1. "换到 relay"**不是改一行代码就自动发生的**：运行环境必须真正导出
+   `TUSHARE_RELAY_*`。这正是 §1.2 要求显式指定的原因。
+2. 离线脚本与管线可能走**不同**传输（前者加载 `.env`、后者不加载）。
+   同一批数据可能一半来自 relay、一半来自 official，而旧标注区分不了。
+   §2 的标注修正是为了让这种分叉**可见**。
+
+顺带修正：`.env` 里 relay 两项写成了 `TUSHARE_RELAY_URL = <值>`（`=` 两侧有空格），
+本仓库的 `_load_env` 能容忍，但 shell `source` 会失败。统一成无空格写法。
 
 ### 2. 证据标注（正确性的地基）
 
-`_supplier_endpoint()` 改为**由 transport 对象报告**，而不是由客户端类型推断：
+#### 2.1 标签由描述符报告
 
-| transport | `supplier_endpoint` | 说明 |
-| --- | --- | --- |
-| relay | `tushare_relay.<host>.<endpoint>`，如 `tushare_relay.jiaoch.top.daily` | host 取真实值，取不到则填 `unknown` |
-| proxy | `tushare_proxy.<endpoint>` | 不变 |
-| official | `tushare.pro.<endpoint>` | **仅当确实打到 `api.waditu.com` 时才允许打此标** |
+`_supplier_endpoint()` 改为**由 `self._transport` 报告**，不再用 `isinstance` 猜：
 
-判定机制（替代"按类型 `isinstance`"）：transport 解析时就**记下实际会打到的
-base URL**（官方 SDK 为 `_DataApi__http_url`，默认
-`http://api.waditu.com/dataapi`；relay 为 `TUSHARE_RELAY_URL`），
-标签由这个 URL 派生。因此 URL 被改写过就**不可能**再打出 `tushare.pro.*`。
+| transport | `supplier_endpoint` |
+| --- | --- |
+| relay | `tushare_relay.<host>.<endpoint>`，如 `tushare_relay.jiaoch.top.daily`（host 取不到则填 `unknown`） |
+| proxy | `tushare_proxy.<endpoint>`（不变） |
+| official | `tushare.pro.<endpoint>`（**仅当确实打到 `api.waditu.com` 时才允许打此标**） |
 
-同时 `sdk_version` 保持"SDK 版本"语义不变（不掺 host），host 只进
-`supplier_endpoint`，避免一个字段担两种含义。
+判定机制：transport 解析时**记下实际会打到的 base URL**（官方 SDK 为
+`_DataApi__http_url`，默认 `http://api.waditu.com/dataapi`；relay 为
+`TUSHARE_RELAY_URL`），标签由该 URL 派生 —— URL 被改写过就**不可能**再打出
+`tushare.pro.*`。`sdk_version` 保持"SDK 版本"语义，不掺 host，避免一个字段
+担两种含义。
 
-**代价（必须认）**：`dataset_build_config` 哈希变 → 数据集版本 bump，
-即使字节完全相同。这意味着本轮要重发布一次数据集。
+#### 2.2 标签怎么进入数据集版本（链条，别记错）
+
+**`supplier_endpoint` 本身不进 `build_config`。**
+`RawSnapshotEvidence`（`raw_store.py:27-40`）只带 `source` / `endpoint` /
+`request_key` / `file_sha256` / `manifest_sha256`，注释写死
+"never local paths, **supplier metadata** or reason prose"。
+
+真正的链条是：
+
+```
+supplier_endpoint          （raw manifest.json 里的 metadata 字段）
+  → manifest.json 内容变化
+    → manifest_sha256 变化
+      → build_config.raw_snapshots[].manifest_sha256 变化
+        → dataset_version 变化
+          （_dataset_version 哈希 files + schema_versions + build_config）
+```
+
+版本确实会 bump，但**不是**因为标签被直接哈希 —— 是因为它住在 manifest 里。
+验收要引用标签时，路径是
+`build_config.raw_snapshots[].manifest_sha256` → raw manifest → `supplier_endpoint`。
+
+#### 2.3 内容寻址去重会让新标签被丢弃（本轮必须处理）
+
+`RawStore.save`（`raw_store.py:59-88`）按**文件内容哈希**寻址，且
+**命中已存在路径时直接复用旧 manifest、不重写**：
+
+```python
+snapshot_path = destination_parent / file_sha256
+if snapshot_path.exists():
+    manifest = json.loads((snapshot_path / "manifest.json").read_text())  # 旧标签
+```
+
+**后果**：relay 与 official 已实测 4/4 逐位一致，所以字节完全相同是常态而非
+例外。此时 `manifest_sha256` 不变 → **数据集版本不变，且新标签被静默丢弃**：
+数据集带着 `tushare.pro.*` 的旧标签，数据却取自 relay。
+
+**这正是本方案要堵的洞，却在去重逻辑里原样复现了一遍。** 处置二选一：
+
+- **A（推荐）：把 transport 身份并入快照键。** 让 `request_key`（或路径）带上
+  transport 标识，使"同一查询、不同来源"成为两条独立证据。语义正确 ——
+  来源不同即证据不同 —— 且天然 bump 版本；
+- **B：去重时校验标签。** 复用前比对 manifest 里的 `supplier_endpoint`，
+  不一致则拒绝复用（报错或另写快照），绝不静默沿用旧标签。
+
+无论选哪个，都要有一条测试：**同一 `DataRequest` 先经 official、再经 relay，
+断言最终证据里的标签是 relay 的**，而不是被复用的 official 标签。
+
+#### 2.4 代价
+
+数据集版本会 bump（经 §2.2 的链条），即使数据字节相同 —— 这是正确行为。
+但意味着本轮要重发布一次数据集，且**验收记录按版本绑定**（见前文）。
 
 ### 3. 证伪体系
 
@@ -211,30 +283,80 @@ base URL**（官方 SDK 为 `_DataApi__http_url`，默认
 逐位比对（列集、行数、值全等），差异落盘。这是把
 `project/crosscheck_calendar_relay.py` 的做法从"只对日历"扩到四接口。
 
-- 纳入**发布前检查**：不阻塞发布，但差异必须显式记录（有差异 → 进运维报告并告警）。
 - **抽样而非全量**：官方 token 限速严，全量不可行；抽样覆盖"每种接口 + 每个
   数据形态（正常行 / 空窗口 / 边界日期）"。
+- 结果**三种态**，不是两种：`AGREE` / `DIFFER` / `UNAVAILABLE`（官方取不到）。
+  第三态在 §3 ④ 里有独立的阻断语义。
 
-**② 轴 2 · 上游真值 · 给 `AkShareSource` 加个股日线 handler**
+**② 轴 2 · 上游真值 · 给 `AkShareSource` 加个股日线 handler（owner 修正 5）**
 
-新增 `stock_daily` endpoint（内部走 akshare 自己的 fallback 链），
-把 `tushare daily ⟷ akshare daily` 这条唯一的跨厂商对照接回来。
+新增 `stock_daily` endpoint，把 `tushare daily ⟷ akshare daily` 这条唯一的
+跨厂商对照接回来。**只做对照，绝不供 published 数据**（akshare 上游是
+EastMoney，有 IP 级封禁史）。**口径不写死就会被误报成数据错误**，故契约如下。
 
-- **只做对照，绝不供 published 数据**：akshare 上游是 EastMoney（有 IP 级封禁史）。
-  对照失败只产生 WARNING。
-- 精度差异需显式处理：指数类 akshare 是 3dp、tushare 是 4dp，
-  对照必须用相对误差阈值而不是相等（现有 `FieldDifference` 已是相对误差口径）。
+**接口与 fallback 顺序**（沿用 `_INDEX_FALLBACKS` 的 eastmoney → sina → tencent 模式）：
 
-**③ 静默换源探针（新增，本轮最重要的一条）**
+| 顺位 | 接口 | symbol 形态 | 不复权 | 备注 |
+| --- | --- | --- | --- | --- |
+| 1 | `stock_zh_a_hist`（东财） | `000001`（6 位） | `adjust=""` | 列：日期/开盘/收盘/最高/最低/成交量/成交额/… |
+| 2 | `stock_zh_a_daily`（新浪） | `sz000001` | `adjust=""` | 列：date/open/high/low/close/volume/amount；官方 docstring 自陈"大量抓取容易封 IP" |
+| 3 | `stock_zh_a_hist_tx`（腾讯） | `sz000001` | `adjust=""` | 列：date/open/close/high/low/**amount** —— **没有 volume**，故只能比价格与 amount，**成交量对照必须跳过** |
+
+**符号与日期映射**：tushare `000001.SZ` 的后缀 `.SZ`/`.SH`/`.BJ` → `sz`/`sh`/`bj`
+前缀，6 位码即 akshare 的 `symbol`。北交所在 akshare 侧覆盖不稳，**遇到即记
+`UNSUPPORTED`，不算差异**。日期统一转 `YYYY-MM-DD` 后比较（tushare 给
+`YYYYMMDD` 字符串，`stock_zh_a_hist` 给 `datetime.date`）。
+
+**单位与容差必须由夹具钉死，不能靠推断。** 本地 docstring 只描述字段名、
+**不描述单位**；tushare `vol` 单位是手、`amount` 单位是千元，而 akshare 三个
+上游互不相同，腾讯连 volume 字段都没有。单位弄错会被误报成"数据错误"，所以：
+
+- 实施时先落一份**已人工核对的夹具**：每个接口一条真实响应 + 确认过的归一化
+  期望值，提交进仓库；
+- 归一化对齐 tushare `daily`（`vol` 手 / `amount` 千元），**换算因子写在夹具里**，
+  不散落在代码里；
+- 容差按字段分级：
+
+| 字段 | 容差 |
+| --- | --- |
+| 开 / 收 / 高 / 低 | 相对误差 ≤ 1e-4（覆盖 3dp vs 4dp 舍入） |
+| vol / amount | 相对误差 ≤ 1e-3（单位换算 + 不同源的舍入与汇总口径） |
+
+**边界情形必须显式分类，不能一律当差异**：
+
+| 情形 | 分类 | 是否算差异 |
+| --- | --- | --- |
+| 停牌日 | `ABSENT_EXPECTED` | 否 |
+| 退市 / 未上市 | `UNSUPPORTED` 或 `ABSENT_EXPECTED` | 否 |
+| 两侧都空 | `AGREE_EMPTY` | 否（**必须与"未取到"区分开**） |
+| 接口失败（含封 IP） | `UNAVAILABLE` | **绝不算通过** |
+| 超容差 | `DIFFER` | 是 |
+
+**`supplier_endpoint` 记录**：fallback 链的最终作答者必须落在那三个具体端点上，
+**不能用一个默认值掩盖实际走了谁**（现有 `_first_valid_index` 已返回该 endpoint，
+照用即可）；这点与 §2.1 的要求一致。
+
+**③ 静默换源探针（本轮最重要的一条）**
 
 promax 的教训是 `fallback_on_empty` 让"空"不再等于"确实为空"。jiaoch 上
-**这条尚未验证**。设计一个探针：
+**这条尚未验证**。探针设计：
 
-- 取官方**合法返回空**的请求（如对已退市/不存在代码的 `daily`、超出区间的窗口），
-  对比 jiaoch 是否也返回空，还是返回了非空（= 换源作答）。
+- 取官方**合法返回空**的请求（如对不存在代码的 `daily`、超出区间的窗口），
+  对比 jiaoch 是返回空、还是返回了非空（= 换源作答）。
 - 取官方**明确报错**的请求，对比错误串（已知未知接口名逐字相同）。
-- 结果写进运维报告。**若 jiaoch 出现换源作答，信任边界必须重估**——
-  这条探针是"jiaoch 可信"这个决定的可撤销依据。
+- 结论写进运维报告，并驱动 §3 ④ 的阻断动作。
+
+**④ 发现异常后的强制动作（owner 修正 4）**
+
+**不能让"写入报告并继续发布"成为差异的唯一后果。** 差异要么被解释并被批准，
+要么阻断发布：
+
+| 情形 | 动作 |
+| --- | --- |
+| 官方不可用 / 限流（`UNAVAILABLE`） | 记 `UNAVAILABLE`，**不等于校验通过**；发布可继续，但报告必须写明"传输保真本轮未校验" |
+| relay 与官方出现**可复现**差异 | **停止本次发布**；或由 owner 显式人工豁免（豁免须留痕、可审计） |
+| 探针发现 relay 对"官方合法空结果"返回非空 | **立即禁用 relay 主供**，回到信任边界重新评估 |
+| 一次性的偶发差异（重试后不可复现） | 允许继续，但必须记录重试次数与最终判定 |
 
 **判据（写进设计，避免误读）**：**同族一致是弱证据，跨族一致才是强证据。**
 jiaoch ⟷ 官方只证明中转没篡改；tushare ⟷ akshare 才证明上游本身没错。
@@ -255,9 +377,19 @@ jiaoch ⟷ 官方只证明中转没篡改；tushare ⟷ akshare 才证明上游�
   供给后，akshare 的状态必须改由公司行为路径设置，且语义是 best-effort
   （恒 `ok`，失败只记 WARNING）——否则会留下一个永远不更新、却参与
   `source_role_health` 判定的状态位。
-- `_REQUIRED_ROLE["akshare"]` **本轮保持 `True`**。此时它事实上恒 `ok`，
-  因此 `_require_available` 不会因它阻塞；这是刻意的：改这个取值会动
-  验收口径，属于 `2026-09-11-trusted-data-chain-design` 的范围，不在本轮。
+- **`_REQUIRED_ROLE["akshare"]` 改为 `False`（owner 修正 2）。**
+  上一版把它保持 `True` 是错的：`_require_available`（`data_pipeline.py:1094-1104`）
+  在源**未启用**时就判 `required_source_disabled` 并阻塞发布 ——
+  把状态设成恒 `ok` 解决不了"禁用 akshare 就发不出去"。akshare 既然只剩
+  best-effort 职责，就不该再持有发布否决权，否则它是个**隐藏的发布单点**。
+  - 验收侧**无需改代码**（已核实）：`_check_source_roles`（`checks.py:386-415`）
+    读的是**记录在 `build_config.source_status` 里的 `required` 标志**，
+    而该标志来自 `_REQUIRED_ROLE` —— 改常量即自动生效。同理
+    `_unbound_required_sources`（`checks.py:737-752`）不再要求 akshare
+    绑定 raw 快照。
+  - 影响面：`build_config` 内容变化 → 数据集版本变化（本来就要重发布）。
+  - 旧数据集（`akshare.required=true`）仍按旧口径判定 —— 验收记录按版本绑定，
+    这是预期行为，不是回归。
 
 **`index_weight`**：把 `project/collect_index_weight_membership.py` 接到 relay。
 它现在**两种配置都跑不通，但失败原因不同**（已核实）：
@@ -294,20 +426,32 @@ relay 路径两者都不是：它是 URL 改写过的官方 `pro_api`，`__getat
 | --- | --- | --- |
 | 1 | §1 传输层 + §2 证据标注 | 必须最先：否则 `data update` 会用旧标注产出一个"看起来是官方直连"的数据集，后续全部白做 |
 | 2 | §5 出处审计 | 紧接着做：它给阶段 1 的新标注提供基线对照 |
-| 3 | §3 证伪体系 | 主传输换好之后才有意义；探针结论可能推翻阶段 1 的信任前提 |
-| 4 | §4 覆盖缺口与基准 | 影响历史实验结论（重跑），放在最后、单独一轮，避免与前面混在一起 |
+| 3 | §3 证伪体系 | 主传输换好之后才有意义；**其中静默换源探针是阶段 4 的放行闸门** |
+| 4 | §4 覆盖缺口与基准 | **仅在阶段 3 探针未发现换源时开始**；影响历史实验结论（重跑），单独一轮 |
 
-阶段 1+2 是一个自然的提交边界，3、4 各自独立成轮。若阶段 3 的静默换源探针
-给出"jiaoch 会换源作答"的结论，**阶段 4 停止**，回到信任边界重新评估。
+阶段 1+2 是一个自然的提交边界，3、4 各自独立成轮。
+
+**阶段 1 的验收必须包含一次真实发布**：显式设 `TUSHARE_TRANSPORT=relay` 跑通
+`data update`，再从运行日志与 `build_config` 两侧证明 jiaoch 确实被使用
+（§2.2 的链）；不设该变量时同一命令必须失败。这两条要在阶段 1 就落地，
+不能推迟到最后。
+
+**阶段 3 的探针具有阻断语义（§3 ④）**：一旦出现"jiaoch 对官方空结果返回非空"，
+或任何可复现的 relay-vs-official 差异，**立即禁用 relay 主供**，阶段 4 不得开始，
+回到信任边界重新评估。这不是"写进报告再继续"。
 
 ## 测试
 
 | 层 | 用例 |
 | --- | --- |
-| relay 传输（单元，不联网） | 沿用 `tests/unit/test_tushare_relay.py` 的 `FakeSdk`；新增 `TushareSource` 在 `TUSHARE_TRANSPORT=relay` 下选中 relay 客户端、且 `fetch()` 行为与 official 分支一致 |
-| 传输解析顺序 | 显式指定优先于自动序；自动序 relay → proxy → official；promax 在自动序中被跳过 |
-| 证据标注 | relay 下 `supplier_endpoint` 含真实 host；official 下仍为 `tushare.pro.*`；proxy 下仍为 `tushare_proxy.*` |
+| relay 传输（单元，不联网） | 沿用 `tests/unit/test_tushare_relay.py` 的 `FakeSdk`；`TushareSource` 在 `TUSHARE_TRANSPORT=relay` 下把官方 `DataApi` 交给 `_client`，`fetch()` 行为与 official 分支一致（§1.1） |
+| 传输解析 · 严格模式 | published 路径未设 `TUSHARE_TRANSPORT` → 失败；设为 `relay` 但凭据缺失 / 半配置 / init 失败 → 失败且**零回退** |
+| 传输解析 · 开发模式 | `allow_auto_transport=True` 时自动序 relay → proxy → official；**promax 不参与自动序** |
+| 证据标注 | relay 下 `supplier_endpoint` 含真实 host；official 仍 `tushare.pro.*`；proxy 仍 `tushare_proxy.*` |
+| 标签不被去重吞掉 | 同一 `DataRequest` 先 official 后 relay → 最终证据标签是 relay 的（§2.3） |
+| akshare 对照契约 | 五类结果各一条夹具；单位换算因子由夹具钉死；腾讯源跳过成交量；`.BJ` 记 `UNSUPPORTED` |
 | 基准换源 | tushare `index_daily` 形状的规范化器单测（含 4dp 与空窗口） |
+| required 角色 | `_REQUIRED_ROLE["akshare"] is False`；禁用 akshare 的发布**不被** `_require_available` 阻塞（stub 适配器，不联网） |
 | 空结果守卫 | 采集器层：空表必须带列名，否则拒收（relay 空表无列名已实测） |
 | 外部契约 | 一条 live 契约测试覆盖 relay（可跳过） |
 
@@ -332,17 +476,30 @@ relay 路径两者都不是：它是 URL 改写过的官方 `pro_api`，`__getat
 
 ## 验收标准
 
-1. `TUSHARE_TRANSPORT=relay` 下 `data update` 产出的数据集，其
-   `build_config` 中 `supplier_endpoint` 全部含真实 relay host，**无一为 `tushare.pro.*`**；
-2. `TUSHARE_TRANSPORT=official` 时行为与改造前**完全一致**（回归测试）；
-   显式指定 `relay` 而凭据缺失时抛 `AuthenticationError`，**不静默回退**；
-3. `verify_transport_fidelity.py` 对四接口全部报一致，或有差异且已落盘；
-4. 静默换源探针有结论，并写入运维报告（无论结论是否为"未换源"）；
-5. 基准指数由 tushare 主供、akshare 对照，且规范化器单测通过；
-6. `collect_index_weight_membership.py` 经 relay 成功采集（不再 AttributeError）；
-7. `audit_raw_provenance.py` 产出报告：给出产出环境分布，
-   反查不出的显式标 `unknown`，**不对历史 provider 下结论**；
-8. 运维报告明确陈述"基准换数导致历史结论需重跑"。
+1. **发布必须显式使用 relay**：未设置 `TUSHARE_TRANSPORT` 时 published 构建
+   **失败**；设为 `relay` 而凭据缺失 / 半配置 / 初始化失败时**失败且不回退**；
+2. **证据链能自证用了 jiaoch**：由
+   `build_config.raw_snapshots[].manifest_sha256` 解析到 raw manifest，
+   其 `supplier_endpoint` 全部为 `tushare_relay.<host>.*`，**无一为 `tushare.pro.*`**；
+   运行日志打印同一结论（标签不直接进 `build_config`，故走 manifest 解析，见 §2.2）；
+3. **去重不吞新标签**：同一 `DataRequest` 先经 official 再经 relay，
+   最终证据里的标签是 relay 的，旧标签未被复用（§2.3）；
+4. `TUSHARE_TRANSPORT=official` 时行为与改造前**完全一致**（回归测试）；
+5. `verify_transport_fidelity.py` 四接口全部 `AGREE`；出现 `DIFFER` 时必须
+   **已解释并获人工批准（留痕）**，否则**发布失败**；`UNAVAILABLE` 允许发布，
+   但报告必须写明"本轮未校验"；
+6. 静默换源探针有结论并驱动 §3 ④ 的阻断动作；若发现换源作答，
+   relay 主供已被禁用；
+7. akshare 个股日线对照跑通，五类结果（`AGREE` / `DIFFER` / `UNAVAILABLE` /
+   `ABSENT_EXPECTED` / `AGREE_EMPTY` / `UNSUPPORTED`）均有夹具覆盖，
+   **单位换算由夹具钉死**而非推断；
+8. `_REQUIRED_ROLE["akshare"] is False`，且**禁用 akshare 不再阻塞发布**
+   （用 stub 适配器验证）；
+9. 基准指数由 tushare 主供、akshare 对照，规范化器单测通过；
+10. `collect_index_weight_membership.py` 经 relay 成功采集；
+11. `audit_raw_provenance.py` 产出报告：给出产出环境分布，反查不出的显式标
+    `unknown`，**不对历史 provider 下结论**；
+12. 运维报告明确陈述"基准换数导致历史结论需重跑"。
 
 ## 决策记录
 
@@ -356,6 +513,32 @@ relay 路径两者都不是：它是 URL 改写过的官方 `pro_api`，`__getat
 - owner 于 2026-09-12 确认：传输**显式可配置**（非隐式 env 优先级）。
 - owner 于 2026-09-12 确认：**promax 保留代码分支但默认不参与自动序**。
 - owner 于 2026-09-12 确认：基准指数**换主供**（而非只加兜底）。
+
+### 2026-09-12 复审修正（owner，五条）
+
+owner 复审初稿后提出五条修正，**均不推翻"jiaoch 作为 tushare 主源"**，
+但不修则不能实施：
+
+1. **发布环境禁止自动选择 transport**（→ §1.2）。published 构建必须显式
+   `TUSHARE_TRANSPORT=relay`；缺失 / 半配置 / init 失败一律直接失败、零回退；
+   自动序只留给开发与诊断脚本。原本"隐式优先级链"的设计作废。
+2. **修正 akshare 的 required 矛盾**（→ §4）。既已把 akshare 降为对照角色，
+   `_REQUIRED_ROLE["akshare"]` 就必须是 `False`；把状态设成恒 `ok`
+   **不解决** `_require_available()` 的阻塞，只会留下一个隐藏的发布单点。
+   已验证 `_check_source_roles` 读的是 `build_config.source_status` 里记录的
+   `required` 标志，故改常量不需要改验收代码。
+3. **明确 relay client 的接口形态**（→ §1.1）。初稿称"`fetch()` 一行都不用改"
+   是**错的**：`TushareRelayClient` 只有 `.query()`，没有 `.daily()` /
+   `.index_daily()` / `.stock_basic()`。采纳 owner 的第 2 种形态 ——
+   `TushareSource` 内部持有官方 `DataApi` 作为真正的请求客户端，
+   transport descriptor 只负责来源描述与凭据解析。
+4. **补上发现异常后的强制动作**（→ §3 ④）。官方不可用/限流 → 记 `UNAVAILABLE`，
+   **不等于校验通过**；可复现差异 → 停止发布或要求人工豁免并留痕；
+   探针发现 jiaoch 对官方合法空结果返回非空 → **立即禁用 relay 主供**并重新评估。
+   验收标准第 3 条相应改为"差异已解释并批准，否则发布失败"。
+5. **补全 AkShare 个股日线对照契约**（→ §3 ②）。原稿只写"用 akshare 对照"，
+   缺少接口与回退序、复权口径、单位换算、代码/日期映射、停牌退市空窗处理、
+   容差与 `supplier_endpoint` 的实际记录方式 —— 缺任何一项都无法实施。
 
 ## 实测证据（2026-09-12）
 
