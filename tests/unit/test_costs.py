@@ -11,13 +11,12 @@ commission/tax and full-cost) are exercised offline.
 
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from stock_quant.backtest.costs import CostModel
 from stock_quant.backtest.models import BUY, SELL, FeeBreakdown
-from pathlib import Path
-
 from stock_quant.config import CostConfig, CostRate, CostScenario, load_project_config
 
 # --------------------------------------------------------------------------- #

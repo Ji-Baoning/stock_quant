@@ -57,7 +57,9 @@ def test_bar_on_the_boundaries_is_clean():
     master = _master(
         "600005.SH", list_date=date(2017, 2, 13), delist_date=date(2017, 2, 13)
     )
-    assert master_bar_boundary_issues(master, _daily("600005.SH", date(2017, 2, 13))) == []
+    assert master_bar_boundary_issues(
+        master, _daily("600005.SH", date(2017, 2, 13))
+    ) == []
 
 
 def test_symbol_without_bounds_is_skipped():
