@@ -256,13 +256,14 @@ def _raw_snapshot_evidence_rows(
     snapshots: Sequence[RawSnapshot],
 ) -> list[dict[str, str]]:
     """Sanitized raw-snapshot rows, deduplicated and deterministically sorted."""
-    unique: dict[tuple[str, str, str, str], dict[str, str]] = {}
+    unique: dict[tuple[str, str, str, str, str], dict[str, str]] = {}
     for snapshot in snapshots:
         evidence = RawSnapshotEvidence.from_snapshot(snapshot)
         row = asdict(evidence)
         key = (
             evidence.source,
             evidence.endpoint,
+            evidence.transport_id or "",
             evidence.request_key,
             evidence.file_sha256,
         )

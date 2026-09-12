@@ -681,12 +681,23 @@ def test_successful_update_binds_sanitized_build_evidence(project):
     assert build["raw_snapshots"] == sorted(
         build["raw_snapshots"],
         key=lambda row: (
-            row["source"], row["endpoint"], row["request_key"], row["file_sha256"]
+            row["source"],
+            row["endpoint"],
+            row["transport_id"] or "",
+            row["request_key"],
+            row["file_sha256"],
         ),
     )
     assert all(
         set(row)
-        == {"source", "endpoint", "request_key", "file_sha256", "manifest_sha256"}
+        == {
+            "source",
+            "endpoint",
+            "transport_id",
+            "request_key",
+            "file_sha256",
+            "manifest_sha256",
+        }
         for row in build["raw_snapshots"]
     )
     assert all(

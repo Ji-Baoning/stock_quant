@@ -216,12 +216,17 @@ class EvidenceReference(BaseModel):
 
 
 class RawSnapshotBinding(BaseModel):
-    """The five-field binding of one raw snapshot into dataset identity.
+    """The binding of one raw snapshot into dataset identity.
 
-    The four leading fields locate the snapshot under
-    ``data/raw/<source>/<endpoint>/<request_key>/<file_sha256>/`` and
-    ``manifest_sha256`` pins its manifest, so a binding resolves to exactly
+    The location fields resolve the snapshot under
+    ``data/raw/<source>/<endpoint>/<transport_id>/<request_key>/<file_sha256>/``
+    and ``manifest_sha256`` pins its manifest, so a binding resolves to exactly
     one stored snapshot instead of any file with the same bytes.
+
+    ``transport_id`` is optional on purpose: bindings written before transport
+    tracking existed carry five fields and resolve on the older four-segment
+    ``<source>/<endpoint>/<request_key>/<file_sha256>`` layout.  Both shapes are
+    readable under ``DATASET_BUILD_CONTRACT_VERSION = 1``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -231,6 +236,7 @@ class RawSnapshotBinding(BaseModel):
     request_key: str = Field(min_length=1)
     file_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    transport_id: str | None = None
 
 
 class CheckResult(BaseModel):

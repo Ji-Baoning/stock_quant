@@ -15,6 +15,11 @@ import pandas as pd
 
 from stock_quant.data_sources.base import FetchResult
 
+#: Reserved: it means "this snapshot predates transport tracking".  It is
+#: never a valid value for a *new* snapshot, so the directory name can never
+#: collide with the legacy layout (design §2.3).
+RESERVED_TRANSPORT_ID = "unknown"
+
 
 @dataclass(frozen=True)
 class RawSnapshot:
@@ -31,6 +36,10 @@ class RawSnapshotEvidence:
     never local paths, supplier metadata or reason prose -- so it can travel
     through dataset build evidence and later be verified back to the exact
     stored bytes via :meth:`RawStore.verify_evidence`.
+
+    ``transport_id`` is the answering party (design §2.3).  ``None`` means the
+    record predates transport tracking and resolves on the four-segment
+    ``<source>/<endpoint>/<request_key>/<file_sha256>`` layout.
     """
 
     source: str
@@ -38,6 +47,7 @@ class RawSnapshotEvidence:
     request_key: str
     file_sha256: str
     manifest_sha256: str
+    transport_id: str | None = None
 
     @classmethod
     def from_snapshot(cls, snapshot: RawSnapshot) -> "RawSnapshotEvidence":
@@ -47,6 +57,7 @@ class RawSnapshotEvidence:
             request_key=str(snapshot.manifest["request_key"]),
             file_sha256=snapshot.sha256,
             manifest_sha256=_sha256_file(snapshot.path / "manifest.json"),
+            transport_id=snapshot.manifest.get("transport_id"),
         )
 
 
@@ -59,8 +70,9 @@ class RawStore:
     def save(self, result: FetchResult) -> RawSnapshot:
         source = _path_component(result.source, "source")
         endpoint = _path_component(result.endpoint, "endpoint")
+        transport_id = _transport_id(result.metadata.get("transport_id"))
         request_key = _path_component(result.request_key, "request key")
-        destination_parent = self._root / source / endpoint / request_key
+        destination_parent = self._root / source / endpoint / transport_id / request_key
         destination_parent.mkdir(parents=True, exist_ok=True)
         temporary = destination_parent / f".{uuid.uuid4().hex}.tmp"
         temporary.mkdir()
@@ -74,7 +86,9 @@ class RawStore:
                 shutil.rmtree(temporary)
                 manifest = json.loads((snapshot_path / "manifest.json").read_text())
             else:
-                manifest = _manifest_for(result, response_sha256, file_sha256)
+                manifest = _manifest_for(
+                    result, response_sha256, file_sha256, transport_id
+                )
                 (temporary / "manifest.json").write_text(
                     json.dumps(manifest, sort_keys=True, indent=2) + "\n",
                     encoding="utf-8",
@@ -87,18 +101,33 @@ class RawStore:
         return RawSnapshot(path=snapshot_path, sha256=file_sha256, manifest=manifest)
 
     def verify_evidence(self, evidence: RawSnapshotEvidence) -> RawSnapshot:
-        """Re-resolve sanitized evidence to the exact stored raw snapshot.
+        """Re-resolve an evidence pointer to the exact stored snapshot.
 
-        Read-only content verification: the evidence's path-safe identifiers
-        locate the content-addressed snapshot, its hashes must match the
-        stored bytes and manifest, and the manifest must agree field by field.
-        Any mismatch (or a path-escaping identifier) raises ``ValueError``.
+        A ``transport_id`` of ``None`` means the record predates transport
+        tracking, and the pointer is resolved on the older four-segment
+        layout; a present ``transport_id`` is re-validated exactly like a
+        fresh one, so a legacy reader cannot be tricked into walking out of
+        the store.
         """
         source = _path_component(evidence.source, "source")
         endpoint = _path_component(evidence.endpoint, "endpoint")
         request_key = _path_component(evidence.request_key, "request key")
         file_sha256 = _sha256_value(evidence.file_sha256)
-        path = self._root / source / endpoint / request_key / file_sha256
+        transport_id = (
+            None
+            if evidence.transport_id is None
+            else _transport_id(evidence.transport_id)
+        )
+        path = (
+            self._root / source / endpoint / request_key / file_sha256
+            if transport_id is None
+            else self._root
+            / source
+            / endpoint
+            / transport_id
+            / request_key
+            / file_sha256
+        )
         data_path = path / "data.parquet"
         manifest_path = path / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -108,19 +137,25 @@ class RawStore:
             raise ValueError("raw data hash mismatch")
         if _sha256_file(manifest_path) != evidence.manifest_sha256:
             raise ValueError("raw manifest hash mismatch")
-        for key, expected in (
+        expected_fields = [
             ("source", source),
             ("endpoint", endpoint),
             ("request_key", request_key),
             ("file_sha256", file_sha256),
-        ):
+        ]
+        if transport_id is not None:
+            expected_fields.append(("transport_id", transport_id))
+        for key, expected in expected_fields:
             if manifest.get(key) != expected:
                 raise ValueError(f"raw manifest {key} mismatch")
         return RawSnapshot(path=path, sha256=file_sha256, manifest=manifest)
 
 
 def _manifest_for(
-    result: FetchResult, response_sha256: str, file_sha256: str
+    result: FetchResult,
+    response_sha256: str,
+    file_sha256: str,
+    transport_id: str,
 ) -> dict[str, Any]:
     metadata = _redact(result.metadata)
     request_parameters = metadata.get("request_parameters", {})
@@ -134,6 +169,7 @@ def _manifest_for(
         "source": result.source,
         "endpoint": result.endpoint,
         "supplier_endpoint": metadata.get("supplier_endpoint", result.endpoint),
+        "transport_id": transport_id,
         "request_key": result.request_key,
         "request_parameters": request_parameters,
         "request_timestamp": metadata.get("request_timestamp"),
@@ -173,6 +209,26 @@ def _path_component(value: str, label: str) -> str:
     if not value or value in {".", ".."} or "/" in value or "\\" in value:
         raise ValueError(f"invalid {label}")
     return value
+
+
+def _transport_id(value: object) -> str:
+    """Validate one snapshot's answering-party id (design §2.3).
+
+    Missing, blank and the reserved word ``unknown`` are all rejected: a
+    default would let two different upstreams share a content-addressed path
+    and silently keep each other's ``supplier_endpoint``.
+    """
+    if not isinstance(value, str):
+        raise ValueError(
+            f"raw metadata must carry a transport_id string, got {type(value).__name__}"
+        )
+    text = _path_component(value.strip(), "transport id")
+    if text == RESERVED_TRANSPORT_ID:
+        raise ValueError(
+            f"{RESERVED_TRANSPORT_ID!r} is reserved for snapshots that predate "
+            "transport tracking and is never valid for a new snapshot"
+        )
+    return text
 
 
 def _sha256_value(value: str) -> str:
