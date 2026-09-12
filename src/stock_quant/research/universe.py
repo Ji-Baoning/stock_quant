@@ -36,7 +36,13 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from stock_quant.data_model.universe_membership import (
     MembershipFact,

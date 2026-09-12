@@ -518,7 +518,10 @@ def test_coverage_criterion_takes_the_earliest_enabled_start(tmp_path):
     criterion = load_universe_coverage_criterion(tmp_path)
     assert criterion.acceptance_start == date(2015, 1, 5)
     assert criterion.skipped == ()
-    assert set(criterion.definition_hashes) == {"custom_a_first_yml", "custom_b_second_yml"}
+    assert set(criterion.definition_hashes) == {
+        "custom_a_first_yml",
+        "custom_b_second_yml",
+    }
     assert all(len(value) == 64 for value in criterion.definition_hashes.values())
 
 

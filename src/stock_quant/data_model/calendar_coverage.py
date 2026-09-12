@@ -67,7 +67,11 @@ class CalendarCoverageError(ValueError):
 
     def __init__(self, violations: Sequence[Violation]) -> None:
         self.violations: Violations = tuple(violations)
-        code = self.violations[0][0] if self.violations else CODE_CALENDAR_COVERAGE_INVALID
+        code = (
+            self.violations[0][0]
+            if self.violations
+            else CODE_CALENDAR_COVERAGE_INVALID
+        )
         super().__init__(code)
 
 
@@ -287,7 +291,9 @@ def _mergeable(previous: CalendarCoverageSpan, current: CalendarCoverageSpan) ->
     return current.start_date == previous.end_date + timedelta(days=1)
 
 
-def _merged(previous: CalendarCoverageSpan, current: CalendarCoverageSpan) -> CalendarCoverageSpan:
+def _merged(
+    previous: CalendarCoverageSpan, current: CalendarCoverageSpan
+) -> CalendarCoverageSpan:
     return CalendarCoverageSpan(
         previous.start_date,
         current.end_date,
@@ -351,7 +357,9 @@ def merge_window(
     merged = merge_adjacent_spans(
         _replaced(spans, start=start, end=end, replacement=replacement)
     )
-    violations = span_violations(merged) + coverage_violations(merged, open_days=open_days)
+    violations = span_violations(merged) + coverage_violations(
+        merged, open_days=open_days
+    )
     if violations:
         raise CalendarCoverageError(violations)
     return merged
@@ -389,7 +397,9 @@ def validate_build_calendar_evidence(
 ) -> Violations:
     """Every calendar-evidence violation of one manifest's ``build_config``."""
     if not isinstance(build, Mapping) or COVERAGE_KEY not in build:
-        return ((CODE_CALENDAR_COVERAGE_MISSING, {"build_config": "calendar_coverage"}),)
+        return (
+            (CODE_CALENDAR_COVERAGE_MISSING, {"build_config": "calendar_coverage"}),
+        )
     violations: list[Violation] = []
     if REMOVED_FALLBACK_KEY in build:
         violations.append(

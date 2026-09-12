@@ -13,7 +13,7 @@ import re
 from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Mapping, Sequence
+from typing import Sequence
 
 import pandas as pd
 
@@ -43,7 +43,9 @@ class TradeCalendarFactError(ValueError):
 
     def __init__(self, violations: Sequence[Violation]) -> None:
         self.violations: Violations = tuple(violations)
-        super().__init__(self.violations[0][0] if self.violations else "calendar_raw_invalid")
+        super().__init__(
+            self.violations[0][0] if self.violations else "calendar_raw_invalid"
+        )
 
 
 @dataclass(frozen=True)
@@ -75,10 +77,14 @@ class ContinuityResult:
     allowed_pre_coverage: tuple[date, ...]
 
 
-def _raw_invalid(exchange: str, reason: str, **details: object) -> TradeCalendarFactError:
-    return TradeCalendarFactError(
-        ((CODE_CALENDAR_RAW_INVALID, {"exchange": exchange, "reason": reason, **details}),)
+def _raw_invalid(
+    exchange: str, reason: str, **details: object
+) -> TradeCalendarFactError:
+    violation = (
+        CODE_CALENDAR_RAW_INVALID,
+        {"exchange": exchange, "reason": reason, **details},
     )
+    return TradeCalendarFactError((violation,))
 
 
 def _compact_date(value: object) -> date | None:
@@ -141,7 +147,9 @@ def _parsed_rows(frame: pd.DataFrame, *, exchange: str) -> tuple[TradeCalRow, ..
         pretrade_raw = record[PRETRADE_DATE_COLUMN]
         if pretrade_raw is None or not str(pretrade_raw).strip():
             raise _raw_invalid(
-                exchange, "unparsable_pretrade_date", calendar_date=calendar_date.isoformat()
+                exchange,
+                "unparsable_pretrade_date",
+                calendar_date=calendar_date.isoformat(),
             )
         pretrade_date = _compact_date(pretrade_raw)
         if pretrade_date is None:

@@ -342,6 +342,23 @@ class _SuspendStub:
             "eastmoney_corporate_actions",
         ):
             return pd.DataFrame()
+        if request.endpoint == "trade_cal":
+            rows = []
+            current = request.start_date
+            while current <= request.end_date:
+                previous = current - timedelta(days=1)
+                while previous.weekday() >= 5:
+                    previous -= timedelta(days=1)
+                rows.append(
+                    {
+                        "exchange": request.params["exchange"],
+                        "cal_date": current.strftime("%Y%m%d"),
+                        "is_open": 1 if current.weekday() < 5 else 0,
+                        "pretrade_date": previous.strftime("%Y%m%d"),
+                    }
+                )
+                current += timedelta(days=1)
+            return pd.DataFrame(rows)
         symbol = request.symbols[0]
         days = [
             day
@@ -381,7 +398,10 @@ def test_update_materializes_proven_suspension_bars(tmp_path):
         shutil.copy(_REPO_ROOT / "configs" / name, configs / name)
     bootstrap_dataset(root)
 
-    stubs = {name: _SuspendStub(name) for name in ("tushare", "akshare")}
+    stubs = {
+        name: _SuspendStub(name)
+        for name in ("tushare", "akshare", "baostock")
+    }
     result = DataPipeline(root, sources=stubs).update(
         DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
     )

@@ -11,8 +11,8 @@ from stock_quant.data_model.trade_calendar_facts import (
     CODE_CALENDAR_EXCHANGE_MISMATCH,
     CODE_CALENDAR_PRETRADE_CONTINUITY_BROKEN,
     CODE_CALENDAR_RAW_INVALID,
-    TradeCalRow,
     TradeCalendarFactError,
+    TradeCalRow,
     check_exchange_agreement,
     check_pretrade_continuity,
     materialize_open_days,
@@ -22,7 +22,13 @@ from stock_quant.data_model.trade_calendar_facts import (
 HALO_START = date(2024, 1, 1)
 HALO_END = date(2024, 1, 7)
 #: Mon 1 .. Sun 7 January 2024; 1-5 are the open days.
-OPEN = (date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5))
+OPEN = (
+    date(2024, 1, 1),
+    date(2024, 1, 2),
+    date(2024, 1, 3),
+    date(2024, 1, 4),
+    date(2024, 1, 5),
+)
 CLOSED = (date(2024, 1, 6), date(2024, 1, 7))
 
 

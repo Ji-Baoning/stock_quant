@@ -90,10 +90,28 @@ def test_coverage_payload_round_trips():
 @pytest.mark.parametrize(
     "payload",
     [
-        [{"start_date": "2020-01-31", "end_date": "2020-01-01", "source": SOURCE_TUSHARE_RELAY}],
-        [{"start_date": "2020-01-01", "end_date": "2020-01-31", "source": "unknown_source"}],
+        [
+            {
+                "start_date": "2020-01-31",
+                "end_date": "2020-01-01",
+                "source": SOURCE_TUSHARE_RELAY,
+            }
+        ],
+        [
+            {
+                "start_date": "2020-01-01",
+                "end_date": "2020-01-31",
+                "source": "unknown_source",
+            }
+        ],
         [{"start_date": "2020-01-01", "end_date": "2020-01-31"}],
-        [{"start_date": "nope", "end_date": "2020-01-31", "source": SOURCE_BOOTSTRAP_SEED}],
+        [
+            {
+                "start_date": "nope",
+                "end_date": "2020-01-31",
+                "source": SOURCE_BOOTSTRAP_SEED,
+            }
+        ],
         ["not-a-mapping"],
     ],
 )
@@ -208,7 +226,9 @@ def test_merge_window_raises_when_the_calendar_range_is_not_covered():
 
 def test_validate_build_calendar_evidence_reads_legacy_manifests_compatibly():
     legacy = {"origin": "data_update", "resolved_end_is_fallback": True}
-    violations = validate_build_calendar_evidence(legacy, open_days=_days("2020-01-02", "2020-01-03"))
+    violations = validate_build_calendar_evidence(
+        legacy, open_days=_days("2020-01-02", "2020-01-03")
+    )
     assert _codes(violations) == [CODE_CALENDAR_COVERAGE_MISSING]
 
 
@@ -225,7 +245,9 @@ def test_validate_build_calendar_evidence_rejects_the_removed_field_on_new_manif
 
 
 def test_validate_build_calendar_evidence_reports_a_missing_acceptance_start():
-    build = {"calendar_coverage": coverage_payload([_relay("2020-01-01", "2020-01-31")])}
+    build = {
+        "calendar_coverage": coverage_payload([_relay("2020-01-01", "2020-01-31")])
+    }
     violations = validate_build_calendar_evidence(
         build, open_days=_days("2020-01-02", "2020-01-30")
     )
