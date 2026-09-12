@@ -271,6 +271,12 @@ def run_probe(
     consumer -- present or future -- can leak a credential a remote side echoed
     back.  The verdict is computed on the *raw* answers first, so redaction can
     never change a judgement.
+
+    ``secrets`` must be the same sequence the caller will hand to
+    :func:`report`.  Results come out of here already clipped, so a credential
+    that straddles that cut is no longer matchable: a later scrub with a
+    different sequence would remove what it recognises and silently keep the
+    fragment.
     """
     results: list[ProbeResult] = []
     for case in cases:
@@ -438,9 +444,13 @@ def main() -> int:
         return EXIT_BLOCKED
     if not cleared(results):
         print(
-            "NOT CLEARED: at least one case produced no evidence (official "
-            "side rate-limited or unreachable); the stage 1 gate stays closed "
-            "-- re-run the probe when the official API answers again"
+            "NOT CLEARED: at least one case produced no evidence.  The official "
+            "side rate-limited, was unreachable, or failed for a reason of its "
+            "own -- a rejected credential is the common one, and it is why the "
+            "live run of 2026-09-12 read INCONCLUSIVE.  Read the official "
+            "answers above before re-running: if they are all the same error, "
+            "the fix is the credential, not a retry.  The stage 1 gate stays "
+            "closed until every case agrees."
         )
         return EXIT_NOT_CONFIGURED
     print("CLEAR: every case agreed; the stage 1 gate is open")
