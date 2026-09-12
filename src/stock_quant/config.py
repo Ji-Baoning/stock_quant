@@ -66,9 +66,8 @@ class ProjectConfig(BaseModel):
     publication_time: dt_time = Field(
         default=dt_time(15, 0),
         description=(
-            "Wall-clock boundary before which a same-day bar set is not "
-            "treated as a complete trading day by end-date discovery (design "
-            "spec §14)."
+            "Recorded market publication time. Informational only: update end "
+            "dates come from the published trading calendar, never from the clock."
         ),
     )
 

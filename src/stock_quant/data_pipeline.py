@@ -27,11 +27,12 @@ passes and no ``FATAL`` pipeline issue exists.  A blocked or failed update
 returns ``dataset_ref is None`` while remaining diagnosable through
 ``quality_report`` / ``source_status`` / ``raw_snapshots``.
 
-Live end-date discovery (``--end`` omitted) reuses the previously published
-dataset as the coverage evidence for ``resolve_latest_complete_date``; an
-explicit ``--end`` bypasses discovery but the merged window still runs the full
-quality checks.  This is engineering scaffolding for the MVP, not evidence of
-alpha -- nothing here is investment advice.
+When ``--end`` is omitted the end date is the newest open day of the
+*published* ``trading_calendar`` -- never a wall-clock heuristic; an empty
+published calendar is a FATAL that asks the operator for an explicit ``--end``.
+An explicit ``--end`` bypasses resolution but the merged window still runs the
+full quality checks.  This is engineering scaffolding for the MVP, not evidence
+of alpha -- nothing here is investment advice.
 """
 
 from __future__ import annotations
@@ -41,8 +42,6 @@ import time as _sleep_module
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import date
-from datetime import datetime as _datetime
-from datetime import time as dt_time
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
@@ -141,7 +140,7 @@ from stock_quant.data_sources.raw_store import (
 CODE_SOURCE_FETCH_FAILED = "source_fetch_failed"
 CODE_REQUIRED_SOURCE_DISABLED = "required_source_disabled"
 CODE_NO_CURRENT_DATASET = "no_current_dataset"
-CODE_DATA_DISCOVERY_UNRESOLVED = "data_discovery_unresolved"
+CODE_CALENDAR_EMPTY_NO_END = "calendar_empty_requires_explicit_end"
 CODE_OPTIONAL_SOURCE_FAILURE = "optional_source_failure"
 CODE_UNIVERSE_MASTER_MISMATCH = "universe_master_mismatch"
 CODE_MASTER_SNAPSHOT_INCOMPLETE = "master_snapshot_incomplete"
@@ -181,27 +180,11 @@ class SourceStatus:
 
 
 @dataclass(frozen=True)
-class SourceCoverage:
-    """Latest *contiguous* complete open day each data role has reached.
-
-    ``stock_primary`` is the required primary stock daily series; ``benchmarks``
-    maps each benchmark symbol to its latest complete open day; ``validation``
-    maps each *non-primary* source actually present (``akshare`` benchmark
-    frames and any ``baostock`` optional validation series) to its latest
-    complete open day.
-    """
-
-    stock_primary: date | None
-    benchmarks: Mapping[str, date]
-    validation: Mapping[str, date]
-
-
-@dataclass(frozen=True)
 class DataUpdateRequest:
     """Idempotent request for one data update run.
 
-    ``end_date`` ``None`` triggers latest-complete-date discovery over the
-    currently published dataset; ``sources`` restricts to a subset of the
+    ``end_date`` ``None`` resolves the end to the newest open day of the
+    published ``trading_calendar``; ``sources`` restricts to a subset of the
     configured names.
     """
 
@@ -212,14 +195,7 @@ class DataUpdateRequest:
 
 @dataclass(frozen=True)
 class DataUpdateResult:
-    """One update's outcome: always diagnosable, published only when gated.
-
-    ``resolved_end_is_fallback`` records whether ``resolved_end_date`` was
-    reached by walking back from the nominal latest complete open day (design
-    spec §14: "条件不满足时回退到上一个确认完整交易日并在报告注明").  It is
-    ``False`` when the end date was either chosen explicitly (``--end``) or is
-    the nominal date with full coverage.
-    """
+    """One update's outcome: always diagnosable, published only when gated."""
 
     quality_report: QualityReport
     dataset_ref: Any
@@ -227,7 +203,6 @@ class DataUpdateResult:
     resolved_end_date: date | None
     source_status: tuple[SourceStatus, ...]
     raw_snapshots: tuple[str, ...]
-    resolved_end_is_fallback: bool = False
 
 
 def _source_evidence(
@@ -275,8 +250,8 @@ def dataset_build_config(
     *,
     run_id: str,
     request: DataUpdateRequest,
+    effective_start_date: date,
     resolved_end_date: date,
-    resolved_end_is_fallback: bool,
     statuses: Mapping[str, SourceStatus],
     raw_snapshots: Sequence[RawSnapshot],
 ) -> dict[str, object]:
@@ -293,87 +268,14 @@ def dataset_build_config(
         "requested_start_date": (
             request.start_date.isoformat() if request.start_date else None
         ),
+        "effective_start_date": effective_start_date.isoformat(),
         "requested_end_date": (
             request.end_date.isoformat() if request.end_date else None
         ),
         "resolved_end_date": resolved_end_date.isoformat(),
-        "resolved_end_is_fallback": bool(resolved_end_is_fallback),
         "source_status": _source_evidence(statuses),
         "raw_snapshots": _raw_snapshot_evidence_rows(raw_snapshots),
     }
-
-
-def _nominal_candidate(
-    calendar: TradingCalendar, publication_time: dt_time
-) -> date | None:
-    """The newest open day an operator could call complete given only the clock.
-
-    Today when today is an open day and ``publication_time`` has already passed;
-    otherwise the newest open day strictly before today.  A non-trading today
-    never counts, so discovery always walks to a real open day.  ``None`` for an
-    empty calendar.
-    """
-    open_days = calendar.open_days
-    if not open_days:
-        return None
-    now = _datetime.now()
-    today = now.date()
-    if calendar.is_trading_day(today):
-        if now.time() >= publication_time:
-            return today
-        return _previous_open_day(open_days, today)
-    return _previous_open_day(open_days, today)
-
-
-def resolve_latest_complete_date(
-    status: SourceCoverage,
-    calendar: TradingCalendar,
-    publication_time: dt_time,
-) -> date | None:
-    """Return the newest open day every required data role is complete through.
-
-    A day ``d`` is *complete* when the primary stock series, every benchmark
-    symbol and at least one validation source each reach ``d``.  Walking starts
-    at the nominal candidate (see :func:`_nominal_candidate`); when the nominal
-    day is not complete the walk continues backwards over confirmed open days.
-    Returns ``None`` when no open day in the calendar satisfies the
-    requirements.
-    """
-    open_days = calendar.open_days
-    if not open_days:
-        return None
-    first_candidate = _nominal_candidate(calendar, publication_time)
-    if first_candidate is None:
-        return None
-    candidates = [
-        day for day in reversed(open_days) if day <= first_candidate
-    ]
-    for day in candidates:
-        if _day_complete(status, day):
-            return day
-    return None
-
-
-def _previous_open_day(open_days: tuple[date, ...], day: date) -> date | None:
-    for candidate in reversed(open_days):
-        if candidate < day:
-            return candidate
-    return None
-
-
-def _day_complete(status: SourceCoverage, day: date) -> bool:
-    if status.stock_primary is None or status.stock_primary < day:
-        return False
-    if not status.benchmarks:
-        return False
-    if any(latest is None or latest < day for latest in status.benchmarks.values()):
-        return False
-    if not status.validation:
-        return False
-    return any(
-        latest is not None and latest >= day
-        for latest in status.validation.values()
-    )
 
 
 def master_bar_boundary_issues(
@@ -579,22 +481,18 @@ class DataPipeline:
                 raw_snapshots,
             )
 
+        # ---- end resolution: the published calendar is the only clock ----- #
         end = request.end_date
-        resolved_end: date | None = end
-        end_fallback = False
         if end is None:
-            resolved_end, end_fallback = self._discover_end(
-                calendar_open, current_daily
-            )
-            if resolved_end is None:
+            if not calendar_open:
                 issues.append(
                     _issue(
                         Severity.FATAL,
-                        CODE_DATA_DISCOVERY_UNRESOLVED,
+                        CODE_CALENDAR_EMPTY_NO_END,
                         details={
                             "message": (
-                                "no latest complete date could be resolved; pass "
-                                "an explicit --end or update the calendar first"
+                                "the published trading_calendar has no open day; "
+                                "pass an explicit --end"
                             )
                         },
                     )
@@ -602,7 +500,7 @@ class DataPipeline:
                 return self._result(
                     issues, None, run_id, None, statuses, raw_snapshots
                 )
-            end = resolved_end
+            end = calendar_open[-1]
         start = request.start_date or self._project_config.start_date
         if end < start:
             issues.append(
@@ -626,7 +524,6 @@ class DataPipeline:
         if master is None:
             return self._result(
                 issues, None, run_id, end, statuses, raw_snapshots,
-                resolved_end_is_fallback=end_fallback,
             )
 
         # ---- required primary stock daily ------------------------------- #
@@ -654,7 +551,6 @@ class DataPipeline:
                 end,
                 statuses,
                 raw_snapshots,
-                resolved_end_is_fallback=end_fallback,
             )
 
         # ---- required benchmark history --------------------------------- #
@@ -680,7 +576,6 @@ class DataPipeline:
                 end,
                 statuses,
                 raw_snapshots,
-                resolved_end_is_fallback=end_fallback,
             )
 
         # ---- best-effort corporate actions ------------------------------ #
@@ -787,7 +682,6 @@ class DataPipeline:
                 end,
                 statuses,
                 raw_snapshots,
-                resolved_end_is_fallback=end_fallback,
             )
 
         # ---- publish ---------------------------------------------------- #
@@ -823,8 +717,8 @@ class DataPipeline:
                 build_config=dataset_build_config(
                     run_id=run_id,
                     request=request,
+                    effective_start_date=start,
                     resolved_end_date=end,
-                    resolved_end_is_fallback=end_fallback,
                     statuses=statuses,
                     raw_snapshots=raw_snapshots,
                 ),
@@ -844,7 +738,6 @@ class DataPipeline:
                 end,
                 statuses,
                 raw_snapshots,
-                resolved_end_is_fallback=end_fallback,
             )
         return self._result(
             issues,
@@ -853,7 +746,6 @@ class DataPipeline:
             end,
             statuses,
             raw_snapshots,
-            resolved_end_is_fallback=end_fallback,
         )
 
     # ------------------------------------------------------------------ #
@@ -1486,6 +1378,7 @@ class DataPipeline:
             [
                 review.model_dump()
                 for review in self._project_config.corporate_action_reviews
+                if start <= review.ex_date <= end
             ],
         )
         accepted = reviewed.accepted
@@ -1762,63 +1655,6 @@ class DataPipeline:
                 )
         return issues
 
-    def _discover_end(
-        self, calendar_open, current_daily
-    ) -> tuple[date | None, bool]:
-        """Resolve the latest complete open day over the *carried* dataset.
-
-        Coverage is built honestly from the per-row ``source`` tag actually
-        saved in ``current_daily`` -- never by copying one source's coverage
-        into another source's slot.  The primary series is the ``tushare``
-        equity coverage; the *validation* map is fed by every non-primary frame
-        present (``akshare`` benchmark rows plus any ``baostock`` rows).  Returns
-        ``(resolved_end, is_fallback)`` where ``is_fallback`` is True when the
-        resolved day was walked back below the nominal candidate.
-        """
-        if not calendar_open:
-            return None, False
-        calendar = TradingCalendar.from_open_days(calendar_open)
-        benchmark_symbols = tuple(self._project_config.benchmark_symbols)
-        by_symbol = {symbol: set() for symbol in benchmark_symbols}
-        tushare_dates: set[date] = set()
-        akshare_dates: set[date] = set()
-        baostock_dates: set[date] = set()
-        for record in current_daily.to_dict("records"):
-            symbol = str(record["symbol"])
-            day = _as_date(record["trade_date"])
-            if symbol in by_symbol:
-                by_symbol[symbol].add(day)
-            source = str(record.get("source", ""))
-            if source == "akshare":
-                akshare_dates.add(day)
-            elif source == "baostock":
-                baostock_dates.add(day)
-            elif source == "tushare":
-                tushare_dates.add(day)
-        if not tushare_dates or any(
-            not dates for dates in by_symbol.values()
-        ):
-            return None, False
-        validation: dict[str, date] = {}
-        if akshare_dates:
-            validation["akshare"] = max(akshare_dates)
-        if baostock_dates:
-            validation["baostock"] = max(baostock_dates)
-        coverage = SourceCoverage(
-            stock_primary=max(tushare_dates),
-            benchmarks={s: max(dates) for s, dates in by_symbol.items()},
-            validation=validation,
-        )
-        publication_time = self._project_config.publication_time
-        resolved = resolve_latest_complete_date(
-            coverage, calendar, publication_time
-        )
-        nominal = _nominal_candidate(calendar, publication_time)
-        is_fallback = (
-            resolved is not None and nominal is not None and resolved != nominal
-        )
-        return resolved, is_fallback
-
     def _result(
         self,
         issues,
@@ -1827,8 +1663,6 @@ class DataPipeline:
         resolved_end,
         statuses,
         raw_snapshots,
-        *,
-        resolved_end_is_fallback: bool = False,
     ) -> DataUpdateResult:
         return DataUpdateResult(
             quality_report=QualityReport(issues=tuple(issues)),
@@ -1841,7 +1675,6 @@ class DataPipeline:
             raw_snapshots=tuple(
                 snapshot.sha256 for snapshot in raw_snapshots
             ),
-            resolved_end_is_fallback=resolved_end_is_fallback,
         )
 
 

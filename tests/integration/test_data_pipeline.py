@@ -1,8 +1,7 @@
 """Unit behaviour of ``stock_quant.data_pipeline`` (Task 13 Step 3).
 
 Imported before ``stock_quant.data_pipeline`` exists so the file fails during
-import in Step 2.  ``resolve_latest_complete_date`` is tested as a pure
-function; ``DataPipeline.update`` / ``DataPipeline.validate`` run against stub
+import in Step 2.  ``DataPipeline.update`` / ``DataPipeline.validate`` run against stub
 ``DataSource`` adapters that never touch a network or a token.  Every test
 builds its own synthetic project (updates change ``CURRENT``, so they must not
 share the session dataset used by the CLI / end-to-end modules).
@@ -10,7 +9,6 @@ share the session dataset used by the CLI / end-to-end modules).
 
 from __future__ import annotations
 
-import datetime as _dt
 import json
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -21,13 +19,13 @@ import pytest
 import yaml
 from conftest import build_fixture_project  # noqa: E402
 
-from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.security_master import master_coverage_frame
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_model.universe_membership import membership_frame
 from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
     CODE_ADJUSTED_BAR_MISSING_FROM_DATASET,
+    CODE_CALENDAR_EMPTY_NO_END,
     CODE_MASTER_BAR_BOUNDARY,
     CODE_MASTER_COVERAGE_MISMATCH,
     CODE_MASTER_SNAPSHOT_INCOMPLETE,
@@ -36,8 +34,6 @@ from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
     CODE_UNIVERSE_MASTER_MISMATCH,
     DataPipeline,
     DataUpdateRequest,
-    SourceCoverage,
-    resolve_latest_complete_date,
 )
 from stock_quant.data_quality.models import (
     CODE_NONPOSITIVE_PRICE,
@@ -492,155 +488,6 @@ def project(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# resolve_latest_complete_date
-# --------------------------------------------------------------------------- #
-
-
-def _freeze_now(monkeypatch, iso: str) -> None:
-    now = _dt.datetime.fromisoformat(iso)
-
-    class _FixedDatetime(_dt.datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return now.replace(tzinfo=tz)
-
-    monkeypatch.setattr("stock_quant.data_pipeline._datetime", _FixedDatetime)
-
-
-def _november_calendar() -> TradingCalendar:
-    return TradingCalendar.from_open_days(
-        tuple(_weekdays(date(2021, 11, 1), date(2021, 11, 30)))
-    )
-
-
-def test_resolver_returns_newest_complete_open_day_after_publication_time(
-    monkeypatch,
-):
-    calendar = _november_calendar()
-    latest = calendar.open_days[-1]
-    coverage = SourceCoverage(
-        stock_primary=latest,
-        benchmarks={"000300.SH": latest, "000905.SH": latest},
-        validation={"baostock": latest},
-    )
-    _freeze_now(monkeypatch, "2021-11-30T15:30:00")
-    assert resolve_latest_complete_date(
-        coverage, calendar, _dt.time(15, 0)
-    ) == latest
-
-
-def test_resolver_waits_until_publication_time_for_today(monkeypatch):
-    calendar = _november_calendar()
-    latest = calendar.open_days[-1]
-    coverage = SourceCoverage(
-        stock_primary=latest,
-        benchmarks={"000300.SH": latest, "000905.SH": latest},
-        validation={"baostock": latest},
-    )
-    _freeze_now(monkeypatch, "2021-11-30T09:30:00")  # before the 15:00 gate
-    assert resolve_latest_complete_date(
-        coverage, calendar, _dt.time(15, 0)
-    ) == calendar.open_days[-2]
-
-
-def test_resolver_falls_back_when_a_required_series_lags(monkeypatch):
-    calendar = _november_calendar()
-    stock_latest = calendar.open_days[-3]
-    coverage = SourceCoverage(
-        stock_primary=stock_latest,
-        benchmarks={
-            "000300.SH": calendar.open_days[-1],
-            "000905.SH": calendar.open_days[-1],
-        },
-        validation={"baostock": calendar.open_days[-1]},
-    )
-    _freeze_now(monkeypatch, "2021-11-30T15:30:00")
-    assert resolve_latest_complete_date(
-        coverage, calendar, _dt.time(15, 0)
-    ) == stock_latest
-
-
-def test_resolver_is_limited_by_a_late_validation_source(monkeypatch):
-    calendar = _november_calendar()
-    validation_latest = calendar.open_days[-2]
-    coverage = SourceCoverage(
-        stock_primary=calendar.open_days[-1],
-        benchmarks={
-            "000300.SH": calendar.open_days[-1],
-            "000905.SH": calendar.open_days[-1],
-        },
-        validation={"baostock": validation_latest},
-    )
-    _freeze_now(monkeypatch, "2021-11-30T15:30:00")
-    assert resolve_latest_complete_date(
-        coverage, calendar, _dt.time(15, 0)
-    ) == validation_latest
-
-
-def test_resolver_returns_none_without_required_coverage(monkeypatch):
-    calendar = _november_calendar()
-    coverage = SourceCoverage(
-        stock_primary=None,
-        benchmarks={"000300.SH": calendar.open_days[-1]},
-        validation={},
-    )
-    _freeze_now(monkeypatch, "2021-11-30T15:30:00")
-    assert (
-        resolve_latest_complete_date(coverage, calendar, _dt.time(15, 0))
-        is None
-    )
-
-
-def test_resolver_uses_previous_open_day_when_today_is_a_weekend(monkeypatch):
-    """A non-trading today never waits for the publication-time gate."""
-    calendar = _november_calendar()
-    latest = calendar.open_days[-1]  # 2021-11-30 (Tuesday)
-    coverage = SourceCoverage(
-        stock_primary=latest,
-        benchmarks={"000300.SH": latest, "000905.SH": latest},
-        validation={"akshare": latest},
-    )
-    # Saturday 2021-12-04, well before the 15:00 gate.
-    _freeze_now(monkeypatch, "2021-12-04T09:00:00")
-    assert (
-        resolve_latest_complete_date(coverage, calendar, _dt.time(15, 0))
-        == latest
-    )
-
-
-def test_resolver_walks_back_from_a_non_trading_weekend_today(monkeypatch):
-    """A lagging required series still walks back over a weekend today."""
-    calendar = _november_calendar()
-    stock_latest = calendar.open_days[-2]
-    coverage = SourceCoverage(
-        stock_primary=stock_latest,
-        benchmarks={
-            "000300.SH": calendar.open_days[-1],
-            "000905.SH": calendar.open_days[-1],
-        },
-        validation={"akshare": calendar.open_days[-1]},
-    )
-    _freeze_now(monkeypatch, "2021-12-04T09:00:00")
-    assert (
-        resolve_latest_complete_date(coverage, calendar, _dt.time(15, 0))
-        == stock_latest
-    )
-
-
-def test_resolver_returns_none_for_an_empty_calendar():
-    calendar = TradingCalendar.from_open_days(())
-    coverage = SourceCoverage(
-        stock_primary=None,
-        benchmarks={},
-        validation={},
-    )
-    assert (
-        resolve_latest_complete_date(coverage, calendar, _dt.time(15, 0))
-        is None
-    )
-
-
-# --------------------------------------------------------------------------- #
 # DataPipeline.update / validate over a fresh synthetic project
 # --------------------------------------------------------------------------- #
 
@@ -674,10 +521,10 @@ def test_successful_update_binds_sanitized_build_evidence(project):
     assert build["pipeline_contract_version"] == 1
     assert build["run_id"] == result.run_id
     assert build["requested_start_date"] == _WINDOW_START.isoformat()
+    assert build["effective_start_date"] == _WINDOW_START.isoformat()
     assert build["requested_end_date"] == _WINDOW_END.isoformat()
     assert build["resolved_end_date"] == _WINDOW_END.isoformat()
-    assert isinstance(build["resolved_end_is_fallback"], bool)
-    assert build["resolved_end_is_fallback"] is False
+    assert "resolved_end_is_fallback" not in build
     assert build["raw_snapshots"] == sorted(
         build["raw_snapshots"],
         key=lambda row: (
@@ -706,6 +553,52 @@ def test_successful_update_binds_sanitized_build_evidence(project):
     )
     assert all(row["reason_code"] == "ok" for row in build["source_status"])
     assert "token" not in json.dumps(build).lower()
+
+
+def test_update_records_configured_start_when_request_omits_start(project):
+    """Manifest evidence distinguishes an omitted start from its effective value."""
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(end_date=_WINDOW_END)
+    )
+
+    manifest = json.loads(
+        (result.dataset_ref.path / "dataset_manifest.json").read_text()
+    )
+    build = manifest["build_config"]
+    assert build["requested_start_date"] is None
+    assert build["effective_start_date"] == "2020-01-01"
+
+
+def test_update_ignores_review_before_the_requested_window(project):
+    """A carried historical review cannot block a later incremental update.
+
+    The update window is November 2021, while this explicitly pinned 2018
+    conflict is already outside that refresh window.  Removing the production
+    window filter for reviews must make this test fail because the reconciler
+    cannot find a 2018 conflict in the current supplier responses.
+    """
+    (project.root / "configs" / "corporate_action_reviews.yml").write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "symbol": "601318.SH",
+                    "ex_date": "2018-06-07",
+                    "selected_source": "cninfo",
+                    "record_date": "2018-06-06",
+                    "cash_dividend_per_share": 1.2,
+                    "bonus_share_ratio": 0.0,
+                    "capitalization_ratio": 0.0,
+                    "rationale": "already reconciled in carried history",
+                }
+            ],
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = DataPipeline(project.root, sources=_all_stubs()).update(_request())
+
+    assert result.dataset_ref is not None
 
 
 def test_update_refreshes_master_and_publishes_master_coverage(project):
@@ -1041,71 +934,37 @@ def test_update_blocks_publication_when_universe_mismatches_master(project):
     assert result.quality_report.by_code()[CODE_UNIVERSE_MASTER_MISMATCH] == 1
 
 
-def test_discovery_passes_configured_publication_time_to_resolver(
-    project, monkeypatch
-):
-    """The configured ``publication_time`` -- not a hard-coded 15:00 -- governs."""
-    config_path = project.root / "configs" / "project.yml"
-    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    payload["publication_time"] = "23:59"
-    config_path.write_text(
-        yaml.safe_dump(payload), encoding="utf-8"
-    )
+def test_update_without_end_uses_the_max_published_calendar_date(project):
+    """``--end`` omission means the newest published calendar day, nothing else.
 
-    captured: dict = {}
-
-    def fake_resolve(status, calendar, publication_time):
-        captured["publication_time"] = publication_time
-        return date(2021, 11, 30)
-
-    monkeypatch.setattr(
-        "stock_quant.data_pipeline.resolve_latest_complete_date", fake_resolve
-    )
-    pipeline = DataPipeline(project.root, sources=_all_stubs())
-    result = pipeline.update(
+    No clock is consulted: the resolved end is exactly the maximum
+    ``trading_calendar.calendar_date`` of the carried dataset (2022-01-07,
+    years before "today"), never the current natural day.
+    """
+    with DatasetReader(project.root).open(project.version) as context:
+        published = context.read("trading_calendar")
+    expected = max(published["calendar_date"]).date()
+    assert expected != date.today()
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
         DataUpdateRequest(start_date=_WINDOW_START, end_date=None)
     )
-    assert captured["publication_time"] == _dt.time(23, 59)
-    assert result.dataset_ref is not None
-    assert result.resolved_end_date == date(2021, 11, 30)
+    assert result.resolved_end_date == expected
+    assert not hasattr(result, "resolved_end_is_fallback")
 
 
-def _republish_with_benchmark_trim(root, symbol, cutoff) -> None:
-    """Re-publish CURRENT with one benchmark symbol trimmed to ``<= cutoff``."""
-    reader = DatasetReader(root)
-    version = DatasetPublisher(root).current().version
-    with reader.open(version) as context:
-        daily = context.read("daily_bar")
-        master = context.read("security_master")
-        ca = context.read("corporate_action")
-        calendar = context.read("trading_calendar")
-    keep = ~(
-        (daily["symbol"] == symbol)
-        & (daily["trade_date"] > pd.Timestamp(cutoff))
+def test_update_without_end_fails_when_no_calendar_is_published(tmp_path):
+    """An empty published calendar must ask the operator for an explicit --end."""
+    project = build_fixture_project(tmp_path / "project")
+    publisher = DatasetPublisher(project.root)
+    with DatasetReader(project.root).open(project.version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+    tables["trading_calendar"] = tables["trading_calendar"].iloc[0:0]
+    publisher.publish(tables, QualityReport())
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(start_date=None, end_date=None)
     )
-    trimmed = daily.loc[keep].reset_index(drop=True)
-    DatasetPublisher(root).publish(
-        {
-            "daily_bar": trimmed,
-            "security_master": master,
-            "corporate_action": ca,
-            "trading_calendar": calendar,
-        },
-        QualityReport(),
-    )
-
-
-def test_discovery_reports_fallback_when_a_benchmark_series_lags(project, monkeypatch):
-    """A lagging required benchmark walks the end date back and flags it."""
-    _freeze_now(monkeypatch, "2022-01-07T16:00:00")
-    _republish_with_benchmark_trim(project.root, "000300.SH", date(2022, 1, 5))
-    pipeline = DataPipeline(project.root, sources=_all_stubs())
-    result = pipeline.update(
-        DataUpdateRequest(start_date=date(2021, 11, 1), end_date=None)
-    )
-    assert result.dataset_ref is not None
-    assert result.resolved_end_date == date(2022, 1, 5)
-    assert result.resolved_end_is_fallback is True
+    assert result.dataset_ref is None
+    assert CODE_CALENDAR_EMPTY_NO_END in result.quality_report.by_code()
 
 
 # --------------------------------------------------------------------------- #

@@ -432,8 +432,8 @@ def fixture_build_config(project_root: Path) -> dict[str, object]:
         request=DataUpdateRequest(
             start_date=_UPDATE_WINDOW_START, end_date=_UPDATE_WINDOW_END
         ),
+        effective_start_date=_UPDATE_WINDOW_START,
         resolved_end_date=_UPDATE_WINDOW_END,
-        resolved_end_is_fallback=False,
         statuses=_fixture_source_statuses(),
         raw_snapshots=snapshots,
     )

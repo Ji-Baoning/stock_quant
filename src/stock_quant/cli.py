@@ -248,7 +248,12 @@ def data_update(
         None, "--start", help="Inclusive start (YYYY-MM-DD)."
     ),
     end: str | None = typer.Option(
-        None, "--end", help="Inclusive end (YYYY-MM-DD)."
+        None,
+        "--end",
+        help=(
+            "Inclusive end (YYYY-MM-DD). Defaults to the newest published "
+            "calendar day."
+        ),
     ),
     sources: str | None = typer.Option(
         None, "--sources", help="Comma-separated source subset."
@@ -270,16 +275,10 @@ def data_update(
         raise typer.Exit(code=1) from None
     typer.echo(f"run_id={result.run_id}")
     typer.echo(f"resolved_end_date={result.resolved_end_date or ''}")
-    typer.echo(f"resolved_end_is_fallback={str(result.resolved_end_is_fallback).lower()}")
     typer.echo(_report_summary(result.quality_report))
     for status in result.source_status:
         state = "ok" if status.ok else "not_ok"
         typer.echo(f"source {status.source}: {state}")
-    if result.resolved_end_is_fallback:
-        typer.echo(
-            "note: coverage was incomplete for the latest date; end date walked "
-            "back to the last confirmed complete trading day"
-        )
     if result.dataset_ref is not None:
         typer.echo(f"dataset_version={result.dataset_ref.version}")
         typer.echo("PASS")
