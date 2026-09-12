@@ -468,11 +468,18 @@ with nothing:
 
 * ``daily`` for a code that does not exist,
 * ``daily`` for a real code over a window that ends before it listed,
-* ``index_daily`` for an index that does not exist,
 * an unknown ``api_name``, whose error text must match verbatim.
 
-No ``trade_cal`` case: the official token is limited to one call per hour on
-it, so it cannot be probed reliably.
+Two cases are deliberately absent.  ``trade_cal`` is limited to one official
+call per hour, and ``index_daily`` carries the same limit on a free official
+token; in the live run of 2026-09-12 that limit -- not the relay -- was what
+kept ``index_daily`` from producing evidence, on a gate that has to be
+repeatable before it is believable.  A hard gate that a quota turns into a
+random blocker is worse than no case at all.  ``index_daily``'s
+empty-result and substitution behaviour moves to the stage 3 transport
+fidelity script, where the official quota can be spent deliberately; it must
+not block stage 0.  Add no case whose official answer depends on a quota this
+token cannot sustain.
 
 Every verdict is a pure function of the two answers, so the classifiers are
 unit tested without a network.  This script deliberately does NOT use the
@@ -570,12 +577,6 @@ CASES: tuple[ProbeCase, ...] = (
         "window_before_listing",
         "daily",
         {"ts_code": "000001.SZ", "start_date": "19900101", "end_date": "19901231"},
-        "empty",
-    ),
-    ProbeCase(
-        "nonexistent_index",
-        "index_daily",
-        {"ts_code": "399999.SZ", "start_date": "20260801", "end_date": "20260828"},
         "empty",
     ),
     ProbeCase("unknown_api_name", _NOT_A_REAL_API, {}, "error"),
@@ -953,16 +954,32 @@ git commit -m "feat(provenance): add the stage 0 silent-substitution probe"
 /home/ji/miniconda3/envs/py310/bin/python project/probe_relay_substitution.py
 ```
 
-Expected: 打印四行判定，退出码 `0`，并写出
+Expected: 打印三行判定，退出码 `0`，并写出
 `docs/operations/relay-substitution-probe-2026-09-12.md`。
 
 - [ ] **Step 7: 按退出码处置**
 
 | 退出码 | 动作 |
 | --- | --- |
-| `0` | **只有这一种情况可以继续**。`git add docs/operations/relay-substitution-probe-*.md && git commit -m "docs: record the stage 0 substitution probe result"`，继续 Task 2 |
-| `1` | **停止**。不进入 Task 2；把报告交给 owner，relay 主供决策回炉（spec §3 ④） |
+| `0` | **可以继续**。`git add docs/operations/relay-substitution-probe-*.md && git commit -m "docs: record the stage 0 substitution probe result"`，继续 Task 2 |
+| `1` | **停止**，除非该阻断差异已被 owner 显式豁免并留痕（见下）。未被豁免的 `1` 不进入 Task 2；把报告交给 owner，relay 主供决策回炉（spec §3 ④） |
 | `2` | **停止**。闸门未开 —— 凭据缺失，或有用例是 `INCONCLUSIVE`（官方侧限流、不可达，或它因自身原因报错）。补齐条件后**重跑探针**，不要带病进入 Task 2 |
+
+**owner 显式豁免（2026-09-12）**：`unknown_api_name` 一例的 `ERROR_DIFFERS`
+已按 spec §3 ④"由 owner 显式人工豁免"处置。实测依据：jiaoch 的网关对任何它不认识的
+`api_name` 直接回 `token不对，您传过来的是<KEY>请确认` 并回显我们提交的 relay key，
+**不转发上游**；官方同名请求回 `请指定正确的接口名`。三个不同的假接口名
+（`not_a_real_tushare_endpoint` / `foo_bar_baz` / `daily_`）全部复现，因此这是**稳定
+行为**而非偶发。判定为网关的输入校验路径，不是换源作答：三个"官方合法空结果"用例
+全部 `AGREE_EMPTY`，填充数据此前有 4/4 逐位一致的记录。
+
+豁免的作用域**只有这一例的这条差异**。它不把退出码 `1` 变成"可以继续"：
+`SUBSTITUTION`、以及任何**新的或不同的** `ERROR_DIFFERS`，仍然是硬阻断。
+
+留痕要求（豁免须可审计）：豁免当天把这段依据写进
+`docs/operations/relay-substitution-probe-<date>.md` 的一个 `## owner 豁免` 小节后再提交
+该报告，并在 `.superpowers/sdd/progress.md` 追加一行。spec 里两处已不成立的
+"未知接口名错误串与官方逐字相同"必须同轮修正 —— 它是被观测推翻的事实，不是待办。
 
 **取值只认 `--env-file` 指定的文件**（默认仓库根 `.env`），不依赖 shell 有没有
 `source`。文件里出现的变量一律以文件为准；环境里若有同名变量且取值不同，探针会
@@ -970,7 +987,7 @@ Expected: 打印四行判定，退出码 `0`，并写出
 一份过期的 `TUSHARE_TOKEN` 压过了刚更新过的 `.env`，探针于是把"官方拒绝凭据"
 报成了结论，而 operator 其实已经改好了。
 
-**退出码 0 的严格含义**：不是"没有发现问题"，而是"每个用例都拿到了证据且都同意"。四行里出现任何 `INCONCLUSIVE`，退出码就是 2 而不是 0 —— 官方侧被限流时，`daily` 的空窗口可能正是因为限流才为空的，那样的"两边都空"不构成证据。
+**退出码 0 的严格含义**：不是"没有发现问题"，而是"每个用例都拿到了证据且都同意"。三行里出现任何 `INCONCLUSIVE`，退出码就是 2 而不是 0 —— 官方侧被限流时，`daily` 的空窗口可能正是因为限流才为空的，那样的"两边都空"不构成证据。
 
 **`INCONCLUSIVE` 不等于 relay 有问题**：`unknown_api_name` 一例里，只有官方答出参照错误串 `请指定正确的接口名` 时，relay 的错误串才成为证据；官方若因自身原因报错（凭据被拒、限流、网络故障），该例记 `INCONCLUSIVE`、退出码 2，而不是 `ERROR_DIFFERS`。判据是"官方有没有答出它本该答的那句话"，不是"两边是否都能跑通"。把官方自身的失败记成 relay 的阻断条件是错的：它会把一份过期的 `.env` 变成淘汰可用 relay 的理由，而且退出码 1 的动作（relay 主供决策回炉）根本不是这种情况该走的路。
 
