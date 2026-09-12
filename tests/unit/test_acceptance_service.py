@@ -94,7 +94,11 @@ class StubAdapter:
             endpoint=request.endpoint,
             request_key=request_key(request),
             frame=frame,
-            metadata={"source": self.name, "sdk_version": "stub"},
+            metadata={
+                "source": self.name,
+                "sdk_version": "stub",
+                "transport_id": self.name,
+            },
         )
 
     def _frame(self, request: DataRequest) -> pd.DataFrame:

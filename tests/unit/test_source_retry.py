@@ -31,7 +31,7 @@ class FakeSource:
             endpoint=request.endpoint,
             request_key="fake-request",
             frame=pd.DataFrame({"symbol": [request.symbols[0]]}),
-            metadata={},
+            metadata={"transport_id": self.name},
         )
 
 

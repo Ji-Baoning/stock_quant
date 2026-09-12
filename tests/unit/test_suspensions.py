@@ -307,6 +307,7 @@ class _SuspendStub:
             metadata={
                 "source": self.name,
                 "response_timestamp": "2021-12-01T00:00:00Z",
+                "transport_id": self.name,
             },
         )
 

@@ -571,17 +571,29 @@ def _fixture_fetch_results() -> tuple[FetchResult, ...]:
         FetchResult(
             source="tushare", endpoint="daily",
             request_key=request_key(daily_request), frame=daily,
-            metadata={"source": "tushare", "sdk_version": "fixture"},
+            metadata={
+                "source": "tushare",
+                "sdk_version": "fixture",
+                "transport_id": "api.waditu.com",
+            },
         ),
         FetchResult(
             source="tushare", endpoint="stock_basic",
             request_key=request_key(basic_request), frame=stock_basic,
-            metadata={"source": "tushare", "sdk_version": "fixture"},
+            metadata={
+                "source": "tushare",
+                "sdk_version": "fixture",
+                "transport_id": "api.waditu.com",
+            },
         ),
         FetchResult(
             source="akshare", endpoint="index_history",
             request_key=request_key(index_request), frame=index_history,
-            metadata={"source": "akshare", "sdk_version": "fixture"},
+            metadata={
+                "source": "akshare",
+                "sdk_version": "fixture",
+                "transport_id": "sina.stock-zh-index-daily",
+            },
         ),
     )
 

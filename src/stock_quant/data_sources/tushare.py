@@ -116,10 +116,10 @@ class TushareSource:
             request,
             self._supplier_endpoint(request.endpoint),
             self._sdk_version,
+            transport_id=self._transport.transport_id,
             request_timestamp=request_timestamp,
             response_timestamp=response_timestamp,
         )
-        metadata["transport_id"] = self._transport.transport_id
         return FetchResult(
             source=self.name,
             endpoint=request.endpoint,
@@ -156,10 +156,10 @@ class TushareSource:
             request,
             self._supplier_endpoint("stock_basic"),
             self._sdk_version,
+            transport_id=self._transport.transport_id,
             request_timestamp=request_timestamp,
             response_timestamp=response_timestamp,
         )
-        metadata["transport_id"] = self._transport.transport_id
         return FetchResult(
             source=self.name,
             endpoint=request.endpoint,
