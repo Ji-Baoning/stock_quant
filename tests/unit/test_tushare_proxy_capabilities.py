@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from stock_quant.data_sources.base import ContractError
 from stock_quant.data_sources.tushare_proxy import TushareProxyClient
 
 BASE_URL = "https://proxy.example/tushare/pro"
@@ -189,3 +192,81 @@ def test_range_filter_is_skipped_when_the_frame_has_no_trade_date():
         end_date="20201231",
     )
     assert list(frame["com_name"]) == ["浦发银行"]
+
+
+def test_disabled_interface_fails_fast_without_a_data_request():
+    client, session, _ = _client([FakeResponse(body=_interface(enabled=False))])
+    with pytest.raises(ContractError):
+        client.query("suspend_d", ts_code="000333.SZ")
+    assert [call["url"] for call in session.calls] == [f"{ROOT}/capabilities/suspend_d"]
+
+
+def test_required_any_must_be_satisfied():
+    body = _interface(required_any=[["ts_code"], ["trade_date"]])
+    client, session, _ = _client([FakeResponse(body=body)])
+    with pytest.raises(ContractError):
+        client.query("suspend_d", foo="bar")
+    assert [call["url"] for call in session.calls] == [f"{ROOT}/capabilities/suspend_d"]
+
+
+def test_required_must_all_be_satisfied():
+    body = _interface(required=["ts_code"], required_any=[])
+    client, session, _ = _client([FakeResponse(body=body)])
+    with pytest.raises(ContractError):
+        client.query("suspend_d", start_date="20200101")
+    assert [call["url"] for call in session.calls] == [f"{ROOT}/capabilities/suspend_d"]
+
+
+def test_unregistered_interface_surfaces_contract_error():
+    unknown = FakeResponse(status_code=404, text='{"ok":false,"error":"unknown_api"}')
+    client, _, _ = _client([unknown])
+    with pytest.raises(ContractError):
+        client.query("no_such_endpoint_xyz")
+
+
+def test_preflight_transient_failure_fails_open_and_records_it():
+    served = {
+        "code": 0,
+        "data": {
+            "fields": ["ts_code", "trade_date"],
+            "items": [["000333.SZ", "20160518"]],
+        },
+    }
+    client, session, _ = _client(
+        [FakeResponse(status_code=503, text="busy"), FakeResponse(body=served)],
+        max_retries=0,
+    )
+    frame = client.query("suspend_d", ts_code="000333.SZ")
+    assert len(frame) == 1
+    assert client.last_query_metadata["capability_checked"] is False
+    assert session.calls[-1]["url"] == f"{BASE_URL}/suspend_d"
+
+
+def test_named_endpoints_skip_preflight():
+    client, session, _ = _client([FakeResponse(body=_daily_body())])
+    client.daily(ts_code="000001.SZ", start_date="20260901", end_date="20260912")
+    assert [call["url"] for call in session.calls] == [f"{BASE_URL}/daily"]
+
+
+def test_query_on_a_named_endpoint_also_skips_preflight():
+    client, session, _ = _client([FakeResponse(body=_daily_body())])
+    client.query(
+        "daily", ts_code="000001.SZ", start_date="20260901", end_date="20260912"
+    )
+    assert [call["url"] for call in session.calls] == [f"{BASE_URL}/daily"]
+
+
+def test_verify_capability_none_records_unchecked():
+    served = {"code": 0, "data": {"fields": ["ts_code"], "items": [["000333.SZ"]]}}
+    client, session, _ = _client([FakeResponse(body=served)])
+    client.query("suspend_d", verify_capability="none", ts_code="000333.SZ")
+    assert [call["url"] for call in session.calls] == [f"{BASE_URL}/suspend_d"]
+    assert client.last_query_metadata["capability_checked"] is None
+
+
+def test_write_only_interfaces_are_never_read():
+    body = _interface(name="p_save", methods=["POST"])
+    client, session, _ = _client([FakeResponse(body=body)])
+    with pytest.raises(ContractError):
+        client.query("p_save", ts_code="000001.SZ")
+    assert all("/pro/p_save" not in call["url"] for call in session.calls)

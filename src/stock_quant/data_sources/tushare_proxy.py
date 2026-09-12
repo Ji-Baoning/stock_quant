@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Callable, Mapping, cast
+from typing import Callable, Literal, Mapping, cast
 
 import pandas as pd
 import requests
@@ -54,6 +54,8 @@ _MAX_ATTEMPTS = len(_BACKOFF_SECONDS) + 1
 # stay two orders of magnitude below the ~6000-row response truncation.
 _WINDOW_YEARS = 5
 _WINDOW_PAUSE_SECONDS = 0.2
+#: Interfaces the code itself pins, so their names need no runtime check.
+_NAMED_ENDPOINTS = ("daily", "index_daily", "stock_basic")
 #: The catalog table carries no TTL of its own; 21600 is the value the
 #: overwhelming majority (181/298) of the individual interfaces declare.
 _CATALOG_TTL_SECONDS = 21600
@@ -148,6 +150,10 @@ class TushareProxyClient:
         self._root = self.base_url.rsplit("/", 1)[0]
         self._catalog: tuple[float, pd.DataFrame] | None = None
         self._interface_cache: dict[str, tuple[float, Mapping[str, object]]] = {}
+        #: Audit trail of the most recent generic `query()` call.  Named reads
+        #: (daily/index_daily/stock_basic) never write it; check that the last
+        #: call was `query()` before reading it.
+        self.last_query_metadata: dict[str, object] | None = None
 
     @classmethod
     def from_env(
@@ -233,9 +239,84 @@ class TushareProxyClient:
             **params,
         )
 
-    def query(self, endpoint: str, **params: object) -> pd.DataFrame:
-        """Single-window generic read for endpoints outside the SDK surface."""
-        return self._query(endpoint, **params)
+    def query(
+        self,
+        endpoint: str,
+        *,
+        verify_capability: Literal["live", "none"] = "live",
+        **params: object,
+    ) -> pd.DataFrame:
+        """One generic read from the catalog.
+
+        ``verify_capability="live"`` pre-flights the interface's declared
+        shape and fails fast on a deterministic error.  **It is a shape check
+        only.**  Passing it says nothing about whether the data is correct or
+        attributable: the catalog has been falsified once already (it declared
+        60 req/min per IP where the headers said 200), and
+        ``fallback_on_empty`` describes *another source answering in this
+        one's place*.  Pre-flight reads the interface's shape, never the
+        data's provenance.
+        """
+        if endpoint in _NAMED_ENDPOINTS:
+            verify_capability = "none"
+        checked: bool | None = None
+        if verify_capability == "live":
+            checked = self._verify_capability(endpoint, params)
+        start_date = params.pop("start_date", None)
+        end_date = params.pop("end_date", None)
+        frame, windows = self._paged(
+            endpoint, start_date=start_date, end_date=end_date, **params
+        )
+        self.last_query_metadata = {
+            "endpoint": endpoint,
+            "capability_checked": checked,
+            "windows": [tuple(window) for window in windows],
+            "rows": int(len(frame)),
+            "request_ids": [],
+            "cache": [],
+        }
+        return frame
+
+    def _verify_capability(self, endpoint: str, params: Mapping[str, object]) -> bool:
+        """Check the declared shape before spending a data request.
+
+        Returns ``True`` when the pre-flight passed and ``False`` when it
+        could not be fetched at all (**fail-open**) -- the server's
+        ``allow_unregistered_apis: false`` is the real gatekeeper, and a
+        metadata hiccup must not block a data read.  Deterministic rejections
+        raise instead: a disabled interface, a non-GET interface, or
+        unsatisfied ``required`` / ``required_any``.
+        """
+        try:
+            capability = self.capability(endpoint)
+        except ServerError:
+            return False
+        if capability.get("enabled") is False:
+            raise ContractError(f"proxy interface {endpoint} is disabled")
+        methods = [str(method).upper() for method in (capability.get("methods") or [])]
+        if "GET" not in methods:
+            raise ContractError(
+                f"proxy interface {endpoint} does not allow GET: "
+                f"{capability.get('methods')}"
+            )
+        missing = [
+            str(name)
+            for name in (capability.get("required") or [])
+            if str(name) not in params
+        ]
+        if missing:
+            raise ContractError(
+                f"proxy interface {endpoint} requires: {', '.join(missing)}"
+            )
+        required_any = capability.get("required_any") or []
+        if required_any:
+            groups = [[str(name) for name in group] for group in required_any]
+            if not any(all(name in params for name in group) for group in groups):
+                alternatives = " | ".join(",".join(group) for group in groups)
+                raise ContractError(
+                    f"proxy interface {endpoint} requires one of: {alternatives}"
+                )
+        return True
 
     # ------------------------------------------------------------------ #
     # Capability discovery (metadata plane)                               #
