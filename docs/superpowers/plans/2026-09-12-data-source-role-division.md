@@ -118,6 +118,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -137,6 +138,7 @@ from probe_relay_substitution import (  # noqa: E402
     SUBSTITUTION,
     ProbeCase,
     ProbeResult,
+    _load_env,
     blocking,
     classify_empty_probe,
     classify_error_probe,
@@ -404,6 +406,37 @@ def test_report_scrubs_a_result_handed_to_it_directly():
     text = report([result], secrets=(SECRET,))
     assert SECRET not in text
     assert "<redacted>" in text
+
+
+def test_env_file_overrides_a_stale_ambient_value(tmp_path, monkeypatch, capsys):
+    """The file the operator named is the one that counts.
+
+    A stale exported TUSHARE_TOKEN outvoted .env once already: the probe then
+    blamed the official server for a credential the operator had replaced.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("TUSHARE_TOKEN=fresh-value\n", encoding="utf-8")
+    monkeypatch.setenv("TUSHARE_TOKEN", "stale-value")
+
+    _load_env(env_file)
+
+    out = capsys.readouterr().out
+    assert os.environ["TUSHARE_TOKEN"] == "fresh-value"
+    assert "TUSHARE_TOKEN" in out  # named, so the operator can find it
+    assert "stale-value" not in out  # values still never printed
+    assert "fresh-value" not in out
+
+
+def test_env_file_is_silent_when_the_ambient_value_agrees(
+    tmp_path, monkeypatch, capsys
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text("TUSHARE_TOKEN=same-value\n", encoding="utf-8")
+    monkeypatch.setenv("TUSHARE_TOKEN", "same-value")
+
+    _load_env(env_file)
+
+    assert capsys.readouterr().out == ""
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -550,13 +583,28 @@ CASES: tuple[ProbeCase, ...] = (
 
 
 def _load_env(path: Path) -> None:
-    """Load simple KEY=VALUE lines without evaluating shell code."""
+    """Load simple KEY=VALUE lines without evaluating shell code.
+
+    The file wins over an ambient value, and a disagreement is announced by
+    variable *name* only.  ``os.environ.setdefault`` was wrong here: the probe
+    is pointed at this file explicitly, so a stale exported ``TUSHARE_TOKEN``
+    silently outvoted it.  The run then reported the official server refusing
+    a credential, and the operator -- who had already replaced it in this very
+    file -- went looking in the wrong place.
+    """
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.removeprefix("export ").split("=", maxsplit=1)
-        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+        key, value = key.strip(), value.strip().strip("\"'")
+        previous = os.environ.get(key)
+        if previous is not None and previous != value:
+            print(
+                f"environment: {key} is set and differs from {path}; "
+                "the file wins"
+            )
+        os.environ[key] = value
 
 
 #: Every credential the probe holds.  A relay is free to echo the token it was
@@ -890,7 +938,7 @@ if __name__ == "__main__":
 /home/ji/miniconda3/envs/py310/bin/python -m pytest tests/unit/test_probe_relay_substitution.py -v
 ```
 
-Expected: PASS — 22 passed
+Expected: PASS — 24 passed
 
 - [ ] **Step 5: 提交**
 
@@ -915,6 +963,12 @@ Expected: 打印四行判定，退出码 `0`，并写出
 | `0` | **只有这一种情况可以继续**。`git add docs/operations/relay-substitution-probe-*.md && git commit -m "docs: record the stage 0 substitution probe result"`，继续 Task 2 |
 | `1` | **停止**。不进入 Task 2；把报告交给 owner，relay 主供决策回炉（spec §3 ④） |
 | `2` | **停止**。闸门未开 —— 凭据缺失，或有用例是 `INCONCLUSIVE`（官方侧限流、不可达，或它因自身原因报错）。补齐条件后**重跑探针**，不要带病进入 Task 2 |
+
+**取值只认 `--env-file` 指定的文件**（默认仓库根 `.env`），不依赖 shell 有没有
+`source`。文件里出现的变量一律以文件为准；环境里若有同名变量且取值不同，探针会
+按**变量名**提示一行（不打印取值）。这条是补上来的：2026-09-12 的实测里 shell 里
+一份过期的 `TUSHARE_TOKEN` 压过了刚更新过的 `.env`，探针于是把"官方拒绝凭据"
+报成了结论，而 operator 其实已经改好了。
 
 **退出码 0 的严格含义**：不是"没有发现问题"，而是"每个用例都拿到了证据且都同意"。四行里出现任何 `INCONCLUSIVE`，退出码就是 2 而不是 0 —— 官方侧被限流时，`daily` 的空窗口可能正是因为限流才为空的，那样的"两边都空"不构成证据。
 
