@@ -688,3 +688,115 @@ def test_akshare_index_history_does_not_try_fallbacks_for_csi_symbols():
             _request("index_history", "csi931151")
         )
     assert client.calls == ["em"]
+
+
+class _TradeCalClient:
+    """A recording stub session exposing only the ``trade_cal`` endpoint."""
+
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+        self.calls: list[dict[str, str]] = []
+
+    def trade_cal(self, **kwargs: str) -> pd.DataFrame:
+        self.calls.append(kwargs)
+        return self.frame
+
+
+def _trade_cal_frame(exchange: str = "SSE") -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "exchange": [exchange, exchange],
+            "cal_date": ["20240102", "20240103"],
+            "is_open": [1, 1],
+            "pretrade_date": ["20231229", "20240102"],
+        }
+    )
+
+
+def test_tushare_trade_cal_requires_a_supported_exchange(monkeypatch):
+    """``trade_cal`` is a per-exchange request with a fixed exchange set."""
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    client = _TradeCalClient(_trade_cal_frame())
+    source = TushareSource(SourceConfig(), client)
+    for params in ({}, {"exchange": "BSE"}):
+        with pytest.raises(ValueError, match="exchange"):
+            source.fetch(
+                DataRequest(
+                    "trade_cal", (), date(2024, 1, 2), date(2024, 1, 5), params
+                )
+            )
+    assert client.calls == []
+
+
+def test_tushare_trade_cal_rejects_a_symbol_scoped_request(monkeypatch):
+    """A calendar is fetched per exchange, never per symbol."""
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    client = _TradeCalClient(_trade_cal_frame())
+    with pytest.raises(ValueError, match="whole-exchange"):
+        TushareSource(SourceConfig(), client).fetch(
+            DataRequest(
+                "trade_cal", ("600000.SH",), date(2024, 1, 2), date(2024, 1, 5),
+                {"exchange": "SSE"},
+            )
+        )
+    assert client.calls == []
+
+
+def test_tushare_trade_cal_returns_native_columns_and_supplier_endpoint(monkeypatch):
+    """The raw boundary keeps Tushare naming and records the real endpoint."""
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    client = _TradeCalClient(_trade_cal_frame())
+    source = TushareSource(SourceConfig(), client)
+
+    result = source.fetch(
+        DataRequest(
+            "trade_cal", (), date(2024, 1, 2), date(2024, 1, 3), {"exchange": "SSE"}
+        )
+    )
+
+    assert client.calls == [
+        {"exchange": "SSE", "start_date": "20240102", "end_date": "20240103"}
+    ]
+    assert result.endpoint == "trade_cal"
+    assert result.metadata["supplier_endpoint"] == "tushare.pro.trade_cal"
+    assert result.frame.columns.tolist() == [
+        "exchange", "cal_date", "is_open", "pretrade_date",
+    ]
+    # The exchange is part of the request key, so one refresh is two raw
+    # snapshots rather than one that overwrites the other.
+    other = source.fetch(
+        DataRequest(
+            "trade_cal", (), date(2024, 1, 2), date(2024, 1, 3), {"exchange": "SZSE"}
+        )
+    )
+    assert other.request_key != result.request_key
+
+
+def test_tushare_trade_cal_rejects_a_response_without_the_calendar_columns(
+    monkeypatch,
+):
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    client = _TradeCalClient(pd.DataFrame({"cal_date": ["20240102"]}))
+    with pytest.raises(ContractError, match="is_open"):
+        TushareSource(SourceConfig(), client).fetch(
+            DataRequest(
+                "trade_cal", (), date(2024, 1, 2), date(2024, 1, 3),
+                {"exchange": "SSE"},
+            )
+        )
+
+
+def test_tushare_trade_cal_names_a_client_without_the_endpoint(monkeypatch):
+    """A transport whose session lacks ``trade_cal`` must say so, not crash."""
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+
+    class _NoCalendar:
+        pass
+
+    with pytest.raises(ValueError, match="trade_cal"):
+        TushareSource(SourceConfig(), _NoCalendar()).fetch(
+            DataRequest(
+                "trade_cal", (), date(2024, 1, 2), date(2024, 1, 3),
+                {"exchange": "SSE"},
+            )
+        )

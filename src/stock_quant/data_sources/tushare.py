@@ -29,6 +29,12 @@ from stock_quant.data_sources.tushare_transport import (
     resolve_transport,
 )
 
+#: The exchanges a published trading calendar must agree on.
+_TRADE_CAL_EXCHANGES = ("SSE", "SZSE")
+
+#: The native columns a ``trade_cal`` response must carry.
+_TRADE_CAL_COLUMNS = ("cal_date", "is_open", "pretrade_date")
+
 
 class TushareSource:
     """Fetch raw Tushare ``daily`` responses without column normalization.
@@ -83,11 +89,13 @@ class TushareSource:
     def fetch(self, request: DataRequest) -> FetchResult:
         if request.endpoint == "stock_basic":
             return self._fetch_stock_basic(request)
+        if request.endpoint == "trade_cal":
+            return self._fetch_trade_cal(request)
         if request.endpoint in ("daily", "index_daily"):
             return self._fetch_symbol_series(request)
         raise ValueError(
-            "TushareSource supports only the daily, index_daily, and "
-            "stock_basic endpoints"
+            "TushareSource supports only the daily, index_daily, stock_basic, "
+            "and trade_cal endpoints"
         )
 
     def _fetch_symbol_series(self, request: DataRequest) -> FetchResult:
@@ -183,6 +191,77 @@ class TushareSource:
             )
         if frame["ts_code"].isna().any() or frame["list_status"].isna().any():
             raise ContractError("supplier response has a blank identity column")
+
+    def _fetch_trade_cal(self, request: DataRequest) -> FetchResult:
+        """Fetch one exchange's calendar for the requested date range.
+
+        ``trade_cal`` is a per-exchange request: ``request.symbols`` must be
+        empty and ``params["exchange"]`` must be one of SSE / SZSE.  The
+        exchange is part of the request key, so the two exchanges of one
+        refresh are two independent raw snapshots.  Values are validated
+        later, by ``trade_calendar_facts.parse_trade_cal_frame``; this method
+        only enforces the endpoint contract.
+        """
+        if request.symbols:
+            raise ValueError(
+                "Tushare trade_cal is a whole-exchange request, not a "
+                "symbol-scoped query"
+            )
+        exchange = request.params.get("exchange")
+        if exchange not in _TRADE_CAL_EXCHANGES:
+            raise ValueError(
+                "Tushare trade_cal requires an exchange of "
+                f"{' or '.join(_TRADE_CAL_EXCHANGES)}, got {exchange!r}"
+            )
+        client_endpoint = getattr(self._client, "trade_cal", None)
+        if client_endpoint is None:
+            raise ValueError(
+                f"tushare transport {self._transport.transport_id} has no "
+                "trade_cal endpoint"
+            )
+        request_timestamp = _utc_timestamp()
+        try:
+            frame = client_endpoint(
+                exchange=exchange,
+                start_date=request.start_date.strftime("%Y%m%d"),
+                end_date=request.end_date.strftime("%Y%m%d"),
+            )
+        except Exception as error:
+            translated = translate_supplier_error(error)
+            if translated is error:
+                raise
+            raise translated from None
+        response_timestamp = _utc_timestamp()
+        self._validate_trade_cal(frame)
+        metadata = request_metadata(
+            request,
+            self._supplier_endpoint("trade_cal"),
+            self._sdk_version,
+            transport_id=self._transport.transport_id,
+            request_timestamp=request_timestamp,
+            response_timestamp=response_timestamp,
+        )
+        return FetchResult(
+            source=self.name,
+            endpoint=request.endpoint,
+            request_key=request_key(request),
+            frame=frame,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _validate_trade_cal(frame: pd.DataFrame) -> None:
+        """Validate the native shape; day-set and value checks come later."""
+        if not isinstance(frame, pd.DataFrame):
+            raise ContractError("supplier response is not a pandas DataFrame")
+        if frame.empty:
+            raise ContractError("supplier returned an empty trade_cal response")
+        missing = [name for name in _TRADE_CAL_COLUMNS if name not in frame.columns]
+        if missing:
+            raise ContractError(
+                "supplier trade_cal response is missing columns: "
+                + ", ".join(missing)
+            )
 
     @staticmethod
     def _validate(frame: pd.DataFrame, request: DataRequest) -> None:
