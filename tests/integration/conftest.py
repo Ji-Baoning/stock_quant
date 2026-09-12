@@ -419,7 +419,12 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
 # --------------------------------------------------------------------------- #
 
 
-def fixture_build_config(project_root: Path) -> dict[str, object]:
+def fixture_build_config(
+    project_root: Path,
+    *,
+    calendar_start: date = CAL_START,
+    calendar_end: date = CAL_END,
+) -> dict[str, object]:
     """The sanitized data-update build evidence bound into trusted fixtures.
 
     Saves deterministic ``FetchResult`` frames for every required source role
@@ -429,6 +434,10 @@ def fixture_build_config(project_root: Path) -> dict[str, object]:
     datasets carry exactly the provenance shape an operator update produces --
     including one relay calendar span over the whole fixture calendar and the
     full-history criterion scanned from the project's universe definitions.
+    ``calendar_start`` / ``calendar_end`` widen the relay span to the open-day
+    range of the actually published ``trading_calendar`` table, because
+    ``data validate`` fails any manifest whose coverage leaves a hole against
+    the published calendar.
     """
     store = RawStore(project_root)
     results = _fixture_fetch_results()
@@ -456,8 +465,8 @@ def fixture_build_config(project_root: Path) -> dict[str, object]:
         raw_snapshots=snapshots,
         calendar_spans=(
             supplier_span(
-                CAL_START,
-                CAL_END,
+                calendar_start,
+                calendar_end,
                 source=SOURCE_TUSHARE_RELAY,
                 snapshots_by_exchange=calendar_hashes,
             ),

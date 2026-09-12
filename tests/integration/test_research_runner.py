@@ -651,7 +651,14 @@ def _publish_synthetic_dataset(
             UNIVERSE_MEMBERSHIP_COLUMNS
         ]
     version = DatasetPublisher(project_root).publish(
-        tables, QualityReport(), build_config=fixture_build_config(project_root)
+        tables,
+        QualityReport(),
+        # The relay span must cover this dataset's own published calendar
+        # (wider than the conftest fixture calendar): ``data validate``
+        # reports any manifest whose calendar coverage leaves a hole.
+        build_config=fixture_build_config(
+            project_root, calendar_start=_CAL_START, calendar_end=_BARS_END
+        ),
     ).version
     if accept:
         publish_fixture_acceptance(project_root, version)

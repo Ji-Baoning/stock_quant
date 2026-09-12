@@ -69,6 +69,7 @@ from stock_quant.data_model.calendar_coverage import (
     coverage_payload,
     merge_window,
     supplier_span,
+    validate_build_calendar_evidence,
 )
 from stock_quant.data_model.corporate_action_coverage import (
     OUTCOME_FAILED,
@@ -457,6 +458,11 @@ class DataPipeline:
             issues.extend(check_provenance(daily, table="daily_bar"))
             master = context.read("security_master")
             calendar_frame = context.read("trading_calendar")
+            build = (
+                context.manifest.get("build_config")
+                if isinstance(context.manifest, Mapping)
+                else None
+            )
             membership = None
             if TABLE_UNIVERSE_MEMBERSHIP in context.tables:
                 membership = context.read(TABLE_UNIVERSE_MEMBERSHIP)
@@ -514,6 +520,13 @@ class DataPipeline:
         issues.extend(self._membership_issues(membership, calendar_frame))
         issues.extend(self._master_bar_boundary_issues(master, daily))
         issues.extend(self._master_coverage_consistency_issues(master, coverage))
+        issues.extend(
+            _calendar_issues(
+                validate_build_calendar_evidence(
+                    build, open_days=_calendar_open_days(calendar_frame)
+                )
+            )
+        )
         return QualityReport(issues=tuple(issues))
 
     def update(self, request: DataUpdateRequest) -> DataUpdateResult:

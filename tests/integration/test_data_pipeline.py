@@ -1452,3 +1452,51 @@ def test_validate_surfaces_tampered_membership_evidence_as_fatal(project):
     )
     assert issue.severity is Severity.FATAL
     assert issue.table == "universe_membership"
+
+
+def test_validate_reports_calendar_evidence_of_the_fixture(project):
+    report = DataPipeline(project.root).validate()
+    codes = report.by_code()
+    assert "calendar_coverage_missing" not in codes
+    assert "bootstrap_seed_in_full_history" not in codes
+    assert "removed_fallback_field_present" not in codes
+    assert report.by_severity()[Severity.FATAL.value] == 0
+
+
+def test_validate_flags_a_legacy_manifest_without_calendar_coverage(project):
+    """A pre-calendar-manifest dataset cannot claim calendar provenance."""
+    with DatasetReader(project.root).open(project.version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+        build = dict(context.manifest["build_config"])
+    build.pop("calendar_coverage")
+    build.pop("full_history_acceptance_start")
+    version = DatasetPublisher(project.root).publish(
+        tables, QualityReport(), build_config=build
+    ).version
+    codes = DataPipeline(project.root).validate(version).by_code()
+    assert "calendar_coverage_missing" in codes
+
+
+def test_validate_ignores_a_compatible_legacy_fallback_field_but_not_a_new_one(
+    project,
+):
+    with DatasetReader(project.root).open(project.version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+        build = dict(context.manifest["build_config"])
+    legacy = dict(build)
+    legacy.pop("calendar_coverage")
+    legacy.pop("full_history_acceptance_start")
+    legacy["resolved_end_is_fallback"] = False
+    legacy_version = DatasetPublisher(project.root).publish(
+        tables, QualityReport(), build_config=legacy
+    ).version
+    assert "removed_fallback_field_present" not in DataPipeline(
+        project.root
+    ).validate(legacy_version).by_code()
+    fresh = dict(build, resolved_end_is_fallback=False)
+    fresh_version = DatasetPublisher(project.root).publish(
+        tables, QualityReport(), build_config=fresh
+    ).version
+    assert "removed_fallback_field_present" in DataPipeline(
+        project.root
+    ).validate(fresh_version).by_code()
