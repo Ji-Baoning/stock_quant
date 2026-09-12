@@ -220,7 +220,7 @@
 
 | transport | `supplier_endpoint` |
 | --- | --- |
-| relay | `tushare_relay.<host>.<endpoint>`，如 `tushare_relay.jiaoch.top.daily`（host 取不到则填 `unknown`） |
+| relay | `tushare_relay.<host>.<endpoint>`，如 `tushare_relay.jiaoch.top.daily`（URL 解析不出 host → **报错**，不写 `unknown`，理由同 §2.3） |
 | proxy | `tushare_proxy.<endpoint>`（不变） |
 | official | `tushare.pro.<endpoint>`（**仅当确实打到 `api.waditu.com` 时才允许打此标**） |
 
@@ -276,11 +276,29 @@ if snapshot_path.exists():
   → `data/raw/<source>/<endpoint>/<transport_id>/<request_key>/<file_sha256>/`。
   内容寻址只在这**一层之内**生效：同源同请求、不同传输 = 两条独立快照，
   字节相同也各存各的。
-- `transport_id` 是**路径安全**的来源标识（`tushare` 取实际 base URL 的 host：
-  `jiaoch.top` / `api.waditu.com` / promax 的 host），由 transport descriptor
-  在解析时给出，与 `supplier_endpoint`（§2.1）同源，一并进 `FetchResult.metadata`。
+- `transport_id` 是**路径安全**的**实际作答方**标识，由各源适配器在 `fetch()`
+  时给出，与 `supplier_endpoint`（§2.1）同源，一并进 `FetchResult.metadata`；
   `_manifest_for` 把它提升为 manifest 顶层字段，`from_snapshot` 读回。
-  取不到 host 时用 `unknown`，**不允许留空**。
+- **`transport_id` 是全局约束，不是 tushare 专属 —— 这是上一版最实质的漏洞。**
+  上一版只定义了 tushare 的 descriptor，其余源落到默认值 `unknown`。但
+  **akshare 的 `index_history` 本身就在 EastMoney / Sina / Tencent 之间切换**
+  （§3 ② 的回退链）：两个上游若返回相同字节，`unknown` 会把它们压进同一条
+  `.../unknown/<request_key>/<file_sha256>` 路径，`supplier_endpoint` 照旧被复用
+  —— **本方案要堵的洞在 akshare 上原样保留**。取值规则：
+
+  | 源 | `transport_id` 取自 |
+  | --- | --- |
+  | `tushare` | 实际 base URL 的 host：`jiaoch.top` / `api.waditu.com` / promax host |
+  | `akshare` | **本次实际作答的 endpoint**：`eastmoney` / `sina` / `tencent`（回退链的胜出者） |
+  | `baostock` | `baostock`（单一供应商，标识其自身） |
+  | 未来新源位 | 其实际作答方；**不允许留空、不允许填一个源位级常量糊弄** |
+
+- **`unknown` 不是"取不到时的兜底值"，而是保留字**：它只表示
+  "历史快照未记录传输身份"。因此：
+  - `RawStore.save` 遇到 `transport_id` 缺失 / 空串 / `unknown` → **抛错拒存**
+    （`data_pipeline.py:1687` 是唯一入库口，拦住它就拦住了全部 published 路径）；
+  - 目录名 `unknown` 因此**永不出现**，不会与"未记录"的历史布局混淆；
+  - `verify_evidence` 只在**读取**缺字段的历史证据时回落到四段旧路径。
 - **为什么不用方案 A（把 transport 并进 `request_key`）**：`request_key` 现在是
   请求的幂等键（`_path_component(result.request_key, "request key")`），
   把来源塞进去会让"同一个请求"在不同传输下变成两个不同请求，
@@ -292,20 +310,27 @@ if snapshot_path.exists():
 | 位置 | 改动 |
 | --- | --- |
 | `raw_store.py:27` `RawSnapshotEvidence` | 新增 `transport_id` 字段；`from_snapshot` 从 manifest 读 |
-| `raw_store.py:59` `RawStore.save` | 路径插入 `transport_id` 分量 |
+| `raw_store.py:59` `RawStore.save` | 路径插入 `transport_id` 分量；**校验非空且非保留字 `unknown`，否则抛错拒存** |
 | `raw_store.py:89` `verify_evidence` | 按新路径解析；manifest 一致性回环里加入 `transport_id` |
-| `raw_store.py:122` `_manifest_for` | 顶层写 `"transport_id": metadata.get("transport_id", "unknown")` |
+| `raw_store.py:122` `_manifest_for` | 顶层写 `transport_id`；**缺失即抛错**，不写 `unknown` 兜底 |
 | `data_pipeline.py:255` `_raw_snapshot_evidence_rows` | 去重键加入 `transport_id`（现为 4 元组） |
-| `acceptance/models.py:218` `RawSnapshotBinding` | 加字段（`extra="forbid"`，不加就解析失败）；文档串"five-field"同步改 |
+| `acceptance/models.py:218` `RawSnapshotBinding` | 加**可选**字段（`extra="forbid"`，不加就解析失败）；文档串"five-field"同步改 |
+| `tushare.py` / `akshare.py` / `baostock.py` 的 `fetch()` | 各适配器产出 `transport_id`；akshare 用**回退链实际胜出的 endpoint** |
+| `tests/unit/test_raw_store.py` / `tests/integration/conftest.py` | 现有夹具的 `FetchResult` 必须补上 `transport_id`，否则全部拒存 |
 
 **向后兼容（必须显式处理，不能靠运气）**：存量 389 份快照在旧路径上，
 已发布数据集的 `build_config.raw_snapshots[]` 是五字段记录。
-`transport_id` 因此**必须带默认值**（缺省 = 旧布局），`verify_evidence`
-在缺省时回落到四段旧路径。否则改完代码读不了任何历史数据集。
+`transport_id` 因此**必须带默认值**（缺省 = 旧布局，语义是字段不存在，
+**不是**字符串 `unknown`），`verify_evidence` 在缺省时回落到四段旧路径。
+否则改完代码读不了任何历史数据集。
 必配一条测试：**旧五字段记录仍能解析并解析到旧路径**。
 
 必配的第二条测试：**同一 `DataRequest` 先经 official、再经 relay，
 两份证据共存且各自标签正确**（不是"后者覆盖前者"）。
+
+必配的第三条测试（针对本节的 akshare 漏洞）：**同一 akshare 请求先由
+EastMoney 作答、再由 Sina 作答，即使字节相同也落在两条路径上**；
+以及 `RawStore.save` 对空 / `unknown` 的 `transport_id` **抛错拒存**。
 
 **`DATASET_BUILD_CONTRACT_VERSION` 保持 `1`，不 bump —— 这是有意的，不是漏掉。**
 `checks.py:399-401` 是 `contract != DATASET_BUILD_CONTRACT_VERSION → FAIL`，
@@ -362,17 +387,27 @@ EastMoney，有 IP 级封禁史）。**口径不写死就会被误报成数据�
   期望值，提交进仓库；
 - 归一化对齐 tushare `daily`（`vol` 手 / `amount` 千元），**换算因子写在夹具里**，
   不散落在代码里；
-- 容差按字段分级：
+- 容差只有**一个判据**（组合式，不是"两者分别满足"）：
 
-| 字段 | 容差 |
-| --- | --- |
-| 开 / 收 / 高 / 低 | 绝对 ≤ 1e-4 **且** 相对 ≤ 1e-4（覆盖 3dp vs 4dp 舍入） |
-| vol / amount | 绝对 ≤ 1e-3 **且** 相对 ≤ 1e-3（单位换算 + 不同源的舍入与汇总口径） |
+  ```
+  |actual - expected| <= abs_tol + rel_tol * |expected|
+  ```
 
-**必须 `abs_tol + rel_tol` 并用，不能只看相对误差**：低价股（0.01 元级别的
-价差在 1 元股票上是 1% 相对误差）和接近零的成交额（`amount ≈ 0` 时相对误差
-发散）都会被纯相对判据误判。判定式为 `diff <= abs_tol + rel_tol * |expected|`，
-两个容差都由夹具验证（构造一对"刚好通过"与"刚好不通过"的样本）。
+  下表**只列参数，不再列"容差"**，避免与判据本身打架：
+
+  | 字段 | `abs_tol`（暂定） | `rel_tol`（暂定） | 参数取这个量级的理由 |
+  | --- | --- | --- | --- |
+  | 开 / 收 / 高 / 低 | 1e-3 | 1e-4 | 3dp vs 4dp 的**最大**绝对舍入差约 `5e-4`（两侧各半格），故 `abs_tol` 必须 ≥ `5e-4`；`1e-4` 不够 |
+  | vol / amount | 1e-3 | 1e-3 | 单位换算 + 不同源的舍入与汇总口径；`amount` 量级在 1e5~1e7，此格实际由 `rel_tol` 主导 |
+
+- **数值是暂定，最终由真实夹具校准**：上面的数不是从文档推出来的，是给出量级
+  并说明为什么不能更小。夹具落地后若实测需要调整，改的是夹具里的常量，
+  **不改本节的判据形式**。
+- **组合式的必要性**：低价股（1 元股票上 0.01 元的差 = 1% 相对误差）与接近零的
+  成交额（`amount ≈ 0` 时相对误差发散）都会被纯相对判据误判；而单纯用绝对容差
+  又管不住高价股的相对漂移。两者相加，谁在主导由量级自然决定。
+- 夹具里必须包含**一对边界样本**（"刚好通过"与"刚好不通过"），否则容差参数
+  改错了不会被任何测试发现。
 
 **边界情形必须显式分类，不能一律当差异**：
 
@@ -466,7 +501,8 @@ relay 路径两者都不是：它是 URL 改写过的官方 `pro_api`，`__getat
   本方案不假装能追溯。
 - **能**判定的是**产出环境的分布**：哪些 SDK 版本组合出现在本机、哪些不出现。
   这直接决定"这些数据集能否在本机复现"。
-- **能**给出的是后续动作的依据：`1.4.29` / `1.18.88` 那 199 份标 `unknown`，
+- **能**给出的是后续动作的依据：`1.4.29` / `1.18.88` 那 199 份的**产出环境**记
+  `unknown`（这是报告里的一个结论字段，**与 §2.3 的保留字 `transport_id` 无关**），
   不猜、不重标；是否需要用新标注重建，留给报告结论而不是脚本自动决定。
 
 **这不是"给出正确答案"，是"把不确定性写下来"。**
@@ -511,6 +547,8 @@ relay 路径两者都不是：它是 URL 改写过的官方 `pro_api`，`__getat
 | 传输身份寻址 | 同一 `DataRequest` 先 official 后 relay → 两份快照共存于各自 `transport_id` 目录，标签各自正确（§2.3） |
 | 旧证据兼容 | 五字段 `RawSnapshotBinding` 记录仍能解析并回落到四段旧路径；`request_key` 仍是纯请求幂等键 |
 | build_config 两种形状 | 五键（旧）与六键（新）`raw_snapshots[]` 行都能解析；`pipeline_contract_version` 仍为 `1` |
+| transport_id 约束 | 缺失 / 空串 / `unknown` → `RawStore.save` 抛错拒存（`unknown` 目录永不出现） |
+| akshare 回退身份 | 同一请求先由 EastMoney 作答、再由 Sina 作答 → 两条路径，字节相同也不复用 |
 | akshare 对照契约 | 六类结果各一条夹具；单位换算因子由夹具钉死；容差用 `abs_tol + rel_tol` 且配一对边界样本；腾讯源跳过成交量；`.BJ` 记 `UNSUPPORTED` |
 | 基准换源 | tushare `index_daily` 形状的规范化器单测（含 4dp 与空窗口） |
 | required 角色 | `_REQUIRED_ROLE["akshare"] is False`；禁用 akshare 的发布**不被** `_require_available` 阻塞（stub 适配器，不联网） |
@@ -551,9 +589,12 @@ relay 路径两者都不是：它是 URL 改写过的官方 `pro_api`，`__getat
    `build_config.raw_snapshots[].manifest_sha256` 解析到 raw manifest，
    其 `supplier_endpoint` 全部为 `tushare_relay.<host>.*`，**无一为 `tushare.pro.*`**；
    运行日志打印同一结论（标签不直接进 `build_config`，故走 manifest 解析，见 §2.2）；
-4. **传输身份进入快照寻址**：同一 `DataRequest` 先经 official 再经 relay，
-   两份快照在 `data/raw/<source>/<endpoint>/<transport_id>/...` 下**共存**，
-   各自 manifest 标签正确，且 `request_key` 仍是纯请求幂等键（§2.3）；
+4. **传输身份进入快照寻址，且不出现 `unknown`**：同一 `DataRequest` 先经
+   official 再经 relay，两份快照在
+   `data/raw/<source>/<endpoint>/<transport_id>/...` 下**共存**，各自 manifest
+   标签正确，`request_key` 仍是纯请求幂等键；新快照的 `transport_id`
+   **非空且不等于保留字 `unknown`**，缺失 / 空 / `unknown` 一律抛错拒存；
+   akshare 的 `transport_id` 是**回退链实际胜出者**（§2.3）；
 5. **向后兼容不被破坏**：存量五字段 `RawSnapshotBinding` 记录仍能解析并回落到
    四段旧路径（§2.3）；开发/诊断路径走 official 时行为与改造前**完全一致**
    （回归测试）；
@@ -638,6 +679,21 @@ owner 对上一版再审，提出三条高/中优先级问题与三处文字契�
    `checks.py:399-401` 是相等判据，bump 会让所有历史数据集在
    `source_role_health` 上立刻 FAIL，故按可选增量字段处理；
    代价是同一版本号下存在两种 payload 形状，已在 §2.3 写明判据。
+
+### 2026-09-12 三审修正（owner，两条）
+
+1. **`transport_id` 的默认 `unknown` 会让其他源继续碰撞**（→ §2.3）。上一版只定义了
+   tushare 的 descriptor，其余源落到 `unknown`；而 **akshare 的 `index_history` 本身
+   就在 EastMoney / Sina / Tencent 之间切换**，两个上游返回相同字节时仍会压进同一条
+   `unknown/...` 路径、复用旧 `supplier_endpoint` —— **本方案要堵的洞在 akshare 上
+   原样保留**。改为：`transport_id` 是**全局约束**（列出四个源位的取值来源），
+   `unknown` 降级为**保留字**（只表示"历史快照未记录"），
+   `RawStore.save` 遇缺失 / 空 / `unknown` **抛错拒存**，目录名 `unknown` 因此永不出现。
+2. **容差表与判据自相矛盾，且价格 `abs_tol` 不足**（→ §3 ②）。表格写"绝对与相对
+   分别满足"，正文用组合式，两者不是同一判据；且若要覆盖 3dp vs 4dp 舍入，
+   最大绝对差约 `5e-4`，原 `1e-4` 不够。改为：**组合式为唯一判据**，表格只列
+   `abs_tol` / `rel_tol` 两个参数并给出量级理由（价格 `abs_tol` 提到 `1e-3`），
+   **具体数值由真实夹具校准**，夹具须含一对"刚好通过 / 刚好不通过"的边界样本。
 
 ## 实测证据（2026-09-12）
 
