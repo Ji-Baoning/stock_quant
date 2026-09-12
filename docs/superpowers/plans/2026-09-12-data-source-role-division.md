@@ -107,7 +107,7 @@
 
 **Interfaces:**
 - Consumes: `stock_quant.data_sources.tushare_relay.TushareRelayClient.from_env()`（已存在）
-- Produces: 常量 `AGREE_EMPTY` / `AGREE_ERROR` / `SUBSTITUTION` / `DIFFERS` / `INCONCLUSIVE` / `BLOCKING` / `AGREE` / `EXIT_CLEAR` / `EXIT_BLOCKED` / `EXIT_NOT_CONFIGURED`；`ProbeCase`、`ProbeResult`、`classify_empty_probe`、`classify_error_probe`、`run_probe`、`blocking`、`cleared`、`report`
+- Produces: 常量 `AGREE_EMPTY` / `AGREE_ERROR` / `SUBSTITUTION` / `DIFFERS` / `INCONCLUSIVE` / `BLOCKING` / `AGREE` / `EXIT_CLEAR` / `EXIT_BLOCKED` / `EXIT_NOT_CONFIGURED` / `REFERENCE_UNKNOWN_API_ERROR`；`ProbeCase`、`ProbeResult`、`classify_empty_probe`、`classify_error_probe`、`configured_secrets`、`redact_secrets`、`redact_result`、`run_probe(official, relay, cases=CASES, *, secrets=())`、`blocking`、`cleared`、`report(results, *, secrets=(), today=None)`
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -133,12 +133,15 @@ from probe_relay_substitution import (  # noqa: E402
     BLOCKING,
     DIFFERS,
     INCONCLUSIVE,
+    REFERENCE_UNKNOWN_API_ERROR,
     SUBSTITUTION,
     ProbeCase,
+    ProbeResult,
     blocking,
     classify_empty_probe,
     classify_error_probe,
     cleared,
+    redact_result,
     report,
     run_probe,
 )
@@ -185,10 +188,35 @@ def test_classify_empty_probe_is_inconclusive_when_official_is_not_empty():
 
 
 def test_classify_error_probe_compares_the_message_verbatim():
-    assert classify_error_probe("请指定正确的接口名", "请指定正确的接口名 ") == (
-        AGREE_ERROR
-    )
-    assert classify_error_probe("请指定正确的接口名", "bad api") == DIFFERS
+    assert classify_error_probe(
+        REFERENCE_UNKNOWN_API_ERROR, REFERENCE_UNKNOWN_API_ERROR + " "
+    ) == AGREE_ERROR
+    assert classify_error_probe(REFERENCE_UNKNOWN_API_ERROR, "bad api") == DIFFERS
+
+
+def test_a_reference_error_wrapped_in_other_text_still_counts():
+    # The SDK wraps server text in its own exception; the question we asked is
+    # still the question that was answered.
+    assert classify_error_probe(
+        f"Exception: {REFERENCE_UNKNOWN_API_ERROR}", REFERENCE_UNKNOWN_API_ERROR
+    ) == AGREE_ERROR
+
+
+def test_an_official_side_that_failed_on_its_own_is_never_evidence():
+    """A rejected credential must not be read as relay misconduct.
+
+    The official API answers an unusable token with its own message, which of
+    course differs from the relay's -- that difference is ours, not the
+    relay's.  Feeding it to ``DIFFERS`` would send a viable relay back for
+    review on the strength of a stale `.env`, and would return exit 1 (whose
+    playbook is "relay 主供决策回炉") instead of the exit 2 this contract
+    reserves for a gate that cannot be opened.
+    """
+    for official in ("您的token不对，请确认。", "抱歉，您每分钟最多访问该接口1次"):
+        assert classify_error_probe(official, REFERENCE_UNKNOWN_API_ERROR) == (
+            INCONCLUSIVE
+        )
+        assert classify_error_probe(official, "internal error") == INCONCLUSIVE
 
 
 def test_blocking_is_the_two_disqualifying_verdicts():
@@ -241,8 +269,8 @@ def test_an_empty_case_list_never_clears_the_gate():
 
 
 def test_run_probe_compares_error_strings_for_error_cases():
-    official = FakeClient(errors={"nope": "请指定正确的接口名"})
-    agreeing = FakeClient(errors={"nope": "请指定正确的接口名"})
+    official = FakeClient(errors={"nope": REFERENCE_UNKNOWN_API_ERROR})
+    agreeing = FakeClient(errors={"nope": REFERENCE_UNKNOWN_API_ERROR})
     results = run_probe(official, agreeing, (ERROR_CASE,))
     assert results[0].verdict == AGREE_ERROR
     assert cleared(results) is True
@@ -253,10 +281,23 @@ def test_run_probe_compares_error_strings_for_error_cases():
     assert blocking(results) is True
 
 
+def test_a_stale_official_credential_cannot_produce_a_blocking_verdict():
+    # End to end through run_probe: this is the shape the live run actually
+    # produced, and it must land as "no evidence", not "relay disqualified".
+    results = run_probe(
+        FakeClient(errors={"nope": "您的token不对，请确认。"}),
+        FakeClient(errors={"nope": "token不对，您传过来的是XXX请确认"}),
+        (ERROR_CASE,),
+    )
+    assert results[0].verdict == INCONCLUSIVE
+    assert blocking(results) is False
+    assert cleared(results) is False
+
+
 def test_an_error_case_is_inconclusive_when_one_side_succeeds():
     results = run_probe(
         FakeClient(frames={"nope": pd.DataFrame({"x": [1]})}),
-        FakeClient(errors={"nope": "请指定正确的接口名"}),
+        FakeClient(errors={"nope": REFERENCE_UNKNOWN_API_ERROR}),
         (ERROR_CASE,),
     )
     assert results[0].verdict == INCONCLUSIVE
@@ -273,6 +314,55 @@ def test_one_inconclusive_case_keeps_the_whole_run_from_clearing():
     assert [result.verdict for result in results] == [AGREE_EMPTY, INCONCLUSIVE]
     assert blocking(results) is False
     assert cleared(results) is False
+
+
+SECRET = "relay-key-that-the-remote-echoes"
+
+
+def test_redact_result_scrubs_both_answers():
+    result = ProbeResult(
+        name="n",
+        endpoint="e",
+        official=f"error: rejected {SECRET}",
+        relay=f"error: you sent {SECRET}",
+        verdict=INCONCLUSIVE,
+    )
+    scrubbed = redact_result(result, (SECRET,))
+    assert SECRET not in scrubbed.official
+    assert SECRET not in scrubbed.relay
+    assert scrubbed.verdict == result.verdict  # scrubbing never re-judges
+
+
+def test_run_probe_never_returns_a_credential():
+    """The guard sits at the emission boundary, not at the print site.
+
+    A caller that forgets to scrub would otherwise write the credential to the
+    committable report -- which is exactly how the live run leaked it once.
+    """
+    echoing = FakeClient(errors={"nope": f"token不对，您传过来的是{SECRET}请确认"})
+    results = run_probe(
+        FakeClient(errors={"nope": "您的token不对，请确认。"}),
+        echoing,
+        (ERROR_CASE,),
+        secrets=(SECRET,),
+    )
+    assert SECRET not in results[0].relay
+    assert "<redacted>" in results[0].relay
+
+
+def test_report_scrubs_a_result_handed_to_it_directly():
+    # Defense in depth: `report` is public and can be called with results that
+    # never went through `run_probe`.
+    result = ProbeResult(
+        name="n",
+        endpoint="e",
+        official="ok: 0 rows",
+        relay=f"error: you sent {SECRET}",
+        verdict=INCONCLUSIVE,
+    )
+    text = report([result], secrets=(SECRET,))
+    assert SECRET not in text
+    assert "<redacted>" in text
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -320,19 +410,24 @@ Run from the repository root or the project directory:
     python project/probe_relay_substitution.py --no-report
 
 Exit codes: 0 = every case agreed (the stage 1 gate is clear); 1 = the relay
-substituted an answer, or an error string diverged -- **do not start stage 1**;
-2 = the gate could not be opened, either because the probe could not run (relay
-or official credentials missing) or because some case produced no evidence
-(the official side rate-limited or unreachable).  Only 0 opens stage 1: this is
-a hard gate, so "unanswered" must never read as "passed".  Token values are
-never printed.
+substituted an answer, or the official side gave its reference error and the
+relay's error text diverged from it -- **do not start stage 1**; 2 = the gate
+could not be opened, either because the probe could not run (relay or official
+credentials missing) or because some case produced no evidence -- the official
+side rate-limited, unreachable, or failed for a reason of its own (a rejected
+credential, say), which makes the pair say nothing about the relay.  Only 0
+opens stage 1: this is a hard gate, so "unanswered" must never read as
+"passed", and an official-side failure of our own making must never be
+recorded as the relay's fault.  Token values are never printed or written:
+answers are scrubbed at the boundary where results are built and where the
+report is rendered, because a relay may echo back the key it was handed.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
@@ -364,6 +459,11 @@ EXIT_BLOCKED = 1
 EXIT_NOT_CONFIGURED = 2
 
 _NOT_A_REAL_API = "not_a_real_tushare_endpoint"
+
+#: The official server's own answer for an unknown ``api_name``, recorded
+#: verbatim from a live call.  This is the only official error that makes the
+#: ``unknown_api_name`` case meaningful -- see ``classify_error_probe``.
+REFERENCE_UNKNOWN_API_ERROR = "请指定正确的接口名"
 
 
 @dataclass(frozen=True)
@@ -418,6 +518,51 @@ def _load_env(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
+#: Every credential the probe holds.  A relay is free to echo the token it was
+#: handed back inside an error string -- jiaoch.top does exactly that, verified
+#: live on 2026-09-12 -- so no answer text may be printed or written until it
+#: has been scrubbed for these.  If a future credential can be echoed by a
+#: remote side, add its name here.
+_SECRET_ENV_VARS = ("TUSHARE_TOKEN", "TUSHARE_RELAY_KEY", "TUSHARE_PROXY_KEY")
+_REDACTED = "<redacted>"
+
+
+def configured_secrets() -> tuple[str, ...]:
+    """The credential values present in the environment, for scrubbing."""
+    return tuple(
+        value
+        for name in _SECRET_ENV_VARS
+        if (value := os.environ.get(name, "").strip())
+    )
+
+
+def redact_secrets(text: str, secrets: Sequence[str]) -> str:
+    """Replace every configured credential value in ``text`` with a placeholder.
+
+    ``str.replace``, not a regex: credential values may contain regex
+    metacharacters, and the failure mode of a bad pattern (silently matching
+    nothing) is exactly the one that leaks.
+    """
+    for secret in secrets:
+        text = text.replace(secret, _REDACTED)
+    return text
+
+
+def redact_result(result: ProbeResult, secrets: Sequence[str]) -> ProbeResult:
+    """A copy of ``result`` with any leaked credential removed from its answers.
+
+    Applied where results are *built* and where they are *rendered*, never only
+    at the print site: a guard that lives at one call site is one refactor away
+    from being dropped, and the thing it protects is a credential written to a
+    file that gets committed.
+    """
+    return replace(
+        result,
+        official=redact_secrets(result.official, secrets),
+        relay=redact_secrets(result.relay, secrets),
+    )
+
+
 def classify_empty_probe(official: pd.DataFrame, relay: pd.DataFrame) -> str:
     """Verdict for one "official returns nothing here" question.
 
@@ -430,7 +575,21 @@ def classify_empty_probe(official: pd.DataFrame, relay: pd.DataFrame) -> str:
 
 
 def classify_error_probe(official: str, relay: str) -> str:
-    """Compare two failure messages; the relay must not invent its own."""
+    """Verdict for one "official legitimately errors here" question.
+
+    Only the reference answer is evidence.  An official side that failed for a
+    reason of its own -- a rejected credential, a rate limit, a network fault
+    -- answered a different question, so the pair says nothing about the relay
+    and must never be allowed to feed ``DIFFERS``.  Doing otherwise would
+    disqualify a viable relay on the strength of our own stale ``.env``, and
+    would return exit 1 (playbook: send the relay-as-main decision back for
+    review) where this contract reserves exit 2 for a gate that cannot open.
+    Fails closed: if tushare ever rewords the reference message, the case
+    becomes ``INCONCLUSIVE`` and the gate stays shut until a human refreshes
+    the constant from a live run.
+    """
+    if REFERENCE_UNKNOWN_API_ERROR not in official:
+        return INCONCLUSIVE
     return AGREE_ERROR if official.strip() == relay.strip() else DIFFERS
 
 
@@ -462,20 +621,35 @@ def _verdict(case: ProbeCase, official: tuple, relay: tuple) -> str:
 
 
 def run_probe(
-    official: Any, relay: Any, cases: Sequence[ProbeCase] = CASES
+    official: Any,
+    relay: Any,
+    cases: Sequence[ProbeCase] = CASES,
+    *,
+    secrets: Sequence[str] = (),
 ) -> list[ProbeResult]:
-    """Run every case against both transports and classify the pair."""
+    """Run every case against both transports and classify the pair.
+
+    Redaction happens here, at the point the results are *built*, not at the
+    call site that prints them: a ``ProbeResult`` is what gets written into the
+    operations report, so scrubbing at construction means no downstream
+    consumer -- present or future -- can leak a credential a remote side echoed
+    back.  The verdict is computed on the *raw* answers first, so redaction can
+    never change a judgement.
+    """
     results: list[ProbeResult] = []
     for case in cases:
         official_answer = _read(official, case)
         relay_answer = _read(relay, case)
         results.append(
-            ProbeResult(
-                name=case.name,
-                endpoint=case.endpoint,
-                official=_describe(official_answer),
-                relay=_describe(relay_answer),
-                verdict=_verdict(case, official_answer, relay_answer),
+            redact_result(
+                ProbeResult(
+                    name=case.name,
+                    endpoint=case.endpoint,
+                    official=_describe(official_answer),
+                    relay=_describe(relay_answer),
+                    verdict=_verdict(case, official_answer, relay_answer),
+                ),
+                secrets,
             )
         )
     return results
@@ -498,8 +672,19 @@ def cleared(results: Sequence[ProbeResult]) -> bool:
     return bool(results) and all(result.verdict in AGREE for result in results)
 
 
-def report(results: Sequence[ProbeResult], *, today: date | None = None) -> str:
-    """Render the probe as a committable operations report."""
+def report(
+    results: Sequence[ProbeResult],
+    *,
+    secrets: Sequence[str] = (),
+    today: date | None = None,
+) -> str:
+    """Render the probe as a committable operations report.
+
+    Scrubs again on the way out, independently of ``run_probe``: the report is
+    the artifact that gets committed, so it is the boundary that must not
+    depend on its caller having remembered.
+    """
+    results = [redact_result(result, secrets) for result in results]
     day = (today or date.today()).isoformat()
     if blocking(results):
         headline = "命中阻断条件，阶段 1 不得开始"
@@ -519,12 +704,19 @@ def report(results: Sequence[ProbeResult], *, today: date | None = None) -> str:
         "或**逐字相同的错误串**。",
         "",
         "- `SUBSTITUTION` = relay 在官方无数据处返回了非空；",
-        "- `ERROR_DIFFERS` = 错误串与官方不一致。",
+        "- `ERROR_DIFFERS` = 官方给出了它**本该给出**的参照错误，而 relay 的错误串"
+        "与它不一致。",
         "",
         "两者都属于 spec §3 ④ 的阻断条件。`INCONCLUSIVE` 表示官方侧本身没给出"
         "可用答案（限流、网络失败，或该问法官方本来就有数据），该用例**不构成"
         "证据** —— 既不算通过，也不算失败。**闸门只在全部用例都给出证据时才放行**，"
         "所以 `INCONCLUSIVE` 同样让阶段 1 保持关闭。",
+        "",
+        "注意 `unknown_api_name` 的判定：只有官方答出参照错误串"
+        f"（`{REFERENCE_UNKNOWN_API_ERROR}`）时，relay 的错误串才成为证据。官方若因"
+        "自身原因报错 —— 凭据被拒、限流、网络故障 —— 它答的是另一个问题，该用例"
+        "一律记 `INCONCLUSIVE`（退出码 2），**不得**记 `ERROR_DIFFERS`。否则一份"
+        "过期的 `.env` 就足以把可用的 relay 判成阻断条件。",
         "",
         "| 用例 | endpoint | 官方作答 | relay 作答 | 判定 |",
         "| --- | --- | --- | --- | --- |",
@@ -591,14 +783,15 @@ def main() -> int:
     print(f"relay: host={relay_client.host} sdk={relay_client.sdk_version}")
     print(f"official: sdk={getattr(ts, '__version__', 'unknown')}")
 
-    results = run_probe(official_client, relay_client)
+    secrets = configured_secrets()
+    results = run_probe(official_client, relay_client, secrets=secrets)
     for result in results:
         print(
             f"{result.name:22s} {result.verdict:14s} "
             f"official={result.official} relay={result.relay}"
         )
 
-    text = report(results)
+    text = report(results, secrets=secrets)
     if not args.no_report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(text, encoding="utf-8")
@@ -628,7 +821,7 @@ if __name__ == "__main__":
 /home/ji/miniconda3/envs/py310/bin/python -m pytest tests/unit/test_probe_relay_substitution.py -v
 ```
 
-Expected: PASS — 14 passed
+Expected: PASS — 20 passed
 
 - [ ] **Step 5: 提交**
 
@@ -652,11 +845,13 @@ Expected: 打印四行判定，退出码 `0`，并写出
 | --- | --- |
 | `0` | **只有这一种情况可以继续**。`git add docs/operations/relay-substitution-probe-*.md && git commit -m "docs: record the stage 0 substitution probe result"`，继续 Task 2 |
 | `1` | **停止**。不进入 Task 2；把报告交给 owner，relay 主供决策回炉（spec §3 ④） |
-| `2` | **停止**。闸门未开 —— 要么凭据缺失，要么有用例是 `INCONCLUSIVE`（多因官方 `trade_cal` 限流一类的节流）。补齐条件后**重跑探针**，不要带病进入 Task 2 |
+| `2` | **停止**。闸门未开 —— 凭据缺失，或有用例是 `INCONCLUSIVE`（官方侧限流、不可达，或它因自身原因报错）。补齐条件后**重跑探针**，不要带病进入 Task 2 |
 
 **退出码 0 的严格含义**：不是"没有发现问题"，而是"每个用例都拿到了证据且都同意"。四行里出现任何 `INCONCLUSIVE`，退出码就是 2 而不是 0 —— 官方侧被限流时，`daily` 的空窗口可能正是因为限流才为空的，那样的"两边都空"不构成证据。
 
-若命中的是 `ERROR_DIFFERS`，先确认探针没有把 relay 侧的临时网络故障误读成"错误串不同"（重跑一次）；可复现才按阻断处理。
+**`INCONCLUSIVE` 不等于 relay 有问题**：`unknown_api_name` 一例里，只有官方答出参照错误串 `请指定正确的接口名` 时，relay 的错误串才成为证据；官方若因自身原因报错（凭据被拒、限流、网络故障），该例记 `INCONCLUSIVE`、退出码 2，而不是 `ERROR_DIFFERS`。判据是"官方有没有答出它本该答的那句话"，不是"两边是否都能跑通"。把官方自身的失败记成 relay 的阻断条件是错的：它会把一份过期的 `.env` 变成淘汰可用 relay 的理由，而且退出码 1 的动作（relay 主供决策回炉）根本不是这种情况该走的路。
+
+若命中的是 `ERROR_DIFFERS`（即官方确实答出了参照错误串，而 relay 不一致），先确认探针没有把 relay 侧的临时网络故障误读成"错误串不同"（重跑一次）；可复现才按阻断处理。**本机凭据状态不影响这一判定**：`TUSHARE_TOKEN` 若已被拒，`unknown_api_name` 一例必然是 `INCONCLUSIVE`，闸门必然停在退出码 2 —— 在 owner 把轮换后的 token 写入 `./.env` 之前，探针不可能给出退出码 0，也不需要为此改动探针。
 
 ---
 
