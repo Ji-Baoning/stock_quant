@@ -1,5 +1,12 @@
 # index-constitution csi300 静态快照与冻结股票池 Implementation Plan
 
+> **前提已过时（2026-09-12）：** 本文记的 2017-02-13\~2019-06-14 的 299-run
+> 卡点出现了一条新路：共享代理的 `index_weight` 对 `000300.SH` 返回**恰好
+> 300 行**含 `weight`（2017-02 实测 32.4s）。**但这不能作为验收依据**——
+> 它是月度成分快照、不是官方公告，且不可溯源。它可以缩短寻路，不能替代
+> 官方 2017-02 公告这一证据。详见
+> `docs/operations/2026-09-12-tushare-proxy-assessment.md` §6。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把 `index-constitution` 的 `csi300` 全历史冻结成带日期的不可变快照，并在其上建一条可审计的构建链，产出一个能进正式 Research 的冻结股票池定义。

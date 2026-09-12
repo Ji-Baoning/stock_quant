@@ -1,5 +1,13 @@
 # 停牌日回补建模 Implementation Plan
 
+> **前提已过时（2026-09-12）：** 本文所记"停牌证据外部来源全部受阻
+> （`suspend_d` 无权限、baostock 停机、`stock_tfp_em` 无历史覆盖）"对
+> **本地直连**仍然成立，但经共享代理可读：实测 `suspend_d`
+> `000333.SZ` 2016-05-01..06-30 返回 10 行 = `2016-05-18..05-31`，正是本文
+> 判定无源的那段区间。**这不改变本方案取向**——用主源 `pre_close` 链合成
+> 停牌行仍是既成事实；`suspend_d` 现在可以充当**独立交叉校验**（见
+> `docs/operations/2026-09-12-tushare-proxy-assessment.md` §6）。
+
 > **For agentic workers:** 按 TDD 顺序实施；先写失败测试再实现。步骤用 checkbox 跟踪。
 
 **Goal:** 用主源自身的 `pre_close` 链作为停牌证据，把验收窗口内"已上市 × 开市日 × 无行"的缺口物化为诚实标注的停牌 bar（`volume=0`、价格前收平推），使 `date_window_completeness` 在不放宽口径的前提下 PASS；链条断裂且无公司行为解释时视为数据丢失，响亮阻断发布。
