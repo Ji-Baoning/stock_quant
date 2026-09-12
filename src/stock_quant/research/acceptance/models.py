@@ -13,7 +13,7 @@ publishes:
   content identity is a SHA-256 over a canonical JSON rendering: key-sorted,
   compact separators, ``acceptance_id`` excluded and arrays placed in a
   stable order (checks by ``code``, raw snapshot bindings by their
-  four-component location key).  The models here are deliberately strict --
+  five-component location key).  The models here are deliberately strict --
   unknown fields are rejected, every hash field is a lowercase 64-hex string,
   and the check codes must cover the ``real-data-v1`` policy vocabulary
   exactly once -- so a record either binds the full evidence chain or does
@@ -386,12 +386,19 @@ def _canonical_payload(record: AcceptanceRecord) -> dict[str, JsonValue]:
     ]
     payload["raw_snapshot_evidence"] = sorted(
         evidence,
+        # The plan pins ``transport_id`` third (2026-09-12 plan, Task 5).  Do
+        # not "unify" this back to a trailing position: a legacy row drops its
+        # ``transport_id`` key (the ``None`` branch above), so this component
+        # is the constant ``""`` for every such row and a constant cannot
+        # reorder a sort -- legacy ``acceptance_id`` values stay bit-identical
+        # under either key order.  Only transport-bearing rows can differ, and
+        # none have been published, so aligning with the plan now is free.
         key=lambda row: (
             row["source"],
             row["endpoint"],
+            row.get("transport_id") or "",
             row["request_key"],
             row["file_sha256"],
-            row.get("transport_id") or "",
         ),
     )
     return payload

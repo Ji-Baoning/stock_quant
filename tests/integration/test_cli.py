@@ -20,6 +20,7 @@ from test_end_to_end import run_offline_fixture  # noqa: E402  (after app import
 from test_reports import _experiment_input  # noqa: E402  (synthetic report helper)
 
 from stock_quant.cli import app  # noqa: F401  (gates Step 2 collection)
+from stock_quant.data_pipeline import DataPipeline
 from stock_quant.reporting.html import render_experiment_report
 
 
@@ -77,10 +78,37 @@ def test_debug_backtest_writes_only_to_run_debug_dir(
     assert published == before, "debug backtest must not publish an experiment"
 
 
-def test_data_update_without_token_fails_and_prints_failed(
+class _RecordingPipeline(DataPipeline):
+    """A ``DataPipeline`` that retains its result for the assertion below.
+
+    The ``data update`` CLI echoes each source's ``ok``/``not_ok`` state but
+    never its ``reason`` prose, so the missing-transport explanation is not
+    reachable from ``result.stdout``.  This subclass runs the real pipeline
+    unchanged and keeps the result so the test can assert on the recorded
+    reason itself rather than only on the exit code.
+    """
+
+    last_result = None
+
+    def update(self, request):
+        result = super().update(request)
+        type(self).last_result = result
+        return result
+
+
+def test_data_update_without_transport_fails_and_prints_failed(
     cli_runner, fixture_root, monkeypatch
 ):
+    # The published ``data update`` path refuses *before* any credential is
+    # read: with no explicit ``TUSHARE_TRANSPORT`` the resolver raises and
+    # never reaches a client.  Clearing the transport (not just the token) is
+    # what makes that first refusal the failure under test, and it keeps the
+    # test offline even under launch-day ``set -a; . ./.env; set +a``, where a
+    # ``TUSHARE_TRANSPORT=relay`` plus relay credentials would otherwise build
+    # a live relay client and attempt a real fetch against the fixture.
+    monkeypatch.delenv("TUSHARE_TRANSPORT", raising=False)
     monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+    monkeypatch.setattr("stock_quant.cli.DataPipeline", _RecordingPipeline)
     result = cli_runner.invoke(
         app,
         [
@@ -96,6 +124,12 @@ def test_data_update_without_token_fails_and_prints_failed(
     )
     assert result.exit_code != 0
     assert "FAILED" in result.stdout
+    # The *reason* is the thing under test: the failure must name the missing
+    # transport, not merely exit non-zero.  The required ``tushare`` source's
+    # recorded reason is where that explanation lives.
+    statuses = {s.source: s for s in _RecordingPipeline.last_result.source_status}
+    assert not statuses["tushare"].ok
+    assert "TUSHARE_TRANSPORT" in (statuses["tushare"].reason or "")
 
 
 def test_data_validate_reports_current_dataset(

@@ -227,10 +227,19 @@ def _enable_transport_logging() -> None:
     The transport resolver logs one INFO line per resolution; without a
     handler it would be invisible, and the design requires the run log --
     not only the evidence chain -- to show which transport answered.
+
+    Scoped to the ``stock_quant`` package tree instead of the root logger:
+    ``logging.basicConfig`` would switch INFO on for every module in the
+    process, and none of those other INFO lines were reviewed for what they
+    may print.  The resolver's logger (``stock_quant.data_sources.*``) is a
+    descendant, so its line still reaches the operator unchanged.
     """
-    logging.basicConfig(
-        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
-    )
+    logger = logging.getLogger("stock_quant")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        logger.addHandler(handler)
 
 
 @data_app.command("update")

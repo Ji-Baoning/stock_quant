@@ -95,9 +95,12 @@ def _setting(environ: Mapping[str, str], key: str) -> str:
 def client_host(client: Any) -> str:
     """The host a client will reach, tolerating stubs that omit it.
 
-    ``getattr`` with a default is what makes this safe: reading ``.host`` on a
-    stub that has no ``base_url`` raises ``AttributeError`` *inside* the
-    property, and only ``getattr`` swallows that.  Public because
+    The lookup of ``.host`` is wrapped in ``try``/``except AttributeError``:
+    a stub with no ``base_url`` raises ``AttributeError`` *inside* that
+    property, and the wrapper is what swallows it.  Only when ``.host`` is
+    absent or blank does the ``getattr(client, "base_url", "")`` fallback run
+    -- there the ``getattr`` default is what keeps a client without a
+    ``base_url`` attribute from raising.  Public because
     ``injected_transport`` (in ``tushare.py``) needs the same tolerance.
     """
     try:
