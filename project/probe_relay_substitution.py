@@ -12,10 +12,14 @@ The probe therefore only asks questions the official API legitimately answers
 with nothing:
 
 * ``daily`` for a code that does not exist,
-* ``daily`` for a real code over a window that ends before it listed,
-* an unknown ``api_name``, whose error text must match verbatim.
+* ``daily`` for a real code over a window that ends before it listed.
 
-Two cases are deliberately absent.  ``trade_cal`` is limited to one official
+A third case once asked an unknown ``api_name``, whose error text had to match
+verbatim; the owner removed it from the live cases on 2026-09-12 and moved the
+question to the stage 3 transport-fidelity script (see ``CASES``).  The
+machinery that judged it stays here, unit-tested.
+
+Two other cases are deliberately absent.  ``trade_cal`` is limited to one official
 call per hour, and ``index_daily`` carries the same limit on a free official
 token; in the live run of 2026-09-12 that limit -- not the relay -- was what
 kept ``index_daily`` from producing evidence, on a gate that has to be
@@ -84,11 +88,13 @@ EXIT_CLEAR = 0
 EXIT_BLOCKED = 1
 EXIT_NOT_CONFIGURED = 2
 
-_NOT_A_REAL_API = "not_a_real_tushare_endpoint"
-
 #: The official server's own answer for an unknown ``api_name``, recorded
-#: verbatim from a live call.  This is the only official error that makes the
-#: ``unknown_api_name`` case meaningful -- see ``classify_error_probe``.
+#: verbatim from a live call.  It is the reference string
+#: ``classify_error_probe`` compares an official-side error against: only when
+#: the official answer carries it does the relay's error text become evidence.
+#: No live case asks this question any more -- the owner removed the
+#: ``unknown_api_name`` case from ``CASES`` on 2026-09-12 -- but the contract
+#: and its unit tests remain.
 REFERENCE_UNKNOWN_API_ERROR = "请指定正确的接口名"
 
 
@@ -111,6 +117,18 @@ class ProbeResult:
     verdict: str
 
 
+#: The live run's case list.  Since the owner's ruling of 2026-09-12 it holds
+#: only ``"empty"`` cases: the ``"error"`` case it once carried
+#: (``unknown_api_name``) was removed so the gate could be re-run to a stable
+#: exit 0.  The ``"error"`` machinery -- :func:`classify_error_probe`,
+#: ``ERROR_DIFFERS``, its membership in ``BLOCKING``, and the ``"error"``
+#: branch of :func:`_verdict` -- is retained deliberately, not forgotten: it is
+#: spec §3 ④'s error-divergence contract, unit-tested directly, and merely
+#: unreachable from this tuple.  The question itself did not vanish: the owner
+#: moved it to the stage 3 transport-fidelity script, which compares the
+#: official reference error against the relay's answer under a controlled quota
+#: window.  Re-adding an ``"error"`` case here is an act that has to be
+#: deliberate -- see ``tests/unit/test_probe_relay_substitution.py``.
 CASES: tuple[ProbeCase, ...] = (
     ProbeCase(
         "nonexistent_symbol",
@@ -124,7 +142,6 @@ CASES: tuple[ProbeCase, ...] = (
         {"ts_code": "000001.SZ", "start_date": "19900101", "end_date": "19901231"},
         "empty",
     ),
-    ProbeCase("unknown_api_name", _NOT_A_REAL_API, {}, "error"),
 )
 
 
@@ -367,11 +384,15 @@ def report(
         "证据** —— 既不算通过，也不算失败。**闸门只在全部用例都给出证据时才放行**，"
         "所以 `INCONCLUSIVE` 同样让阶段 1 保持关闭。",
         "",
-        "注意 `unknown_api_name` 的判定：只有官方答出参照错误串"
-        f"（`{REFERENCE_UNKNOWN_API_ERROR}`）时，relay 的错误串才成为证据。官方若因"
-        "自身原因报错 —— 凭据被拒、限流、网络故障 —— 它答的是另一个问题，该用例"
-        "一律记 `INCONCLUSIVE`（退出码 2），**不得**记 `ERROR_DIFFERS`。否则一份"
-        "过期的 `.env` 就足以把可用的 relay 判成阻断条件。",
+        "错误串判定的规则（`classify_error_probe` 的契约，现无用例行使）：只有官方"
+        f"答出参照错误串（`{REFERENCE_UNKNOWN_API_ERROR}`）时，relay 的错误串才成为"
+        "证据。官方若因自身原因报错 —— 凭据被拒、限流、网络故障 —— 它答的是另一个"
+        "问题，该用例一律记 `INCONCLUSIVE`（退出码 2），**不得**记 `ERROR_DIFFERS`。"
+        "否则一份过期的 `.env` 就足以把可用的 relay 判成阻断条件。行使该规则的"
+        "`unknown_api_name` 用例已由 owner 于 2026-09-12 裁决移出 `CASES`，改由阶段 3"
+        "的传输保真脚本在可控额度窗口下行使（闸门因此可稳定重跑到退出码 0）；移出"
+        "**不撤回**当时记录的实测事实 —— jiaoch 网关对不认识的 `api_name` 回显 relay "
+        "key 并用自身鉴权文案作答，与官方的参照错误串不一致。",
         "",
         "| 用例 | endpoint | 官方作答 | relay 作答 | 判定 |",
         "| --- | --- | --- | --- | --- |",

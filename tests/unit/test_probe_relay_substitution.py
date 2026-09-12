@@ -16,6 +16,7 @@ from probe_relay_substitution import (  # noqa: E402
     AGREE_EMPTY,
     AGREE_ERROR,
     BLOCKING,
+    CASES,
     DIFFERS,
     INCONCLUSIVE,
     REFERENCE_UNKNOWN_API_ERROR,
@@ -135,6 +136,22 @@ def test_blocking_is_the_two_disqualifying_verdicts():
 
 def test_agree_is_the_two_evidential_verdicts():
     assert AGREE == frozenset({AGREE_EMPTY, AGREE_ERROR})
+
+
+def test_the_live_case_list_holds_only_the_two_empty_cases():
+    """Pins the owner's 2026-09-12 ruling moving the ``error`` case out.
+
+    ``unknown_api_name`` left ``CASES`` -- the question moves to the stage 3
+    transport-fidelity script -- so the stage 0 gate could be re-run to a
+    stable exit 0.  The ``"error"`` machinery it exercised stays in the
+    module but is no longer reachable from the live tuple, so a future re-add
+    has to be a deliberate edit -- this test fails loudly otherwise.
+    """
+    assert [case.name for case in CASES] == [
+        "nonexistent_symbol",
+        "window_before_listing",
+    ]
+    assert [case.expect for case in CASES] == ["empty", "empty"]
 
 
 def test_run_probe_marks_a_substitution_as_blocking():

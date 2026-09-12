@@ -467,10 +467,14 @@ The probe therefore only asks questions the official API legitimately answers
 with nothing:
 
 * ``daily`` for a code that does not exist,
-* ``daily`` for a real code over a window that ends before it listed,
-* an unknown ``api_name``, whose error text must match verbatim.
+* ``daily`` for a real code over a window that ends before it listed.
 
-Two cases are deliberately absent.  ``trade_cal`` is limited to one official
+A third case once asked an unknown ``api_name``, whose error text had to match
+verbatim; the owner removed it from the live cases on 2026-09-12 and moved the
+question to the stage 3 transport-fidelity script (see ``CASES``).  The
+machinery that judged it stays here, unit-tested.
+
+Two other cases are deliberately absent.  ``trade_cal`` is limited to one official
 call per hour, and ``index_daily`` carries the same limit on a free official
 token; in the live run of 2026-09-12 that limit -- not the relay -- was what
 kept ``index_daily`` from producing evidence, on a gate that has to be
@@ -539,11 +543,13 @@ EXIT_CLEAR = 0
 EXIT_BLOCKED = 1
 EXIT_NOT_CONFIGURED = 2
 
-_NOT_A_REAL_API = "not_a_real_tushare_endpoint"
-
 #: The official server's own answer for an unknown ``api_name``, recorded
-#: verbatim from a live call.  This is the only official error that makes the
-#: ``unknown_api_name`` case meaningful -- see ``classify_error_probe``.
+#: verbatim from a live call.  It is the reference string
+#: ``classify_error_probe`` compares an official-side error against: only when
+#: the official answer carries it does the relay's error text become evidence.
+#: No live case asks this question any more -- the owner removed the
+#: ``unknown_api_name`` case from ``CASES`` on 2026-09-12 -- but the contract
+#: and its unit tests remain.
 REFERENCE_UNKNOWN_API_ERROR = "请指定正确的接口名"
 
 
@@ -566,6 +572,18 @@ class ProbeResult:
     verdict: str
 
 
+#: The live run's case list.  Since the owner's ruling of 2026-09-12 it holds
+#: only ``"empty"`` cases: the ``"error"`` case it once carried
+#: (``unknown_api_name``) was removed so the gate could be re-run to a stable
+#: exit 0.  The ``"error"`` machinery -- :func:`classify_error_probe`,
+#: ``ERROR_DIFFERS``, its membership in ``BLOCKING``, and the ``"error"``
+#: branch of :func:`_verdict` -- is retained deliberately, not forgotten: it is
+#: spec §3 ④'s error-divergence contract, unit-tested directly, and merely
+#: unreachable from this tuple.  The question itself did not vanish: the owner
+#: moved it to the stage 3 transport-fidelity script, which compares the
+#: official reference error against the relay's answer under a controlled quota
+#: window.  Re-adding an ``"error"`` case here is an act that has to be
+#: deliberate -- see ``tests/unit/test_probe_relay_substitution.py``.
 CASES: tuple[ProbeCase, ...] = (
     ProbeCase(
         "nonexistent_symbol",
@@ -579,7 +597,6 @@ CASES: tuple[ProbeCase, ...] = (
         {"ts_code": "000001.SZ", "start_date": "19900101", "end_date": "19901231"},
         "empty",
     ),
-    ProbeCase("unknown_api_name", _NOT_A_REAL_API, {}, "error"),
 )
 
 
@@ -825,11 +842,15 @@ def report(
         "证据** —— 既不算通过，也不算失败。**闸门只在全部用例都给出证据时才放行**，"
         "所以 `INCONCLUSIVE` 同样让阶段 1 保持关闭。",
         "",
-        "注意 `unknown_api_name` 的判定：只有官方答出参照错误串"
-        f"（`{REFERENCE_UNKNOWN_API_ERROR}`）时，relay 的错误串才成为证据。官方若因"
-        "自身原因报错 —— 凭据被拒、限流、网络故障 —— 它答的是另一个问题，该用例"
-        "一律记 `INCONCLUSIVE`（退出码 2），**不得**记 `ERROR_DIFFERS`。否则一份"
-        "过期的 `.env` 就足以把可用的 relay 判成阻断条件。",
+        "错误串判定的规则（`classify_error_probe` 的契约，现无用例行使）：只有官方"
+        f"答出参照错误串（`{REFERENCE_UNKNOWN_API_ERROR}`）时，relay 的错误串才成为"
+        "证据。官方若因自身原因报错 —— 凭据被拒、限流、网络故障 —— 它答的是另一个"
+        "问题，该用例一律记 `INCONCLUSIVE`（退出码 2），**不得**记 `ERROR_DIFFERS`。"
+        "否则一份过期的 `.env` 就足以把可用的 relay 判成阻断条件。行使该规则的"
+        "`unknown_api_name` 用例已由 owner 于 2026-09-12 裁决移出 `CASES`，改由阶段 3"
+        "的传输保真脚本在可控额度窗口下行使（闸门因此可稳定重跑到退出码 0）；移出"
+        "**不撤回**当时记录的实测事实 —— jiaoch 网关对不认识的 `api_name` 回显 relay "
+        "key 并用自身鉴权文案作答，与官方的参照错误串不一致。",
         "",
         "| 用例 | endpoint | 官方作答 | relay 作答 | 判定 |",
         "| --- | --- | --- | --- | --- |",
@@ -954,7 +975,7 @@ git commit -m "feat(provenance): add the stage 0 silent-substitution probe"
 /home/ji/miniconda3/envs/py310/bin/python project/probe_relay_substitution.py
 ```
 
-Expected: 打印三行判定，退出码 `0`，并写出
+Expected: 打印两行判定，退出码 `0`，并写出
 `docs/operations/relay-substitution-probe-2026-09-12.md`。
 
 - [ ] **Step 7: 按退出码处置**
@@ -965,20 +986,31 @@ Expected: 打印三行判定，退出码 `0`，并写出
 | `1` | **停止**，除非该阻断差异已被 owner 显式豁免并留痕（见下）。未被豁免的 `1` 不进入 Task 2；把报告交给 owner，relay 主供决策回炉（spec §3 ④） |
 | `2` | **停止**。闸门未开 —— 凭据缺失，或有用例是 `INCONCLUSIVE`（官方侧限流、不可达，或它因自身原因报错）。补齐条件后**重跑探针**，不要带病进入 Task 2 |
 
-**owner 显式豁免（2026-09-12）**：`unknown_api_name` 一例的 `ERROR_DIFFERS`
-已按 spec §3 ④"由 owner 显式人工豁免"处置。实测依据：jiaoch 的网关对任何它不认识的
-`api_name` 直接回 `token不对，您传过来的是<KEY>请确认` 并回显我们提交的 relay key，
-**不转发上游**；官方同名请求回 `请指定正确的接口名`。三个不同的假接口名
-（`not_a_real_tushare_endpoint` / `foo_bar_baz` / `daily_`）全部复现，因此这是**稳定
-行为**而非偶发。判定为网关的输入校验路径，不是换源作答：三个"官方合法空结果"用例
-全部 `AGREE_EMPTY`，填充数据此前有 4/4 逐位一致的记录。
+**owner 处置（2026-09-12，两度改口；以下以第二次裁定为准）**
 
-豁免的作用域**只有这一例的这条差异**。它不把退出码 `1` 变成"可以继续"：
+**第一次裁定 —— 显式豁免（已被推翻）**：`unknown_api_name` 一例的 `ERROR_DIFFERS`
+曾按 spec §3 ④"由 owner 显式人工豁免"处置，阶段 1 在豁免范围内可开始。实测依据：
+jiaoch 的网关对任何它不认识的 `api_name` 直接回
+`token不对，您传过来的是<KEY>请确认` 并回显我们提交的 relay key，**不转发上游**；
+官方同名请求回 `请指定正确的接口名`。三个不同的假接口名
+（`not_a_real_tushare_endpoint` / `foo_bar_baz` / `daily_`）全部复现，因此这是**稳定
+行为**而非偶发。判定为网关的输入校验路径，不是换源作答。
+
+**第二次裁定 —— 从阶段 0 `CASES` 移出、改派到阶段 3（现行）**：owner 于同日晚些时候
+改口，把 `unknown_api_name` **从阶段 0 的 `CASES` 移出**，使探针可稳定重跑到退出码 0；
+第一次裁定的豁免文本因此作废。**移出不是放弃观察**：该错误串比对改由阶段 3 的轴 1
+传输保真脚本（`verify_transport_fidelity.py`，见「不在本计划内」表）承接，在可控的官方
+额度窗口下把官方参照错误串与 relay 作答逐字比对 —— 与 `index_daily` 保真检查同一条
+理由（额度不可控的端点进不了可复现的硬闸门）。留住的是**机制**：`classify_error_probe`、
+`DIFFERS`/`ERROR_DIFFERS`、其在 `BLOCKING` 中的成员资格，以及 `_verdict` 的 `"error"`
+分支全部保留在探针里（它是 spec §3 ④ 的契约）、单测原样通过，只是不再被阶段 0 的
+`CASES` 触达。移出**不撤回**上面那条实测事实 —— jiaoch 网关对不认识的 `api_name` 与
+官方不一致，仍是已记录的既有证据，只是不再作为一条独立用例把阶段 0 闸门卡死。
 `SUBSTITUTION`、以及任何**新的或不同的** `ERROR_DIFFERS`，仍然是硬阻断。
 
-留痕要求（豁免须可审计）：豁免当天把这段依据写进
-`docs/operations/relay-substitution-probe-<date>.md` 的一个 `## owner 豁免` 小节后再提交
-该报告，并在 `.superpowers/sdd/progress.md` 追加一行。spec 里两处已不成立的
+留痕要求（处置须可审计）：把这段处置写进
+`docs/operations/relay-substitution-probe-<date>.md`，并在
+`.superpowers/sdd/progress.md` 追加一行。spec 里两处已不成立的
 "未知接口名错误串与官方逐字相同"必须同轮修正 —— 它是被观测推翻的事实，不是待办。
 
 **取值只认 `--env-file` 指定的文件**（默认仓库根 `.env`），不依赖 shell 有没有
@@ -987,11 +1019,11 @@ Expected: 打印三行判定，退出码 `0`，并写出
 一份过期的 `TUSHARE_TOKEN` 压过了刚更新过的 `.env`，探针于是把"官方拒绝凭据"
 报成了结论，而 operator 其实已经改好了。
 
-**退出码 0 的严格含义**：不是"没有发现问题"，而是"每个用例都拿到了证据且都同意"。三行里出现任何 `INCONCLUSIVE`，退出码就是 2 而不是 0 —— 官方侧被限流时，`daily` 的空窗口可能正是因为限流才为空的，那样的"两边都空"不构成证据。
+**退出码 0 的严格含义**：不是"没有发现问题"，而是"每个用例都拿到了证据且都同意"。两行里出现任何 `INCONCLUSIVE`，退出码就是 2 而不是 0 —— 官方侧被限流时，`daily` 的空窗口可能正是因为限流才为空的，那样的"两边都空"不构成证据。
 
-**`INCONCLUSIVE` 不等于 relay 有问题**：`unknown_api_name` 一例里，只有官方答出参照错误串 `请指定正确的接口名` 时，relay 的错误串才成为证据；官方若因自身原因报错（凭据被拒、限流、网络故障），该例记 `INCONCLUSIVE`、退出码 2，而不是 `ERROR_DIFFERS`。判据是"官方有没有答出它本该答的那句话"，不是"两边是否都能跑通"。把官方自身的失败记成 relay 的阻断条件是错的：它会把一份过期的 `.env` 变成淘汰可用 relay 的理由，而且退出码 1 的动作（relay 主供决策回炉）根本不是这种情况该走的路。
+**`INCONCLUSIVE` 不等于 relay 有问题**（`classify_error_probe` 的契约，现无用例行使）：只有官方答出参照错误串 `请指定正确的接口名` 时，relay 的错误串才成为证据；官方若因自身原因报错（凭据被拒、限流、网络故障），该例记 `INCONCLUSIVE`、退出码 2，而不是 `ERROR_DIFFERS`。判据是"官方有没有答出它本该答的那句话"，不是"两边是否都能跑通"。把官方自身的失败记成 relay 的阻断条件是错的：它会把一份过期的 `.env` 变成淘汰可用 relay 的理由，而且退出码 1 的动作（relay 主供决策回炉）根本不是这种情况该走的路。原先行使该规则的 `unknown_api_name` 用例已按 owner 2026-09-12 的第二次裁定移出阶段 0 `CASES`、改派阶段 3 传输保真脚本；规则与单测保留在探针里。
 
-若命中的是 `ERROR_DIFFERS`（即官方确实答出了参照错误串，而 relay 不一致），先确认探针没有把 relay 侧的临时网络故障误读成"错误串不同"（重跑一次）；可复现才按阻断处理。**本机凭据状态不影响这一判定**：`TUSHARE_TOKEN` 若已被拒，`unknown_api_name` 一例必然是 `INCONCLUSIVE`，闸门必然停在退出码 2 —— 在 owner 把轮换后的 token 写入 `./.env` 之前，探针不可能给出退出码 0，也不需要为此改动探针。
+若命中的是 `ERROR_DIFFERS`（当前 `CASES` 已无用例能触发它，此判据留待将来重新加入 `"error"` 用例时生效；即官方确实答出了参照错误串，而 relay 不一致），先确认探针没有把 relay 侧的临时网络故障误读成"错误串不同"（重跑一次）；可复现才按阻断处理。**本机凭据状态不影响这一判定**：`TUSHARE_TOKEN` 若已被拒，官方侧每个用例都会因自身原因失败而记 `INCONCLUSIVE`，闸门必然停在退出码 2 —— 在 owner 把轮换后的 token 写入 `./.env` 之前，探针不可能给出退出码 0，也不需要为此改动探针。
 
 ---
 
@@ -4059,7 +4091,7 @@ cd /home/ji/work/program/stock
 | 3 证据链能自证用了 jiaoch | Task 6 Step 1（`_resolve_label`）+ Step 6（真实发布上的自证脚本） |
 | 4 传输身份进入寻址，且新快照不出现 `unknown`；akshare 的 id 是回退链实际胜出者 | Task 5 + Task 4（`_UPSTREAM_VENDOR`）。标签按**作答 host** 取，不由 `transport_id` 推导 —— Task 5 与 Task 6 各自的 `LABEL_FOR_HOST` 就是这条断言的落点：官方 host 恒为 `tushare.pro.*`，只有 relay 的 host 带 relay 前缀 |
 | 5 向后兼容不被破坏（旧五字段仍可解析并回落四段旧路径；开发/诊断走 official 时行为与改造前一致） | Task 5（旧路径回落）+ Task 6（五字段行用例）+ Task 3（`injected_transport` 保持 8 处注入调用点行为不变） |
-| 7 探针有结论并驱动阻断动作 | **阶段 0 最小版本**：Task 1。常态化版本（四接口）属阶段 3 |
+| 7 探针有结论并驱动阻断动作 | **阶段 0 最小版本**：Task 1（2026-09-12 起 `CASES` 只含两例 `"empty"`）。常态化版本（四接口）属阶段 3，并把 `unknown_api_name` 错误串比对一并承接过去（见下「阶段 3 承接的两项观察」） |
 | 12 `audit_raw_provenance.py` 产出报告，不对历史 provider 下结论 | Task 7 |
 | 6、8、9、10、11、13 | **不在本计划**：属阶段 3（§3 证伪体系）与阶段 4（§4 覆盖缺口与基准） |
 
@@ -4069,11 +4101,24 @@ cd /home/ji/work/program/stock
 | --- | --- | --- |
 | `_REQUIRED_ROLE["akshare"] → False` | 阶段 4 | 与基准换主供同一次改动才有意义（spec §4） |
 | 基准指数换 tushare `index_daily` 主供 + 规范化器 | 阶段 4 | 会改数值，历史结论需重跑，必须单独一轮 |
-| `verify_transport_fidelity.py`（轴 1） | 阶段 3 | 依赖阶段 0 探针常态化 |
+| `verify_transport_fidelity.py`（轴 1） | 阶段 3 | 依赖阶段 0 探针常态化；并**承接 `unknown_api_name` 错误串比对**（见下） |
 | `AkShareSource.stock_daily`（轴 2 跨厂商对照） | 阶段 3 | 需夹具先钉死单位与容差 |
 | `collect_index_weight_membership.py` 接 relay、去掉 `TUSHARE_TOKEN` 闸门 | 阶段 4 | 本轮只保证它不被构造器改动打断 |
 | `extend_history_offline.py` 加 `allow_auto_transport` | 不适用 | 它写数据集，属于 published 路径，**保持严格** |
 | `TUSHARE_TOKEN` 轮换 | owner | 与本方案正交 |
+
+**阶段 3 承接的两项阶段 0 观察**（硬闸门都容纳不下，理由同为「官方额度不可控则不可复现」）：
+
+- `index_daily` 的空结果 / 换源行为 —— 原 Task 1 候选用例，2026-09-12 因免费 token
+  1 次/小时的官方额度排除（见 Task 1 模块 docstring）。
+- **未知 `api_name` 错误串比对** —— 原 `unknown_api_name` 用例，2026-09-12 由 owner
+  从阶段 0 `CASES` 移出并**改派到阶段 3**，与 `index_daily` 同一条理由。轴 1 脚本须在
+  **可控的官方额度窗口下**把官方的参照错误串 `请指定正确的接口名` 与 relay 的作答逐字
+  比对。它的起点是 2026-09-12 已记录的实测：三个假 `api_name`
+  （`not_a_real_tushare_endpoint` / `foo_bar_baz` / `daily_`）复现出网关**自身的鉴权
+  文案** `token不对，您传过来的是<KEY>请确认` 并回显我们提交的 relay key、**不转发
+  上游**，而官方侧对同一请求答出参照错误串。移出阶段 0 的只是「用这一例把硬闸门卡住」，
+  **不是「不再观察它」**。
 
 ### 一条未经核实、留给阶段 4 的风险
 
