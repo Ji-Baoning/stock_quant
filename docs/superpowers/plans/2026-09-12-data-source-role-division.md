@@ -194,12 +194,29 @@ def test_classify_error_probe_compares_the_message_verbatim():
     assert classify_error_probe(REFERENCE_UNKNOWN_API_ERROR, "bad api") == DIFFERS
 
 
-def test_a_reference_error_wrapped_in_other_text_still_counts():
-    # The SDK wraps server text in its own exception; the question we asked is
-    # still the question that was answered.
+def test_the_reference_guard_tolerates_a_sdk_wrapper_on_both_sides():
+    """The guard is a membership test; the judgement itself stays verbatim.
+
+    Both sides answer through the same tushare SDK, so if the SDK wraps the
+    server's text in an exception of its own it does so on both sides alike,
+    and the two rendered messages are still equal.  The wrap on one side only
+    is *not* tolerated -- see the next test: that asymmetry is itself the
+    divergence this probe exists to catch.
+    """
+    wrapped = f"Exception: {REFERENCE_UNKNOWN_API_ERROR}"
+    assert classify_error_probe(wrapped, wrapped) == AGREE_ERROR
+
+
+def test_a_wrapper_on_one_side_only_is_a_divergence():
+    # A relay that renders the same server error differently is not running
+    # the same pipeline we audited.  Blocking, not a pass -- and Step 7 says to
+    # re-run once before treating a blocking verdict as real.
     assert classify_error_probe(
         f"Exception: {REFERENCE_UNKNOWN_API_ERROR}", REFERENCE_UNKNOWN_API_ERROR
-    ) == AGREE_ERROR
+    ) == DIFFERS
+    assert classify_error_probe(
+        REFERENCE_UNKNOWN_API_ERROR, f"Exception: {REFERENCE_UNKNOWN_API_ERROR}"
+    ) == DIFFERS
 
 
 def test_an_official_side_that_failed_on_its_own_is_never_evidence():
@@ -821,7 +838,7 @@ if __name__ == "__main__":
 /home/ji/miniconda3/envs/py310/bin/python -m pytest tests/unit/test_probe_relay_substitution.py -v
 ```
 
-Expected: PASS — 20 passed
+Expected: PASS — 21 passed
 
 - [ ] **Step 5: 提交**
 
