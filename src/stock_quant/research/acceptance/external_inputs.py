@@ -393,7 +393,13 @@ def price_sample_frame(daily: pd.DataFrame, open_days: Sequence[date]) -> pd.Dat
     if not days:
         return daily.iloc[0:0]
     edges = {days[0], days[-1]}
-    wanted = daily[daily["trade_date"].isin(edges)]
+    # ``open_days`` are plain ``date`` objects while the stored column may be
+    # ``datetime64[us]`` (DatasetReader) or object ``date`` (a direct Parquet
+    # read): compare on the date part so neither shape depends on the implicit
+    # cast ``isin`` is deprecating away.  A silently emptied sample would be
+    # reported as ``single_price_source`` -- a false reason about the version
+    # -- so this comparison must never be the thing that fails quietly.
+    wanted = daily[pd.to_datetime(daily["trade_date"]).dt.date.isin(edges)]
     keys = [key for key in ("trade_date", "symbol", "source") if key in wanted.columns]
     return wanted.sort_values(keys, kind="stable")
 

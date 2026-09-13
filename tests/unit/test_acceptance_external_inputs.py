@@ -9,6 +9,7 @@ path and hash: a replaced excerpt must be detected, not silently accepted.
 from __future__ import annotations
 
 import hashlib
+import warnings
 from datetime import date
 from pathlib import Path
 
@@ -197,6 +198,29 @@ def test_price_sample_takes_the_window_edges() -> None:
         [date(2021, 11, 1), date(2021, 11, 2), date(2021, 11, 3)],
     )
     assert sorted(sample["trade_date"]) == [date(2021, 11, 1), date(2021, 11, 3)]
+
+
+def test_price_sample_matches_edge_days_of_any_date_dtype() -> None:
+    """Edge selection never relies on pandas casting a ``date`` to match.
+
+    ``DatasetReader`` hands back ``datetime64[us]`` while a direct Parquet read
+    hands back object ``date`` values.  ``isin`` currently coerce-matches both,
+    but that castable path is deprecated, and once it goes the mask is empty --
+    an empty sample is then reported as ``single_price_source``, a verdict that
+    says the version has one price source when it has two.  Both shapes must
+    select the same two edge days, without a FutureWarning on the way.
+    """
+    days = [date(2021, 11, 1), date(2021, 11, 2), date(2021, 11, 3)]
+    base = pd.DataFrame({"trade_date": days, "symbol": ["600000.SH"] * 3})
+    for column in (base["trade_date"], base["trade_date"].astype("datetime64[us]")):
+        daily = base.assign(trade_date=column)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            sample = price_sample_frame(daily, days)
+        assert [pd.Timestamp(day) for day in sample["trade_date"]] == [
+            pd.Timestamp("2021-11-01"),
+            pd.Timestamp("2021-11-03"),
+        ]
 
 
 def test_a_single_price_source_refuses_to_compare() -> None:
