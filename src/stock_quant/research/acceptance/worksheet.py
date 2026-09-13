@@ -116,6 +116,7 @@ WORKSHEET_ERROR_CATEGORIES = (
     "conclusion_required",
     "external_input_invalid",
     "candidate_evidence_missing",
+    "unknown_check_code",
 )
 
 
