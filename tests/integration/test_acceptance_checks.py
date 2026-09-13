@@ -54,7 +54,7 @@ _WINDOW_END = date(2021, 11, 30)
 #: The repository fixture universe the stub ``stock_basic`` answer must cover.
 _FIXTURE_UNIVERSE_SYMBOLS = tuple(
     Universe.from_yaml(
-        _REPO_ROOT / "configs" / "universe.yml"
+        _REPO_ROOT / "templates" / "project-config" / "universe.yml"
     ).symbols
 )
 _STOCK_BASIC_LIST_DATE = date(2001, 1, 2)

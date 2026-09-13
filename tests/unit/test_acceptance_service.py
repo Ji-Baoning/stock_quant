@@ -62,7 +62,7 @@ _PREPARED_AT = datetime(2026, 9, 8, tzinfo=timezone.utc)
 _CREATED_AT = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
 
 _FIXTURE_UNIVERSE_SYMBOLS = tuple(
-    Universe.from_yaml(_REPO_ROOT / "configs" / "universe.yml").symbols
+    Universe.from_yaml(_REPO_ROOT / "templates" / "project-config" / "universe.yml").symbols
 )
 _STOCK_BASIC_LIST_DATE = date(2001, 1, 2)
 
@@ -251,7 +251,7 @@ def _published_project(root: Path) -> AcceptanceProject:
         "trading_rules.yml",
         "universe.yml",
     ):
-        shutil.copy(_REPO_ROOT / "configs" / name, configs / name)
+        shutil.copy(_REPO_ROOT / "templates" / "project-config" / name, configs / name)
     # The fixture's baseline window must equal the stubbed update window: on
     # the repository's wide baseline the bootstrap would seed weekday
     # approximations far beyond November 2021, and a relay update can never

@@ -182,7 +182,7 @@ def _ensure_fixture_configs(project_root: Path, master: pd.DataFrame) -> None:
         target = config_dir / name
         if not target.is_file():
             target.write_text(
-                (_REPO_ROOT / "configs" / name).read_text(encoding="utf-8"),
+                (_REPO_ROOT / "templates" / "project-config" / name).read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
     entries = [
@@ -709,11 +709,11 @@ def _write_config_tree(
         "universe.yml",
         "corporate_action_reviews.yml",
     ):
-        source = _REPO_ROOT / "configs" / name
+        source = _REPO_ROOT / "templates" / "project-config" / name
         if source.is_file():
             shutil.copyfile(source, configs / name)
     shutil.copyfile(
-        _REPO_ROOT / "configs" / "experiments" / "momentum_60d.yml",
+        _REPO_ROOT / "templates" / "project-config" / "experiments" / "momentum_60d.yml",
         configs / "experiments" / "momentum_60d.yml",
     )
     # The repository example spec declares the formal walk-forward policy and

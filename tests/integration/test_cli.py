@@ -184,9 +184,11 @@ def test_data_bootstrap_publishes_initial_dataset(cli_runner, tmp_path):
     root = tmp_path / "seed-project"
     configs = root / "configs"
     configs.mkdir(parents=True)
-    repo_configs = Path(__file__).resolve().parents[2] / "configs"
+    template_configs = (
+        Path(__file__).resolve().parents[2] / "templates" / "project-config"
+    )
     for name in ("project.yml", "sources.yml", "costs.yml", "universe.yml"):
-        shutil.copy(repo_configs / name, configs / name)
+        shutil.copy(template_configs / name, configs / name)
 
     result = cli_runner.invoke(app, ["data", "bootstrap", "--root", str(root)])
 

@@ -63,8 +63,9 @@ def test_load_project_config_never_contains_tushare_token(
 def test_load_project_config_missing_root_raises_project_root_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    #: The repository root carries a complete ``configs/`` tree; running from
-    #: there must not give a fallback target for an unrelated missing root.
+    #: The repository root has no live ``configs/`` tree (only the committed
+    #: template under ``templates/project-config``); running from there must
+    #: not give a fallback target for an unrelated missing root.
     monkeypatch.chdir(Path(__file__).resolve().parents[2])
 
     with pytest.raises(ProjectRootPathError):

@@ -42,7 +42,7 @@ from stock_quant.research.spec import (
 from stock_quant.research.walk_forward.policy import canonical_sha256
 
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
-_EXAMPLE_SPEC = f"{_REPO_ROOT}/configs/experiments/momentum_60d.yml"
+_EXAMPLE_SPEC = f"{_REPO_ROOT}/templates/project-config/experiments/momentum_60d.yml"
 
 _FROZEN_POLICY_DUMP = {
     "target_count": 10,

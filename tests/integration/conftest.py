@@ -3,8 +3,8 @@
 Task 13 wires the research runner to a Typer CLI and builds a thin end-to-end
 acceptance over one synthetic project.  A test-support file is justified here
 because *both* ``test_cli.py`` and ``test_end_to_end.py`` need the exact same
-deterministic synthetic project (a ``configs/`` tree copied from the
-repository plus one content-addressed 8-table dataset that also carries
+deterministic synthetic project (a ``configs/`` tree copied from the committed
+``templates/project-config`` template plus one content-addressed 8-table dataset that also carries
 ``adjusted_bar``, ``corporate_action_quarantine``,
 ``corporate_action_coverage`` and ``security_master_coverage`` evidence
 tables) and the same two fixtures
@@ -86,6 +86,11 @@ from stock_quant.research.acceptance.registry import AcceptanceRegistry
 from stock_quant.research.universe import load_universe_coverage_criterion
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: The committed configuration template the fixture projects copy.  The
+#: repository root deliberately carries no live ``configs/`` tree; the
+#: template directory is a copy source only and is never resolved as a root.
+_TEMPLATE_CONFIG = _REPO_ROOT / "templates" / "project-config"
 
 #: The experiment spec name the CLI research command is invoked with.
 FIXTURE_SPEC = "configs/experiments/momentum_60d.yml"
@@ -304,11 +309,30 @@ def _wf_membership_facts(universe: Universe) -> list[dict[str, object]]:
     ]
 
 
+def _fixture_sources_yaml() -> str:
+    """The template ``sources.yml`` with every supplier enabled by default.
+
+    The fixture projects must not inherit the template's per-supplier toggles:
+    the template may ship with ``baostock.enabled: false`` (an operator
+    preference), while fixture updates expect every optional supplier to be
+    attempted unless a test explicitly disables one via ``write_sources``.
+    """
+    payload = yaml.safe_load(
+        (_TEMPLATE_CONFIG / "sources.yml").read_text(encoding="utf-8")
+    )
+    for settings in payload.values():
+        if isinstance(settings, dict):
+            settings["enabled"] = True
+    return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+
+
 def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject:
     """Materialise one full synthetic project under ``root``.
 
-    Copies the repository ``configs/`` tree (project/sources/costs/rules/
-    universe) into ``root/configs/``, authors a short experiment spec, then
+    Copies the committed ``templates/project-config`` tree (project/sources/
+    costs/rules/universe) into ``root/configs/``, rewrites ``sources.yml`` so
+    every supplier is enabled (see ``_fixture_sources_yaml``), authors a short
+    experiment spec, then
     publishes a deterministic 9-table dataset over the repository's 30-symbol
     universe plus two benchmark indices.  The ``adjusted_bar`` rows are
     generated through the production ``build_adjusted_bars`` over the same
@@ -341,9 +365,12 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
     experiments_dir.mkdir(parents=True, exist_ok=True)
     for name in _CONFIG_NAMES:
         (config_dir / name).write_text(
-            (_REPO_ROOT / "configs" / name).read_text(encoding="utf-8"),
+            (_TEMPLATE_CONFIG / name).read_text(encoding="utf-8"),
             encoding="utf-8",
         )
+    (config_dir / "sources.yml").write_text(
+        _fixture_sources_yaml(), encoding="utf-8"
+    )
     (experiments_dir / "momentum_60d.yml").write_text(
         _FIXTURE_SPEC_YAML, encoding="utf-8"
     )
@@ -847,9 +874,10 @@ def write_sources(project_root: Path, *, tushare: bool = True,
                   akshare: bool = True, baostock: bool = True) -> None:
     """Rewrite ``configs/sources.yml`` enabling or disabling each supplier.
 
-    The fixture projects copy the repository ``sources.yml``; tests that need
-    a specific enablement call this before constructing any pipeline so the
-    config gate (never a CLI flag) decides which sources may be built.
+    Fixture projects start from the template ``sources.yml`` with every
+    supplier enabled; tests that need a specific enablement call this before
+    constructing any pipeline so the config gate (never a CLI flag) decides
+    which sources may be built.
     """
     (Path(project_root) / "configs" / "sources.yml").write_text(
         yaml.safe_dump(

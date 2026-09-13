@@ -351,7 +351,7 @@ def _request(scenario: str) -> BacktestRequest:
     spec = _SCENARIOS[scenario]
     calendar = TradingCalendar.from_open_days(_MARKET.days)
     rule_book = TradingRuleBook.from_yaml(
-        _REPO_ROOT / "configs" / "trading_rules.yml"
+        _REPO_ROOT / "templates" / "project-config" / "trading_rules.yml"
     )
     return BacktestRequest(
         dataset_version=_DATASET_VERSION,
@@ -836,7 +836,7 @@ def _request_with(bars=None, actions=None, benchmarks=None,
         dataset_version=_DATASET_VERSION,
         initial_cash=_INITIAL_CASH,
         calendar=calendar,
-        rule_book=TradingRuleBook.from_yaml(_REPO_ROOT / "configs"
+        rule_book=TradingRuleBook.from_yaml(_REPO_ROOT / "templates" / "project-config"
                                             / "trading_rules.yml"),
         cost_model=CostModel(_cost_rate(spec)),
         bars=_read_fixture("bars.parquet") if bars is None else bars,
@@ -897,7 +897,7 @@ def test_pure_intent_plan_replay_records_fills_partials_and_rejections():
         initial_cash=1500,
         calendar=TradingCalendar.from_open_days(_MARKET.days),
         rule_book=TradingRuleBook.from_yaml(
-            _REPO_ROOT / "configs" / "trading_rules.yml"
+            _REPO_ROOT / "templates" / "project-config" / "trading_rules.yml"
         ),
         cost_model=CostModel(_cost_rate(_SCENARIOS["full_cost"])),
         bars=_MARKET.bars,
@@ -1097,7 +1097,7 @@ def _provider_request(
         initial_cash=initial_cash,
         calendar=TradingCalendar.from_open_days(_MARKET.days),
         rule_book=TradingRuleBook.from_yaml(
-            _REPO_ROOT / "configs" / "trading_rules.yml"
+            _REPO_ROOT / "templates" / "project-config" / "trading_rules.yml"
         ),
         cost_model=CostModel(_cost_rate(spec)),
         bars=_provider_bars(),
@@ -1282,7 +1282,7 @@ def test_empty_schedule_without_provider_keeps_the_legacy_behavior():
         initial_cash=_INITIAL_CASH,
         calendar=TradingCalendar.from_open_days(_MARKET.days),
         rule_book=TradingRuleBook.from_yaml(
-            _REPO_ROOT / "configs" / "trading_rules.yml"
+            _REPO_ROOT / "templates" / "project-config" / "trading_rules.yml"
         ),
         cost_model=CostModel(_cost_rate(_SCENARIOS["full_cost"])),
         bars=_provider_bars(),
@@ -1309,7 +1309,7 @@ def test_provider_without_possible_held_symbols_is_a_config_error():
             initial_cash=_INITIAL_CASH,
             calendar=TradingCalendar.from_open_days(_MARKET.days),
             rule_book=TradingRuleBook.from_yaml(
-                _REPO_ROOT / "configs" / "trading_rules.yml"
+                _REPO_ROOT / "templates" / "project-config" / "trading_rules.yml"
             ),
             cost_model=CostModel(_cost_rate(_SCENARIOS["full_cost"])),
             bars=_provider_bars(),
@@ -1353,7 +1353,7 @@ def _buffered_weight_provider_request(
         initial_cash=_INITIAL_CASH,
         calendar=TradingCalendar.from_open_days(_MARKET.days),
         rule_book=TradingRuleBook.from_yaml(
-            _REPO_ROOT / "configs" / "trading_rules.yml"
+            _REPO_ROOT / "templates" / "project-config" / "trading_rules.yml"
         ),
         cost_model=CostModel(_cost_rate(_SCENARIOS["zero_cost"])),
         bars=bars,

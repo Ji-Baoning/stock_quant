@@ -357,7 +357,7 @@ def build_request(
         stability_policy=StabilityPolicy(),
         calendar=project.calendar,
         rule_book=TradingRuleBook.from_yaml(
-            _REPO_ROOT / "configs" / "trading_rules.yml"
+            _REPO_ROOT / "templates" / "project-config" / "trading_rules.yml"
         ),
         initial_cash=1_000_000.0,
         dataset_version=project.version,

@@ -77,7 +77,7 @@ _EVENT_DAY = date(2021, 11, 11)
 #: mirrored from ``conftest._REPO_ROOT`` / ``configs/universe.yml``).
 _FIXTURE_UNIVERSE_SYMBOLS = tuple(
     Universe.from_yaml(
-        Path(__file__).resolve().parents[2] / "configs" / "universe.yml"
+        Path(__file__).resolve().parents[2] / "templates" / "project-config" / "universe.yml"
     ).symbols
 )
 _STOCK_BASIC_LIST_DATE = date(2001, 1, 2)

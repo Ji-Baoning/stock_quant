@@ -20,7 +20,7 @@ cd ~/work/program/stock
 set -a; . ./.env; set +a
 
 cd ~/work/program/stock/project
-cp -r ~/work/program/stock/configs .   # 若无 configs
+cp -r ~/work/program/stock/templates/project-config configs   # 若无 configs（仓库根不再有 configs/）
 ```
 
 > `.env` 只在当前 shell 生效。**每次发布前都要重新 source 一次并显式导出

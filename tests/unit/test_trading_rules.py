@@ -18,7 +18,7 @@ from stock_quant.data_model.trading_rules import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
-RULES_YAML = ROOT / "configs" / "trading_rules.yml"
+RULES_YAML = ROOT / "templates" / "project-config" / "trading_rules.yml"
 
 
 @pytest.fixture

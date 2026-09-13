@@ -276,7 +276,7 @@ def test_missing_pre_close_column_disables_the_proof():
 _WINDOW_START = date(2021, 11, 1)
 _WINDOW_END = date(2021, 11, 30)
 _UNIVERSE_SYMBOLS = tuple(
-    Universe.from_yaml(_REPO_ROOT / "configs" / "universe.yml").symbols
+    Universe.from_yaml(_REPO_ROOT / "templates" / "project-config" / "universe.yml").symbols
 )
 _GAPPY_SYMBOL = "000001.SZ"
 _GAP_DAYS = {date(2021, 11, 2), date(2021, 11, 3), date(2021, 11, 4)}
@@ -395,7 +395,7 @@ def test_update_materializes_proven_suspension_bars(tmp_path):
         "trading_rules.yml",
         "universe.yml",
     ):
-        shutil.copy(_REPO_ROOT / "configs" / name, configs / name)
+        shutil.copy(_REPO_ROOT / "templates" / "project-config" / name, configs / name)
     bootstrap_dataset(root)
 
     stubs = {

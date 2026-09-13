@@ -7,7 +7,7 @@ from pathlib import Path
 from stock_quant.data_model.universe import Universe
 
 ROOT = Path(__file__).resolve().parents[2]
-UNIVERSE_YAML = ROOT / "configs" / "universe.yml"
+UNIVERSE_YAML = ROOT / "templates" / "project-config" / "universe.yml"
 
 _CANONICAL_SYMBOL = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
 

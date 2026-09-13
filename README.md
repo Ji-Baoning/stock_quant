@@ -18,9 +18,24 @@ Tushare source. Do not commit `.env` or credentials.
 
 ## Configuration
 
-Project, source, and cost settings are stored under `configs/`. Tushare's token
-is read only from the `TUSHARE_TOKEN` environment variable and is never stored
-in configuration files.
+The repository root does not carry a runtime `configs/` tree. The committed
+configuration template lives under `templates/project-config/`; to create a
+working project, copy it into your project directory and run there, or pass an
+explicit `--root`:
+
+```bash
+mkdir -p ~/my-project
+cp -r templates/project-config ~/my-project/configs
+cd ~/my-project          # run with --root . ...
+python -m stock_quant data update --root .   # ... or use --root ~/my-project
+```
+
+`--root` must point at a directory containing at least
+`configs/project.yml`, `configs/sources.yml`, and `configs/costs.yml`; every
+command resolves and validates it before constructing any service, and there
+is no fallback to the repository root or the template directory. Tushare's
+token is read only from the `TUSHARE_TOKEN` environment variable and is never
+stored in configuration files.
 
 ## Offline data model
 

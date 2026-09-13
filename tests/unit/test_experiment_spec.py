@@ -31,7 +31,7 @@ from stock_quant.research.trust import DataTrustMode
 from stock_quant.research.walk_forward.snapshots import build_snapshot_bundle
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_EXAMPLE_SPEC = _REPO_ROOT / "configs" / "experiments" / "momentum_60d.yml"
+_EXAMPLE_SPEC = _REPO_ROOT / "templates" / "project-config" / "experiments" / "momentum_60d.yml"
 
 #: Static pinned-dataset table hashes for identity tests.  Identity is
 #: spec + snapshot bundle, so every identity call needs a bundle built from
