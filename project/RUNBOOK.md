@@ -122,6 +122,38 @@ python -m stock_quant data validate --root .
   `effective_start_date` 是配置回退后的**实际起点**。别把 `requested_start_date:
   null` 误读成"没有起点"。改造前发布的旧版本没有 `effective_start_date` 字段。
 
+## 阶段 4.5 · 数据验收与 ACCEPTED 发布（正式研究前必须完成）
+
+`data validate` 的 PASS 只说明数据集通过自动质量检查；它**不**产生正式研究所需的
+验收记录。对阶段 4 刚发布的 `dataset_version`，必须先生成并人工填写验收清单，再发布
+`ACCEPTED` 记录：
+
+```bash
+# <VERSION> 是阶段 4 data update 输出的 dataset_version；不要改写已有版本。
+# prepare 会写出清单 YAML，并在 data/acceptance-evidence/<VERSION>/ 下生成六份
+# 确定性证据。六项可机械化人工项（source_row_count_sample、missing_reason_sample、
+# corporate_action_sample、benchmark_sample、security_master_sample、secret_scan）
+# 已指向这些证据，但仍须逐项审阅确认；另外三项外部佐证（exchange_calendar_sample、
+# cross_source_price_sample、trading_rule_effective_dates）只能由审核者补齐。
+python -m stock_quant data acceptance prepare --version <VERSION> \
+  --operator <OPERATOR_ID> --output checklist.yml --root .
+
+# 审核者逐项审阅六项证据、补齐三项外部佐证，然后把九项 manual 全部改为 PASS
+# （九项均 PASS 且每项 evidence 可校验）后才 publish。
+python -m stock_quant data acceptance publish --checklist checklist.yml --root .
+
+# 可选：确认当前版本的 ACCEPTED 记录与每项结果。
+python -m stock_quant data acceptance show --version <VERSION> --root .
+```
+
+`prepare` 产出的九项 manual **全部是待确认**（`PENDING_CONFIRMATION`）：它只生成
+证据、不做签署，所以未确认的清单直接 publish 只会得到 `REJECTED`（原因形如
+`manual_<code>_pending_confirmation`）。命令本身不会把任何 manual 项标成 PASS——
+签署永远是审核者的动作。`publish` 只在自动与人工检查均 PASS 时写入不可变的
+`ACCEPTED` 记录；否则会写入 `REJECTED` 记录并以非零退出。不要通过改验收规则或
+使用 engineering 模式绕过失败。阶段 5 的 `research run` 会选择该数据版本的
+`CURRENT_ACCEPTED`；没有有效的 `ACCEPTED` 记录就不得进入正式研究。
+
 ## 阶段 5 · 正式研究（唯一发布者）
 
 ```bash
