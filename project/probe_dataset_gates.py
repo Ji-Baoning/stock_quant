@@ -14,16 +14,20 @@ equality assertion, not the source of truth.
 
 from __future__ import annotations
 
+import argparse
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_quality.raw_checks import classify_missing_row
+from stock_quant.project_root import resolve_project_root
 from stock_quant.research.acceptance.checks import (
     _ACCEPTED_MISSING_CODES,
     AcceptanceCheckInput,
@@ -34,7 +38,6 @@ from stock_quant.research.acceptance.checks import (
 )
 from stock_quant.research.trust import evaluate_corporate_action_trust
 
-ROOT = Path(__file__).resolve().parent
 #: The window the update must be requested with; asserted, never assumed.
 # The acceptance checker requires the requested window to start on or
 # after the calendar's first open day, so the 2015 window is requested
@@ -167,12 +170,12 @@ def corporate_action_gate(
     )
 
 
-def main() -> int:
-    symbols = Universe.from_yaml(ROOT / "configs" / "universe.yml").symbols
-    version = DatasetPublisher(ROOT).current().version
+def run(root: Path, config: ProjectConfig) -> int:
+    symbols = Universe.from_yaml(root / "configs" / "universe.yml").symbols
+    version = DatasetPublisher(root).current().version
     manifest = json.loads(
         (
-            ROOT / "data" / "standardized" / version / "dataset_manifest.json"
+            root / "data" / "standardized" / version / "dataset_manifest.json"
         ).read_text(encoding="utf-8")
     )
     build = manifest.get("build_config")
@@ -192,7 +195,7 @@ def main() -> int:
     print(
         f"dataset={version} window={start}..{end} universe_symbols={len(symbols)}"
     )
-    with DatasetReader(ROOT).open(version) as dataset:
+    with DatasetReader(root).open(version) as dataset:
         daily = dataset.read("daily_bar")
         master = dataset.read("security_master")
         calendar = dataset.read("trading_calendar")
@@ -212,7 +215,7 @@ def main() -> int:
     )
     for symbol, code in reasons[:20]:
         print(f"  coverage {symbol} {code}")
-    checks = run_automated_checks(AcceptanceCheckInput(ROOT, version))
+    checks = run_automated_checks(AcceptanceCheckInput(root, version))
     for check in checks:
         print(f"check {check.code} {check.status.value} {check.summary}")
     failed = [
@@ -221,6 +224,15 @@ def main() -> int:
     passed = bars.passed and trusted and not failed
     print(f"verdict passed={str(passed).lower()}")
     return 0 if passed else 1
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("."))
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(root, config)
 
 
 if __name__ == "__main__":

@@ -38,11 +38,13 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from stock_quant.config import load_project_config
 from stock_quant.data_model.index_membership_import import (
     build_membership_facts,  # noqa: F401  (re-exported for the script's tests)
     prepare_membership_file,
 )
 from stock_quant.data_model.universe_membership import MembershipReason
+from stock_quant.project_root import resolve_project_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
             "universe_membership facts (offline; no network access)."
         )
     )
+    parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument(
         "--universe-id",
         required=True,
@@ -114,6 +117,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(root, config, args=args)
+
+
+def run(root, config, *, args) -> int:
     try:
         result = prepare_membership_file(
             args.input,

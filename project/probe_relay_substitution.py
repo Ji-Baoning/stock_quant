@@ -64,11 +64,9 @@ from typing import Any, Sequence
 
 import pandas as pd
 
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_sources.tushare_relay import TushareRelayClient
-
-ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ENV_FILE = ROOT / ".env"
-REPORT_DIR = ROOT / "docs" / "operations"
+from stock_quant.project_root import resolve_project_root
 
 AGREE_EMPTY = "AGREE_EMPTY"
 AGREE_ERROR = "AGREE_ERROR"
@@ -420,22 +418,28 @@ def report(
     return "\n".join(lines)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE)
-    parser.add_argument(
-        "--report",
-        type=Path,
-        default=REPORT_DIR / f"relay-substitution-probe-{date.today().isoformat()}.md",
-    )
-    parser.add_argument("--no-report", action="store_true")
-    args = parser.parse_args()
-
-    if args.env_file.is_file():
-        _load_env(args.env_file)
-        print(f"environment: loaded {args.env_file}")
+def run(
+    root: Path,
+    config: ProjectConfig,
+    *,
+    env_file: Path | None = None,
+    report_path: Path | None = None,
+    no_report: bool = False,
+) -> int:
+    if env_file is None:
+        env_file = root / ".env"
+    if report_path is None:
+        report_path = (
+            root
+            / "docs"
+            / "operations"
+            / f"relay-substitution-probe-{date.today().isoformat()}.md"
+        )
+    if env_file.is_file():
+        _load_env(env_file)
+        print(f"environment: loaded {env_file}")
     else:
-        print(f"environment: not found ({args.env_file}); using current environment")
+        print(f"environment: not found ({env_file}); using current environment")
 
     relay_client = TushareRelayClient.from_env()
     if relay_client is None:
@@ -468,10 +472,10 @@ def main() -> int:
         )
 
     text = report(results, secrets=secrets)
-    if not args.no_report:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(text, encoding="utf-8")
-        print(f"report: {args.report}")
+    if not no_report:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(text, encoding="utf-8")
+        print(f"report: {report_path}")
 
     if blocking(results):
         print("BLOCKED: the relay substituted an answer; do not start stage 1")
@@ -490,6 +494,35 @@ def main() -> int:
         return EXIT_NOT_CONFIGURED
     print("CLEAR: every case agreed; the stage 1 gate is open")
     return EXIT_CLEAR
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help="KEY=VALUE file to load first (default: <root>/.env)",
+    )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="report file (default: <root>/docs/operations/"
+        f"relay-substitution-probe-<today>.md)",
+    )
+    parser.add_argument("--no-report", action="store_true")
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(
+        root,
+        config,
+        env_file=args.env_file,
+        report_path=args.report,
+        no_report=args.no_report,
+    )
 
 
 if __name__ == "__main__":

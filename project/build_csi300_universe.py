@@ -18,21 +18,22 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
-from typing import NamedTuple, Sequence
+from typing import NamedTuple
 
 import pandas as pd
 import yaml
 
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.index_membership_import import (
     MembershipImportResult,
     prepare_membership_file,
 )
 from stock_quant.data_quality.models import QualityReport
-
-ROOT = Path(__file__).resolve().parent
+from stock_quant.project_root import resolve_project_root
 
 #: The index launch cohort; the only intervals allowed to stay
 #: ``initial_constituent`` (which the fact contract requires to be active).
@@ -381,14 +382,16 @@ def resolve_universe_id(deviations: list[str], *, requested: str) -> str:
     return CUSTOM_ID
 
 
-def membership_snapshot_path(universe_id: str) -> Path:
+def membership_snapshot_path(root: Path, universe_id: str) -> Path:
     """Staging path for the derived membership CSV handed to the importer.
 
     Deliberately OUTSIDE the sealed snapshot directory: a snapshot holds only
     the enumerated evidence files, and this derived artifact is legitimately
     rewritten on every build.
     """
-    return ROOT / "data" / "raw" / "csi" / f"{universe_id}_membership_snapshot.csv"
+    return Path(root) / "data" / "raw" / "csi" / (
+        f"{universe_id}_membership_snapshot.csv"
+    )
 
 
 class MembershipBuild(NamedTuple):
@@ -407,16 +410,17 @@ def build_membership(
     *,
     sessions: Sequence[date],
     requested_id: str,
+    root: Path,
     output: Path | None = None,
 ) -> MembershipBuild:
     """Verify a sealed snapshot and turn it into imported membership facts.
 
-    Takes ``sessions`` and ``output`` explicitly rather than reading the
-    published calendar or choosing a path, so the whole offline half is
-    drivable from a fixture without a dataset or a publish round-trip.
-    ``output`` of ``None`` selects the operator default,
-    ``data/membership/<universe_id>.parquet``; the resolved id is only known
-    here, after the cardinality scan.
+    Takes ``root`` (the project root every derived path hangs off),
+    ``sessions`` and ``output`` explicitly rather than reading the published
+    calendar or choosing a path, so the whole offline half is drivable from a
+    fixture without a dataset or a publish round-trip.  ``output`` of ``None``
+    selects the operator default, ``data/membership/<universe_id>.parquet``;
+    the resolved id is only known here, after the cardinality scan.
     """
     snapshot_dir = Path(snapshot_dir)
     manifest, summary = verify_snapshot(snapshot_dir)
@@ -451,11 +455,11 @@ def build_membership(
     else:
         print(f"cardinality exactly {EXPECTED_MEMBERS} on every session")
 
-    snapshot_csv = membership_snapshot_path(universe_id)
+    snapshot_csv = membership_snapshot_path(root, universe_id)
     snapshot_csv.parent.mkdir(parents=True, exist_ok=True)
     rows.to_csv(snapshot_csv, index=False)
     if output is None:
-        output = ROOT / "data" / "membership" / f"{universe_id}.parquet"
+        output = Path(root) / "data" / "membership" / f"{universe_id}.parquet"
     result = prepare_membership_file(
         snapshot_csv,
         universe_id=universe_id,
@@ -520,19 +524,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    args = build_parser().parse_args()
-    snapshot_dir = Path(args.snapshot_dir)
-
-    if args.seal_evidence:
-        summary = seal_evidence(snapshot_dir)
-        print(f"sealed {snapshot_dir / EVIDENCE_NAME}")
-        print(f"  manifest_sha256={summary['manifest_sha256']}")
-        print(f"  repairs_sha256={summary['repairs_sha256']}")
-        return
-
-    publisher = DatasetPublisher(ROOT)
-    with DatasetReader(ROOT).open(publisher.current().version) as dataset:
+def run(
+    root: Path,
+    config: ProjectConfig,
+    *,
+    snapshot_dir: Path,
+    universe_id: str = CANONICAL_ID,
+    output: Path | None = None,
+) -> int:
+    publisher = DatasetPublisher(root)
+    with DatasetReader(root).open(publisher.current().version) as dataset:
         calendar = dataset.read("trading_calendar")
         tables = {name: dataset.read(name) for name in dataset.tables}
     sessions = [
@@ -542,33 +543,34 @@ def main() -> None:
         )
     ]
     build = build_membership(
-        snapshot_dir,
+        Path(snapshot_dir),
         sessions=sessions,
-        requested_id=args.universe_id,
-        output=args.output,
+        requested_id=universe_id,
+        root=root,
+        output=output,
     )
-    universe_id = build.universe_id
+    resolved_id = build.universe_id
     result = build.result
 
     tables["universe_membership"] = result.frame
     published = publisher.publish(tables, QualityReport())
     print(f"dataset_version={published.version}")
 
-    with DatasetReader(ROOT).open(published.version) as dataset:
+    with DatasetReader(root).open(published.version) as dataset:
         daily = dataset.read("daily_bar")
-    repairs_sha = _sha256_file(snapshot_dir / REPAIRS_NAME)
+    repairs_sha = _sha256_file(Path(snapshot_dir) / REPAIRS_NAME)
     definition = {
         "schema_version": 1,
-        "universe_id": universe_id,
+        "universe_id": resolved_id,
         "rules_version": (
             f"{SOURCE}-{build.manifest['package_version']}+repairs-{repairs_sha[:8]}"
         ),
         "membership_table_sha256": result.content_hash,
-        "evidence_summary_sha256": _sha256_file(snapshot_dir / EVIDENCE_NAME),
+        "evidence_summary_sha256": _sha256_file(Path(snapshot_dir) / EVIDENCE_NAME),
         "coverage_start": pd.to_datetime(daily["trade_date"]).min().date().isoformat(),
         "coverage_end": pd.to_datetime(daily["trade_date"]).max().date().isoformat(),
     }
-    definition_path = ROOT / "configs" / "universes" / f"{universe_id}.yml"
+    definition_path = root / "configs" / "universes" / f"{resolved_id}.yml"
     definition_path.parent.mkdir(parents=True, exist_ok=True)
     header = (
         "# Frozen universe definition generated by build_csi300_universe.py.\n"
@@ -582,7 +584,31 @@ def main() -> None:
         encoding="utf-8",
     )
     print(f"definition={definition_path}")
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    parser.add_argument("--root", type=Path, default=Path("."))
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+
+    if args.seal_evidence:
+        summary = seal_evidence(Path(args.snapshot_dir))
+        print(f"sealed {args.snapshot_dir / EVIDENCE_NAME}")
+        print(f"  manifest_sha256={summary['manifest_sha256']}")
+        print(f"  repairs_sha256={summary['repairs_sha256']}")
+        return 0
+
+    return run(
+        root,
+        config,
+        snapshot_dir=args.snapshot_dir,
+        universe_id=args.universe_id,
+        output=args.output,
+    )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

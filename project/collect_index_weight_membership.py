@@ -42,21 +42,21 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 import yaml
 
-from stock_quant.config import SourceConfig
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.index_membership_import import (
     prepare_membership_file,
 )
 from stock_quant.data_quality.models import QualityReport
 from stock_quant.data_sources.tushare import TushareSource
-
-ROOT = Path(__file__).resolve().parent
+from stock_quant.project_root import resolve_project_root
 
 
 def _sha256_file(path: Path) -> str:
@@ -84,48 +84,41 @@ def _month_end_date(yearmonth: str) -> date:
     return period.end_time.date()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Collect tushare index_weight snapshots into a frozen universe "
-            "definition (network: one index_weight call per month)."
-        )
-    )
-    parser.add_argument("--index-code", default="399300.SZ")
-    parser.add_argument("--start", default="201412", help="YYYYMM first month")
-    parser.add_argument("--end", default="202608", help="YYYYMM last month")
-    parser.add_argument(
-        "--universe-id",
-        default="custom_csi300_tw",
-        help="custom_<slug> (no cardinality check) or csi300 (exactly 300/day)",
-    )
-    parser.add_argument("--pause-seconds", type=float, default=1.0)
-    parser.add_argument("--skip-pull", action="store_true",
-                        help="reuse stored snapshots; only re-run steps 2-5")
-    args = parser.parse_args()
-
+def run(
+    root: Path,
+    config: ProjectConfig,
+    *,
+    index_code: str = "399300.SZ",
+    start: str = "201412",
+    end: str = "202608",
+    universe_id: str = "custom_csi300_tw",
+    pause_seconds: float = 1.0,
+    skip_pull: bool = False,
+) -> int:
     token = os.environ.get("TUSHARE_TOKEN")
-    if not token and not args.skip_pull:
+    if not token and not skip_pull:
         raise SystemExit("TUSHARE_TOKEN is required (index_weight permission)")
 
-    snapshot_dir = ROOT / "data" / "raw" / "csi" / "index_weight"
+    snapshot_dir = root / "data" / "raw" / "csi" / "index_weight"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
-    months = _month_ends(args.start, args.end)
+    months = _month_ends(start, end)
 
     # ---- step 1: pull and store every monthly snapshot --------------------
-    if not args.skip_pull:
+    if not skip_pull:
         # ``allow_auto_transport=True`` keeps this offline collector working
         # after the published path became strict.  Rewiring it to consume the
         # relay as its transport (and dropping the TUSHARE_TOKEN gate above) is
         # design spec §4, stage 4 -- not this change.
-        source = TushareSource(SourceConfig(), allow_auto_transport=True)
+        source = TushareSource(
+            config.sources["tushare"], allow_auto_transport=True
+        )
         client = source._client
         for index, yearmonth in enumerate(months):
-            target = snapshot_dir / f"{args.index_code}_{yearmonth}.csv"
+            target = snapshot_dir / f"{index_code}_{yearmonth}.csv"
             if target.exists():
                 continue
             frame = client.index_weight(
-                index_code=args.index_code,
+                index_code=index_code,
                 start_date=f"{yearmonth}01",
                 end_date=f"{yearmonth}31",
             )
@@ -138,14 +131,14 @@ def main() -> None:
             print(
                 f"[{index + 1}/{len(months)}] {yearmonth}: {len(frame)} rows"
             )
-            time.sleep(args.pause_seconds)
+            time.sleep(pause_seconds)
 
     # ---- step 2: evidence manifest ----------------------------------------
-    snapshot_files = sorted(snapshot_dir.glob(f"{args.index_code}_*.csv"))
+    snapshot_files = sorted(snapshot_dir.glob(f"{index_code}_*.csv"))
     if not snapshot_files:
         raise SystemExit(f"no snapshots stored under {snapshot_dir}")
     manifest = {
-        "index_code": args.index_code,
+        "index_code": index_code,
         "source": "tushare_index_weight",
         "source_url": "https://api.tushare.pro",
         "endpoint": "index_weight",
@@ -218,8 +211,8 @@ def main() -> None:
                     ),
                 }
             )
-    snapshot_csv = ROOT / "data" / "raw" / "csi" / (
-        f"{args.universe_id}_membership_snapshot.csv"
+    snapshot_csv = root / "data" / "raw" / "csi" / (
+        f"{universe_id}_membership_snapshot.csv"
     )
     snapshot_csv.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(consolidated).to_csv(snapshot_csv, index=False)
@@ -232,14 +225,14 @@ def main() -> None:
     # ---- step 4: evidence-bound import ------------------------------------
     result = prepare_membership_file(
         snapshot_csv,
-        universe_id=args.universe_id,
+        universe_id=universe_id,
         source="tushare_index_weight",
         source_url="https://api.tushare.pro",
         snapshot_sha256=snapshot_sha256,
         source_document_sha256=manifest_sha256,
-        effective_date=_month_end_date(args.start),
-        announcement_date=_month_end_date(args.start),
-        output=ROOT / "data" / "membership" / f"{args.universe_id}.parquet",
+        effective_date=_month_end_date(start),
+        announcement_date=_month_end_date(start),
+        output=root / "data" / "membership" / f"{universe_id}.parquet",
     )
     print(
         f"membership facts={len(result.frame)} "
@@ -247,31 +240,29 @@ def main() -> None:
     )
 
     # ---- step 5: republish the dataset with the membership table ----------
-    publisher = DatasetPublisher(ROOT)
+    publisher = DatasetPublisher(root)
     version = publisher.current().version
-    with DatasetReader(ROOT).open(version) as dataset:
+    with DatasetReader(root).open(version) as dataset:
         tables = {name: dataset.read(name) for name in dataset.tables}
     tables["universe_membership"] = result.frame
     published = publisher.publish(tables, QualityReport())
     print(f"dataset_version={published.version}")
 
     # ---- step 6: emit the frozen universe definition ----------------------
-    with DatasetReader(ROOT).open(published.version) as dataset:
+    with DatasetReader(root).open(published.version) as dataset:
         daily = dataset.read("daily_bar")
     coverage_start = pd.to_datetime(daily["trade_date"]).min().date()
     coverage_end = pd.to_datetime(daily["trade_date"]).max().date()
     definition = {
         "schema_version": 1,
-        "universe_id": args.universe_id,
+        "universe_id": universe_id,
         "membership_table_sha256": result.content_hash,
         "evidence_summary_sha256": manifest_sha256,
         "coverage_start": coverage_start.isoformat(),
         "coverage_end": coverage_end.isoformat(),
         "rules_version": "tushare-index-weight-monthly-v1",
     }
-    definition_path = (
-        ROOT / "configs" / "universes" / f"{args.universe_id}.yml"
-    )
+    definition_path = root / "configs" / "universes" / f"{universe_id}.yml"
     header = (
         "# Frozen universe definition generated by "
         "collect_index_weight_membership.py.\n"
@@ -288,8 +279,43 @@ def main() -> None:
     derived = _sha256_file(definition_path)
     print(f"definition={definition_path} (universe_version={derived})")
     print("next: research specs pin universe_definition: "
-          f"{args.universe_id} + universe_version: {derived[:16]}…")
+          f"{universe_id} + universe_version: {derived[:16]}…")
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Collect tushare index_weight snapshots into a frozen universe "
+            "definition (network: one index_weight call per month)."
+        )
+    )
+    parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--index-code", default="399300.SZ")
+    parser.add_argument("--start", default="201412", help="YYYYMM first month")
+    parser.add_argument("--end", default="202608", help="YYYYMM last month")
+    parser.add_argument(
+        "--universe-id",
+        default="custom_csi300_tw",
+        help="custom_<slug> (no cardinality check) or csi300 (exactly 300/day)",
+    )
+    parser.add_argument("--pause-seconds", type=float, default=1.0)
+    parser.add_argument("--skip-pull", action="store_true",
+                        help="reuse stored snapshots; only re-run steps 2-5")
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(
+        root,
+        config,
+        index_code=args.index_code,
+        start=args.start,
+        end=args.end,
+        universe_id=args.universe_id,
+        pause_seconds=args.pause_seconds,
+        skip_pull=args.skip_pull,
+    )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

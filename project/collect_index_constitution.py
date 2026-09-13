@@ -18,12 +18,12 @@ import hashlib
 import importlib.metadata
 import json
 import sys
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parent
 SOURCE = "index_constitution"
 SOURCE_URL = "https://github.com/unliftedq/index-constitution"
 
@@ -127,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
             "immutable snapshot directory (requires pandas >= 3)."
         )
     )
+    parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument(
         "--out-dir",
         type=Path,
@@ -139,26 +140,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _default_out_dir() -> Path:
+def _default_out_dir(root: Path) -> Path:
     return (
-        ROOT / "data" / "raw" / "csi" / "index_constitution"
+        Path(root) / "data" / "raw" / "csi" / "index_constitution"
         / date.today().isoformat()
     )
 
 
-def main() -> None:
-    args = build_parser().parse_args()
-    require_pandas_major(pd.__version__)
-
-    # Local import: the module must stay loadable under pandas 2.x so the
-    # tests can exercise export_frames in the main environment.
-    import index_constitution as ic
-
-    out_dir = args.out_dir or _default_out_dir()
+def run(
+    root: Path,
+    ic_module: object,
+    *,
+    out_dir: Path | None = None,
+) -> int:
+    """Export the frames under ``root`` (already resolved and validated)."""
+    out_dir = out_dir or _default_out_dir(root)
     manifest = export_frames(
-        ic.history("csi300"),
-        ic.latest("csi300"),
-        ic.events(region="cn"),
+        ic_module.history("csi300"),
+        ic_module.latest("csi300"),
+        ic_module.events(region="cn"),
         out_dir,
         # The module's own __version__ is stale ("0.1.0" while the released
         # wheel is 1.0.0); the installed distribution metadata is authoritative.
@@ -172,7 +172,26 @@ def main() -> None:
     for name, digest in sorted(manifest["files"].items()):
         print(f"  {name} sha256={digest}")
     print(f"manifest sha256={_sha256_file(out_dir / 'manifest.json')}")
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    require_pandas_major(pd.__version__)
+
+    # Local imports: the module must stay loadable under pandas 2.x so the
+    # tests can exercise export_frames in the main environment, and the
+    # exporter may run in an isolated interpreter where the package layout
+    # differs; nothing project-level is touched before the pandas check.
+    from stock_quant.config import load_project_config
+    from stock_quant.project_root import resolve_project_root
+
+    import index_constitution as ic
+
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(root, ic, out_dir=args.out_dir)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -173,13 +173,14 @@ def test_require_pandas_major_accepts_pandas_3():
     module.require_pandas_major("3.0.5")  # must not raise
 
 
-def test_parser_defaults_to_todays_dated_directory():
+def test_parser_defaults_to_todays_dated_directory(tmp_path: Path):
     """``out_dir`` defaults to None so main() derives today's dated path."""
     module = _load_export_module()
     args = module.build_parser().parse_args([])
     assert args.out_dir is None
-    assert module._default_out_dir() == (
-        module.ROOT
+    assert args.root == Path(".")
+    assert module._default_out_dir(tmp_path) == (
+        tmp_path
         / "data"
         / "raw"
         / "csi"

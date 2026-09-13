@@ -431,7 +431,7 @@ def _redirect_staging(monkeypatch, tmp_path: Path):
     module = _load_build_module()
     staged = tmp_path / "staging"
 
-    def _path(universe_id: str) -> Path:
+    def _path(root: Path, universe_id: str) -> Path:
         return staged / f"{universe_id}_membership_snapshot.csv"
 
     monkeypatch.setattr(module, "membership_snapshot_path", _path)
@@ -471,6 +471,7 @@ def test_build_membership_end_to_end_from_a_fixture_snapshot(
         directory,
         sessions=[date(2006, 8, 14)],
         requested_id="csi300",
+        root=tmp_path,
         output=output,
     )
 
@@ -505,6 +506,7 @@ def test_build_membership_falls_back_to_custom_when_count_cannot_reach_300(
         directory,
         sessions=[date(2005, 4, 8)],
         requested_id="csi300",
+        root=tmp_path,
         output=output,
     )
 
@@ -587,9 +589,9 @@ def test_parser_has_a_seal_only_mode(tmp_path: Path):
     assert args.seal_evidence is True
 
 
-def test_membership_snapshot_is_staged_outside_the_snapshot_dir():
+def test_membership_snapshot_is_staged_outside_the_snapshot_dir(tmp_path: Path):
     module = _load_build_module()
-    path = module.membership_snapshot_path("custom_csi300_ic")
+    path = module.membership_snapshot_path(tmp_path, "custom_csi300_ic")
     assert path.name == "custom_csi300_ic_membership_snapshot.csv"
     assert path.parent.name == "csi"
     assert "index_constitution" not in path.parts

@@ -14,26 +14,29 @@ YAML the operator named.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping
 
 import pandas as pd
 import yaml
 
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.dataset import DatasetReader
 from stock_quant.data_quality.raw_checks import classify_missing_row
+from stock_quant.project_root import resolve_project_root
 from stock_quant.research.acceptance.checks import (
     _ACCEPTED_MISSING_CODES,
     _open_days,
     _window,
 )
 
-ROOT = Path(__file__).resolve().parent
 #: The window the update must be requested with; asserted, never assumed.
 # The acceptance checker requires the requested window to start on or
 # after the calendar's first open day, so the 2015 window is requested
@@ -319,17 +322,19 @@ def apply_evidence(
     return patched
 
 
-def main(version: str, checklist_path: Path) -> int:
-    evidence_root = ROOT / "data" / EVIDENCE_DIRNAME / version
+def run(
+    root: Path, config: ProjectConfig, *, version: str, checklist_path: Path
+) -> int:
+    evidence_root = root / "data" / EVIDENCE_DIRNAME / version
     evidence_root.mkdir(parents=True, exist_ok=True)
-    with DatasetReader(ROOT).open(version) as dataset:
+    with DatasetReader(root).open(version) as dataset:
         daily = dataset.read("daily_bar")
         master = dataset.read("security_master")
         calendar = dataset.read("trading_calendar")
         corporate_action = dataset.read("corporate_action")
     manifest = json.loads(
         (
-            ROOT / "data" / "standardized" / version / "dataset_manifest.json"
+            root / "data" / "standardized" / version / "dataset_manifest.json"
         ).read_text(encoding="utf-8")
     )
     build = manifest.get("build_config")
@@ -344,8 +349,7 @@ def main(version: str, checklist_path: Path) -> int:
     # The manifest stores these as plain mappings, not ``RawSnapshotBinding``.
     snapshots = list(build.get("raw_snapshots", []))
     open_days = [day for day in _open_days(calendar) if start <= day <= end]
-    project = yaml.safe_load((ROOT / "configs" / "project.yml").read_text())
-    benchmarks = tuple(str(s) for s in project["benchmark_symbols"])
+    benchmarks = tuple(str(s) for s in config.benchmark_symbols)
     written = [
         source_row_count_evidence(
             manifest, snapshots, trading_days=len(open_days)
@@ -359,7 +363,7 @@ def main(version: str, checklist_path: Path) -> int:
         (evidence_root / file.name).write_text(file.text, encoding="utf-8")
     scanned = [evidence_root / file.name for file in written]
     scanned.append(checklist_path)
-    scan = secret_scan_evidence(scanned, root=ROOT)
+    scan = secret_scan_evidence(scanned, root=root)
     (evidence_root / scan.name).write_text(scan.text, encoding="utf-8")
     names = {
         "source_row_count_sample": "source_row_counts.json",
@@ -371,7 +375,7 @@ def main(version: str, checklist_path: Path) -> int:
     }
     checklist = yaml.safe_load(checklist_path.read_text(encoding="utf-8"))
     patched = apply_evidence(
-        checklist, root=ROOT, evidence_root=evidence_root, names=names
+        checklist, root=root, evidence_root=evidence_root, names=names
     )
     checklist_path.write_text(
         yaml.safe_dump(patched, sort_keys=False, allow_unicode=True),
@@ -379,11 +383,24 @@ def main(version: str, checklist_path: Path) -> int:
     )
     for row in patched["manual_checks"]:
         print(f"manual {row['code']} {row['status']}")
-    print(f"evidence_dir={evidence_root.relative_to(ROOT)}")
+    print(f"evidence_dir={evidence_root.relative_to(root)}")
     return 0
 
 
-if __name__ == "__main__":
-    import typer
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("version", help="published dataset version to evidence")
+    parser.add_argument(
+        "checklist_path",
+        type=Path,
+        help="the acceptance checklist YAML to patch in place",
+    )
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(root, config, version=args.version, checklist_path=args.checklist_path)
 
-    typer.run(main)
+
+if __name__ == "__main__":
+    raise SystemExit(main())

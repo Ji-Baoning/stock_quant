@@ -25,16 +25,16 @@ from __future__ import annotations
 
 import argparse
 import os
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_sources.tushare_relay import TushareRelayClient
-
-DATASET_ROOT = Path(__file__).resolve().parent
-DEFAULT_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+from stock_quant.project_root import resolve_project_root
 
 
 def _load_env(path: Path) -> None:
@@ -99,17 +99,20 @@ def _pretrade_breaks(relay: pd.DataFrame) -> list[tuple[date, date | None, date]
     ]
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE)
-    parser.add_argument("--exchange", default="SSE")
-    args = parser.parse_args()
-
-    if args.env_file.is_file():
-        _load_env(args.env_file)
-        print(f"environment: loaded {args.env_file}")
+def run(
+    root: Path,
+    config: ProjectConfig,
+    *,
+    env_file: Path | None = None,
+    exchange: str = "SSE",
+) -> int:
+    if env_file is None:
+        env_file = root / ".env"
+    if env_file.is_file():
+        _load_env(env_file)
+        print(f"environment: loaded {env_file}")
     else:
-        print(f"environment: not found ({args.env_file}); using current environment")
+        print(f"environment: not found ({env_file}); using current environment")
 
     client = TushareRelayClient.from_env()
     if client is None:
@@ -120,8 +123,8 @@ def main() -> int:
         return 2
     print(f"relay: host={client.host} sdk={client.sdk_version}")
 
-    publisher = DatasetPublisher(DATASET_ROOT)
-    with DatasetReader(DATASET_ROOT).open(publisher.current().version) as dataset:
+    publisher = DatasetPublisher(root)
+    with DatasetReader(root).open(publisher.current().version) as dataset:
         stored = dataset.read("trading_calendar")
 
     stored_open = _open_days(stored, "calendar_date", "is_trading_day")
@@ -136,12 +139,12 @@ def main() -> int:
 
     relay = client.query(
         "trade_cal",
-        exchange=args.exchange,
+        exchange=exchange,
         start_date=start.strftime("%Y%m%d"),
         end_date=end.strftime("%Y%m%d"),
     )
     relay_open = _open_days(relay, "cal_date", "is_open")
-    print(f"relay calendar: {len(relay_open)} open days (exchange={args.exchange})")
+    print(f"relay calendar: {len(relay_open)} open days (exchange={exchange})")
 
     only_stored = sorted(stored_open - relay_open)
     only_relay = sorted(relay_open - stored_open)
@@ -165,6 +168,22 @@ def main() -> int:
             got = claimed.isoformat() if claimed else "blank"
             print(f"  {current}: claimed={got} expected={previous}")
     return 1
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help="KEY=VALUE file to load first (default: <root>/.env)",
+    )
+    parser.add_argument("--exchange", default="SSE")
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(root, config, env_file=args.env_file, exchange=args.exchange)
 
 
 if __name__ == "__main__":

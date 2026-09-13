@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[2] / "project"
@@ -105,14 +106,46 @@ def test_scan_returns_nothing_for_a_store_that_does_not_exist(tmp_path):
     assert result.skipped == []
 
 
-def test_the_default_root_is_the_project_directory():
-    # Real data lives in ``project/data/raw``; a repo-root default would find
-    # nothing and report an empty audit as if it were the truth.
-    assert audit_raw_provenance.PROJECT_ROOT == PROJECT
-    assert (PROJECT / "data" / "raw").is_dir()
-    assert audit_raw_provenance.DEFAULT_REPORT.parent == (
-        PROJECT.parent / "docs" / "operations"
+def _make_project_root(root: Path) -> Path:
+    """Add the three required configs so ``root`` is a valid project root."""
+    configs = root / "configs"
+    configs.mkdir(parents=True, exist_ok=True)
+    (configs / "project.yml").write_text(
+        "start_date: 2020-01-01\nend_date: 2020-12-31\n"
+        "initial_cash: 100000\nbenchmark_symbols: [000300.SH]\n"
     )
+    (configs / "sources.yml").write_text("tushare: {enabled: false}\n")
+    (configs / "costs.yml").write_text("scenarios: []\n")
+    return root
+
+
+def test_the_project_directory_still_carries_the_real_raw_store():
+    # Real data lives in ``project/data/raw``; running against the repo root
+    # instead would find nothing and report an empty audit as the truth.
+    assert (PROJECT / "data" / "raw").is_dir()
+
+
+def test_the_default_report_path_derives_from_the_root(tmp_path):
+    """No ``--report``: the report lands under ``<root>/docs/operations``."""
+    root = _make_project_root(tmp_path)
+    _write_manifest(
+        root / "data" / "raw",
+        "tushare",
+        "daily",
+        "rk",
+        "aa" * 32,
+        manifest=TUSHARE_MANIFEST,
+    )
+    expected = (
+        root
+        / "docs"
+        / "operations"
+        / f"raw-provenance-audit-{date.today().isoformat()}.md"
+    )
+    code = main(["--root", str(root)])
+    assert code == 0
+    assert expected.is_file()
+    assert "不对历史 provider 下结论" in expected.read_text(encoding="utf-8")
 
 
 def test_summarise_flags_environments_absent_from_this_interpreter():
@@ -233,25 +266,17 @@ def test_exit_code_is_two_when_only_some_manifests_are_readable(tmp_path):
     assert _scan_exit_code(tmp_path) == 2
 
 
-def test_main_writes_an_incomplete_report_and_returns_2(tmp_path, monkeypatch, capsys):
+def test_main_writes_an_incomplete_report_and_returns_2(tmp_path, capsys):
     """The load-bearing claim: exit 2 still writes the report, paths and all."""
-    broken = tmp_path / "data" / "raw" / "tushare" / "daily" / "rk" / ("cc" * 32)
+    root = _make_project_root(tmp_path)
+    broken = root / "data" / "raw" / "tushare" / "daily" / "rk" / ("cc" * 32)
     broken.mkdir(parents=True)
     (broken / "manifest.json").write_text("{not json", encoding="utf-8")
     out = tmp_path / "out.md"
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "audit_raw_provenance.py",
-            "--root",
-            str(tmp_path),
-            "--report",
-            str(out),
-        ],
-    )
 
-    code = main()
+    code = main(
+        ["--root", str(root), "--report", str(out)]
+    )
 
     assert code == 2
     assert out.is_file()
@@ -262,27 +287,17 @@ def test_main_writes_an_incomplete_report_and_returns_2(tmp_path, monkeypatch, c
     assert f"report: {out}" in capsys.readouterr().out
 
 
-def test_main_finds_nothing_prints_the_hint_and_writes_no_report(
-    tmp_path, monkeypatch, capsys
-):
+def test_main_finds_nothing_prints_the_hint_and_writes_no_report(tmp_path, capsys):
     """Exit 1 must not overwrite the committed report with a "0 snapshots" one."""
+    root = _make_project_root(tmp_path)
     out = tmp_path / "out.md"
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "audit_raw_provenance.py",
-            "--root",
-            str(tmp_path),
-            "--report",
-            str(out),
-        ],
-    )
 
-    code = main()
+    code = main(
+        ["--root", str(root), "--report", str(out)]
+    )
 
     assert code == 1
     assert not out.exists()
-    assert f"no snapshots found under {tmp_path / 'data' / 'raw'}" in (
+    assert f"no snapshots found under {root / 'data' / 'raw'}" in (
         capsys.readouterr().out
     )

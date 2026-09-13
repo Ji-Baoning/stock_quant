@@ -22,9 +22,12 @@ from __future__ import annotations
 import argparse
 import os
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_sources.tushare_proxy import TushareProxyClient
+from stock_quant.project_root import resolve_project_root
 
 
 def _load_env(path: Path) -> None:
@@ -110,25 +113,20 @@ def _print_watched(client: TushareProxyClient) -> None:
         _print_chain(client, str(capability.get("name") or name))
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--env-file",
-        type=Path,
-        default=Path(__file__).resolve().parents[1] / ".env",
-        help="KEY=VALUE file to load first (default: repo-root .env)",
-    )
-    parser.add_argument(
-        "--probe",
-        metavar="NAME",
-        help="smoke-read one interface with __probe=1 (max 5 rows, server-side)",
-    )
-    args = parser.parse_args()
-    if args.env_file.is_file():
-        _load_env(args.env_file)
-        print(f"environment: loaded {args.env_file}")
+def run(
+    root: Path,
+    config: ProjectConfig,
+    *,
+    env_file: Path | None = None,
+    probe: str | None = None,
+) -> int:
+    if env_file is None:
+        env_file = root / ".env"
+    if env_file.is_file():
+        _load_env(env_file)
+        print(f"environment: loaded {env_file}")
     else:
-        print(f"environment: not found ({args.env_file}); using current environment")
+        print(f"environment: not found ({env_file}); using current environment")
 
     client = TushareProxyClient.from_env()
     if client is None:
@@ -136,13 +134,13 @@ def main() -> int:
         return 1
     print(f"proxy host: {client.host}")
 
-    if args.probe:
+    if probe:
         # __probe=1 is the server's own sample mode and ignores the interface's
         # required_any, so this read is deliberately unchecked.  A live
         # pre-flight would reject e.g. `daily` (required_any:
         # ts_code|trade_date|start_date|end_date) before the sample is asked for.
-        frame = client.query(args.probe, verify_capability="none", **{"__probe": 1})
-        print(f"\n{args.probe} __probe=1 -> {len(frame)} rows")
+        frame = client.query(probe, verify_capability="none", **{"__probe": 1})
+        print(f"\n{probe} __probe=1 -> {len(frame)} rows")
         print(frame.head().to_string(index=False))
         return 0
 
@@ -153,6 +151,26 @@ def main() -> int:
         "checks shape only - no response identifies the answering upstream."
     )
     return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help="KEY=VALUE file to load first (default: <root>/.env)",
+    )
+    parser.add_argument(
+        "--probe",
+        metavar="NAME",
+        help="smoke-read one interface with __probe=1 (max 5 rows, server-side)",
+    )
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(root, config, env_file=args.env_file, probe=args.probe)
 
 
 if __name__ == "__main__":

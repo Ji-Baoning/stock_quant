@@ -16,15 +16,16 @@ experiment to emit order-level diagnostics.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parent
-EXPERIMENTS = ROOT / "data" / "experiments"
-STANDARDIZED = ROOT / "data" / "standardized"
+from stock_quant.config import ProjectConfig, load_project_config
+from stock_quant.project_root import resolve_project_root
 
 #: Spec-section-8 key order for the per-scenario flat object.
 SUMMARY_KEYS = (
@@ -58,20 +59,22 @@ _ORDER_DIFF_COLUMNS = (
 _STATUS_FILLED = "FILLED"
 
 
-def _latest_experiment_dir() -> Path:
-    experiments = [p for p in EXPERIMENTS.iterdir() if p.is_dir()]
+def _latest_experiment_dir(experiments_dir: Path) -> Path:
+    experiments = [p for p in experiments_dir.iterdir() if p.is_dir()]
     if not experiments:
-        sys.exit(f"no experiments under {EXPERIMENTS}")
+        sys.exit(f"no experiments under {experiments_dir}")
     return max(experiments, key=lambda p: p.name)
 
 
-def _price_tape(dataset_version: str, symbols: set[str]) -> pd.DataFrame:
+def _price_tape(
+    root: Path, dataset_version: str, symbols: set[str]
+) -> pd.DataFrame:
     """Per-(date, symbol) signal-day close, restricted to the order symbols.
 
     Returns a frame with datetime64 ``date``, ``symbol`` and float ``close``,
     sorted by ``date`` so it can back a backward ``merge_asof``.
     """
-    path = STANDARDIZED / dataset_version / "daily_bar.parquet"
+    path = root / "data" / "standardized" / dataset_version / "daily_bar.parquet"
     if not path.is_file():
         sys.exit(f"dataset daily_bar missing for {dataset_version}: {path}")
     daily = pd.read_parquet(path)
@@ -176,14 +179,14 @@ def scenario_summary(
     return summary
 
 
-def main() -> None:
-    experiment_dir = _latest_experiment_dir()
+def run(root: Path, config: ProjectConfig) -> None:
+    experiment_dir = _latest_experiment_dir(root / "data" / "experiments")
     metrics = json.loads(
         (experiment_dir / "metrics.json").read_text(encoding="utf-8")
     )
     meta = metrics["meta"]
     run_id = str(meta["run_id"])
-    run = ROOT / "data" / "runs" / run_id
+    run = root / "data" / "runs" / run_id
     scenarios = tuple(
         str(item) for item in (meta.get("spec") or {}).get("cost_scenarios", ())
     )
@@ -207,7 +210,7 @@ def main() -> None:
             )
         diffs_by_scenario[name] = diff
         symbols |= set(diff["symbol"])
-    tape = _price_tape(str(meta["dataset_version"]), symbols)
+    tape = _price_tape(root, str(meta["dataset_version"]), symbols)
 
     for name in scenarios:
         folder = run / "backtest" / name
@@ -241,5 +244,15 @@ def main() -> None:
         print(json.dumps(summary, ensure_ascii=False))
 
 
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("."))
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    run(root, config)
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

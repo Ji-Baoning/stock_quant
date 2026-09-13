@@ -22,56 +22,77 @@ fetch evidence is (or can be) bound, so no formal ACCEPTED record may ever be
 pinned to the version it publishes.
 """
 
+from __future__ import annotations
+
+import argparse
+from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
 import yaml
 
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.adjusted_bar import build_adjusted_bars
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.schemas import CORPORATE_ACTION_QUARANTINE_COLUMNS
 from stock_quant.data_model.universe_membership import membership_frame
 from stock_quant.data_quality.models import QualityReport
+from stock_quant.project_root import resolve_project_root
 
-root = Path(__file__).resolve().parent
-universe = yaml.safe_load((root / "configs" / "universe.yml").read_text())
-symbols = [entry["symbol"] for entry in universe["entries"]]
-print(f"universe symbols={len(symbols)}")
 
-publisher = DatasetPublisher(root)
-version = publisher.current().version
-print(f"base version={version}")
-with DatasetReader(root).open(version) as dataset:
-    daily = dataset.read("daily_bar")
-    corporate_action = dataset.read("corporate_action")
-    coverage = dataset.read("corporate_action_coverage")
-    master = dataset.read("security_master")
-    master_coverage = dataset.read("security_master_coverage")
-    calendar = dataset.read("trading_calendar")
+def run(root: Path, config: ProjectConfig) -> int:
+    universe = yaml.safe_load((root / "configs" / "universe.yml").read_text())
+    symbols = [entry["symbol"] for entry in universe["entries"]]
+    print(f"universe symbols={len(symbols)}")
 
-quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
-adjusted = build_adjusted_bars(
-    daily,
-    corporate_action,
-    quarantine,
-    coverage,
-    symbols=tuple(symbols),
-)
-print(
-    f"adjusted_bar rows={len(adjusted)} symbols={adjusted['symbol'].nunique()} "
-    f"severity={adjusted['quality_severity'].value_counts().to_dict()}"
-)
+    publisher = DatasetPublisher(root)
+    version = publisher.current().version
+    print(f"base version={version}")
+    with DatasetReader(root).open(version) as dataset:
+        daily = dataset.read("daily_bar")
+        corporate_action = dataset.read("corporate_action")
+        coverage = dataset.read("corporate_action_coverage")
+        master = dataset.read("security_master")
+        master_coverage = dataset.read("security_master_coverage")
+        calendar = dataset.read("trading_calendar")
 
-tables = {
-    "daily_bar": daily,
-    "adjusted_bar": adjusted,
-    "security_master": master,
-    "security_master_coverage": master_coverage,
-    "corporate_action": corporate_action,
-    "corporate_action_quarantine": quarantine,
-    "corporate_action_coverage": coverage,
-    "trading_calendar": calendar,
-    "universe_membership": membership_frame([]),
-}
-published = publisher.publish(tables, QualityReport())
-print(f"dataset_version={published.version}")
+    quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
+    adjusted = build_adjusted_bars(
+        daily,
+        corporate_action,
+        quarantine,
+        coverage,
+        symbols=tuple(symbols),
+    )
+    print(
+        f"adjusted_bar rows={len(adjusted)} symbols={adjusted['symbol'].nunique()} "
+        f"severity={adjusted['quality_severity'].value_counts().to_dict()}"
+    )
+
+    tables = {
+        "daily_bar": daily,
+        "adjusted_bar": adjusted,
+        "security_master": master,
+        "security_master_coverage": master_coverage,
+        "corporate_action": corporate_action,
+        "corporate_action_quarantine": quarantine,
+        "corporate_action_coverage": coverage,
+        "trading_calendar": calendar,
+        "universe_membership": membership_frame([]),
+    }
+    published = publisher.publish(tables, QualityReport())
+    print(f"dataset_version={published.version}")
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("."))
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(root, config)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

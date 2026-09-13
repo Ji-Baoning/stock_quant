@@ -43,18 +43,8 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-#: The repository root.  Reports are committed there (``docs/operations``).
-REPO_ROOT = Path(__file__).resolve().parents[1]
-#: The data store root.  Real snapshots live in ``project/data/raw``, never in
-#: ``<repo>/data/raw`` -- defaulting ``--root`` to the repository would scan an
-#: empty tree and produce a confident, wrong report.
-PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_REPORT = (
-    REPO_ROOT
-    / "docs"
-    / "operations"
-    / f"raw-provenance-audit-{date.today().isoformat()}.md"
-)
+from stock_quant.config import ProjectConfig, load_project_config
+from stock_quant.project_root import resolve_project_root
 
 UNKNOWN = "unknown"
 #: Present in the *running interpreter* -- not "present on this machine".
@@ -285,31 +275,62 @@ def exit_code(
     return 0 if records else 1
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=PROJECT_ROOT)
-    parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
-    parser.add_argument("--no-report", action="store_true")
-    args = parser.parse_args()
+def run(
+    root: Path,
+    config: ProjectConfig,
+    *,
+    report_path: Path | None = None,
+    no_report: bool = False,
+) -> int:
+    """Audit the raw store under ``root`` and optionally write the report.
 
-    result = scan(args.root)
+    The default report path derives from ``root`` (``<root>/docs/operations``),
+    never from this file's location.
+    """
+    if report_path is None:
+        report_path = (
+            root
+            / "docs"
+            / "operations"
+            / f"raw-provenance-audit-{date.today().isoformat()}.md"
+        )
+    result = scan(root)
     # Built unconditionally: even an all-unreadable store has something to say,
     # and its report lists the paths and reasons instead of vanishing.
     text = report(result.records, skipped=result.skipped)
     if result.records or result.skipped:
         sys.stdout.write(text)
-        if not args.no_report:
-            args.report.parent.mkdir(parents=True, exist_ok=True)
-            args.report.write_text(text, encoding="utf-8")
-            print(f"report: {args.report}")
+        if not no_report:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(text, encoding="utf-8")
+            print(f"report: {report_path}")
     else:
         # Nothing found at all.  The default report path is a *committed*
         # ``docs/operations/raw-provenance-audit-<today>.md``, so a wrong
         # ``--root`` must not overwrite that audit with a "0 snapshots" one --
         # hence no report file is written here, and this line is the whole
         # behaviour.
-        print(f"no snapshots found under {args.root / 'data' / 'raw'}")
+        print(f"no snapshots found under {root / 'data' / 'raw'}")
     return exit_code(result.records, result.skipped)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="report file (default: <root>/docs/operations/"
+        "raw-provenance-audit-<today>.md)",
+    )
+    parser.add_argument("--no-report", action="store_true")
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(
+        root, config, report_path=args.report, no_report=args.no_report
+    )
 
 
 if __name__ == "__main__":

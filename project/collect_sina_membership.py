@@ -36,6 +36,7 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
@@ -43,13 +44,14 @@ import pandas as pd
 import requests
 import yaml
 
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.index_membership_import import (
     prepare_membership_file,
 )
 from stock_quant.data_quality.models import QualityReport
+from stock_quant.project_root import resolve_project_root
 
-ROOT = Path(__file__).resolve().parent
 BASE_URL = (
     "https://vip.stock.finance.sina.com.cn/corp/view/"
     "vII_HistoryComponent.php?page={page}&indexid={indexid}"
@@ -109,47 +111,38 @@ def _suffix(code: str) -> str:
     return f"{code}.SZ"
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Collect Sina's historical constituent table into a frozen "
-            "universe definition (network: one GET per page)."
-        )
-    )
-    parser.add_argument("--indexid", default="000300")
-    parser.add_argument(
-        "--universe-id",
-        default="csi300",
-        help="canonical id enforces exactly 300 members per day; a custom_ "
-        "id skips only the cardinality check",
-    )
-    parser.add_argument("--pause-seconds", type=float, default=1.0)
-    parser.add_argument("--skip-pull", action="store_true")
-    args = parser.parse_args()
-
-    page_dir = ROOT / "data" / "raw" / "csi" / "sina_history_component"
+def run(
+    root: Path,
+    config: ProjectConfig,
+    *,
+    indexid: str = "000300",
+    universe_id: str = "csi300",
+    pause_seconds: float = 1.0,
+    skip_pull: bool = False,
+) -> int:
+    page_dir = root / "data" / "raw" / "csi" / "sina_history_component"
     page_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- step 1: fetch and store every page -------------------------------
-    if not args.skip_pull:
+    if not skip_pull:
         first = requests.get(
-            FIRST_PAGE_URL.format(indexid=args.indexid),
+            FIRST_PAGE_URL.format(indexid=indexid),
             timeout=30,
             headers=HEADERS,
         )
         first.raise_for_status()
         first.encoding = "gbk"
-        (page_dir / f"{args.indexid}_page_1.html").write_text(
+        (page_dir / f"{indexid}_page_1.html").write_text(
             first.text, encoding="utf-8"
         )
         total = _page_count(first.text)
         print(f"page 1/{total} stored ({len(first.text)} bytes)")
         for page in range(2, total + 1):
-            target = page_dir / f"{args.indexid}_page_{page}.html"
+            target = page_dir / f"{indexid}_page_{page}.html"
             if target.exists():
                 continue
             response = requests.get(
-                BASE_URL.format(page=page, indexid=args.indexid),
+                BASE_URL.format(page=page, indexid=indexid),
                 timeout=30,
                 headers=HEADERS,
             )
@@ -157,17 +150,17 @@ def main() -> None:
             response.encoding = "gbk"
             target.write_text(response.text, encoding="utf-8")
             print(f"page {page}/{total} stored ({len(response.text)} bytes)")
-            time.sleep(args.pause_seconds)
+            time.sleep(pause_seconds)
 
-    pages = sorted(page_dir.glob(f"{args.indexid}_page_*.html"))
+    pages = sorted(page_dir.glob(f"{indexid}_page_*.html"))
     if not pages:
         raise SystemExit(f"no stored pages under {page_dir}")
 
     # ---- step 2: evidence manifest ----------------------------------------
     manifest = {
-        "indexid": args.indexid,
+        "indexid": indexid,
         "source": "sina_index_history_component",
-        "source_url": FIRST_PAGE_URL.format(indexid=args.indexid),
+        "source_url": FIRST_PAGE_URL.format(indexid=indexid),
         "note": (
             "Sina Finance historical constituent table (品种代码/品种名称/"
             "纳入日期/剔除日期), one HTML page per stored file; inclusion and "
@@ -234,8 +227,8 @@ def main() -> None:
         print(f"cross-check csindex current FAILED (advisory): {error}")
 
     # ---- step 4: consolidated snapshot CSV + evidence-bound import --------
-    snapshot_csv = ROOT / "data" / "raw" / "csi" / (
-        f"{args.universe_id}_membership_snapshot.csv"
+    snapshot_csv = root / "data" / "raw" / "csi" / (
+        f"{universe_id}_membership_snapshot.csv"
     )
     pd.DataFrame(facts).to_csv(snapshot_csv, index=False)
     snapshot_sha256 = _sha256_file(snapshot_csv)
@@ -245,14 +238,14 @@ def main() -> None:
     )
     result = prepare_membership_file(
         snapshot_csv,
-        universe_id=args.universe_id,
+        universe_id=universe_id,
         source="sina_index_history_component",
-        source_url=FIRST_PAGE_URL.format(indexid=args.indexid),
+        source_url=FIRST_PAGE_URL.format(indexid=indexid),
         snapshot_sha256=snapshot_sha256,
         source_document_sha256=manifest_sha256,
         effective_date=date.fromisoformat(facts[0]["raw_effective_from"]),
         announcement_date=date.fromisoformat(facts[0]["raw_effective_from"]),
-        output=ROOT / "data" / "membership" / f"{args.universe_id}.parquet",
+        output=root / "data" / "membership" / f"{universe_id}.parquet",
     )
     print(
         f"membership facts={len(result.frame)} "
@@ -260,9 +253,9 @@ def main() -> None:
     )
 
     # ---- step 5: cardinality report over the pinned calendar --------------
-    publisher = DatasetPublisher(ROOT)
+    publisher = DatasetPublisher(root)
     version = publisher.current().version
-    with DatasetReader(ROOT).open(version) as dataset:
+    with DatasetReader(root).open(version) as dataset:
         calendar = dataset.read("trading_calendar")
     sessions = [
         day.date()
@@ -294,27 +287,27 @@ def main() -> None:
             f"cardinality deviates from 300 on {len(deviating)}/{len(sessions)} "
             f"days (first: {deviating[:6]})"
         )
-        if args.universe_id == "csi300":
+        if universe_id == "csi300":
             fallback = "custom_csi300_sina"
             print(
                 f"falling back to {fallback} (custom pools skip only the "
                 "cardinality check; the evidence chain is identical)"
             )
-            args.universe_id = fallback
+            universe_id = fallback
             snapshot_csv = (
-                ROOT
+                root
                 / "data"
                 / "raw"
                 / "csi"
-                / f"{args.universe_id}_membership_snapshot.csv"
+                / f"{universe_id}_membership_snapshot.csv"
             )
             pd.DataFrame(facts).to_csv(snapshot_csv, index=False)
             snapshot_sha256 = _sha256_file(snapshot_csv)
             result = prepare_membership_file(
                 snapshot_csv,
-                universe_id=args.universe_id,
+                universe_id=universe_id,
                 source="sina_index_history_component",
-                source_url=FIRST_PAGE_URL.format(indexid=args.indexid),
+                source_url=FIRST_PAGE_URL.format(indexid=indexid),
                 snapshot_sha256=snapshot_sha256,
                 source_document_sha256=manifest_sha256,
                 effective_date=date.fromisoformat(
@@ -323,7 +316,7 @@ def main() -> None:
                 announcement_date=date.fromisoformat(
                     facts[0]["raw_effective_from"]
                 ),
-                output=ROOT / "data" / "membership" / f"{args.universe_id}.parquet",
+                output=root / "data" / "membership" / f"{universe_id}.parquet",
             )
             print(
                 f"membership facts={len(result.frame)} "
@@ -333,27 +326,27 @@ def main() -> None:
         print("cardinality exactly 300 on every pinned session")
 
     # ---- step 6: republish the dataset with the membership table ----------
-    with DatasetReader(ROOT).open(publisher.current().version) as dataset:
+    with DatasetReader(root).open(publisher.current().version) as dataset:
         tables = {name: dataset.read(name) for name in dataset.tables}
     tables["universe_membership"] = result.frame
     published = publisher.publish(tables, QualityReport())
     print(f"dataset_version={published.version}")
 
     # ---- step 7: emit the frozen universe definition ----------------------
-    with DatasetReader(ROOT).open(published.version) as dataset:
+    with DatasetReader(root).open(published.version) as dataset:
         daily_current = dataset.read("daily_bar")
     coverage_start = pd.to_datetime(daily_current["trade_date"]).min().date()
     coverage_end = pd.to_datetime(daily_current["trade_date"]).max().date()
     definition = {
         "schema_version": 1,
-        "universe_id": args.universe_id,
+        "universe_id": universe_id,
         "membership_table_sha256": result.content_hash,
         "evidence_summary_sha256": manifest_sha256,
         "coverage_start": coverage_start.isoformat(),
         "coverage_end": coverage_end.isoformat(),
         "rules_version": "sina-history-component-v1",
     }
-    definition_path = ROOT / "configs" / "universes" / f"{args.universe_id}.yml"
+    definition_path = root / "configs" / "universes" / f"{universe_id}.yml"
     header = (
         "# Frozen universe definition generated by collect_sina_membership.py.\n"
         "# evidence_summary_sha256 = SHA-256 of\n"
@@ -370,7 +363,38 @@ def main() -> None:
         f"definition={definition_path} "
         f"(universe_version={_sha256_file(definition_path)})"
     )
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Collect Sina's historical constituent table into a frozen "
+            "universe definition (network: one GET per page)."
+        )
+    )
+    parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--indexid", default="000300")
+    parser.add_argument(
+        "--universe-id",
+        default="csi300",
+        help="canonical id enforces exactly 300 members per day; a custom_ "
+        "id skips only the cardinality check",
+    )
+    parser.add_argument("--pause-seconds", type=float, default=1.0)
+    parser.add_argument("--skip-pull", action="store_true")
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(
+        root,
+        config,
+        indexid=args.indexid,
+        universe_id=args.universe_id,
+        pause_seconds=args.pause_seconds,
+        skip_pull=args.skip_pull,
+    )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

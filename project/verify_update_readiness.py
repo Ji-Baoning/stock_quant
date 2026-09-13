@@ -10,7 +10,9 @@ CURRENT.
 
 from __future__ import annotations
 
+import argparse
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from functools import partial
@@ -19,14 +21,14 @@ from typing import Callable, Mapping
 
 import pandas as pd
 
-from stock_quant.config import SourceConfig
+from stock_quant.config import ProjectConfig, SourceConfig, load_project_config
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_sources.akshare import AkShareSource
 from stock_quant.data_sources.base import AuthenticationError, DataRequest
 from stock_quant.data_sources.tushare import TushareSource
 from stock_quant.data_sources.tushare_transport import resolve_transport
+from stock_quant.project_root import resolve_project_root
 
-ROOT = Path(__file__).resolve().parent
 UPDATE_START = date(2015, 1, 1)
 UPDATE_END = date(2026, 8, 28)
 TRADABLE_UNIVERSE_ID = "custom_csi300_ic_tradable"
@@ -86,6 +88,8 @@ def baseline_issues(
 
 def transport_issue(
     environ: Mapping[str, str] | None = None,
+    *,
+    config: SourceConfig | None = None,
 ) -> ReadinessIssue | None:
     """Require the published build's own transport gate to pass.
 
@@ -97,7 +101,9 @@ def transport_issue(
     """
     source = os.environ if environ is None else environ
     try:
-        resolve_transport(SourceConfig(), environ=source)
+        resolve_transport(
+            config if config is not None else SourceConfig(), environ=source
+        )
     except AuthenticationError as error:
         return ReadinessIssue("TUSHARE_TRANSPORT_UNUSABLE", str(error))
     return None
@@ -144,30 +150,33 @@ def _fetch(source: object, endpoint: str, symbol: str, start: date, end: date):
     return source.fetch(DataRequest(endpoint, (symbol,), start, end, {})).frame
 
 
-def main() -> int:
-    publisher = DatasetPublisher(ROOT)
+def run(root: Path, config: ProjectConfig) -> int:
+    publisher = DatasetPublisher(root)
     version = publisher.current().version
     print(f"current dataset={version}")
-    with DatasetReader(ROOT).open(version) as dataset:
+    with DatasetReader(root).open(version) as dataset:
         membership = (
             dataset.read("universe_membership")
             if "universe_membership" in dataset.tables
             else None
         )
     issues = baseline_issues(membership)
-    missing_transport = transport_issue()
+    missing_transport = transport_issue(config=config.sources["tushare"])
     if missing_transport is not None:
         issues.append(missing_transport)
     probes: dict[str, int] = {}
     if missing_transport is None:
         sources = {
-            "tushare.daily": (TushareSource(SourceConfig()), "daily"),
+            "tushare.daily": (
+                TushareSource(config.sources["tushare"]),
+                "daily",
+            ),
             "cninfo_corporate_actions": (
-                AkShareSource(SourceConfig()),
+                AkShareSource(config.sources["akshare"]),
                 "cninfo_corporate_actions",
             ),
             "eastmoney_corporate_actions": (
-                AkShareSource(SourceConfig()),
+                AkShareSource(config.sources["akshare"]),
                 "eastmoney_corporate_actions",
             ),
         }
@@ -184,6 +193,15 @@ def main() -> int:
                 issues.append(issue)
     print(report(issues, probes))
     return 1 if issues else 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("."))
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(root, config)
 
 
 if __name__ == "__main__":

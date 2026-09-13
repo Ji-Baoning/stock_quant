@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_pipeline import DataPipeline
 from stock_quant.data_quality.models import QualityIssue, QualityReport, Severity
+from stock_quant.project_root import resolve_project_root
 
 
 def _report(path: Path) -> QualityReport:
@@ -35,11 +38,7 @@ def _report(path: Path) -> QualityReport:
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=Path, default=Path("."))
-    args = parser.parse_args()
-    root = args.root.resolve()
+def run(root: Path, config: ProjectConfig) -> int:
     reader = DatasetReader(root)
     current = DatasetPublisher(root).current()
     with reader.open(current.version) as context:
@@ -76,7 +75,17 @@ def main() -> None:
         },
     )
     print(f"dataset_version={published.version}")
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("."))
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(root, config)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

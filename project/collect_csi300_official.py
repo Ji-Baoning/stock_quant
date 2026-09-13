@@ -34,6 +34,7 @@ import io
 import json
 import re
 import time
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
@@ -41,13 +42,14 @@ import pandas as pd
 import requests
 import yaml
 
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.index_membership_import import (
     prepare_membership_file,
 )
 from stock_quant.data_quality.models import QualityReport
+from stock_quant.project_root import resolve_project_root
 
-ROOT = Path(__file__).resolve().parent
 SEARCH_URL = (
     "https://www.csindex.com.cn/csindex-home/search/search-content"
     "?lang=cn&searchInput={query}&pageNum={page}&pageSize=100"
@@ -99,10 +101,6 @@ SEARCH_QUERIES = (
 EFFECTIVE_RE = re.compile(
     r"自\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日[^。]*?生效"
 )
-STORE = ROOT / "data" / "raw" / "csi" / "csi_index_announcements"
-SINA_STORE = ROOT / "data" / "raw" / "csi" / "sina_history_component"
-
-
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
@@ -125,9 +123,11 @@ def _session() -> requests.Session:
     return session
 
 
-def _collect(session: requests.Session, pause: float) -> dict:
+def _collect(
+    session: requests.Session, pause: float, *, store: Path
+) -> dict:
     """Fetch the announcement list, every detail JSON and every attachment."""
-    STORE.mkdir(parents=True, exist_ok=True)
+    store.mkdir(parents=True, exist_ok=True)
     seen: dict[int, dict] = {}
     for query in SEARCH_QUERIES:
         for page in (1, 2, 3):
@@ -157,7 +157,7 @@ def _collect(session: requests.Session, pause: float) -> dict:
     manifest: dict = {"announcements": {}, "files": {}}
     for index, announcement in enumerate(announcements):
         identifier = announcement["id"]
-        detail_path = STORE / f"{identifier}.json"
+        detail_path = store / f"{identifier}.json"
         if not detail_path.exists():
             payload = _get_json(
                 session,
@@ -180,7 +180,7 @@ def _collect(session: requests.Session, pause: float) -> dict:
             file_url = enclosure.get("fileUrl") or ""
             if not file_url.endswith((".xlsx", ".xls")):
                 continue
-            target = STORE / f"{identifier}_{Path(file_url).name}"
+            target = store / f"{identifier}_{Path(file_url).name}"
             if not target.exists():
                 payload = session.get(file_url, timeout=60).content
                 target.write_bytes(payload)
@@ -203,7 +203,7 @@ def _collect(session: requests.Session, pause: float) -> dict:
             print(f"... {index + 1}/{len(announcements)} details collected")
     manifest["source"] = "csindex_official_announcements"
     manifest["source_url"] = DETAIL_URL.format(id="0").replace("id=0", "")
-    manifest_path = STORE / "manifest.json"
+    manifest_path = store / "manifest.json"
     manifest_path.write_text(
         json.dumps(manifest, indent=1, sort_keys=True, ensure_ascii=False),
         encoding="utf-8",
@@ -215,7 +215,7 @@ def _collect(session: requests.Session, pause: float) -> dict:
     return manifest
 
 
-def _base_cohort_from_sina() -> tuple[list[str], dict[str, str]]:
+def _base_cohort_from_sina(sina_store: Path) -> tuple[list[str], dict[str, str]]:
     """The 2005-04-08 initial constituents from the stored Sina pages.
 
     Returns ``(symbols, removal_dates)``: the launch cohort (with the
@@ -224,7 +224,7 @@ def _base_cohort_from_sina() -> tuple[list[str], dict[str, str]]:
     only when no official announcement covers them.
     """
     rows: list[dict[str, str]] = []
-    for path in sorted(SINA_STORE.glob("000300_page_*.html")):
+    for path in sorted(Path(sina_store).glob("000300_page_*.html")):
         html = path.read_text(encoding="utf-8")
         for table_html in re.findall(
             r"<table[^>]*>(.*?)</table>", html, flags=re.S
@@ -298,7 +298,9 @@ def _parse_announcement_excel(
     return entries, exits
 
 
-def _build(manifest: dict, universe_id: str) -> None:
+def _build(
+    manifest: dict, universe_id: str, *, root: Path, store: Path
+) -> None:
     entries_by_announcement: list[dict] = []
     for identifier, record in sorted(
         manifest["announcements"].items(), key=lambda item: item[1]["publishDate"]
@@ -308,7 +310,7 @@ def _build(manifest: dict, universe_id: str) -> None:
         effective = record["effective_date"]
         publish = record["publishDate"] or record["itemDate"]
         for file_record in record["files"]:
-            path = STORE / file_record["file"]
+            path = store / file_record["file"]
             try:
                 entries, exits = _parse_announcement_excel(
                     path, int(identifier), effective, publish
@@ -335,7 +337,7 @@ def _build(manifest: dict, universe_id: str) -> None:
         f"({sum(len(a['entries']) for a in entries_by_announcement)} entries, "
         f"{sum(len(a['exits']) for a in entries_by_announcement)} exits)"
     )
-    base, base_removals = _base_cohort_from_sina()
+    base, base_removals = _base_cohort_from_sina(store.parent / "sina_history_component")
 
     facts: dict[str, list[dict]] = {}
 
@@ -406,16 +408,14 @@ def _build(manifest: dict, universe_id: str) -> None:
         for interval in intervals
     ]
     consolidated.sort(key=lambda row: (row["symbol"], row["raw_effective_from"]))
-    snapshot_csv = ROOT / "data" / "raw" / "csi" / (
-        f"{universe_id}_membership_snapshot.csv"
-    )
+    snapshot_csv = store.parent / f"{universe_id}_membership_snapshot.csv"
     pd.DataFrame(consolidated).to_csv(snapshot_csv, index=False)
     snapshot_sha256 = _sha256_file(snapshot_csv)
     print(
         f"snapshot facts={len(consolidated)} sha256={snapshot_sha256}"
     )
 
-    manifest_path = STORE / "manifest.json"
+    manifest_path = store / "manifest.json"
     manifest_sha256 = _sha256_file(manifest_path)
     result = prepare_membership_file(
         snapshot_csv,
@@ -426,7 +426,7 @@ def _build(manifest: dict, universe_id: str) -> None:
         source_document_sha256=manifest_sha256,
         effective_date=date.fromisoformat("2005-04-08"),
         announcement_date=date.fromisoformat("2005-04-05"),
-        output=ROOT / "data" / "membership" / f"{universe_id}.parquet",
+        output=root / "data" / "membership" / f"{universe_id}.parquet",
     )
     print(
         f"membership facts={len(result.frame)} "
@@ -458,32 +458,27 @@ def _cardinality(consolidated: list[dict], sessions: list[date]) -> list[str]:
     return deviating
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Collect official CSI adjustment announcements and build the "
-            "frozen csi300 universe (network: search + detail + xlsx GETs)."
-        )
-    )
-    parser.add_argument(
-        "--universe-id",
-        default="csi300",
-        help="canonical id enforces exactly 300 members per day",
-    )
-    parser.add_argument("--pause-seconds", type=float, default=2.0)
-    parser.add_argument("--skip-collect", action="store_true")
-    args = parser.parse_args()
-
+def run(
+    root: Path,
+    config: ProjectConfig,
+    *,
+    universe_id: str = "csi300",
+    pause_seconds: float = 2.0,
+    skip_collect: bool = False,
+) -> int:
+    store = root / "data" / "raw" / "csi" / "csi_index_announcements"
     session = _session()
-    if args.skip_collect and (STORE / "manifest.json").exists():
-        manifest = json.loads((STORE / "manifest.json").read_text())
+    if skip_collect and (store / "manifest.json").exists():
+        manifest = json.loads((store / "manifest.json").read_text())
     else:
-        manifest = _collect(session, args.pause_seconds)
+        manifest = _collect(session, pause_seconds, store=store)
 
-    result, consolidated, manifest_sha256 = _build(manifest, args.universe_id)
+    result, consolidated, manifest_sha256 = _build(
+        manifest, universe_id, root=root, store=store
+    )
 
-    publisher = DatasetPublisher(ROOT)
-    with DatasetReader(ROOT).open(publisher.current().version) as dataset:
+    publisher = DatasetPublisher(root)
+    with DatasetReader(root).open(publisher.current().version) as dataset:
         calendar = dataset.read("trading_calendar")
         tables = {name: dataset.read(name) for name in dataset.tables}
     sessions = [
@@ -498,7 +493,7 @@ def main() -> None:
             f"cardinality deviates from 300 on {len(deviating)}/{len(sessions)} "
             f"days (first: {deviating[:8]})"
         )
-        if args.universe_id == "csi300":
+        if universe_id == "csi300":
             raise SystemExit(
                 "the official history does not yield exactly 300 members on "
                 "every day; investigate the deviating days above, then rerun "
@@ -511,18 +506,18 @@ def main() -> None:
     published = publisher.publish(tables, QualityReport())
     print(f"dataset_version={published.version}")
 
-    with DatasetReader(ROOT).open(published.version) as dataset:
+    with DatasetReader(root).open(published.version) as dataset:
         daily = dataset.read("daily_bar")
     definition = {
         "schema_version": 1,
-        "universe_id": args.universe_id,
+        "universe_id": universe_id,
         "membership_table_sha256": result.content_hash,
         "evidence_summary_sha256": manifest_sha256,
         "coverage_start": pd.to_datetime(daily["trade_date"]).min().date().isoformat(),
         "coverage_end": pd.to_datetime(daily["trade_date"]).max().date().isoformat(),
         "rules_version": "csindex-official-announcements-v1",
     }
-    definition_path = ROOT / "configs" / "universes" / f"{args.universe_id}.yml"
+    definition_path = root / "configs" / "universes" / f"{universe_id}.yml"
     definition_path.parent.mkdir(parents=True, exist_ok=True)
     header = (
         "# Frozen universe definition generated by collect_csi300_official.py.\n"
@@ -538,7 +533,35 @@ def main() -> None:
         f"definition={definition_path} "
         f"(universe_version={_sha256_file(definition_path)})"
     )
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Collect official CSI adjustment announcements and build the "
+            "frozen csi300 universe (network: search + detail + xlsx GETs)."
+        )
+    )
+    parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument(
+        "--universe-id",
+        default="csi300",
+        help="canonical id enforces exactly 300 members per day",
+    )
+    parser.add_argument("--pause-seconds", type=float, default=2.0)
+    parser.add_argument("--skip-collect", action="store_true")
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(
+        root,
+        config,
+        universe_id=args.universe_id,
+        pause_seconds=args.pause_seconds,
+        skip_collect=args.skip_collect,
+    )
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

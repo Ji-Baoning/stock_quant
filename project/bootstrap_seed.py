@@ -28,12 +28,13 @@ Usage (in the activated env, from this project root):
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime, timedelta
+from collections.abc import Sequence
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
-import yaml
 
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.dataset import DatasetPublisher
 from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COLUMNS,
@@ -43,6 +44,7 @@ from stock_quant.data_model.schemas import (
 )
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_quality.models import QualityReport
+from stock_quant.project_root import resolve_project_root
 
 #: Synthetic list date for every sample.  All 30 samples are pre-window
 #: listings (the 2021+ window), so a single early constant is equivalent to
@@ -136,20 +138,8 @@ def _empty_corporate_action() -> pd.DataFrame:
     )[CORPORATE_ACTION_COLUMNS]
 
 
-def _as_date(value: object) -> date:
-    """yaml.safe_load turns bare ISO dates into datetime/date; normalise."""
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    return date.fromisoformat(str(value))
-
-
-def _warn_equity_benchmarks(root: Path, universe: Universe) -> None:
+def _warn_equity_benchmarks(benchmarks: list[str], universe: Universe) -> None:
     """Flag benchmark_symbols that look like investable samples, not indices."""
-    config_path = root / "configs" / "project.yml"
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    benchmarks = raw.get("benchmark_symbols") or []
     universe_symbols = set(universe.symbols)
     misplaced = [b for b in benchmarks if b in universe_symbols]
     if misplaced:
@@ -162,45 +152,21 @@ def _warn_equity_benchmarks(root: Path, universe: Universe) -> None:
         )
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--root",
-        type=Path,
-        default=Path(__file__).resolve().parent,
-        help="project root holding configs/ and data/ (default: this script's dir)",
-    )
-    parser.add_argument(
-        "--calendar-csv",
-        type=Path,
-        default=None,
-        help="optional official trading-day file (one ISO date per line)",
-    )
-    args = parser.parse_args()
-
-    root: Path = args.root.resolve()
+def run(
+    root: Path, config: ProjectConfig, *, calendar_csv: Path | None = None
+) -> int:
     config_dir = root / "configs"
-    for required in ("project.yml", "universe.yml"):
-        if not (config_dir / required).exists():
-            print(f"FAILED: missing {config_dir / required}", flush=True)
-            return 1
-
-    project = yaml.safe_load(
-        (config_dir / "project.yml").read_text(encoding="utf-8")
-    ) or {}
-    start = _as_date(project["start_date"])
-    end = _as_date(project["end_date"])
-    if end < start:
-        print(
-            f"FAILED: project.yml end_date {end} precedes start_date {start}",
-            flush=True,
-        )
+    if not (config_dir / "universe.yml").exists():
+        print(f"FAILED: missing {config_dir / 'universe.yml'}", flush=True)
         return 1
 
-    universe = Universe.from_yaml(config_dir / "universe.yml")
-    _warn_equity_benchmarks(root, universe)
+    start = config.start_date
+    end = config.end_date
 
-    days = _calendar_days(args.calendar_csv, start, end)
+    universe = Universe.from_yaml(config_dir / "universe.yml")
+    _warn_equity_benchmarks(config.benchmark_symbols, universe)
+
+    days = _calendar_days(calendar_csv, start, end)
     if not days:
         print(
             "FAILED: no trading days in range; check --calendar-csv / dates",
@@ -235,6 +201,26 @@ def main() -> int:
         flush=True,
     )
     return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path("."),
+        help="project root holding configs/ and data/ (default: current directory)",
+    )
+    parser.add_argument(
+        "--calendar-csv",
+        type=Path,
+        default=None,
+        help="optional official trading-day file (one ISO date per line)",
+    )
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(root, config, calendar_csv=args.calendar_csv)
 
 
 if __name__ == "__main__":

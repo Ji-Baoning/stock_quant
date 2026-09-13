@@ -20,14 +20,16 @@ UNTRUSTED diagnostics.
 
 from __future__ import annotations
 
+import argparse
 import os
+from collections.abc import Sequence
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import yaml
 
-from stock_quant.config import SourceConfig
+from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.adjusted_bar import build_adjusted_bars
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.schemas import (
@@ -39,34 +41,15 @@ from stock_quant.data_quality.models import QualityReport
 from stock_quant.data_sources.akshare import AkShareSource
 from stock_quant.data_sources.base import ContractError, DataRequest
 from stock_quant.data_sources.tushare import TushareSource
+from stock_quant.project_root import resolve_project_root
 
-ROOT = Path(__file__).resolve().parent
 BACKFILL_START = date(2015, 1, 1)
 BACKFILL_END = date(2020, 12, 31)
 
-universe = yaml.safe_load((ROOT / "configs" / "universe.yml").read_text())
-symbols = [entry["symbol"] for entry in universe["entries"]]
-project = yaml.safe_load((ROOT / "configs" / "project.yml").read_text())
-benchmarks = list(project["benchmark_symbols"])
-print(f"universe symbols={len(symbols)} benchmarks={benchmarks}")
 
-publisher = DatasetPublisher(ROOT)
-version = publisher.current().version
-print(f"base version={version}")
-with DatasetReader(ROOT).open(version) as dataset:
-    daily = dataset.read("daily_bar")
-    corporate_action = dataset.read("corporate_action")
-    coverage = dataset.read("corporate_action_coverage")
-    master = dataset.read("security_master")
-    master_coverage = dataset.read("security_master_coverage")
-    calendar = dataset.read("trading_calendar")
-
-token = os.environ["TUSHARE_TOKEN"]
-source = TushareSource(SourceConfig())
-ingested = datetime.now(timezone.utc)
-
-
-def _canonical_stock_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
+def _canonical_stock_frame(
+    frame: pd.DataFrame, symbol: str, ingested: datetime
+) -> pd.DataFrame:
     """Canonicalise one tushare ``daily`` response (vol hands, amount kCNY)."""
     rows = []
     for record in frame.to_dict("records"):
@@ -89,7 +72,7 @@ def _canonical_stock_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
 
 def _canonical_index_frame(
-    frame: pd.DataFrame, symbol: str, endpoint_name: str
+    frame: pd.DataFrame, symbol: str, endpoint_name: str, ingested: datetime
 ) -> pd.DataFrame:
     """Canonicalise one index-history response (mirrors ``_normalize_index``).
 
@@ -139,119 +122,161 @@ def _canonical_index_frame(
     return pd.DataFrame(rows)
 
 
-backfill_frames: list[pd.DataFrame] = []
-master_dates = {
-    str(row["symbol"]): row["list_date"] for row in master.to_dict("records")
-}
-for index, symbol in enumerate(symbols):
-    try:
-        result = source.fetch(
+def run(root: Path, config: ProjectConfig) -> int:
+    universe = yaml.safe_load((root / "configs" / "universe.yml").read_text())
+    symbols = [entry["symbol"] for entry in universe["entries"]]
+    benchmarks = list(config.benchmark_symbols)
+    print(f"universe symbols={len(symbols)} benchmarks={benchmarks}")
+
+    publisher = DatasetPublisher(root)
+    version = publisher.current().version
+    print(f"base version={version}")
+    with DatasetReader(root).open(version) as dataset:
+        daily = dataset.read("daily_bar")
+        corporate_action = dataset.read("corporate_action")
+        coverage = dataset.read("corporate_action_coverage")
+        master = dataset.read("security_master")
+        master_coverage = dataset.read("security_master_coverage")
+        calendar = dataset.read("trading_calendar")
+
+    token = os.environ["TUSHARE_TOKEN"]  # noqa: F841 - the transport reads it
+    source = TushareSource(config.sources["tushare"])
+    akshare_source = AkShareSource(config.sources["akshare"])
+    ingested = datetime.now(timezone.utc)
+
+    backfill_frames: list[pd.DataFrame] = []
+    master_dates = {
+        str(row["symbol"]): row["list_date"] for row in master.to_dict("records")
+    }
+    for index, symbol in enumerate(symbols):
+        try:
+            result = source.fetch(
+                DataRequest(
+                    endpoint="daily",
+                    symbols=(symbol,),
+                    start_date=BACKFILL_START,
+                    end_date=BACKFILL_END,
+                )
+            )
+        except ContractError:
+            # An empty supplier response is a legitimate fact for symbols
+            # listed after the backfill window (the pool deliberately includes
+            # listed_after_2020 boundary names); anything else stays fatal.
+            list_date = master_dates.get(symbol)
+            if (
+                list_date is not None
+                and pd.Timestamp(list_date).date() > BACKFILL_END
+            ):
+                print(
+                    f"[{index + 1}/{len(symbols)}] {symbol} no bars: listed "
+                    f"{pd.Timestamp(list_date).date()} after backfill window; "
+                    "skipping"
+                )
+                backfill_frames.append(pd.DataFrame(columns=DAILY_COLUMNS))
+                continue
+            raise
+        frame = _canonical_stock_frame(result.frame, symbol, ingested)
+        print(
+            f"[{index + 1}/{len(symbols)}] {symbol} rows={len(frame)} "
+            f"window={frame['trade_date'].min().date()}..{frame['trade_date'].max().date()}"
+            if not frame.empty
+            else f"[{index + 1}/{len(symbols)}] {symbol} EMPTY"
+        )
+        backfill_frames.append(frame)
+
+    for symbol in benchmarks:
+        # tushare index_daily is quota-limited to 1 call/hour on this token, so
+        # benchmarks come from the akshare eastmoney->sina->tencent fallback
+        # chain (the same normalization the pipeline applies to index_history
+        # frames).
+        frame, endpoint_name = akshare_source._index_history(
             DataRequest(
-                endpoint="daily",
+                endpoint="index_history",
                 symbols=(symbol,),
                 start_date=BACKFILL_START,
                 end_date=BACKFILL_END,
             )
         )
-    except ContractError:
-        # An empty supplier response is a legitimate fact for symbols listed
-        # after the backfill window (the pool deliberately includes
-        # listed_after_2020 boundary names); anything else stays fatal.
-        list_date = master_dates.get(symbol)
-        if list_date is not None and pd.Timestamp(list_date).date() > BACKFILL_END:
-            print(
-                f"[{index + 1}/{len(symbols)}] {symbol} no bars: listed "
-                f"{pd.Timestamp(list_date).date()} after backfill window; skipping"
-            )
-            backfill_frames.append(pd.DataFrame(columns=DAILY_COLUMNS))
-            continue
-        raise
-    frame = _canonical_stock_frame(result.frame, symbol)
-    print(
-        f"[{index + 1}/{len(symbols)}] {symbol} rows={len(frame)} "
-        f"window={frame['trade_date'].min().date()}..{frame['trade_date'].max().date()}"
-        if not frame.empty
-        else f"[{index + 1}/{len(symbols)}] {symbol} EMPTY"
-    )
-    backfill_frames.append(frame)
+        canonical = _canonical_index_frame(frame, symbol, endpoint_name, ingested)
+        print(f"benchmark {symbol} via {endpoint_name} rows={len(canonical)}")
+        backfill_frames.append(canonical)
 
-akshare_source = AkShareSource(SourceConfig())
-for symbol in benchmarks:
-    # tushare index_daily is quota-limited to 1 call/hour on this token, so
-    # benchmarks come from the akshare eastmoney->sina->tencent fallback chain
-    # (the same normalization the pipeline applies to index_history frames).
-    frame, endpoint_name = akshare_source._index_history(
-        DataRequest(
-            endpoint="index_history",
-            symbols=(symbol,),
-            start_date=BACKFILL_START,
-            end_date=BACKFILL_END,
+    backfill = pd.concat(backfill_frames, ignore_index=True)
+
+    # ---- guardrails before anything is published ------------------------- #
+    existing_keys = {
+        (str(row["symbol"]), pd.Timestamp(row["trade_date"]))
+        for row in daily.to_dict("records")
+    }
+    overlap = [
+        key
+        for key in zip(backfill["symbol"], backfill["trade_date"])
+        if (str(key[0]), pd.Timestamp(key[1])) in existing_keys
+    ]
+    if overlap:
+        raise SystemExit(
+            f"FATAL: {len(overlap)} backfill rows overlap existing daily_bar"
         )
+    merged = pd.concat([daily, backfill], ignore_index=True)
+    merged = merged.sort_values(["symbol", "trade_date"], kind="stable").reset_index(
+        drop=True
     )
-    canonical = _canonical_index_frame(frame, symbol, endpoint_name)
-    print(f"benchmark {symbol} via {endpoint_name} rows={len(canonical)}")
-    backfill_frames.append(canonical)
 
-backfill = pd.concat(backfill_frames, ignore_index=True)
-
-# ---- guardrails before anything is published ----------------------------- #
-existing_keys = {
-    (str(row["symbol"]), pd.Timestamp(row["trade_date"]))
-    for row in daily.to_dict("records")
-}
-overlap = [
-    key
-    for key in zip(backfill["symbol"], backfill["trade_date"])
-    if (str(key[0]), pd.Timestamp(key[1])) in existing_keys
-]
-if overlap:
-    raise SystemExit(f"FATAL: {len(overlap)} backfill rows overlap existing daily_bar")
-merged = pd.concat([daily, backfill], ignore_index=True)
-merged = merged.sort_values(["symbol", "trade_date"], kind="stable").reset_index(
-    drop=True
-)
-
-# The published calendar is the intersection of benchmark sessions over the
-# merged window (same rule as rebuild_trading_calendar.py).
-benchmark_dates = [
-    set(
-        pd.to_datetime(
-            merged.loc[merged["symbol"] == symbol, "trade_date"]
-        ).dt.normalize()
+    # The published calendar is the intersection of benchmark sessions over
+    # the merged window (same rule as rebuild_trading_calendar.py).
+    benchmark_dates = [
+        set(
+            pd.to_datetime(
+                merged.loc[merged["symbol"] == symbol, "trade_date"]
+            ).dt.normalize()
+        )
+        for symbol in benchmarks
+    ]
+    sessions = sorted(set.intersection(*benchmark_dates))
+    new_calendar = pd.DataFrame({"calendar_date": sessions, "is_trading_day": True})
+    print(
+        f"calendar sessions={len(new_calendar)} "
+        f"{new_calendar['calendar_date'].min().date()}..{new_calendar['calendar_date'].max().date()}"
     )
-    for symbol in benchmarks
-]
-sessions = sorted(set.intersection(*benchmark_dates))
-new_calendar = pd.DataFrame({"calendar_date": sessions, "is_trading_day": True})
-print(
-    f"calendar sessions={len(new_calendar)} "
-    f"{new_calendar['calendar_date'].min().date()}..{new_calendar['calendar_date'].max().date()}"
-)
 
-quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
-adjusted = build_adjusted_bars(
-    merged,
-    corporate_action,
-    quarantine,
-    coverage,
-    symbols=tuple(symbols),
-)
-severity = adjusted["quality_severity"].value_counts().to_dict()
-print(
-    f"adjusted_bar rows={len(adjusted)} symbols={adjusted['symbol'].nunique()} "
-    f"severity={severity}"
-)
+    quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
+    adjusted = build_adjusted_bars(
+        merged,
+        corporate_action,
+        quarantine,
+        coverage,
+        symbols=tuple(symbols),
+    )
+    severity = adjusted["quality_severity"].value_counts().to_dict()
+    print(
+        f"adjusted_bar rows={len(adjusted)} symbols={adjusted['symbol'].nunique()} "
+        f"severity={severity}"
+    )
 
-tables = {
-    "daily_bar": merged,
-    "adjusted_bar": adjusted,
-    "security_master": master,
-    "security_master_coverage": master_coverage,
-    "corporate_action": corporate_action,
-    "corporate_action_quarantine": quarantine,
-    "corporate_action_coverage": coverage,
-    "trading_calendar": new_calendar,
-    "universe_membership": membership_frame([]),
-}
-published = publisher.publish(tables, QualityReport())
-print(f"dataset_version={published.version}")
+    tables = {
+        "daily_bar": merged,
+        "adjusted_bar": adjusted,
+        "security_master": master,
+        "security_master_coverage": master_coverage,
+        "corporate_action": corporate_action,
+        "corporate_action_quarantine": quarantine,
+        "corporate_action_coverage": coverage,
+        "trading_calendar": new_calendar,
+        "universe_membership": membership_frame([]),
+    }
+    published = publisher.publish(tables, QualityReport())
+    print(f"dataset_version={published.version}")
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("."))
+    args = parser.parse_args(argv)
+    root = resolve_project_root(args.root)
+    config = load_project_config(root)
+    return run(root, config)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
