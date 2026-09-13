@@ -132,6 +132,32 @@ def test_data_update_without_transport_fails_and_prints_failed(
     assert "TUSHARE_TRANSPORT" in (statuses["tushare"].reason or "")
 
 
+def test_data_update_with_empty_root_fails_before_any_service(
+    cli_runner, tmp_path, monkeypatch
+):
+    """An empty ``--root`` fails before any service object is constructed.
+
+    A directory without the required config files must produce a nonzero
+    exit naming the missing ``configs/project.yml`` -- and ``DataPipeline``
+    (with it the raw store, staging and any network path) must never be
+    constructed for that root.
+    """
+    empty_root = tmp_path / "empty-root"
+    empty_root.mkdir()
+    constructions: list[object] = []
+
+    def _spy(*args, **kwargs):
+        constructions.append(args)
+        raise AssertionError("DataPipeline constructed for an invalid root")
+
+    monkeypatch.setattr("stock_quant.cli.DataPipeline", _spy)
+    result = cli_runner.invoke(app, ["data", "update", "--root", str(empty_root)])
+    assert result.exit_code != 0
+    assert "FAILED" in result.stdout
+    assert "configs/project.yml" in result.stdout
+    assert constructions == []
+
+
 def test_data_validate_reports_current_dataset(
     cli_runner, fixture_root
 ):
@@ -159,7 +185,7 @@ def test_data_bootstrap_publishes_initial_dataset(cli_runner, tmp_path):
     configs = root / "configs"
     configs.mkdir(parents=True)
     repo_configs = Path(__file__).resolve().parents[2] / "configs"
-    for name in ("project.yml", "universe.yml"):
+    for name in ("project.yml", "sources.yml", "costs.yml", "universe.yml"):
         shutil.copy(repo_configs / name, configs / name)
 
     result = cli_runner.invoke(app, ["data", "bootstrap", "--root", str(root)])

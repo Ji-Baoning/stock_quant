@@ -160,6 +160,7 @@ from stock_quant.data_sources.raw_store import (
     RawSnapshotEvidence,
     RawStore,
 )
+from stock_quant.project_root import resolve_project_root
 from stock_quant.research.universe import (
     UniverseCoverageError,
     load_universe_coverage_criterion,
@@ -416,20 +417,18 @@ class DataPipeline:
 
     def __init__(
         self,
-        project_root,
+        project_root: str | Path,
         *,
-        config_root=None,
         sources: Mapping[str, DataSource] | None = None,
         sleeper=_sleep_module.sleep,
     ) -> None:
-        self._project_root = type(project_root)(project_root)
-        self._config_root = (
-            type(project_root)(config_root) if config_root is not None
-            else self._project_root
-        )
+        # One validated root: config, dataset and raw-store paths all derive
+        # from it, and an invalid root fails here -- before any source, raw
+        # store, staging or network path is ever reached.
+        self._project_root = resolve_project_root(project_root)
         self._overrides = dict(sources or {})
         self._sleeper = sleeper
-        self._project_config = load_project_config(self._config_root)
+        self._project_config = load_project_config(self._project_root)
         self._raw_store = RawStore(self._project_root)
 
     # -- public surface --------------------------------------------------- #
@@ -906,7 +905,7 @@ class DataPipeline:
         publication.
         """
         universe = Universe.from_yaml(
-            self._config_root / "configs" / "universe.yml"
+            self._project_root / "configs" / "universe.yml"
         )
         master_symbols = set(str(value) for value in master["symbol"])
         universe_symbols = set(universe.symbols)

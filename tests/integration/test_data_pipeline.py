@@ -937,6 +937,33 @@ def test_disabled_required_source_is_never_called(tmp_path):
     assert not tushare_status.ok and tushare_status.required
 
 
+def test_disabled_baostock_is_never_constructed_or_fetched(project, monkeypatch):
+    """``--sources baostock`` cannot bypass ``baostock.enabled: false``.
+
+    A config-disabled source is never built through ``_build_source`` and
+    never requested: naming it in the update request only narrows the enabled
+    set to nothing, so the run fails (or carries it as not-run) without the
+    adapter ever existing.
+    """
+    from conftest import write_sources
+
+    write_sources(project.root, baostock=False)
+    constructed: list[str] = []
+
+    def build(name, _config):
+        constructed.append(name)
+        if name == "baostock":
+            raise AssertionError("disabled baostock constructed")
+        return _all_stubs()[name]
+
+    monkeypatch.setattr("stock_quant.data_pipeline._build_source", build)
+    result = DataPipeline(project.root).update(
+        DataUpdateRequest(sources=("baostock",))
+    )
+    assert constructed == []
+    assert result.dataset_ref is None
+
+
 def test_validate_returns_clean_report_over_current_dataset(project):
     pipeline = DataPipeline(project.root)
     report = pipeline.validate()

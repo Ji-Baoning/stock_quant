@@ -843,6 +843,26 @@ def math_exp(value: float) -> float:
     return math.exp(value)
 
 
+def write_sources(project_root: Path, *, tushare: bool = True,
+                  akshare: bool = True, baostock: bool = True) -> None:
+    """Rewrite ``configs/sources.yml`` enabling or disabling each supplier.
+
+    The fixture projects copy the repository ``sources.yml``; tests that need
+    a specific enablement call this before constructing any pipeline so the
+    config gate (never a CLI flag) decides which sources may be built.
+    """
+    (Path(project_root) / "configs" / "sources.yml").write_text(
+        yaml.safe_dump(
+            {
+                "tushare": {"enabled": tushare},
+                "akshare": {"enabled": akshare},
+                "baostock": {"enabled": baostock},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture
 def cli_runner():
     """A Typer ``CliRunner`` used to invoke the CLI application in-process."""

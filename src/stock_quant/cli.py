@@ -66,6 +66,7 @@ from stock_quant.reporting.html import (
     render_experiment_report,
     render_quality_report,
 )
+from stock_quant.project_root import ProjectRootError, resolve_project_root
 from stock_quant.research.acceptance.models import AcceptanceRecord
 from stock_quant.research.acceptance.registry import (
     AcceptanceIntegrityError,
@@ -143,6 +144,22 @@ def _echo_failure(message: str) -> None:
     typer.echo(f"FAILED: {message}")
 
 
+def _resolved_project_root(root: Path) -> Path:
+    """Validate ``root`` once, before any service object is constructed.
+
+    Every command resolves its ``--root`` through this helper *first*: an
+    invalid or incomplete root is reported as a clean ``FAILED`` line and a
+    nonzero exit before ``DataPipeline``, ``DatasetReader``, the raw store,
+    staging or any network path can ever be reached.  Downstream code only
+    ever receives the resolved root.
+    """
+    try:
+        return resolve_project_root(root)
+    except ProjectRootError as error:
+        _echo_failure(str(error))
+        raise typer.Exit(code=1) from None
+
+
 def _report_summary(report: QualityReport) -> str:
     counts = {str(key): int(value) for key, value in report.by_severity().items()}
     parts = " ".join(f"{key}={counts[key]}" for key in sorted(counts))
@@ -203,8 +220,9 @@ def data_bootstrap(
     ),
 ) -> None:
     """Publish the baseline dataset required before the first data update."""
+    project_root = _resolved_project_root(root)
     try:
-        result = bootstrap_dataset(root, calendar_csv=calendar_csv)
+        result = bootstrap_dataset(project_root, calendar_csv=calendar_csv)
     except Exception as error:  # noqa: BLE001 - surface cleanly to the operator
         _echo_failure(str(error))
         raise typer.Exit(code=1) from None
@@ -262,7 +280,7 @@ def data_update(
 ) -> None:
     """Fetch one window into the raw-store and publish when the gate passes."""
     _enable_transport_logging()
-    project_root = Path(root)
+    project_root = _resolved_project_root(root)
     request = DataUpdateRequest(
         start_date=date.fromisoformat(start) if start else None,
         end_date=date.fromisoformat(end) if end else None,
@@ -293,7 +311,7 @@ def data_validate(
     root: Path = typer.Option(".", "--root", help="Project root."),
 ) -> None:
     """Re-run the shared quality checks over one published dataset version."""
-    project_root = Path(root)
+    project_root = _resolved_project_root(root)
     pipeline = DataPipeline(project_root)
     try:
         if version is None:
@@ -422,7 +440,8 @@ def data_acceptance_prepare(
     starts as an explicit FAIL the operator must turn into PASS with
     evidence before publishing.
     """
-    checklist = prepare_checklist(Path(root), version, operator)
+    project_root = _resolved_project_root(root)
+    checklist = prepare_checklist(project_root, version, operator)
     output.write_text(
         yaml.safe_dump(
             checklist.model_dump(mode="json"),
@@ -449,8 +468,9 @@ def data_acceptance_publish(
     unreadable or schema-invalid checklist is invalid input, not a decision:
     it fails cleanly without publishing any record.
     """
+    project_root = _resolved_project_root(root)
     try:
-        record = publish_checklist(Path(root), checklist)
+        record = publish_checklist(project_root, checklist)
     except AcceptanceRejected as error:
         typer.echo(f"acceptance_id={error.record.acceptance_id}")
         typer.echo("decision=REJECTED")
@@ -478,7 +498,7 @@ def data_acceptance_show(
     instead of surfacing a traceback, the remaining history is still listed,
     and the command exits nonzero so corruption is never mistaken for a pass.
     """
-    registry = AcceptanceRegistry(Path(root))
+    registry = AcceptanceRegistry(_resolved_project_root(root))
     directory = registry.root / version
     if not directory.is_dir():
         typer.echo("UNACCEPTED")
@@ -534,7 +554,7 @@ def research_run(
     exits nonzero; a COMPLETED STABLE/UNSTABLE/INCONCLUSIVE research retains
     the exact label and exits zero.
     """
-    published = _run_one_research(Path(root), spec)
+    published = _run_one_research(_resolved_project_root(root), spec)
     typer.echo(f"experiment_id={published.experiment_id}")
     typer.echo(f"published={published.path}")
     _echo_stability(published)
@@ -571,7 +591,7 @@ def research_challenge(
     INCONCLUSIVE_RESEARCH_ONLY are completed research outcomes and exit
     zero with the exact label.
     """
-    service = StrategyChallengeService(Path(root))
+    service = StrategyChallengeService(_resolved_project_root(root))
     try:
         result = service.run(Path(declaration))
     except ChallengeServiceError as error:
@@ -620,8 +640,9 @@ def backtest_momentum_60d(
     diagnostic from a trusted performance claim.
     """
     mode = DataTrustMode.ENGINEERING if engineering else DataTrustMode.RESEARCH
+    project_root = _resolved_project_root(root)
     published = _run_one_research(
-        Path(root), spec, registry=_DebugRegistry(Path(root)), trust_mode=mode
+        project_root, spec, registry=_DebugRegistry(project_root), trust_mode=mode
     )
     typer.echo(f"experiment_id={published.experiment_id}")
     typer.echo(f"debug={published.path}")
@@ -649,7 +670,7 @@ def report_build(
     ``data/reports``.  The quality HTML is reconstructed from the persisted
     ``quality_report.json`` / version manifest -- nothing is recomputed.
     """
-    project_root = Path(root)
+    project_root = _resolved_project_root(root)
     experiment_id = experiment or _latest_experiment_id(project_root)
     if experiment_id is None:
         _echo_failure("no published experiment found under data/experiments")
