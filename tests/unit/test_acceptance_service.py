@@ -32,11 +32,13 @@ from stock_quant.data_sources.base import (
     FetchResult,
     request_key,
 )
+from stock_quant.research.acceptance.evidence import EvidenceBuildError
 from stock_quant.research.acceptance.models import (
     AUTOMATED_CHECK_CODES,
     MANUAL_CHECK_CODES,
     MECHANISABLE_CODES,
     OPERATOR_ONLY_CODES,
+    AcceptanceChecklist,
     AcceptanceDecision,
     EvidenceReference,
     ManualCheckResult,
@@ -47,6 +49,7 @@ from stock_quant.research.acceptance.service import (
     AcceptanceBindingError,
     AcceptanceRejected,
     acceptance_audit_dict,
+    build_checklist,
     prepare_checklist,
     publish_checklist,
     show_acceptances,
@@ -365,7 +368,7 @@ def _write_checklist_yaml(
     name: str,
 ) -> Path:
     """Serialise a prepared checklist to YAML, optionally completed."""
-    checklist = prepare_checklist(
+    checklist = build_checklist(
         project.root,
         project.version,
         "operator-a",
@@ -421,7 +424,7 @@ def _replace_evidence_reference(checklist_path: Path, reference: str) -> Path:
 
 
 def test_prepare_creates_complete_pending_manual_template(project):
-    checklist = prepare_checklist(
+    checklist = build_checklist(
         project.root,
         project.version,
         "operator-a",
@@ -449,11 +452,11 @@ def test_prepare_creates_complete_pending_manual_template(project):
     )
 
 
-def test_prepare_is_deterministic_and_strips_the_operator_id(project):
-    first = prepare_checklist(
+def test_build_checklist_is_deterministic_and_strips_the_operator_id(project):
+    first = build_checklist(
         project.root, project.version, "  operator-a \n", prepared_at=_PREPARED_AT
     )
-    second = prepare_checklist(
+    second = build_checklist(
         project.root, project.version, "operator-a", prepared_at=_PREPARED_AT
     )
     assert first == second
@@ -501,6 +504,89 @@ def test_pending_manual_row_is_not_publishable(project, incomplete_checklist):
         f"manual_{code}_pending_confirmation" in record.reasons
         for code in MANUAL_CHECK_CODES
     )
+
+
+def test_prepare_writes_a_pending_checklist_with_evidence(project, tmp_path):
+    output = tmp_path / "checklist.yml"
+    checklist = prepare_checklist(
+        project.root,
+        project.version,
+        "operator-a",
+        output,
+        prepared_at=_PREPARED_AT,
+    )
+    rows = {row.code: row for row in checklist.manual_checks}
+    assert all(
+        row.status is ManualCheckStatus.PENDING_CONFIRMATION
+        for row in rows.values()
+    )
+    assert all(rows[code].evidence for code in MECHANISABLE_CODES)
+    assert all(not rows[code].evidence for code in OPERATOR_ONLY_CODES)
+    assert output.is_file()
+    assert (
+        AcceptanceChecklist.model_validate(
+            yaml.safe_load(output.read_text(encoding="utf-8"))
+        )
+        == checklist
+    )
+
+
+def test_prepare_degrades_to_pending_rows_when_evidence_fails(
+    project, tmp_path, monkeypatch
+):
+    """A failed pack leaves unconfirmed rows, never rows with fake evidence."""
+
+    def broken(root, version):
+        raise EvidenceBuildError("window_missing")
+
+    monkeypatch.setattr(
+        "stock_quant.research.acceptance.service.build_mechanisable_evidence",
+        broken,
+    )
+    output = tmp_path / "checklist.yml"
+    checklist = prepare_checklist(
+        project.root, project.version, "operator-a", output
+    )
+    rows = {row.code: row for row in checklist.manual_checks}
+    for code in MECHANISABLE_CODES:
+        assert rows[code].status is ManualCheckStatus.PENDING_CONFIRMATION
+        assert rows[code].evidence == ()
+        assert rows[code].summary == "evidence generation failed: window_missing"
+    for code in OPERATOR_ONLY_CODES:
+        assert rows[code].summary == "external corroboration required"
+    assert output.is_file()
+
+
+def test_verify_never_rewrites_the_evidence_pack(
+    project, completed_checklist, tmp_path
+):
+    """The read-only verification path must not touch evidence on disk.
+
+    Snapshotting the whole project -- not just the operator ``evidence/``
+    directory -- is what makes the assertion bite: a verification path wired to
+    the writing ``prepare_checklist`` would materialise
+    ``data/acceptance-evidence/<version>/`` (and its checklist output) on disk,
+    so the file set would grow and ``before == after`` would fail.
+    """
+    record = publish_checklist(
+        project.root, completed_checklist, created_at=_CREATED_AT
+    )
+    evidence_path = project.root / "evidence" / f"{MANUAL_CHECK_CODES[0]}.txt"
+    original = evidence_path.read_bytes()
+    evidence_path.write_bytes(original + b"tamper")
+    before = sorted(
+        (path.relative_to(project.root).as_posix(), path.read_bytes())
+        for path in project.root.rglob("*")
+        if path.is_file()
+    )
+    with pytest.raises(AcceptanceBindingError):
+        verify_acceptance_bindings(project.root, record)
+    after = sorted(
+        (path.relative_to(project.root).as_posix(), path.read_bytes())
+        for path in project.root.rglob("*")
+        if path.is_file()
+    )
+    assert before == after
 
 
 def test_local_evidence_cannot_escape_project(project, completed_checklist):

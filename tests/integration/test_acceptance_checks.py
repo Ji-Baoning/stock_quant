@@ -13,6 +13,7 @@ the evidence it owns.  All failure details stay deterministic and redacted.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -41,8 +42,12 @@ from stock_quant.research.acceptance.checks import (
 )
 from stock_quant.research.acceptance.models import (
     AUTOMATED_CHECK_CODES,
+    MECHANISABLE_CODES,
+    OPERATOR_ONLY_CODES,
     CheckStatus,
+    ManualCheckStatus,
 )
+from stock_quant.research.acceptance.service import prepare_checklist
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -429,3 +434,64 @@ def test_calendar_coverage_evidence_names_the_missing_manifest_key(
     result = checks["calendar_coverage_evidence"]
     assert result.status is CheckStatus.FAIL
     assert result.details["code"] == "calendar_coverage_missing"
+
+
+def test_prepare_creates_pending_checklist_with_six_evidence_files(
+    fixture_root, tmp_path
+):
+    output = tmp_path / "checklist.yml"
+    checklist = prepare_checklist(
+        fixture_root.root, fixture_root.version, "reviewer", output
+    )
+    rows = {row.code: row for row in checklist.manual_checks}
+    assert all(
+        row.status is ManualCheckStatus.PENDING_CONFIRMATION
+        for row in rows.values()
+    )
+    assert all(rows[code].evidence for code in MECHANISABLE_CODES)
+    assert all(not rows[code].evidence for code in OPERATOR_ONLY_CODES)
+    pack = (
+        fixture_root.root
+        / "data"
+        / "acceptance-evidence"
+        / fixture_root.version
+    )
+    assert sorted(path.name for path in pack.iterdir()) == [
+        "benchmark_coverage.json",
+        "corporate_action_sample.csv",
+        "missing_reasons.json",
+        "secret_scan.json",
+        "security_master_sample.csv",
+        "source_row_counts.json",
+    ]
+    for code in MECHANISABLE_CODES:
+        path = fixture_root.root / rows[code].evidence[0].reference
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+            rows[code].evidence[0].sha256
+        )
+    assert output.is_file()
+
+
+def test_prepare_leaves_current_and_the_dataset_untouched(fixture_root, tmp_path):
+    def snapshot() -> list[str]:
+        root = fixture_root.root / "data"
+        return sorted(
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file() and "acceptance-evidence" not in path.parts
+        )
+
+    before = snapshot()
+    current = (fixture_root.root / "data" / "standardized" / "CURRENT").read_text(
+        encoding="utf-8"
+    )
+    prepare_checklist(
+        fixture_root.root,
+        fixture_root.version,
+        "reviewer",
+        tmp_path / "checklist.yml",
+    )
+    assert snapshot() == before
+    assert (
+        fixture_root.root / "data" / "standardized" / "CURRENT"
+    ).read_text(encoding="utf-8") == current

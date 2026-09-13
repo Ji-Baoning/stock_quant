@@ -76,6 +76,8 @@ def _prepare(cli_runner, project: AcceptanceProject) -> Path:
     )
     assert result.exit_code == 0, result.stdout
     assert "checklist=checklist.yml" in result.stdout
+    assert "evidence_dir=data/acceptance-evidence/" in result.stdout
+    assert "evidence_attached=6" in result.stdout
     return output
 
 
@@ -144,6 +146,14 @@ def test_prepare_publish_show_round_trip(cli_runner, project):
     assert acceptance_id in shown.stdout
     assert "real-data-v1 ACCEPTED" in shown.stdout
     assert str(project.root) not in shown.stdout
+
+
+def test_publish_rejects_the_untouched_prepared_checklist(cli_runner, project):
+    prepared = _prepare(cli_runner, project)
+    result = _invoke(cli_runner, project, "publish", "--checklist", str(prepared))
+    assert result.exit_code == 1
+    assert "decision=REJECTED" in result.stdout
+    assert "reason=manual_benchmark_sample_pending_confirmation" in result.stdout
 
 
 def test_incomplete_checklist_publishes_rejection_then_exits_nonzero(

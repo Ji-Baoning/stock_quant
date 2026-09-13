@@ -1,22 +1,29 @@
 """Operator workflows over the immutable acceptance registry.
 
-``prepare_checklist`` recomputes every automated verdict for one pinned
-dataset version and emits the operator-facing checklist whose manual rows all
-start as explicit PENDING_CONFIRMATION entries.  ``publish_checklist``
-re-runs the whole preparation against the live dataset, verifies every manual
-evidence reference, and only then records an ACCEPTED or REJECTED decision; a
-rejection is persisted *before* :class:`AcceptanceRejected` is raised so the
-registry always shows why an operator attempt failed.  Nothing here mutates
-datasets, raw snapshots or ``CURRENT`` -- the only write path is the
-append-only registry -- and every published artifact keeps hashes, summaries,
-relative paths and public identifiers only.
+``build_checklist`` is the pure kernel: it recomputes every automated verdict
+for one pinned dataset version and returns the operator-facing checklist whose
+manual rows all start as explicit PENDING_CONFIRMATION entries, without
+touching disk.  ``prepare_checklist`` layers the deterministic evidence pack on
+top -- generating ``data/acceptance-evidence/<version>/``, pointing the six
+mechanisable manual rows at their artifacts and writing the checklist YAML.
+``publish_checklist`` re-runs the *pure* recompute against the live dataset,
+verifies every manual evidence reference, and only then records an ACCEPTED or
+REJECTED decision; a rejection is persisted *before*
+:class:`AcceptanceRejected` is raised so the registry always shows why an
+operator attempt failed.  The read-only paths deliberately never generate
+evidence, so a tampered pack cannot be silently repaired.  Nothing here
+mutates datasets, raw snapshots or ``CURRENT``, and every published artifact
+keeps hashes, summaries, relative paths and public identifiers only.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
+from uuid import uuid4
 
 import yaml
 
@@ -24,6 +31,10 @@ from stock_quant.research.acceptance.checks import (
     AcceptanceCheckInput,
     dataset_evidence,
     run_automated_checks,
+)
+from stock_quant.research.acceptance.evidence import (
+    EvidenceBuildError,
+    build_mechanisable_evidence,
 )
 from stock_quant.research.acceptance.models import (
     MANUAL_CHECK_CODES,
@@ -71,18 +82,21 @@ class AcceptanceBindingError(ValueError):
 _UNPUBLISHABLE_REFERENCE = "unverifiable_local_reference"
 
 
-def prepare_checklist(
+def build_checklist(
     project_root: Path,
     dataset_version: str,
     operator_id: str,
+    *,
     prepared_at: datetime | None = None,
 ) -> AcceptanceChecklist:
-    """Build the deterministic operator checklist for one dataset version.
+    """Recompute the deterministic operator checklist for one dataset version.
 
-    The automated rows carry the fresh offline checker results in policy
-    order while every manual row starts as a PENDING_CONFIRMATION placeholder
-    an operator must turn into PASS with evidence; ``prepared_at`` defaults to
-    the current UTC time so identical inputs differ only by that clock field.
+    Pure: it reads the pinned dataset and returns the checklist, writing
+    nothing.  The automated rows carry the fresh offline checker results in
+    policy order while every manual row starts as a PENDING_CONFIRMATION
+    placeholder an operator must turn into PASS with evidence; ``prepared_at``
+    defaults to the current UTC time so identical inputs differ only by that
+    clock field.
     """
     value = AcceptanceCheckInput(Path(project_root), dataset_version)
     evidence = dataset_evidence(value)
@@ -111,6 +125,84 @@ def prepare_checklist(
     )
 
 
+def prepare_checklist(
+    project_root: Path,
+    dataset_version: str,
+    operator_id: str,
+    output_path: Path,
+    *,
+    prepared_at: datetime | None = None,
+) -> AcceptanceChecklist:
+    """Build the checklist, generate the evidence pack, and write both.
+
+    The pack is replaced whole before the checklist is written, and a failed
+    build never yields a row with fake evidence: those rows stay
+    ``PENDING_CONFIRMATION`` with empty evidence and a stable failure category
+    in their summary, so publishing them rejects instead of accepting.
+    """
+    root = Path(project_root).resolve()
+    checklist = build_checklist(
+        root, dataset_version, operator_id, prepared_at=prepared_at
+    )
+    failed: str | None = None
+    try:
+        references = build_mechanisable_evidence(root, dataset_version)
+    except EvidenceBuildError as error:
+        references = {}
+        failed = error.category
+    checklist = checklist.model_copy(
+        update={
+            "manual_checks": _attach_evidence(
+                checklist.manual_checks, references, failed=failed
+            )
+        }
+    )
+    _write_checklist(checklist, Path(output_path))
+    return checklist
+
+
+def _attach_evidence(
+    rows: tuple[ManualCheckResult, ...],
+    references: Mapping[str, EvidenceReference],
+    *,
+    failed: str | None,
+) -> tuple[ManualCheckResult, ...]:
+    """Point each mechanisable row at its artifact, or name the failure."""
+    attached: list[ManualCheckResult] = []
+    for row in rows:
+        reference = references.get(row.code)
+        if reference is not None:
+            attached.append(row.model_copy(update={"evidence": (reference,)}))
+        elif failed is not None and row.code in MECHANISABLE_CODES:
+            attached.append(
+                row.model_copy(
+                    update={
+                        "summary": f"evidence generation failed: {failed}"
+                    }
+                )
+            )
+        else:
+            attached.append(row)
+    return tuple(attached)
+
+
+def _write_checklist(
+    checklist: AcceptanceChecklist, output_path: Path
+) -> None:
+    """Write the checklist YAML atomically (temp file, then replace)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    staging = output_path.with_name(f".{output_path.name}.{uuid4().hex}.tmp")
+    staging.write_text(
+        yaml.safe_dump(
+            checklist.model_dump(mode="json"),
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    os.replace(staging, output_path)
+
+
 def publish_checklist(
     project_root: Path,
     checklist_path: Path,
@@ -132,7 +224,7 @@ def publish_checklist(
     checklist = AcceptanceChecklist.model_validate(
         yaml.safe_load(Path(checklist_path).read_text(encoding="utf-8"))
     )
-    fresh = prepare_checklist(
+    fresh = build_checklist(
         root,
         checklist.dataset_version,
         checklist.operator_id,
@@ -175,10 +267,12 @@ def verify_acceptance_bindings(
     quality hashes, raw snapshot bindings, automated verdicts), re-verifies
     every manual evidence reference and requires the current policy version;
     any drift raises :class:`AcceptanceBindingError` with the sorted reason
-    set.  Read-only.
+    set.  Read-only: it calls the pure :func:`build_checklist` and generates no
+    evidence, so a tampered pack fails the hash check instead of being
+    rewritten into a pass.
     """
     root = Path(project_root).resolve()
-    fresh = prepare_checklist(
+    fresh = build_checklist(
         root,
         record.dataset_version,
         record.operator_id,

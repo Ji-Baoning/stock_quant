@@ -43,7 +43,6 @@ from typing import Annotated
 
 import pandas as pd
 import typer
-import yaml
 from pydantic import ValidationError
 
 from stock_quant.analytics.performance import PerformanceMetrics, compute_metrics
@@ -59,6 +58,7 @@ from stock_quant.data_quality.models import (
     QualityReport,
     Severity,
 )
+from stock_quant.project_root import ProjectRootError, resolve_project_root
 from stock_quant.reporting.html import (
     ExperimentReportInput,
     ExperimentScenario,
@@ -66,7 +66,7 @@ from stock_quant.reporting.html import (
     render_experiment_report,
     render_quality_report,
 )
-from stock_quant.project_root import ProjectRootError, resolve_project_root
+from stock_quant.research.acceptance.evidence import EVIDENCE_DIRNAME
 from stock_quant.research.acceptance.models import AcceptanceRecord
 from stock_quant.research.acceptance.registry import (
     AcceptanceIntegrityError,
@@ -434,23 +434,25 @@ def data_acceptance_prepare(
     ],
     root: Path = typer.Option(".", "--root", help="Project root."),
 ) -> None:
-    """Write the redacted checklist YAML for one pinned dataset version.
+    """Write the checklist YAML and its deterministic evidence pack.
 
-    Automated rows carry the fresh offline checker verdicts; every manual row
-    starts as an explicit FAIL the operator must turn into PASS with
-    evidence before publishing.
+    Automated rows carry the fresh offline checker verdicts; all nine manual
+    rows start as ``PENDING_CONFIRMATION``, six of them pointing at evidence
+    this command generated under ``data/acceptance-evidence/<version>/`` and
+    three requiring external corroboration only the operator can supply.
+    Nothing here marks a manual row PASS.
     """
     project_root = _resolved_project_root(root)
-    checklist = prepare_checklist(project_root, version, operator)
-    output.write_text(
-        yaml.safe_dump(
-            checklist.model_dump(mode="json"),
-            sort_keys=False,
-            allow_unicode=True,
-        ),
-        encoding="utf-8",
-    )
+    checklist = prepare_checklist(project_root, version, operator, output)
     typer.echo(f"checklist={output.name}")
+    typer.echo(f"evidence_dir=data/{EVIDENCE_DIRNAME}/{version}")
+    typer.echo(
+        "evidence_attached="
+        f"{sum(1 for row in checklist.manual_checks if row.evidence)}"
+    )
+    typer.echo(
+        f"manual_checks={len(checklist.manual_checks)} pending_confirmation"
+    )
 
 
 @acceptance_app.command("publish")
