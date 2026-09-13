@@ -77,6 +77,7 @@ from stock_quant.research.acceptance.service import (
     prepare_checklist,
     publish_checklist,
 )
+from stock_quant.research.acceptance.worksheet import WorksheetError
 from stock_quant.research.models import ResearchRunFailed
 from stock_quant.research.reconcile import (
     STATUS_FILLED,
@@ -432,6 +433,16 @@ def data_acceptance_prepare(
     output: Annotated[
         Path, typer.Option("--output", help="Destination checklist YAML file.")
     ],
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help=(
+                "Restore already signed rows into a rebuilt checklist. Never "
+                "overwrites or deletes a signed worksheet."
+            ),
+        ),
+    ] = False,
     root: Path = typer.Option(".", "--root", help="Project root."),
 ) -> None:
     """Write the checklist YAML and its deterministic evidence pack.
@@ -440,10 +451,19 @@ def data_acceptance_prepare(
     rows start as ``PENDING_CONFIRMATION``, six of them pointing at evidence
     this command generated under ``data/acceptance-evidence/<version>/`` and
     three requiring external corroboration only the operator can supply.
-    Nothing here marks a manual row PASS.
+    Each manual row also gets an unsigned worksheet under
+    ``data/acceptance-worksheets/<version>/``.  Nothing here marks a manual
+    row PASS: an already signed version is refused before anything is written
+    unless ``--force`` restores its signed rows into the rebuilt checklist.
     """
     project_root = _resolved_project_root(root)
-    checklist = prepare_checklist(project_root, version, operator, output)
+    try:
+        checklist = prepare_checklist(
+            project_root, version, operator, output, force=force
+        )
+    except WorksheetError as error:
+        typer.echo(f"reason={error.category}")
+        raise typer.Exit(code=1) from None
     typer.echo(f"checklist={output.name}")
     typer.echo(f"evidence_dir=data/{EVIDENCE_DIRNAME}/{version}")
     typer.echo(

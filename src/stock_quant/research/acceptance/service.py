@@ -50,6 +50,10 @@ from stock_quant.research.acceptance.models import (
     compute_acceptance_id,
 )
 from stock_quant.research.acceptance.registry import AcceptanceRegistry
+from stock_quant.research.acceptance.worksheet_prepare import (
+    precheck_signed,
+    prepare_worksheets,
+)
 
 
 class AcceptanceRejected(Exception):
@@ -132,15 +136,17 @@ def prepare_checklist(
     output_path: Path,
     *,
     prepared_at: datetime | None = None,
+    force: bool = False,
 ) -> AcceptanceChecklist:
-    """Build the checklist, generate the evidence pack, and write both.
+    """Build the checklist, generate the evidence pack, write worksheets and both.
 
-    The pack is replaced whole before the checklist is written, and a failed
-    build never yields a row with fake evidence: those rows stay
-    ``PENDING_CONFIRMATION`` with empty evidence and a stable failure category
-    in their summary, so publishing them rejects instead of accepting.
+    The signed-version pre-check runs *before* the evidence pack is rebuilt: a
+    check that ran after it would already have changed the tree it protects.
+    Without ``force`` an already signed version stops here; with ``force`` the
+    signed rows are restored and no revision is written over.
     """
     root = Path(project_root).resolve()
+    precheck_signed(root, dataset_version, force=force)
     checklist = build_checklist(
         root, dataset_version, operator_id, prepared_at=prepared_at
     )
@@ -157,7 +163,8 @@ def prepare_checklist(
             )
         }
     )
-    _write_checklist(checklist, Path(output_path))
+    checklist = prepare_worksheets(root, checklist, force=force)
+    write_checklist_atomic(checklist, Path(output_path))
     return checklist
 
 
@@ -186,7 +193,7 @@ def _attach_evidence(
     return tuple(attached)
 
 
-def _write_checklist(
+def write_checklist_atomic(
     checklist: AcceptanceChecklist, output_path: Path
 ) -> None:
     """Write the checklist YAML atomically (temp file, then replace)."""
@@ -230,7 +237,7 @@ def publish_checklist(
         checklist.operator_id,
         prepared_at=checklist.prepared_at,
     )
-    reasons = _binding_reasons(checklist, fresh)
+    reasons = binding_reasons(checklist, fresh)
     reasons.extend(_manual_check_reasons(root, checklist.manual_checks))
     decision = (
         AcceptanceDecision.REJECTED if reasons else AcceptanceDecision.ACCEPTED
@@ -288,7 +295,7 @@ def verify_acceptance_bindings(
         manual_checks=record.manual_checks,
         raw_snapshot_evidence=record.raw_snapshot_evidence,
     )
-    reasons = _binding_reasons(requested, fresh)
+    reasons = binding_reasons(requested, fresh)
     reasons.extend(_manual_check_reasons(root, record.manual_checks))
     if record.policy_version != POLICY_VERSION:
         reasons.append("policy_version_expired")
@@ -315,7 +322,7 @@ def show_acceptances(
     return AcceptanceRegistry(project_root).list(dataset_version)
 
 
-def _binding_reasons(
+def binding_reasons(
     requested: AcceptanceChecklist,
     fresh: AcceptanceChecklist,
 ) -> list[str]:
@@ -353,7 +360,7 @@ def _manual_check_reasons(
         if not check.evidence:
             reasons.append(f"manual_{check.code}_evidence_missing")
         for evidence in check.evidence:
-            reason = _verify_evidence_reference(project_root, evidence)
+            reason = verify_evidence_reference(project_root, evidence)
             if reason is not None:
                 reasons.append(f"manual_{check.code}_{reason}")
     return reasons
@@ -417,7 +424,7 @@ def _resolve_local_reference(
     return candidate, None
 
 
-def _verify_evidence_reference(
+def verify_evidence_reference(
     project_root: Path,
     evidence: EvidenceReference,
 ) -> str | None:

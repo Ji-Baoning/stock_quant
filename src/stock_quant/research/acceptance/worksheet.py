@@ -47,6 +47,7 @@ __all__ = [
     "OPERATOR_ATTESTED",
     "Revision",
     "SIGNATURE_FENCE",
+    "SIGNED_SUMMARY",
     "WORKSHEET_DIRNAME",
     "WORKSHEET_ERROR_CATEGORIES",
     "WorksheetError",
@@ -101,6 +102,15 @@ CONFIRMATION_STRENGTHS = (EXTERNAL_CORROBORATED, OPERATOR_ATTESTED)
 #: The two decisions a signature block may carry.
 _SIGNED_DECISIONS = ("PASS", "FAIL")
 
+#: The conclusion-free summary a signed manual row carries.  The signature and
+#: the conclusion live in the worksheet's human area only: a row's ``summary``
+#: is rewritten by every supersede, so putting the old conclusion there would
+#: leave a stale judgement attached to the newest decision.
+SIGNED_SUMMARY = {
+    "PASS": "operator confirmed on worksheet revision",
+    "FAIL": "operator rejected on worksheet revision",
+}
+
 #: The stable failure categories every worksheet operation reports.
 WORKSHEET_ERROR_CATEGORIES = (
     "marker_invalid",
@@ -117,6 +127,7 @@ WORKSHEET_ERROR_CATEGORIES = (
     "external_input_invalid",
     "candidate_evidence_missing",
     "unknown_check_code",
+    "worksheet_missing",
 )
 
 

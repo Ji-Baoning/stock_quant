@@ -56,7 +56,9 @@ __all__ = [
     "build_mechanisable_evidence",
     "corporate_action_evidence",
     "evidence_window",
+    "load_manifest",
     "missing_reason_evidence",
+    "read_pack_references",
     "secret_scan_evidence",
     "security_master_evidence",
     "source_row_count_evidence",
@@ -142,13 +144,13 @@ def build_mechanisable_evidence(
     anything fails.
     """
     root = Path(project_root).resolve()
-    manifest = _load_manifest(root, dataset_version)
+    manifest = load_manifest(root, dataset_version)
     start, end = evidence_window(manifest)
     files = _evidence_files(root, manifest, dataset_version, start, end)
     return _write_pack(root, dataset_version, files)
 
 
-def _load_manifest(root: Path, dataset_version: str) -> dict[str, object]:
+def load_manifest(root: Path, dataset_version: str) -> dict[str, object]:
     """The version's manifest JSON, or a stable build failure."""
     path = (
         root
@@ -164,6 +166,35 @@ def _load_manifest(root: Path, dataset_version: str) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise EvidenceBuildError("dataset_unreadable")
     return payload
+
+
+def read_pack_references(
+    project_root: Path, dataset_version: str
+) -> dict[str, EvidenceReference]:
+    """The references of an **existing** pack, re-hashed read-only.
+
+    Rebuilding a pack is a write, and ``confirm`` may not write evidence; so
+    the signer reads what ``prepare`` already published and cites exactly the
+    bytes it reviewed.  Reading the pack rather than the checklist row is what
+    makes a supersede cite the same artifacts the first signing cited, instead
+    of citing the revision it is replacing.  A missing or half-written pack
+    yields fewer entries -- or none -- which is what lets ``confirm`` refuse a
+    mechanisable row it has nothing to cite for.
+    """
+    root = Path(project_root).resolve()
+    pack = _pack_dir(root, dataset_version)
+    references: dict[str, EvidenceReference] = {}
+    for code, name in EVIDENCE_FILENAMES.items():
+        candidate = pack / name
+        if not candidate.is_file():
+            continue
+        references[code] = EvidenceReference(
+            kind="local",
+            reference=candidate.relative_to(root).as_posix(),
+            sha256=_sha256_file(candidate),
+            summary=f"{code} evidence",
+        )
+    return references
 
 
 def _evidence_files(
