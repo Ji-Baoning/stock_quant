@@ -557,6 +557,48 @@ def test_prepare_degrades_to_pending_rows_when_evidence_fails(
     assert output.is_file()
 
 
+def test_prepare_degrades_when_a_manifest_field_is_unparseable(
+    project, tmp_path
+):
+    """A malformed manifest field degrades, never aborts, ``prepare``.
+
+    The bad ``row_count`` is a plain ``ValueError`` raised deep inside
+    :func:`source_row_count_evidence` -- past the old read-only guard -- so this
+    drives the *real* builder, not a monkeypatch.  It also matters that
+    ``build_checklist`` itself survives the malformation (the automated
+    ``dataset_manifest_integrity`` check swallows it as a FAIL row): before the
+    constructors were guarded, ``prepare`` raised and wrote no checklist at all
+    instead of degrading to unconfirmed rows.
+    """
+    manifest_path = (
+        project.root
+        / "data"
+        / "standardized"
+        / project.version
+        / "dataset_manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    table = sorted(manifest["tables"])[0]
+    manifest["tables"][table]["row_count"] = "not-a-number"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    output = tmp_path / "checklist.yml"
+    checklist = prepare_checklist(
+        project.root, project.version, "operator-a", output
+    )
+    rows = {row.code: row for row in checklist.manual_checks}
+    for code in MECHANISABLE_CODES:
+        assert rows[code].status is ManualCheckStatus.PENDING_CONFIRMATION
+        assert rows[code].evidence == ()
+        assert (
+            rows[code].summary
+            == "evidence generation failed: dataset_unreadable"
+        )
+    for code in OPERATOR_ONLY_CODES:
+        assert rows[code].summary == "external corroboration required"
+    assert output.is_file()
+
+
 def test_verify_never_rewrites_the_evidence_pack(
     project, completed_checklist, tmp_path
 ):

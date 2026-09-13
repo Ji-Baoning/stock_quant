@@ -173,31 +173,43 @@ def _evidence_files(
     start: date,
     end: date,
 ) -> tuple[EvidenceFile, ...]:
-    """The six artifacts, built in memory from the pinned version."""
+    """The six artifacts, built in memory from the pinned version.
+
+    Every input problem reads the same way out of here -- an unreadable table,
+    a malformed project config, or a manifest field a constructor cannot parse
+    -- as :class:`EvidenceBuildError("dataset_unreadable")`.  The guard spans
+    the whole build, not only the reads, so no plain ``ValueError``/``KeyError``
+    from a constructor escapes to abort ``data acceptance prepare`` before the
+    checklist is written; the caller degrades to unconfirmed rows instead.
+    """
     try:
         with DatasetReader(root).open(dataset_version) as dataset:
             daily = dataset.read("daily_bar")
             master = dataset.read("security_master")
             calendar = dataset.read("trading_calendar")
             corporate_action = dataset.read("corporate_action")
-    except (OSError, KeyError, ValueError) as error:
+        build = manifest.get("build_config")
+        snapshots = (
+            list(build.get("raw_snapshots", []))
+            if isinstance(build, dict)
+            else []
+        )
+        benchmarks = tuple(load_project_config(root).benchmark_symbols)
+        open_days = [
+            day for day in _open_days(calendar) if start <= day <= end
+        ]
+        written = [
+            source_row_count_evidence(
+                manifest, snapshots, trading_days=len(open_days)
+            ),
+            missing_reason_evidence(daily, master, calendar, start, end),
+            security_master_evidence(master),
+            benchmark_evidence(daily, calendar, benchmarks, start, end),
+            corporate_action_evidence(corporate_action),
+        ]
+        return (*written, secret_scan_evidence(written))
+    except (OSError, KeyError, ValueError, TypeError) as error:
         raise EvidenceBuildError("dataset_unreadable") from error
-    build = manifest.get("build_config")
-    snapshots = (
-        list(build.get("raw_snapshots", [])) if isinstance(build, dict) else []
-    )
-    benchmarks = tuple(load_project_config(root).benchmark_symbols)
-    open_days = [day for day in _open_days(calendar) if start <= day <= end]
-    written = [
-        source_row_count_evidence(
-            manifest, snapshots, trading_days=len(open_days)
-        ),
-        missing_reason_evidence(daily, master, calendar, start, end),
-        security_master_evidence(master),
-        benchmark_evidence(daily, calendar, benchmarks, start, end),
-        corporate_action_evidence(corporate_action),
-    ]
-    return (*written, secret_scan_evidence(written))
 
 
 def _pack_dir(root: Path, dataset_version: str) -> Path:

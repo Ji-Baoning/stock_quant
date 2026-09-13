@@ -154,6 +154,11 @@ python -m stock_quant data acceptance show --version <VERSION> --root .
 使用 engineering 模式绕过失败。阶段 5 的 `research run` 会选择该数据版本的
 `CURRENT_ACCEPTED`；没有有效的 `ACCEPTED` 记录就不得进入正式研究。
 
+`data/acceptance-evidence/<VERSION>/` 虽在只追加的 `data/acceptances/` 注册表之外，
+却是已接受记录绑定的一部分：阶段 5 的 `research run` 预检会在运行时重新校验整份证据
+包。备份或恢复 `data/acceptances/` 时必须一并保留同名的证据包，否则后续
+`research run` 会因 `evidence_missing` 失败。
+
 ## 阶段 5 · 正式研究（唯一发布者）
 
 ```bash
