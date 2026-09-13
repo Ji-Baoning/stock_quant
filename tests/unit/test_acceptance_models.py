@@ -37,10 +37,14 @@ from stock_quant.research.acceptance import (
 from stock_quant.research.acceptance.models import (
     AUTOMATED_CHECK_CODES,
     MANUAL_CHECK_CODES,
+    MECHANISABLE_CODES,
+    OPERATOR_ONLY_CODES,
     AcceptanceChecklist,
     AcceptanceRecord,
     CheckResult,
     CheckStatus,
+    ManualCheckResult,
+    ManualCheckStatus,
     canonical_record_json,
     compute_acceptance_id,
 )
@@ -360,6 +364,52 @@ def test_check_result_rejects_empty_summary_and_unknown_fields():
         CheckResult(code="x", status=CheckStatus.PASS, summary="")
     with pytest.raises(ValidationError):
         CheckResult(code="x", status=CheckStatus.PASS, summary="ok", extra=True)
+
+
+def test_manual_status_adds_only_the_pending_state():
+    """The manual vocabulary is the automated one plus one unconfirmed state."""
+    assert [status.value for status in ManualCheckStatus] == [
+        "PENDING_CONFIRMATION",
+        "PASS",
+        "FAIL",
+    ]
+    assert ManualCheckStatus.PASS.value == CheckStatus.PASS.value
+    assert ManualCheckStatus.FAIL.value == CheckStatus.FAIL.value
+
+
+def test_manual_result_renders_the_legacy_check_result_payload():
+    """The manual row's canonical JSON is unchanged, so record ids stay stable.
+
+    ``acceptance_id`` is the SHA-256 of the canonical payload, and a status is
+    rendered by its ``value``: as long as the two models carry the same fields
+    and the two PASS/FAIL values agree, a record published before this change
+    keeps its id bit-for-bit.
+    """
+    assert list(ManualCheckResult.model_fields) == list(CheckResult.model_fields)
+    manual = ManualCheckResult(code="secret_scan", status="PASS", summary="ok")
+    legacy = CheckResult(code="secret_scan", status="PASS", summary="ok")
+    assert manual.model_dump(mode="json") == legacy.model_dump(mode="json")
+
+
+def test_automated_check_rejects_the_pending_state():
+    with pytest.raises(ValidationError):
+        CheckResult(code="x", status="PENDING_CONFIRMATION", summary="ok")
+    with pytest.raises(ValidationError):
+        ManualCheckResult(code="x", status="UNKNOWN", summary="ok")
+
+
+def test_manual_row_classification_tiles_the_policy_vocabulary():
+    assert set(MECHANISABLE_CODES) | set(OPERATOR_ONLY_CODES) == set(
+        MANUAL_CHECK_CODES
+    )
+    assert set(MECHANISABLE_CODES) & set(OPERATOR_ONLY_CODES) == set()
+
+
+def test_accepted_record_cannot_carry_a_pending_manual_row():
+    payload = _record_payload()
+    payload["manual_checks"][0]["status"] = "PENDING_CONFIRMATION"
+    with pytest.raises(ValidationError, match="ACCEPTED requires"):
+        AcceptanceRecord.model_validate(payload)
 
 
 def test_checklist_requires_every_manual_code_once(checklist_payload):

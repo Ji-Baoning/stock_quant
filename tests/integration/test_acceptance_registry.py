@@ -197,6 +197,19 @@ def test_select_rejected_record_is_not_valid(
         )
 
 
+def test_select_reads_confirmed_manual_rows(tmp_path, accepted_record):
+    """A confirmed manual row is a PASS whatever enum carries it.
+
+    Regression guard for the four sites that compare a manual row's status: a
+    stale ``CheckStatus`` comparison turns every ACCEPTED record into
+    ``NoValidAcceptance``, and the failure surfaces far from the model change
+    that caused it.
+    """
+    registry = AcceptanceRegistry(tmp_path)
+    registry.publish(accepted_record)
+    assert registry.select(_DATASET_VERSION, CURRENT_ACCEPTED) == accepted_record
+
+
 def test_get_detects_tampered_record(tmp_path, accepted_record):
     registry = AcceptanceRegistry(tmp_path)
     registry.publish(accepted_record)

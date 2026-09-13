@@ -77,9 +77,10 @@ from stock_quant.research.acceptance.models import (
     MANUAL_CHECK_CODES,
     AcceptanceDecision,
     AcceptanceRecord,
-    CheckResult,
     CheckStatus,
     EvidenceReference,
+    ManualCheckResult,
+    ManualCheckStatus,
     compute_acceptance_id,
 )
 from stock_quant.research.acceptance.registry import AcceptanceRegistry
@@ -521,9 +522,9 @@ def publish_fixture_acceptance(project_root: Path, dataset_version: str) -> str:
     assert not failed, f"fixture dataset failed automated checks: {failed}"
     evidence = dataset_evidence(value)
     manual = tuple(
-        CheckResult(
+        ManualCheckResult(
             code=code,
-            status=CheckStatus.PASS,
+            status=ManualCheckStatus.PASS,
             summary="integration fixture operator sample verified",
             evidence=(_fixture_evidence_reference(root, code),),
         )

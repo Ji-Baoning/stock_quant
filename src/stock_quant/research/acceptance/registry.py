@@ -32,6 +32,7 @@ from stock_quant.research.acceptance.models import (
     AcceptanceDecision,
     AcceptanceRecord,
     CheckStatus,
+    ManualCheckStatus,
     canonical_record_json,
     compute_acceptance_id,
 )
@@ -173,7 +174,7 @@ class AcceptanceRegistry:
                 for check in row.automated_checks
             )
             and all(
-                check.status is CheckStatus.PASS
+                check.status is ManualCheckStatus.PASS
                 for check in row.manual_checks
             )
         )

@@ -160,7 +160,8 @@ def test_incomplete_checklist_publishes_rejection_then_exits_nonzero(
     )
     assert saved.decision.value == "REJECTED"
     assert any(
-        reason.startswith("manual_") and reason.endswith("_failed")
+        reason.startswith("manual_")
+        and reason.endswith("_pending_confirmation")
         for reason in saved.reasons
     )
 

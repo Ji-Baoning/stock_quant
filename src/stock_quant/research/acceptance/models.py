@@ -96,6 +96,21 @@ MANUAL_CHECK_CODES = (
     "security_master_sample",
     "secret_scan",
 )
+#: Manual checks a script can evidence on its own, from the pinned version.
+MECHANISABLE_CODES = (
+    "source_row_count_sample",
+    "missing_reason_sample",
+    "corporate_action_sample",
+    "benchmark_sample",
+    "security_master_sample",
+    "secret_scan",
+)
+#: Manual checks that need corroboration this project cannot produce.
+OPERATOR_ONLY_CODES = (
+    "exchange_calendar_sample",
+    "cross_source_price_sample",
+    "trading_rule_effective_dates",
+)
 
 #: ``JsonValue`` (imported from pydantic) is the recursive JSON-safe union a
 #: structured ``CheckResult.details`` mapping may hold; hand-rolled recursive
@@ -112,6 +127,20 @@ class AcceptanceStatus(str, Enum):
 class CheckStatus(str, Enum):
     """Outcome of one acceptance check."""
 
+    PASS = "PASS"
+    FAIL = "FAIL"
+
+
+class ManualCheckStatus(str, Enum):
+    """Outcome of one manual acceptance check.
+
+    Manual rows carry one extra state on purpose: ``PENDING_CONFIRMATION``
+    separates "the machine generated the evidence" from "a human read it and
+    signed it off".  Automated rows never take this value -- their contract
+    stays the two-valued :class:`CheckStatus`.
+    """
+
+    PENDING_CONFIRMATION = "PENDING_CONFIRMATION"
     PASS = "PASS"
     FAIL = "FAIL"
 
@@ -256,8 +285,26 @@ class CheckResult(BaseModel):
     evidence: tuple[EvidenceReference, ...] = ()
 
 
+class ManualCheckResult(BaseModel):
+    """One manual check outcome, including the unconfirmed state.
+
+    Field-for-field identical to :class:`CheckResult`, so a persisted row
+    renders the same canonical JSON and a legacy ``acceptance_id`` stays
+    bit-identical; ``status`` is the only difference, and its PASS/FAIL values
+    are shared with :class:`CheckStatus`.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    code: str = Field(min_length=1)
+    status: ManualCheckStatus
+    summary: str = Field(min_length=1)
+    details: dict[str, JsonValue] = Field(default_factory=dict)
+    evidence: tuple[EvidenceReference, ...] = ()
+
+
 def _require_exact_codes(
-    checks: tuple[CheckResult, ...],
+    checks: tuple[CheckResult | ManualCheckResult, ...],
     expected_codes: tuple[str, ...],
     label: str,
 ) -> None:
@@ -285,8 +332,9 @@ class AcceptanceChecklist(BaseModel):
     """The operator-facing checklist an acceptance record is published from.
 
     The automated rows carry the fresh offline checker results while the
-    manual rows start as explicit FAIL entries the operator must turn into
-    PASS with evidence; both vocabularies must be covered exactly once.
+    manual rows start as explicit PENDING_CONFIRMATION entries the operator
+    must turn into PASS with evidence; both vocabularies must be covered
+    exactly once.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -301,7 +349,7 @@ class AcceptanceChecklist(BaseModel):
     prepared_at: AwareDatetime
     operator_id: str = Field(min_length=1)
     automated_checks: tuple[CheckResult, ...]
-    manual_checks: tuple[CheckResult, ...]
+    manual_checks: tuple[ManualCheckResult, ...]
     raw_snapshot_evidence: tuple[RawSnapshotBinding, ...]
 
     @model_validator(mode="after")
@@ -335,7 +383,7 @@ class AcceptanceRecord(BaseModel):
     created_at: AwareDatetime
     operator_id: str = Field(min_length=1)
     automated_checks: tuple[CheckResult, ...]
-    manual_checks: tuple[CheckResult, ...]
+    manual_checks: tuple[ManualCheckResult, ...]
     raw_snapshot_evidence: tuple[RawSnapshotBinding, ...]
     decision: AcceptanceDecision
     reasons: tuple[str, ...]
@@ -344,8 +392,9 @@ class AcceptanceRecord(BaseModel):
     def validate_decision(self) -> "AcceptanceRecord":
         """Keep the decision consistent with the recorded evidence."""
         all_pass = all(
-            item.status is CheckStatus.PASS
-            for item in (*self.automated_checks, *self.manual_checks)
+            item.status is CheckStatus.PASS for item in self.automated_checks
+        ) and all(
+            item.status is ManualCheckStatus.PASS for item in self.manual_checks
         )
         if self.decision is AcceptanceDecision.ACCEPTED and (
             not all_pass or self.reasons

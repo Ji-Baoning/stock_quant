@@ -2,14 +2,14 @@
 
 ``prepare_checklist`` recomputes every automated verdict for one pinned
 dataset version and emits the operator-facing checklist whose manual rows all
-start as explicit FAIL entries.  ``publish_checklist`` re-runs the whole
-preparation against the live dataset, verifies every manual evidence
-reference, and only then records an ACCEPTED or REJECTED decision; a rejection
-is persisted *before* :class:`AcceptanceRejected` is raised so the registry
-always shows why an operator attempt failed.  Nothing here mutates datasets,
-raw snapshots or ``CURRENT`` -- the only write path is the append-only
-registry -- and every published artifact keeps hashes, summaries, relative
-paths and public identifiers only.
+start as explicit PENDING_CONFIRMATION entries.  ``publish_checklist``
+re-runs the whole preparation against the live dataset, verifies every manual
+evidence reference, and only then records an ACCEPTED or REJECTED decision; a
+rejection is persisted *before* :class:`AcceptanceRejected` is raised so the
+registry always shows why an operator attempt failed.  Nothing here mutates
+datasets, raw snapshots or ``CURRENT`` -- the only write path is the
+append-only registry -- and every published artifact keeps hashes, summaries,
+relative paths and public identifiers only.
 """
 
 from __future__ import annotations
@@ -27,13 +27,15 @@ from stock_quant.research.acceptance.checks import (
 )
 from stock_quant.research.acceptance.models import (
     MANUAL_CHECK_CODES,
+    MECHANISABLE_CODES,
     POLICY_VERSION,
     AcceptanceChecklist,
     AcceptanceDecision,
     AcceptanceRecord,
-    CheckResult,
     CheckStatus,
     EvidenceReference,
+    ManualCheckResult,
+    ManualCheckStatus,
     compute_acceptance_id,
 )
 from stock_quant.research.acceptance.registry import AcceptanceRegistry
@@ -78,18 +80,22 @@ def prepare_checklist(
     """Build the deterministic operator checklist for one dataset version.
 
     The automated rows carry the fresh offline checker results in policy
-    order while every manual row starts as a FAIL placeholder an operator
-    must turn into PASS with evidence; ``prepared_at`` defaults to the
-    current UTC time so identical inputs differ only by that clock field.
+    order while every manual row starts as a PENDING_CONFIRMATION placeholder
+    an operator must turn into PASS with evidence; ``prepared_at`` defaults to
+    the current UTC time so identical inputs differ only by that clock field.
     """
     value = AcceptanceCheckInput(Path(project_root), dataset_version)
     evidence = dataset_evidence(value)
     automated = run_automated_checks(value)
     manual = tuple(
-        CheckResult(
+        ManualCheckResult(
             code=code,
-            status=CheckStatus.FAIL,
-            summary="operator review required",
+            status=ManualCheckStatus.PENDING_CONFIRMATION,
+            summary=(
+                "operator review required"
+                if code in MECHANISABLE_CODES
+                else "external corroboration required"
+            ),
         )
         for code in MANUAL_CHECK_CODES
     )
@@ -241,12 +247,14 @@ def _binding_reasons(
 
 def _manual_check_reasons(
     project_root: Path,
-    checks: tuple[CheckResult, ...],
+    checks: tuple[ManualCheckResult, ...],
 ) -> list[str]:
     """Every manual row that is not a verified PASS with good evidence."""
     reasons = []
     for check in checks:
-        if check.status is not CheckStatus.PASS:
+        if check.status is ManualCheckStatus.PENDING_CONFIRMATION:
+            reasons.append(f"manual_{check.code}_pending_confirmation")
+        elif check.status is not ManualCheckStatus.PASS:
             reasons.append(f"manual_{check.code}_failed")
         if not check.evidence:
             reasons.append(f"manual_{check.code}_evidence_missing")
@@ -259,8 +267,8 @@ def _manual_check_reasons(
 
 def _sanitized_manual_checks(
     project_root: Path,
-    checks: tuple[CheckResult, ...],
-) -> tuple[CheckResult, ...]:
+    checks: tuple[ManualCheckResult, ...],
+) -> tuple[ManualCheckResult, ...]:
     """The manual rows as they may be persisted.
 
     A local reference is kept verbatim only when it is a relative path the
@@ -270,7 +278,7 @@ def _sanitized_manual_checks(
     already explain why the row did not verify -- and fully verified
     checklists (the ACCEPTED path) are returned unchanged.
     """
-    sanitized: list[CheckResult] = []
+    sanitized: list[ManualCheckResult] = []
     for check in checks:
         evidence = tuple(
             row

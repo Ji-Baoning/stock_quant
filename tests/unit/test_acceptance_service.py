@@ -1,8 +1,9 @@
 """Unit behaviour of the acceptance operator service (Task 5).
 
 ``prepare_checklist`` turns one pinned dataset version into the deterministic
-operator checklist: fresh automated verdicts plus an all-manual-FAIL template.
-The healthy project fixture mirrors ``tests/integration/test_acceptance_checks.py``
+operator checklist: fresh automated verdicts plus an all-manual-PENDING
+template.  The healthy project fixture mirrors
+``tests/integration/test_acceptance_checks.py``
 (repository configs plus one stubbed ``data update``), so the automated checks
 genuinely pass offline and the publish tests exercise the real evidence path
 end to end on ``tmp_path`` projects only.  Nothing touches a network or token.
@@ -34,10 +35,12 @@ from stock_quant.data_sources.base import (
 from stock_quant.research.acceptance.models import (
     AUTOMATED_CHECK_CODES,
     MANUAL_CHECK_CODES,
+    MECHANISABLE_CODES,
+    OPERATOR_ONLY_CODES,
     AcceptanceDecision,
-    CheckResult,
-    CheckStatus,
     EvidenceReference,
+    ManualCheckResult,
+    ManualCheckStatus,
 )
 from stock_quant.research.acceptance.registry import AcceptanceRegistry
 from stock_quant.research.acceptance.service import (
@@ -335,9 +338,9 @@ def _external_evidence() -> EvidenceReference:
     )
 
 
-def _completed_manual_checks(root: Path) -> tuple[CheckResult, ...]:
+def _completed_manual_checks(root: Path) -> tuple[ManualCheckResult, ...]:
     """Every manual check PASS with exactly one verifiable reference."""
-    checks: list[CheckResult] = []
+    checks: list[ManualCheckResult] = []
     for code in MANUAL_CHECK_CODES:
         evidence = (
             _external_evidence()
@@ -345,9 +348,9 @@ def _completed_manual_checks(root: Path) -> tuple[CheckResult, ...]:
             else _local_evidence(root, code)
         )
         checks.append(
-            CheckResult(
+            ManualCheckResult(
                 code=code,
-                status=CheckStatus.PASS,
+                status=ManualCheckStatus.PASS,
                 summary=f"{code} sample verified by operator",
                 evidence=(evidence,),
             )
@@ -394,7 +397,7 @@ def completed_checklist(project):
 
 @pytest.fixture
 def incomplete_checklist(project):
-    """Path to the raw prepared template (manual rows FAIL, no evidence)."""
+    """Path to the prepared template (manual rows unconfirmed, no evidence)."""
     return _write_checklist_yaml(
         project, complete=False, name="incomplete-checklist.yml"
     )
@@ -417,7 +420,7 @@ def _replace_evidence_reference(checklist_path: Path, reference: str) -> Path:
 # --------------------------------------------------------------------------- #
 
 
-def test_prepare_creates_complete_unpassed_manual_template(project):
+def test_prepare_creates_complete_pending_manual_template(project):
     checklist = prepare_checklist(
         project.root,
         project.version,
@@ -430,10 +433,19 @@ def test_prepare_creates_complete_unpassed_manual_template(project):
     assert [row.code for row in checklist.manual_checks] == list(
         MANUAL_CHECK_CODES
     )
-    assert all(row.status is CheckStatus.FAIL for row in checklist.manual_checks)
+    assert all(
+        row.status is ManualCheckStatus.PENDING_CONFIRMATION
+        for row in checklist.manual_checks
+    )
     assert all(
         row.summary == "operator review required"
         for row in checklist.manual_checks
+        if row.code in MECHANISABLE_CODES
+    )
+    assert all(
+        row.summary == "external corroboration required"
+        for row in checklist.manual_checks
+        if row.code in OPERATOR_ONLY_CODES
     )
 
 
@@ -475,6 +487,20 @@ def test_publish_records_rejection_before_raising(project, incomplete_checklist)
     )
     assert saved.decision is AcceptanceDecision.REJECTED
     assert saved == captured.value.record
+
+
+def test_pending_manual_row_is_not_publishable(project, incomplete_checklist):
+    """The prepared template is unconfirmed: publishing it must reject loudly."""
+    with pytest.raises(AcceptanceRejected) as captured:
+        publish_checklist(
+            project.root, incomplete_checklist, created_at=_CREATED_AT
+        )
+    record = captured.value.record
+    assert record.decision is AcceptanceDecision.REJECTED
+    assert all(
+        f"manual_{code}_pending_confirmation" in record.reasons
+        for code in MANUAL_CHECK_CODES
+    )
 
 
 def test_local_evidence_cannot_escape_project(project, completed_checklist):
