@@ -29,15 +29,24 @@ import hashlib
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 import yaml
 
-from stock_quant.research.acceptance.models import MANUAL_CHECK_CODES
+from stock_quant.research.acceptance.models import (
+    MANUAL_CHECK_CODES,
+    MECHANISABLE_CODES,
+    OPERATOR_ONLY_CODES,
+    AcceptanceChecklist,
+    EvidenceReference,
+    ManualCheckStatus,
+)
 
 __all__ = [
     "CONFIRMATION_STRENGTHS",
+    "ConfirmationRequest",
     "EXTERNAL_CORROBORATED",
     "EXTERNAL_INPUT_DIRNAME",
     "MARKER_HUMAN_BEGIN",
@@ -52,6 +61,8 @@ __all__ = [
     "WORKSHEET_ERROR_CATEGORIES",
     "WorksheetError",
     "append_signature",
+    "apply_confirmation",
+    "confirm",
     "effective_revision",
     "external_inputs_root",
     "last_signature",
@@ -478,3 +489,387 @@ def signed_codes(project_root: Path, dataset_version: str) -> tuple[str, ...]:
         for code in MANUAL_CHECK_CODES
         if effective_revision(project_root, dataset_version, code) is not None
     )
+
+
+#: The two decisions a signature block may carry.
+_PASS = "PASS"
+_FAIL = "FAIL"
+
+
+@dataclass(frozen=True)
+class ConfirmationRequest:
+    """Everything one ``confirm`` invocation decided, in one value."""
+
+    code: str
+    operator_id: str
+    decision: str
+    conclusion: str
+    strength: str
+    supersede: bool
+    evidence: tuple[EvidenceReference, ...]
+    confirmed_at: str
+
+
+def apply_confirmation(
+    checklist: AcceptanceChecklist,
+    request: ConfirmationRequest,
+    *,
+    effective: Revision | None,
+) -> AcceptanceChecklist:
+    """The pure kernel: flip exactly one manual row, change nothing else.
+
+    The checklist is *copied*, never rebuilt, so every untouched row stays
+    byte-identical and no container field can move.  The guards here are the
+    same ones ``confirm`` already applied -- a kernel that trusted its caller
+    would be one refactor away from being the second write path.
+    """
+    if request.code not in MANUAL_CHECK_CODES:
+        raise WorksheetError("unknown_check_code")
+    if request.decision not in (_PASS, _FAIL):
+        raise WorksheetError("unknown_check_code")
+    rows = {row.code: row for row in checklist.manual_checks}
+    if request.code not in rows:
+        raise WorksheetError("unknown_check_code")
+    row = rows[request.code]
+    if request.supersede:
+        # ``nothing_to_supersede`` is decided by the caller, which is the only
+        # party that can tell "no revision yet" from "a stale baseline": here
+        # the row state alone is enough to refuse an unsigned one.
+        if row.status is ManualCheckStatus.PENDING_CONFIRMATION or effective is None:
+            raise WorksheetError("nothing_to_supersede")
+        if not row.evidence or row.evidence[0].reference != effective.reference:
+            raise WorksheetError("superseded_revision_drift")
+    else:
+        if row.status is not ManualCheckStatus.PENDING_CONFIRMATION:
+            raise WorksheetError("already_signed")
+        if effective is not None:
+            raise WorksheetError("already_signed")
+    updated = row.model_copy(
+        update={
+            "status": ManualCheckStatus(request.decision),
+            "summary": SIGNED_SUMMARY[request.decision],
+            "evidence": request.evidence,
+        }
+    )
+    return checklist.model_copy(
+        update={
+            "manual_checks": tuple(
+                updated if other.code == request.code else other
+                for other in checklist.manual_checks
+            )
+        }
+    )
+
+
+def confirm(
+    project_root: Path,
+    checklist_path: Path,
+    *,
+    code: str,
+    operator_id: str,
+    decision: str,
+    conclusion: str | None = None,
+    external_input: Path | None = None,
+    acknowledge: int | None = None,
+    supersede: bool = False,
+    now: datetime | None = None,
+) -> AcceptanceChecklist:
+    """Confirm or reject one manual row, appending one immutable revision.
+
+    Seven steps, and the order *is* the safety property: the revision is
+    written and hashed before the checklist cites it, so a crash between the
+    two leaves a revision the checklist has not caught up with -- recoverable
+    with ``prepare --force`` -- and never a checklist pointing at a file that
+    does not exist.
+    """
+    from stock_quant.research.acceptance.evidence import read_pack_references
+    from stock_quant.research.acceptance.external_inputs import (
+        EXCERPT_CODES,
+        compare_for_code,
+        store_blob,
+        version_facts,
+    )
+    from stock_quant.research.acceptance.service import (
+        binding_reasons,
+        build_checklist,
+        write_checklist_atomic,
+    )
+    from stock_quant.research.acceptance.worksheet_prepare import (
+        candidate_evidence,
+        previous_candidate_rows,
+        previous_signed_payload,
+        revision_reference,
+        window_of,
+    )
+    from stock_quant.research.acceptance.worksheet_program import (
+        build_program,
+        candidate_rows,
+        comparison_for_checklist,
+        review_queue,
+        strength_for,
+    )
+
+    root = Path(project_root).resolve()
+    if code not in MANUAL_CHECK_CODES:
+        raise WorksheetError("unknown_check_code")
+    if decision not in (_PASS, _FAIL):
+        raise WorksheetError("unknown_check_code")
+
+    # Step 1: read the checklist, then re-verify every binding and every other
+    # manual row.  A malformed checklist raises the model's own error: the CLI
+    # turns that into one stable ``invalid_checklist`` reason.
+    checklist = AcceptanceChecklist.model_validate(
+        yaml.safe_load(Path(checklist_path).read_text(encoding="utf-8"))
+    )
+    version = checklist.dataset_version
+    fresh = build_checklist(
+        root, version, checklist.operator_id, prepared_at=checklist.prepared_at
+    )
+    reasons = binding_reasons(checklist, fresh)
+    reasons.extend(_other_rows_reasons(root, checklist, fresh, code))
+    if reasons:
+        raise WorksheetError("signed_worksheet_drift")
+
+    # Step 2: this row and its chain must be in the state the request needs.
+    effective = effective_revision(root, version, code)
+    row = next(item for item in checklist.manual_checks if item.code == code)
+    if supersede:
+        if row.status is ManualCheckStatus.PENDING_CONFIRMATION or effective is None:
+            raise WorksheetError("nothing_to_supersede")
+        if not row.evidence or row.evidence[0].reference != effective.reference:
+            raise WorksheetError("superseded_revision_drift")
+        if not conclusion:
+            raise WorksheetError("conclusion_required")
+    elif (
+        row.status is not ManualCheckStatus.PENDING_CONFIRMATION
+        or effective is not None
+    ):
+        raise WorksheetError("already_signed")
+    elif decision == _FAIL and not conclusion:
+        raise WorksheetError("conclusion_required")
+
+    # Step 3: land the external input, then recompute what this signing is
+    # judged against.  The queue is computed *here*, after the input exists,
+    # and is what ``--acknowledge`` is compared against -- never the number a
+    # prepared worksheet happened to print.
+    start, end = window_of(root, version)
+    facts = version_facts(root, version, start, end)
+    rows_by_code = candidate_rows(facts)
+    source: Path | None = None
+    data: bytes | None = None
+    if external_input is not None:
+        if code not in EXCERPT_CODES:
+            raise WorksheetError("external_input_invalid")
+        source = Path(external_input)
+        try:
+            data = source.read_bytes()
+        except OSError as error:
+            raise WorksheetError("external_input_invalid") from error
+    # Parse before storing: a malformed excerpt is refused, not preserved in
+    # the append-only store, and never becomes something a row can cite.  Only
+    # the operator-only codes have a comparison at all; ``compare_for_code``
+    # itself refuses every other code.
+    comparison = (
+        compare_for_code(code, facts, data) if code in OPERATOR_ONLY_CODES else None
+    )
+    stored_input = (
+        None if data is None or source is None else store_blob(root, data, source.name)
+    )
+    strength = strength_for(code, comparison)
+    previous = latest_pass_revision(root, code, exclude_version=version)
+    queue = (
+        review_queue(
+            code,
+            rows_by_code[code],
+            previous_rows=(
+                previous_candidate_rows(root, previous)
+                if previous is not None
+                else None
+            ),
+            supersede=supersede,
+            extra=_comparison_queue(comparison),
+        )
+        if code in OPERATOR_ONLY_CODES
+        else ()
+    )
+    if len(queue) != (acknowledge if acknowledge is not None else 0):
+        raise WorksheetError("acknowledgement_required")
+    pack_references = read_pack_references(root, version)
+    candidate = candidate_evidence(root, code, rows_by_code, pack_references)
+    if code in MECHANISABLE_CODES and not candidate:
+        # ``confirm`` may not generate evidence, so a mechanisable row with no
+        # published artifact cannot be turned into PASS by this command at all:
+        # signing it would produce a checklist row whose only citation is this
+        # very revision, i.e. a signature standing in for its own evidence.
+        raise WorksheetError("candidate_evidence_missing")
+
+    # Steps 4-5: the baseline human area, its markers, then the new signature.
+    baseline = _baseline_human(root, version, code, effective, supersede)
+    stamp = (now or datetime.now(timezone.utc)).isoformat()
+    program = build_program(
+        code=code,
+        dataset_version=version,
+        dataset_manifest_sha256=checklist.dataset_manifest_sha256,
+        window={"start": start.isoformat(), "end": end.isoformat()},
+        generated_at=stamp,
+        candidate=candidate,
+        previous_signed=previous_signed_payload(previous),
+        supersedes=(
+            {"reference": effective.reference, "sha256": effective.sha256}
+            if supersede and effective is not None
+            else None
+        ),
+        external_input=(
+            {"reference": stored_input.reference, "sha256": stored_input.sha256}
+            if stored_input is not None
+            else None
+        ),
+        comparison=comparison_for_checklist(code, comparison),
+        strength=strength,
+        queue=queue,
+    )
+    human = append_signature(
+        baseline,
+        {
+            "operator_id": operator_id,
+            "confirmed_at": stamp,
+            "decision": decision,
+            "strength": strength,
+            "conclusion": conclusion or "operator confirmed on worksheet revision",
+            "supersedes": effective.reference if supersede and effective else None,
+        },
+    )
+
+    # Step 6: write the revision.  ``write_revision`` refuses to produce a file
+    # whose name disagrees with its bytes, and reuses an identical one.
+    revision = write_revision(root, version, code, program, human)
+
+    # Step 7: the revision is in place, so the checklist may now cite it.
+    evidence = [revision_reference(revision)]
+    if stored_input is not None:
+        evidence.append(
+            EvidenceReference(
+                kind="local",
+                reference=stored_input.reference,
+                sha256=stored_input.sha256,
+                summary=f"{code} external input",
+            )
+        )
+    updated = apply_confirmation(
+        checklist,
+        ConfirmationRequest(
+            code=code,
+            operator_id=operator_id,
+            decision=decision,
+            conclusion=conclusion or "",
+            strength=strength,
+            supersede=supersede,
+            evidence=tuple(evidence),
+            confirmed_at=stamp,
+        ),
+        effective=effective,
+    )
+    pending_path(root, version, code).unlink(missing_ok=True)
+    write_checklist_atomic(updated, Path(checklist_path))
+    return updated
+
+
+#: How ``prepare`` marks a mechanisable row whose evidence build failed.
+_EVIDENCE_FAILURE_PREFIX = "evidence generation failed: "
+
+
+def _other_rows_reasons(
+    root: Path,
+    checklist: AcceptanceChecklist,
+    fresh: AcceptanceChecklist,
+    code: str,
+) -> list[str]:
+    """Why the rows *other* than ``code`` are not in an acceptable state.
+
+    Exactly three states are acceptable:
+
+    * an **unsigned** row -- status ``PENDING_CONFIRMATION`` and the summary
+      ``prepare`` writes (the placeholder text ``build_checklist`` produces, or
+      its ``evidence generation failed:`` form).  The evidence is deliberately
+      *not* compared against ``fresh``: ``build_checklist`` is pure, so the
+      fresh row always carries empty evidence while the prepared row carries
+      the pack reference ``prepare`` legitimately attached.  A reference that
+      does not verify is caught below instead;
+    * a **signed** row whose first reference is this code's *effective*
+      revision and whose every reference still verifies.  A ``FAIL`` row is
+      acceptable here: a rejection is a signature, not an error;
+    * anything else is a reason to refuse.
+
+    This cannot reuse the publish path's reasons, which treat ``FAIL`` as a
+    rejection and would therefore reject every confirm that follows one.
+    """
+    reasons: list[str] = []
+    fresh_rows = {item.code: item for item in fresh.manual_checks}
+    for row in checklist.manual_checks:
+        if row.code == code:
+            continue
+        if row.status is ManualCheckStatus.PENDING_CONFIRMATION:
+            expected = fresh_rows[row.code].summary
+            if row.summary != expected and not row.summary.startswith(
+                _EVIDENCE_FAILURE_PREFIX
+            ):
+                reasons.append(f"manual_{row.code}_placeholder_changed")
+            reasons.extend(
+                f"manual_{row.code}_{reason}"
+                for reason in _unverifiable(root, row.evidence)
+            )
+            continue
+        revision = effective_revision(root, checklist.dataset_version, row.code)
+        if (
+            revision is None
+            or not row.evidence
+            or row.evidence[0].reference != revision.reference
+        ):
+            reasons.append(f"manual_{row.code}_unbound_worksheet")
+            continue
+        reasons.extend(
+            f"manual_{row.code}_{reason}"
+            for reason in _unverifiable(root, row.evidence)
+        )
+    return reasons
+
+
+def _unverifiable(root: Path, evidence: tuple[EvidenceReference, ...]) -> list[str]:
+    """The reason each of these references fails to verify, if any."""
+    from stock_quant.research.acceptance.service import verify_evidence_reference
+
+    return [
+        reason
+        for reference in evidence
+        if (reason := verify_evidence_reference(root, reference)) is not None
+    ]
+
+
+def _baseline_human(
+    project_root: Path,
+    dataset_version: str,
+    code: str,
+    effective: Revision | None,
+    supersede: bool,
+) -> str:
+    """The human area a new revision carries forward, byte for byte.
+
+    A supersede continues the revision it replaces; a first signing continues
+    the pending worksheet ``prepare`` wrote.  A pending worksheet without
+    human markers is a hard failure -- creating one would be guessing at the
+    content that is supposed to be carried forward.
+    """
+    if supersede:
+        if effective is None:
+            raise WorksheetError("nothing_to_supersede")
+        return effective.human
+    path = pending_path(project_root, dataset_version, code)
+    if not path.is_file():
+        raise WorksheetError("worksheet_missing")
+    _, human = verify_markers(path.read_text(encoding="utf-8"))
+    return human
+
+
+def _comparison_queue(comparison: object) -> tuple[str, ...]:
+    """The excerpt-side rows an operator must look at for one comparison."""
+    return tuple(f"official:{key}" for key in getattr(comparison, "queue_rows", ()))

@@ -77,7 +77,7 @@ from stock_quant.research.acceptance.service import (
     prepare_checklist,
     publish_checklist,
 )
-from stock_quant.research.acceptance.worksheet import WorksheetError
+from stock_quant.research.acceptance.worksheet import WorksheetError, confirm
 from stock_quant.research.models import ResearchRunFailed
 from stock_quant.research.reconcile import (
     STATUS_FILLED,
@@ -473,6 +473,94 @@ def data_acceptance_prepare(
     typer.echo(
         f"manual_checks={len(checklist.manual_checks)} pending_confirmation"
     )
+
+
+@acceptance_app.command("confirm")
+def data_acceptance_confirm(
+    checklist: Annotated[
+        Path, typer.Option("--checklist", help="Checklist YAML file.")
+    ],
+    code: Annotated[
+        str, typer.Option("--code", help="Manual check code to confirm.")
+    ],
+    operator: Annotated[
+        str, typer.Option("--operator", help="Signing operator id.")
+    ],
+    external_input: Annotated[
+        Path | None,
+        typer.Option(
+            "--external-input",
+            help=(
+                "Official excerpt for an external check. Copied into the "
+                "project's content-addressed input store."
+            ),
+        ),
+    ] = None,
+    acknowledge: Annotated[
+        int | None,
+        typer.Option(
+            "--acknowledge",
+            help="Number of queued rows the operator reviewed before signing.",
+        ),
+    ] = None,
+    fail: Annotated[
+        bool, typer.Option("--fail", help="Reject this check.")
+    ] = False,
+    supersede: Annotated[
+        bool,
+        typer.Option(
+            "--supersede",
+            help="Replace this check's signed revision. Never overwrites it.",
+        ),
+    ] = False,
+    conclusion: Annotated[
+        str | None,
+        typer.Option("--conclusion", help="Signature conclusion text."),
+    ] = None,
+    conclusion_file: Annotated[
+        Path | None,
+        typer.Option("--conclusion-file", help="Read the conclusion from a file."),
+    ] = None,
+    root: Path = typer.Option(".", "--root", help="Project root."),
+) -> None:
+    """Confirm or reject one manual check, appending one worksheet revision.
+
+    Read-only on everything else: no row is added, no automated row changes,
+    no evidence file is generated, and the container's ``operator_id`` stays
+    where ``prepare`` put it.  Only the named row flips, and only after the
+    worksheet revision citing it is in place.
+    """
+    if conclusion is not None and conclusion_file is not None:
+        typer.echo("reason=conclusion_required")
+        raise typer.Exit(code=1)
+    text = (
+        conclusion_file.read_text(encoding="utf-8")
+        if conclusion_file is not None
+        else conclusion
+    )
+    try:
+        updated = confirm(
+            _resolved_project_root(root),
+            checklist,
+            code=code,
+            operator_id=operator,
+            decision="FAIL" if fail else "PASS",
+            conclusion=text,
+            external_input=external_input,
+            acknowledge=acknowledge,
+            supersede=supersede,
+        )
+    except WorksheetError as error:
+        typer.echo(f"reason={error.category}")
+        raise typer.Exit(code=1) from None
+    except (OSError, ValueError, ValidationError) as error:
+        typer.echo("reason=invalid_checklist")
+        typer.echo(f"error={type(error).__name__}")
+        raise typer.Exit(code=1) from None
+    row = next(item for item in updated.manual_checks if item.code == code)
+    typer.echo(f"code={code}")
+    typer.echo(f"decision={row.status.value}")
+    typer.echo(f"evidence={row.evidence[0].reference}")
 
 
 @acceptance_app.command("publish")
