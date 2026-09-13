@@ -135,16 +135,36 @@ python -m stock_quant data validate --root .
 # corporate_action_sample、benchmark_sample、security_master_sample、secret_scan）
 # 已指向这些证据，但仍须逐项审阅确认；另外三项外部佐证（exchange_calendar_sample、
 # cross_source_price_sample、trading_rule_effective_dates）只能由审核者补齐。
+# 生成九份工作表（同版本重跑会失败；已签版本要用 --force 恢复清单）：
 python -m stock_quant data acceptance prepare --version <VERSION> \
   --operator <OPERATOR_ID> --output checklist.yml --root .
 
-# 审核者逐项审阅六项证据、补齐三项外部佐证，然后把九项 manual 全部改为 PASS
-# （九项均 PASS 且每项 evidence 可校验）后才 publish。
+# 九项逐条确认：每次一个 code，没有批量入口
+python -m stock_quant data acceptance confirm --checklist checklist.yml \
+  --code <CODE> --operator <OPERATOR_ID> [--external-input <FILE>] \
+  [--acknowledge <N>] [--fail] [--supersede] \
+  [--conclusion "<TEXT>"] --root .
+
 python -m stock_quant data acceptance publish --checklist checklist.yml --root .
 
 # 可选：确认当前版本的 ACCEPTED 记录与每项结果。
 python -m stock_quant data acceptance show --version <VERSION> --root .
 ```
+
+- 工作表在 `data/acceptance-worksheets/<VERSION>/`：`<code>.md` 是**未签**的（会被
+  `prepare` 刷新），`<code>/<sha256>.md` 是**已签修订**（永不改写）。清单只绑定后者。
+- 外部输入（官方日历、官方规则摘录）必须用 `--external-input` 提交，命令会把它复制到
+  `data/acceptance-external-inputs/<sha256>/<原名>`；只指一个仓外路径不会被接受。
+  官方日历严格档用两列格式（`日期 1|0`），单列只能得到 `OPERATOR_ATTESTED`。
+- 工作表里的**待确认队列**是这次签署必须逐条过目的项。队列非空时必须 `--acknowledge <N>`
+  且 `N` 恰好等于队列长度，否则拒绝（`reason=acknowledgement_required`）；六项机械项队列恒空。
+  队列在签署当时用**实际提交的**外部输入重算，所以补了摘录之后 `<N>` 可能与工作表上印的不同。
+- 签错了（结论文字、签署者、判据）用 `confirm --supersede` 追加一份修订，旧修订原样
+  留在链上；清单顶层 `operator_id` 是 `prepare` 的发起者，要改它得重跑
+  `prepare --force --operator <正确 ID>` 再 publish。
+- 备份 `data/acceptances/` 时必须一并保留 `data/acceptance-evidence/`、
+  `data/acceptance-worksheets/` 与 `data/acceptance-external-inputs/`，否则后续
+  `research run` 会在人工证据校验上失败。
 
 `prepare` 产出的九项 manual **全部是待确认**（`PENDING_CONFIRMATION`）：它只生成
 证据、不做签署，所以未确认的清单直接 publish 只会得到 `REJECTED`（原因形如
@@ -156,8 +176,7 @@ python -m stock_quant data acceptance show --version <VERSION> --root .
 
 `data/acceptance-evidence/<VERSION>/` 虽在只追加的 `data/acceptances/` 注册表之外，
 却是已接受记录绑定的一部分：阶段 5 的 `research run` 预检会在运行时重新校验整份证据
-包。备份或恢复 `data/acceptances/` 时必须一并保留同名的证据包，否则后续
-`research run` 会因 `evidence_missing` 失败。
+包（连同工作表与外部输入目录，见上）。
 
 ## 阶段 5 · 正式研究（唯一发布者）
 

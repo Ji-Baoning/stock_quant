@@ -163,6 +163,10 @@ python -m stock_quant report build --root <ROOT>
 4. **跨源最大差异抽查**：同一 (security, trade_date) 的主源与校验源收盘比较；阈值见
    §13.4（绝对差 ≤ ¥0.01 为 INFO，相对差 > 0.05% 为 WARNING，收盘相对差 > 0.20% 为
    ERROR）。阶段一管线不把 BaoStock 行并入 `daily_bar`，抽查时直接从原始库取两帧比对。
+   验收工作表的 `cross_source_price_sample` 不接受外部输入：程序按同一阈值在数据集内
+   逐对比较；无法比对时（版本只有一个价格源 `single_price_source`，或两个源各自覆盖
+   不相交的证券集合 `no_paired_bars`）固定为 `OPERATOR_ATTESTED`，并在工作表里用该
+   稳定原因写明为什么没比。
 5. **复权抽查（adjusted_bar 口径）**：发布的 `adjusted_bar` 只应有
    `adjustment=internal_total_return_v1` 一种口径；抽查同 (symbol, trade_date) 的
    `raw_close` 与 `daily_bar.close` 一致、`applied_action_ids` 能回溯到
@@ -191,8 +195,17 @@ python -m stock_quant report build --root <ROOT>
 10. **历史涨跌幅时间表（与官方来源核对）**：`configs/trading_rules.yml` 各行生效日期
     与比例，对照交易所当时官方规则再用于真实数据验收——创业板普通股票
     2020-08-24 起 10%→20%、科创板开板（2019-07-22）起 20%、主板 ST/*ST 5%，并确认
-    ST 状态为**按生效日（effective-dated）**解析、规则行带文档化生效日期。
+    ST 状态为**按生效日（effective-dated）**解析、规则行带文档化生效日期。验收工作表
+    的 `trading_rule_effective_dates` 用 `--external-input` 提交官方规则摘录：五列
+    CSV，表头恰为 `board,status,effective_from,rate,source_url`，逐条覆盖
+    `configs/trading_rules.yml` 展开后的每个规则行且费率一致，程序才给
+    `EXTERNAL_CORROBORATED`；有未覆盖/冲突行或未提交摘录时为 `OPERATOR_ATTESTED`。
 11. **日历与官方日历核对**：把 fixture/真实日历与官方交易所日历对照验收日期区间。
+    验收工作表的 `exchange_calendar_sample` 用 `--external-input` 提交官方日历文件
+    （与 `bootstrap_seed --calendar-csv` 同款格式）：每行一个 ISO 日期、`#` 注释，
+    第二列 `1|0` 标注开/闭市；两列齐全且与数据集日历双向一致才得
+    `EXTERNAL_CORROBORATED`，单列摘录分不清「官方闭市」与「漏抄」，只能得到
+    `OPERATOR_ATTESTED`。
 12. **秘密扫描（接受活数据前最后一步）**：
 
 ```bash
