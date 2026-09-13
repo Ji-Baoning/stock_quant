@@ -8,6 +8,7 @@ checklist without inventing, discarding or re-dating a conclusion.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -219,3 +220,89 @@ def test_a_failed_evidence_build_still_writes_a_worksheet(
     assert _program(published_project, "exchange_calendar_sample")[
         "candidate_evidence"
     ], "the operator-only snapshot does not depend on the evidence pack"
+
+
+def test_a_tampered_revision_breaks_its_own_chain(published_project, tmp_path) -> None:
+    from stock_quant.research.acceptance.worksheet import revision_chain
+
+    _prepare(published_project, tmp_path, "checklist.yml")
+    revision = _sign(published_project, "secret_scan")
+    revision.path.chmod(0o644)
+    revision.path.write_text("tampered\n", encoding="utf-8")
+    with pytest.raises(WorksheetError) as error:
+        revision_chain(
+            published_project.root, published_project.version, "secret_scan"
+        )
+    assert error.value.category == "revision_chain_invalid"
+
+
+def test_an_unexpected_file_in_a_revision_directory_is_rejected(
+    published_project, tmp_path
+) -> None:
+    from stock_quant.research.acceptance.worksheet import revisions_dir
+
+    _prepare(published_project, tmp_path, "checklist.yml")
+    _sign(published_project, "secret_scan")
+    stray = (
+        revisions_dir(published_project.root, published_project.version, "secret_scan")
+        / "operator_notes.md"
+    )
+    stray.write_text("notes\n", encoding="utf-8")
+    with pytest.raises(WorksheetError) as error:
+        _prepare(published_project, tmp_path, "forced.yml", force=True)
+    # The restore path deliberately reports a revision chain it cannot
+    # explain as signed-worksheet drift (worksheet_prepare re-raises every
+    # chain failure that way); the chain-level category itself is covered by
+    # test_a_tampered_revision_breaks_its_own_chain.
+    assert error.value.category == "signed_worksheet_drift"
+    assert stray.exists(), "the stray file is reported, never swept away"
+    assert not (tmp_path / "forced.yml").exists()
+
+
+def test_worksheets_are_written_outside_the_version_evidence_pack(
+    published_project, tmp_path
+) -> None:
+    _prepare(published_project, tmp_path, "checklist.yml")
+    pack = (
+        published_project.root
+        / "data"
+        / "acceptance-evidence"
+        / published_project.version
+    )
+    assert pack.is_dir()
+    assert not (pack / "acceptance-worksheets").exists()
+    assert not (pack / "secret_scan.md").exists()
+
+
+def test_rebuilding_the_evidence_pack_leaves_its_bytes_unchanged(
+    published_project, tmp_path
+) -> None:
+    """The pack is rebuilt on every prepare; its bytes must not drift.
+
+    A signed checklist row cites pack files by hash, so a rebuild that changed
+    a single byte would break published records retroactively.  This is also
+    why the candidate snapshots of the operator-only codes were put in the
+    external-input store instead of in the pack.
+    """
+    from stock_quant.research.acceptance.evidence import (
+        EVIDENCE_FILENAMES,
+        build_mechanisable_evidence,
+    )
+
+    _prepare(published_project, tmp_path, "checklist.yml")
+    pack = (
+        published_project.root
+        / "data"
+        / "acceptance-evidence"
+        / published_project.version
+    )
+    before = {
+        name: hashlib.sha256((pack / name).read_bytes()).hexdigest()
+        for name in EVIDENCE_FILENAMES.values()
+    }
+    build_mechanisable_evidence(published_project.root, published_project.version)
+    after = {
+        name: hashlib.sha256((pack / name).read_bytes()).hexdigest()
+        for name in EVIDENCE_FILENAMES.values()
+    }
+    assert before == after
