@@ -1,31 +1,31 @@
-"""Unit tests for the scripted acceptance evidence pack."""
+"""Unit tests for the version-bound acceptance evidence pack."""
 
 from __future__ import annotations
 
-import hashlib
 import json
-import sys
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
-PROJECT = Path(__file__).resolve().parents[2] / "project"
-sys.path.insert(0, str(PROJECT))
-
-from build_acceptance_evidence import (  # noqa: E402
-    MECHANISABLE,
-    OPERATOR_ONLY,
-    apply_evidence,
+from stock_quant.research.acceptance import evidence
+from stock_quant.research.acceptance.checks import _window
+from stock_quant.research.acceptance.evidence import (
+    EVIDENCE_DIRNAME,
+    MECHANISABLE_CODES,
+    OPERATOR_ONLY_CODES,
+    EvidenceBuildError,
+    EvidenceFile,
     benchmark_evidence,
+    build_mechanisable_evidence,
     corporate_action_evidence,
+    evidence_window,
     missing_reason_evidence,
     secret_scan_evidence,
     security_master_evidence,
     source_row_count_evidence,
 )
-
-from stock_quant.research.acceptance.models import MANUAL_CHECK_CODES  # noqa: E402
 
 DAYS = [date(2015, 1, 5), date(2015, 1, 6), date(2015, 1, 7)]
 
@@ -36,13 +36,10 @@ def _calendar(days: list[date]) -> pd.DataFrame:
     )
 
 
-def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def test_mechanisable_and_operator_only_tile_the_policy_vocabulary() -> None:
-    assert set(MECHANISABLE) | set(OPERATOR_ONLY) == set(MANUAL_CHECK_CODES)
-    assert set(MECHANISABLE) & set(OPERATOR_ONLY) == set()
+def test_evidence_reexports_the_manual_check_vocabularies() -> None:
+    """The module republishes the model layer's manual-check vocabulary."""
+    assert evidence.MECHANISABLE_CODES is MECHANISABLE_CODES
+    assert evidence.OPERATOR_ONLY_CODES is OPERATOR_ONLY_CODES
 
 
 def test_source_row_count_evidence_lists_tables_and_snapshots() -> None:
@@ -99,6 +96,7 @@ def test_missing_reason_evidence_counts_accepted_classifications() -> None:
     )
     assert payload["counts"] == {"not_listed": 1}
     assert payload["first_sample"] == {"not_listed": "000001.SZ@2015-01-05"}
+    assert payload["window"]["start"] == "2015-01-05"
 
 
 def test_security_master_evidence_is_symbol_sorted_csv() -> None:
@@ -126,9 +124,10 @@ def test_benchmark_evidence_counts_covered_open_days() -> None:
             daily, _calendar(DAYS), ("000300.SH",), DAYS[0], DAYS[-1]
         ).text
     )
-    assert payload["000300.SH"]["rows"] == 2
-    assert payload["000300.SH"]["open_days"] == 3
-    assert payload["000300.SH"]["missing_open_days"] == 1
+    assert payload["window"] == {"start": "2015-01-05", "end": "2015-01-07"}
+    assert payload["coverage"]["000300.SH"]["rows"] == 2
+    assert payload["coverage"]["000300.SH"]["open_days"] == 3
+    assert payload["coverage"]["000300.SH"]["missing_open_days"] == 1
 
 
 def test_corporate_action_evidence_samples_facts_in_order() -> None:
@@ -143,42 +142,75 @@ def test_corporate_action_evidence_samples_facts_in_order() -> None:
     assert text.splitlines()[1].startswith("000001.SZ")
 
 
-def test_secret_scan_flags_a_credential_like_line(tmp_path: Path) -> None:
-    (tmp_path / "clean.txt").write_text("nothing to see\n", encoding="utf-8")
-    (tmp_path / "leaky.txt").write_text(
-        "TUSHARE_TOKEN=abcdef\n", encoding="utf-8"
-    )
+def test_secret_scan_flags_a_credential_like_line() -> None:
     payload = json.loads(
         secret_scan_evidence(
-            [tmp_path / "clean.txt", tmp_path / "leaky.txt"], root=tmp_path
+            [
+                EvidenceFile("clean.txt", "nothing to see\n"),
+                EvidenceFile("leaky.txt", "TUSHARE_TOKEN=abcdef\n"),
+            ]
         ).text
     )
-    assert payload["scanned"] == 2
+    assert payload["scanned"] == ["clean.txt", "leaky.txt"]
     assert payload["hits"] == [{"path": "leaky.txt", "line": 1}]
 
 
-def test_apply_evidence_passes_scripted_rows_and_leaves_the_rest(
+def test_evidence_window_uses_the_requested_start_the_checks_use() -> None:
+    """The manual evidence window is the automated check's window, exactly.
+
+    ``effective_start_date`` is deliberately ignored: a request that started
+    before the data does must show up as absent bars, not silently shrink the
+    window a human is signing off on.
+    """
+    build = {
+        "requested_start_date": "2015-01-05",
+        "effective_start_date": "2015-01-06",
+        "resolved_end_date": "2026-08-28",
+    }
+    assert evidence_window({"build_config": build}) == _window(build)
+    assert evidence_window({"build_config": build}) == (
+        date(2015, 1, 5),
+        date(2026, 8, 28),
+    )
+
+
+def test_evidence_window_is_missing_without_a_build_window() -> None:
+    for manifest in ({}, {"build_config": {}}, {"build_config": "broken"}):
+        with pytest.raises(EvidenceBuildError) as captured:
+            evidence_window(manifest)
+        assert captured.value.category == "window_missing"
+
+
+def test_build_mechanisable_evidence_fails_loudly_on_a_missing_version(
     tmp_path: Path,
 ) -> None:
-    evidence_root = tmp_path / "evidence"
-    evidence_root.mkdir()
-    (evidence_root / "pack.json").write_text("{}\n", encoding="utf-8")
-    checklist = {
-        "manual_checks": [
-            {"code": "secret_scan", "status": "FAIL", "summary": "x"},
-            {"code": "benchmark_sample", "status": "FAIL", "summary": "x"},
-        ]
-    }
-    patched = apply_evidence(
-        checklist,
-        root=tmp_path,
-        evidence_root=evidence_root,
-        names={"secret_scan": "pack.json"},
-    )
-    rows = {row["code"]: row for row in patched["manual_checks"]}
-    assert rows["benchmark_sample"]["status"] == "FAIL"
-    assert rows["secret_scan"]["status"] == "PASS"
-    reference = rows["secret_scan"]["evidence"][0]
-    assert reference["kind"] == "local"
-    assert reference["reference"] == "evidence/pack.json"
-    assert reference["sha256"] == _sha256("{}\n")
+    with pytest.raises(EvidenceBuildError) as captured:
+        build_mechanisable_evidence(tmp_path, "0" * 64)
+    assert captured.value.category == "dataset_unreadable"
+
+
+def test_failed_staging_leaves_the_previous_pack_untouched(
+    tmp_path, monkeypatch
+) -> None:
+    """A pack is replaced whole: a failure never yields a half-written pack."""
+    pack = tmp_path / "data" / EVIDENCE_DIRNAME / "v1"
+    pack.mkdir(parents=True)
+    (pack / "sentinel.txt").write_text("old pack", encoding="utf-8")
+
+    def half_written(staging, files):
+        (staging / files[0].name).write_text(files[0].text, encoding="utf-8")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(evidence, "_stage_files", half_written)
+    with pytest.raises(EvidenceBuildError) as captured:
+        evidence._write_pack(
+            tmp_path, "v1", [EvidenceFile("a.json", "{}\n")]
+        )
+    assert captured.value.category == "evidence_write_failed"
+    assert (pack / "sentinel.txt").read_text(encoding="utf-8") == "old pack"
+    assert sorted(item.name for item in pack.parent.iterdir()) == ["v1"]
+
+
+def test_evidence_build_error_rejects_an_unknown_category() -> None:
+    with pytest.raises(ValueError):
+        EvidenceBuildError("something_else")

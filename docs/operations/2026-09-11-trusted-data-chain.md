@@ -129,8 +129,13 @@ PYTHONPATH=src python project/probe_dataset_gates.py
 # 验收清单 + 证据回填
 python -m stock_quant data acceptance prepare --version <64hex> --operator <id> \
     --output data/acceptance/<64hex>-checklist.yml --root .
-PYTHONPATH=src python build_acceptance_evidence.py <64hex> data/acceptance/<64hex>-checklist.yml
+# [2026-09-13 已废弃] PYTHONPATH=src python build_acceptance_evidence.py <64hex> data/acceptance/<64hex>-checklist.yml
 ```
+
+> **2026-09-13 更新**：`project/build_acceptance_evidence.py` 已删除，证据生成并入
+> `data acceptance prepare` 主线（见 `docs/superpowers/plans/2026-09-13-acceptance-pending-confirmation.md`）。
+> 证据窗口不再由脚本常量决定，改为取自该版本 manifest 的请求窗口；`prepare` 生成的六项人工证据
+> 状态为 `PENDING_CONFIRMATION`，须由审核者逐项确认后转 `PASS`。
 
 本轮提交：`2e29867`（前置检查）、`eb0137f`（关卡探针）、`1fc0a1b`（证据包）、
 `d4d710b`（浮点换算修复）、`85c25c6`（覆盖集合元组修复）、`69522b4`（601318 复核）、
