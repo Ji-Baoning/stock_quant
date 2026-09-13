@@ -204,6 +204,27 @@ def _ensure_fixture_configs(project_root: Path, master: pd.DataFrame) -> None:
         yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
+    # The full-history criterion must be non-empty: an enabled universe
+    # definition is what binds ``full_history_acceptance_start`` into the
+    # build config, and the acceptance chain fails a manifest without one.
+    (config_dir / "universes").mkdir(parents=True, exist_ok=True)
+    (config_dir / "universes" / "csi300.yml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "universe_id": "csi300",
+                "rules_version": "fixture-rules-v1",
+                "membership_table_sha256": membership_content_hash(
+                    _fact_payloads()
+                ),
+                "coverage_start": _CAL_START.isoformat(),
+                "coverage_end": _BARS_END.isoformat(),
+                "evidence_summary_sha256": "cd" * 32,
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
 
 
 @dataclass(frozen=True)
