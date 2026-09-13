@@ -1,7 +1,7 @@
 """Versioned 60-trading-session momentum factor ``momentum_60d`` (Task 6).
 
 For each weekly signal date the factor uses the continuity series of one
-``(source, adjustment)`` and computes
+``(source family, adjustment)`` and computes
 
     Momentum60 = adjusted_close[t] / adjusted_close[t-60] - 1
 
@@ -27,6 +27,12 @@ Version 2.0.0 permanently isolates the total-return input basis
 results: a spec that still requests 1.0.0 is rejected by the provider instead
 of being silently upgraded.
 
+The single-series rule is judged over the continuity *family* of the
+``source`` label, not the label's literal value: suspension bars the pipeline
+materialized from a supplier's own ``pre_close`` chain continue that
+supplier's series, so they join its window rather than being refused as a
+second source.  The label itself is never rewritten.
+
 Only the signal dates given in ``FactorContext.signal_dates`` produce rows;
 rows are sorted by trade date then symbol, so identical inputs yield
 byte-stable Parquet.
@@ -48,6 +54,21 @@ _SEASONING_BELOW_120 = "seasoning_below_120"
 
 _MIN_LISTED_DAYS = 120
 _NAN = float("nan")
+
+#: The continuity family each ``source`` label belongs to.  Suspension bars are
+#: materialized from the primary supplier's own ``pre_close`` chain (see
+#: :mod:`stock_quant.data_model.suspensions`): they *continue* that supplier's
+#: price series by carrying its last reference close, so they must join its
+#: momentum window instead of counting as a competing source.  Only the
+#: continuity family is normalized here -- the original label travels into the
+#: factor output unchanged, so the audit trail keeps the distinction.
+_SOURCE_FAMILY = {"tushare_suspend": "tushare"}
+
+
+def _series_family(source: object) -> str:
+    """The continuity family one row's ``source`` label belongs to."""
+    label = str(source)
+    return _SOURCE_FAMILY.get(label, label)
 
 
 class Momentum60:
@@ -126,16 +147,18 @@ class Momentum60:
 
     @staticmethod
     def _assert_single_series_per_symbol(observations: pd.DataFrame) -> None:
-        key = observations["source"].astype(str) + "\x1f" + observations[
-            "adjustment"
-        ].astype(str)
+        key = (
+            observations["source"].map(_series_family).astype(str)
+            + "\x1f"
+            + observations["adjustment"].astype(str)
+        )
         counts = pd.DataFrame({"symbol": observations["symbol"], "key": key})
         mixed = counts.groupby("symbol")["key"].nunique()
         mixed = mixed[mixed > 1]
         if not mixed.empty:
             raise ValueError(
                 "factor input mixes source/adjustment series per symbol; momentum "
-                "needs one source and one adjustment, got multiple for: "
+                "needs one source family and one adjustment, got multiple for: "
                 + ", ".join(sorted(mixed.index))
             )
 

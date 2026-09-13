@@ -330,6 +330,47 @@ def test_momentum_never_mixes_source_adjustment_series():
         Momentum60().compute(context)
 
 
+def test_momentum_accepts_suspension_fills_as_the_same_supplier():
+    """Suspension fills continue their supplier's series, never split it.
+
+    ``tushare_suspend`` bars are materialized from tushare's own ``pre_close``
+    chain, so a window carrying both labels is still one continuity series and
+    must value exactly like the all-tushare window.  The label is an audit
+    trail rather than a second source: the frame handed in is never rewritten.
+    """
+    sessions = _sessions(61)
+    rows = _symbol_rows(_SYMBOL, sessions, step=21.0 / 60.0, source="tushare")
+    for row in rows[10:14]:
+        row["source"] = "tushare_suspend"
+    frame = pd.DataFrame(rows, columns=_FACTOR_INPUT_COLUMNS)
+    before = frame.copy()
+
+    row = Momentum60().compute(
+        _context_at(frame, sessions, signal_index=-1)
+    ).frame.iloc[0]
+
+    assert row.raw_value == pytest.approx(121 / 100 - 1)
+    assert row.is_valid
+    assert frame.equals(before)
+
+
+def test_momentum_rejects_two_different_suppliers_for_one_symbol():
+    """Two genuinely different suppliers are still refused, never stitched."""
+    sessions = _sessions(80)
+    rows = _symbol_rows(_SYMBOL, sessions[:60], source="baostock")
+    rows += _symbol_rows(
+        _SYMBOL, sessions[60:], close_start=300.0, source="akshare"
+    )
+    context = _make_context(
+        rows,
+        start_date=sessions[0],
+        end_date=sessions[-1],
+        signal_dates=(sessions[-1],),
+    )
+    with pytest.raises(ValueError, match="one source family"):
+        Momentum60().compute(context)
+
+
 def test_momentum_rejects_duplicate_dates_within_a_symbol_series():
     sessions = _sessions(61)
     rows = _symbol_rows(_SYMBOL, sessions)
