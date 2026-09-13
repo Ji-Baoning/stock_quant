@@ -19,7 +19,11 @@ from conftest import build_fixture_project  # noqa: E402
 from test_end_to_end import run_offline_fixture  # noqa: E402  (after app import)
 from test_reports import _experiment_input  # noqa: E402  (synthetic report helper)
 
-from stock_quant.cli import app  # noqa: F401  (gates Step 2 collection)
+from stock_quant.cli import (  # gates Step 2 collection
+    _experiment_window,
+    _within_window,
+    app,
+)
 from stock_quant.data_pipeline import DataPipeline
 from stock_quant.reporting.html import render_experiment_report
 
@@ -307,6 +311,33 @@ def test_report_build_fails_when_backtest_workspace_pruned(
     assert result.exit_code != 0
     assert "FAILED" in result.stdout
     assert "backtest workspace was pruned" in result.stdout
+
+
+def test_experiment_window_follows_the_plotted_curves():
+    """The benchmark is cut to the strategy's own span, not the dataset's.
+
+    Unclipped, the benchmark drew years the experiment never ran over -- and
+    indexed from its own first day, it printed that earlier run as if it were
+    relative performance.
+    """
+    scenarios = _experiment_input().scenarios
+    plotted = _experiment_window({}, scenarios)
+    assert plotted == (date(2024, 1, 2), date(2024, 1, 8))
+
+    # A walk-forward report plots no scenario curves: its window is the spec's.
+    spec = {"date_range": {"start_date": "2021-01-01", "end_date": "2026-08-21"}}
+    assert _experiment_window(spec, ()) == (date(2021, 1, 1), date(2026, 8, 21))
+
+
+def test_within_window_cuts_the_benchmark_to_the_experiment():
+    equity = _experiment_input().scenarios[0].equity
+    days = [day.isoformat() for day in equity["trade_date"]]
+
+    cut = _within_window(equity, date(2024, 1, 3), date(2024, 1, 5))
+    assert [day.isoformat() for day in cut["trade_date"]] == days[1:4]
+    # Either edge may be absent; an absent edge cuts nothing.
+    assert len(_within_window(equity, None, None)) == len(equity)
+    assert _within_window(equity, date(2030, 1, 1), None).empty
 
 
 # --------------------------------------------------------------------------- #

@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 from typing import Annotated
@@ -841,7 +842,13 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
     # report renders the walk-forward section over an empty scenario list.
     stability_path = experiment_dir / "stability_report.json"
     if stability_path.is_file():
-        benchmark = _benchmark_closes(project_root, dataset_version, benchmark_symbols)
+        # A walk-forward experiment plots no scenario curves, so its window is
+        # the spec's own date range: the benchmark is still cut to it rather
+        # than left spanning the whole dataset.
+        benchmark = _within_window(
+            _benchmark_closes(project_root, dataset_version, benchmark_symbols),
+            *_experiment_window(spec, ()),
+        )
         run_input = ExperimentReportInput(
             experiment_id=experiment_id,
             dataset_version=dataset_version,
@@ -909,7 +916,12 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
         universe_version=str(meta.get("universe_version", "")),
         code_commit=str(meta.get("code_commit", "")),
         scenarios=tuple(scenarios),
-        benchmark_closes=benchmark,
+        # The benchmarks are cut to the window the strategy curves actually
+        # cover: unclipped they draw the dataset's whole history, which the
+        # experiment never ran over.
+        benchmark_closes=_within_window(
+            benchmark, *_experiment_window(spec, scenarios)
+        ),
         benchmark_symbols=benchmark_symbols,
         run_id=run_id,
         hypothesis=str(spec.get("hypothesis", "")),
@@ -929,8 +941,62 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
     return run_input
 
 
+def _as_date(value: object) -> date:
+    """The plain date behind a frame's trade-date value."""
+    return pd.Timestamp(value).date()
+
+
+def _experiment_window(
+    spec: dict, scenarios: Sequence[ExperimentScenario]
+) -> tuple[date | None, date | None]:
+    """The window the report's own curves cover, else the spec's date range.
+
+    A benchmark read without a window spans the whole dataset, so it draws
+    years the experiment never covered -- and, indexed from its own first day,
+    it turns a period difference into what reads as relative performance.
+    """
+    days: list[date] = []
+    for scenario in scenarios:
+        equity = scenario.equity
+        if not equity.empty:
+            days.append(_as_date(equity["trade_date"].min()))
+            days.append(_as_date(equity["trade_date"].max()))
+    if days:
+        return min(days), max(days)
+    window = spec.get("date_range") or {}
+    start = window.get("start_date")
+    end = window.get("end_date")
+    return (
+        date.fromisoformat(str(start)) if start else None,
+        date.fromisoformat(str(end)) if end else None,
+    )
+
+
+def _within_window(
+    frame: pd.DataFrame, start: date | None, end: date | None
+) -> pd.DataFrame:
+    """``frame`` cut to ``[start, end]``; either side may be ``None``.
+
+    The rows are kept by comparing plain dates, never the column against a
+    ``date``: a ``datetime64[us]`` column (what ``DatasetReader`` hands back)
+    raises ``TypeError`` on that comparison rather than warning, and a frame
+    read straight from Parquet carries object ``date`` values instead.
+    """
+    if frame.empty or (start is None and end is None):
+        return frame.reset_index(drop=True)
+    keep = [
+        index
+        for index, value in enumerate(frame["trade_date"])
+        if (start is None or _as_date(value) >= start)
+        and (end is None or _as_date(value) <= end)
+    ]
+    return frame.iloc[keep].reset_index(drop=True)
+
+
 def _benchmark_closes(
-    project_root: Path, dataset_version: str, benchmark_symbols: tuple[str, ...]
+    project_root: Path,
+    dataset_version: str,
+    benchmark_symbols: tuple[str, ...],
 ) -> pd.DataFrame:
     empty = pd.DataFrame(columns=["symbol", "trade_date", "close"])
     if not dataset_version or not benchmark_symbols:

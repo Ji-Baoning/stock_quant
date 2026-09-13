@@ -521,15 +521,44 @@ def _layout(fig: go.Figure, title: str) -> go.Figure:
     return fig
 
 
-def _index_series(frame: pd.DataFrame, value_col: str) -> tuple[list[str], list[float]]:
-    """Chronological date labels plus a start-of-100 index series."""
+def _first_day(frame: pd.DataFrame) -> date | None:
+    """The earliest trade date in ``frame``, or ``None`` when it holds none."""
+    if frame.empty:
+        return None
+    return _day(frame["trade_date"].min())
+
+
+def _common_base_day(frames: list[pd.DataFrame]) -> date | None:
+    """The first day every frame is plotted on, or ``None`` if none has one.
+
+    Indexing each series against its own first point is what made the net-value
+    chart read as a comparison it never was: a benchmark whose history starts
+    years before the strategy got rebased at *its* own first day, so the gap
+    between the lines carried the benchmark's earlier run instead of any
+    relative performance.  One shared base day removes the ambiguity.
+    """
+    firsts = [day for day in (_first_day(frame) for frame in frames) if day]
+    return max(firsts) if firsts else None
+
+
+def _return_series(
+    frame: pd.DataFrame, value_col: str, base_day: date
+) -> tuple[list[str], list[float]]:
+    """Chronological labels plus cumulative return (%) since ``base_day``."""
     data = frame.sort_values("trade_date")
-    first = float(data[value_col].iloc[0]) if len(data) else 0.0
-    xs = [_iso(day) for day in data["trade_date"]]
-    if first > 0:
-        ys = [round(float(v) / first * 100.0, 4) for v in data[value_col]]
+    dated = [
+        (_day(day), float(value))
+        for day, value in zip(data["trade_date"], data[value_col])
+        if _day(day) >= base_day
+    ]
+    if not dated:
+        return [], []
+    base = dated[0][1]
+    xs = [day.isoformat() for day, _ in dated]
+    if base > 0:
+        ys = [round((value / base - 1.0) * 100.0, 4) for _, value in dated]
     else:
-        ys = [0.0] * len(data)
+        ys = [0.0] * len(dated)
     return xs, ys
 
 
@@ -580,19 +609,44 @@ def _summary_rows(experiment: ExperimentReportInput) -> list[list[str]]:
 
 
 def _net_value_figure(experiment: ExperimentReportInput) -> go.Figure:
-    fig = go.Figure()
-    for scenario in experiment.scenarios:
-        xs, ys = _index_series(scenario.equity, "total_equity")
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name=scenario.name))
+    """Every trace as cumulative return over one shared base day.
+
+    Strategy and benchmarks are indexed from the same day, and that day is
+    named in the title: "期初 = 100" per series is only meaningful when the
+    series share an origin, and a benchmark rebased at its own start (which
+    may predate the experiment by years) draws a period difference as if it
+    were relative performance.
+    """
+    plotted: list[tuple[str, pd.DataFrame, str, bool]] = [
+        (scenario.name, scenario.equity, "total_equity", False)
+        for scenario in experiment.scenarios
+    ]
     for symbol in experiment.benchmark_symbols:
         series = experiment.benchmark_closes[
             experiment.benchmark_closes["symbol"] == symbol
         ]
-        xs, ys = _index_series(series, "close")
-        fig.add_trace(
-            go.Scatter(x=xs, y=ys, mode="lines", name=symbol, line={"dash": "dash"})
-        )
-    return _layout(fig, "净值与基准对照（期初 = 100）")
+        plotted.append((symbol, series, "close", True))
+
+    base_day = _common_base_day([frame for _, frame, _, _ in plotted])
+    fig = go.Figure()
+    if base_day is not None:
+        for name, frame, value_col, is_benchmark in plotted:
+            xs, ys = _return_series(frame, value_col, base_day)
+            if not xs:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=xs,
+                    y=ys,
+                    mode="lines",
+                    name=name,
+                    **({"line": {"dash": "dash"}} if is_benchmark else {}),
+                )
+            )
+    title = "同区间累计收益（%）"
+    if base_day is not None:
+        title = f"{title}（基准日 = {base_day.isoformat()}）"
+    return _layout(fig, title)
 
 
 def _drawdown_figure(experiment: ExperimentReportInput) -> go.Figure:

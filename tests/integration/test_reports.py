@@ -11,6 +11,7 @@ by a synthetic input rendered under a ``tmp_path`` (never committed).
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import date
 
 import pandas as pd
@@ -34,6 +35,7 @@ from stock_quant.reporting.html import (
     FieldDifference,
     QualityReportInput,
     SourceStatus,
+    _net_value_figure,
     render_experiment_report,
     render_quality_report,
 )
@@ -627,6 +629,50 @@ def test_experiment_html_flags_unverified_without_acceptance(tmp_path):
         assert "UNVERIFIED" in html
         assert "ACCEPTED" not in html
         assert "real-data-v1" not in html
+
+
+def _benchmark_on(days: list[date]) -> pd.DataFrame:
+    """The benchmark fixture over an explicit day list."""
+    rows: list[dict] = []
+    for index, day in enumerate(days):
+        rows.append(
+            {"symbol": "000300.SH", "trade_date": day, "close": 3000.0 + 60.0 * index}
+        )
+        rows.append(
+            {"symbol": "000905.SH", "trade_date": day, "close": 5000.0 + 50.0 * index}
+        )
+    return pd.DataFrame(rows)
+
+
+def test_net_value_chart_indexes_every_series_from_one_base_day():
+    """A benchmark predating the strategy must not set its own origin.
+
+    Indexing each series at its own first point let a benchmark whose history
+    began years earlier draw that earlier run as if it were relative
+    performance.  Every trace now starts at the base day the title names.
+    """
+    history = [date(2023, 6, 1), date(2023, 6, 2)] + _DATES
+    experiment = replace(_experiment_input(), benchmark_closes=_benchmark_on(history))
+
+    fig = _net_value_figure(experiment)
+
+    assert fig.layout.title.text == "同区间累计收益（%）（基准日 = 2024-01-02）"
+    for trace in fig.data:
+        assert list(trace.x)[0] == "2024-01-02", trace.name
+        assert list(trace.y)[0] == 0.0, trace.name
+    benchmark = next(trace for trace in fig.data if trace.name == "000300.SH")
+    assert min(benchmark.x) == "2024-01-02"  # the 2023 tail is not drawn
+
+
+def test_net_value_chart_plots_cumulative_return_over_the_window():
+    """The traces are cumulative return (%), not per-series net values."""
+    fig = _net_value_figure(_experiment_input())
+    plotted = {trace.name: list(trace.y) for trace in fig.data}
+
+    assert plotted["zero_cost"] == [0.0, 1.0, 3.0, 2.0, 4.0]
+    assert plotted["full_cost"] == [0.0, 0.5, 2.5, 1.2, 2.8]
+    # 3000 -> 3240 over the same days, on the same base day.
+    assert plotted["000300.SH"] == [0.0, 2.0, 4.0, 6.0, 8.0]
 
 
 def test_experiment_html_escapes_data_acceptance_fields(tmp_path):
