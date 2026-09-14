@@ -6,10 +6,15 @@ cross-check) and reconciles them into implemented, supported events. These
 tests never call a network or supplier; every frame is authored inline.
 """
 
+import datetime
+
 import pandas as pd
 import pytest
 
 from stock_quant.data_model.corporate_actions import (
+    EXCLUSION_ANNOUNCEMENT_PRE_WINDOW_IMPLEMENTED,
+    EXCLUSION_EX_DATE_OUT_OF_WINDOW,
+    EXCLUSION_RECORD_DATE_OUT_OF_WINDOW,
     REASON_CROSS_SOURCE_CONFLICT,
     REASON_INCOMPLETE,
     REASON_NOT_IMPLEMENTED,
@@ -19,6 +24,7 @@ from stock_quant.data_model.corporate_actions import (
     normalize_corporate_actions,
     prepare_cninfo_dividend_frame,
     prepare_eastmoney_dividend_frame,
+    quarantine_row_out_of_window_reason,
 )
 
 # Documented supplier-native column names (CNINFO primary, Eastmoney cross).
@@ -455,3 +461,113 @@ def test_plan_column_absent_second_supplier_never_reads_empty_plan():
     assert result.quarantined.empty
     assert not result.accepted.empty
     assert result.accepted.iloc[0]["confirmed_by"] == "cninfo+eastmoney"
+
+
+# --------------------------------------------------------------------------- #
+# Window scope of a quarantined row (ADR-006): an event can only matter to a
+# window it falls in, and the first *known* date decides which window that is.
+# --------------------------------------------------------------------------- #
+
+_WINDOW_START = datetime.date(2015, 1, 5)
+_WINDOW_END = datetime.date(2016, 12, 30)
+
+
+def _quarantine_row(**overrides):
+    """One canonical quarantine row; dates default to ``None``."""
+    row = {
+        "symbol": "600000.SH",
+        "announcement_date": None,
+        "record_date": None,
+        "ex_date": None,
+        "status": "implemented",
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        # 1. ex_date known: the transition itself is outside the window.
+        (
+            _quarantine_row(ex_date=datetime.date(2014, 12, 31)),
+            EXCLUSION_EX_DATE_OUT_OF_WINDOW,
+        ),
+        (
+            _quarantine_row(ex_date=datetime.date(2017, 1, 3)),
+            EXCLUSION_EX_DATE_OUT_OF_WINDOW,
+        ),
+        (
+            _quarantine_row(ex_date=datetime.date(2015, 1, 5)),
+            None,
+        ),
+        (
+            _quarantine_row(ex_date=datetime.date(2016, 12, 30)),
+            None,
+        ),
+        # ex_date wins over a record_date that would say otherwise.
+        (
+            _quarantine_row(
+                ex_date=datetime.date(2015, 6, 1),
+                record_date=datetime.date(2014, 6, 1),
+            ),
+            None,
+        ),
+        # 2. no ex_date: the record date decides (its own transition follows it).
+        (
+            _quarantine_row(record_date=datetime.date(2014, 12, 31)),
+            EXCLUSION_RECORD_DATE_OUT_OF_WINDOW,
+        ),
+        (
+            _quarantine_row(record_date=datetime.date(2017, 1, 3)),
+            EXCLUSION_RECORD_DATE_OUT_OF_WINDOW,
+        ),
+        (
+            _quarantine_row(record_date=datetime.date(2015, 1, 5)),
+            None,
+        ),
+        # 3. neither dated fact: a pre-window announcement on an implemented
+        #    record cannot affect the window.
+        (
+            _quarantine_row(announcement_date=datetime.date(1998, 6, 1)),
+            EXCLUSION_ANNOUNCEMENT_PRE_WINDOW_IMPLEMENTED,
+        ),
+        #    ... but only when the record claims to be implemented.
+        (
+            _quarantine_row(
+                announcement_date=datetime.date(1998, 6, 1),
+                status="not_implemented",
+            ),
+            None,
+        ),
+        #    An announcement *after* the window keeps the row: its ex-date may
+        #    still land inside it.
+        (
+            _quarantine_row(announcement_date=datetime.date(2017, 1, 3)),
+            None,
+        ),
+        (
+            _quarantine_row(announcement_date=datetime.date(2015, 6, 1)),
+            None,
+        ),
+        # 4. no known date at all: fail closed.
+        (_quarantine_row(), None),
+    ],
+)
+def test_quarantine_row_out_of_window_reason_decides_by_first_known_date(row, expected):
+    assert (
+        quarantine_row_out_of_window_reason(row, _WINDOW_START, _WINDOW_END) == expected
+    )
+
+
+def test_quarantine_row_out_of_window_reason_reads_pandas_date_cells():
+    """A published quarantine table hands back ``Timestamp`` / ``NaT`` cells."""
+    row = _quarantine_row(
+        ex_date=pd.NaT,
+        record_date=pd.NaT,
+        announcement_date=pd.Timestamp("1998-06-01"),
+    )
+    assert (
+        quarantine_row_out_of_window_reason(row, _WINDOW_START, _WINDOW_END)
+        == EXCLUSION_ANNOUNCEMENT_PRE_WINDOW_IMPLEMENTED
+    )

@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 
@@ -211,6 +212,68 @@ def filter_corporate_actions_to_window(
     )
     keep = in_window | (dates.isna() & implemented)
     return frame.loc[keep].reset_index(drop=True)
+
+
+#: Why a quarantined row cannot affect a window.  Each label names the rule
+#: that excluded it, so the audit trail records whether the exclusion rests on
+#: a dated fact (a derivation) or on the pre-window announcement rule for an
+#: implemented record (a conditional relaxation -- see ADR-006).
+EXCLUSION_EX_DATE_OUT_OF_WINDOW = "ex_date_out_of_window"
+EXCLUSION_RECORD_DATE_OUT_OF_WINDOW = "record_date_out_of_window"
+EXCLUSION_ANNOUNCEMENT_PRE_WINDOW_IMPLEMENTED = "announcement_pre_window_implemented"
+
+
+def quarantine_row_out_of_window_reason(
+    row: Mapping[str, object], start: date, end: date
+) -> str | None:
+    """Why a quarantined row cannot affect ``[start, end]``; ``None`` if it can.
+
+    A quarantine row is evidence about one event, and an event can only matter
+    to a window it falls in.  This answers the *window* question the coverage
+    verdict asks; it never edits or hides the row itself.  The first date the
+    row actually knows decides:
+
+    1. ``ex_date`` known -- an ex-date outside the window is a transition
+       outside it.  This is a derivation.
+    2. ``record_date`` known -- also a derivation, because a completed
+       settlement's ex-date is never earlier than its record date (measured on
+       the accepted facts: 6,872/6,872, lag 1-13 days, no negatives).  A
+       record date after the window implies an ex-date after it too.
+    3. no ex_date and no record_date, but an ``announcement_date`` before
+       ``start`` on an ``implemented`` record -- excluded.  This *relaxes* the
+       policy ``filter_corporate_actions_to_window`` states (an implemented
+       record with a missing ex-date is kept so reconciliation can flag it) and
+       is recorded in ``docs/adr/006-corporate-action-window-scope.md``.  An
+       announcement *after* the window does not qualify: the event it announces
+       may still settle inside the window.
+    4. no known date at all -- kept (fail closed).
+    """
+    ex_date = _row_date(row.get("ex_date"))
+    if ex_date is not None:
+        return None if start <= ex_date <= end else EXCLUSION_EX_DATE_OUT_OF_WINDOW
+    record_date = _row_date(row.get("record_date"))
+    if record_date is not None:
+        if start <= record_date <= end:
+            return None
+        return EXCLUSION_RECORD_DATE_OUT_OF_WINDOW
+    announcement_date = _row_date(row.get("announcement_date"))
+    if (
+        announcement_date is not None
+        and announcement_date < start
+        and str(row.get("status")) == STATUS_IMPLEMENTED
+    ):
+        return EXCLUSION_ANNOUNCEMENT_PRE_WINDOW_IMPLEMENTED
+    return None
+
+
+def _row_date(value: object) -> date | None:
+    """Coerce a canonical row's date cell (``date``/``Timestamp``/``NaT``)."""
+    if value is None:
+        return None
+    timestamp = pd.to_datetime(value, errors="coerce")
+    if pd.isna(timestamp):
+        return None
+    return timestamp.date()
 
 
 def normalize_corporate_actions(
