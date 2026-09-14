@@ -37,11 +37,13 @@ the first date the row actually knows:
 
 1. **`ex_date` known** — inside the window it counts, outside it does not.
    A derivation: the ex-date *is* the transition.
-2. **`record_date` known** (no ex-date) — the same. Also a derivation on this
-   data, because a completed settlement's ex-date is never earlier than its
-   record date (measured: 6,872 / 6,872 accepted facts carry both dates, lag
-   1-13 days, zero negatives), so a record date outside the window places the
-   ex-date outside it too.
+2. **`record_date` known** (no ex-date) — the same, bounded by the measured
+   settlement lag. *After* the window it is a derivation: an ex-date is never
+   earlier than its record date (measured: 6,872 / 6,872 accepted facts carry
+   both dates, lag 1-13 days, zero negatives). *Before* it, the record date must
+   sit more than that 13-day lag ahead of `start`; a record date closer than
+   that keeps the row, because its settlement could still land inside the
+   window.
 3. **Neither, but an `announcement_date` before `start` on a record whose
    `status` is `implemented`** — excluded. This *is* a conditional relaxation
    and it supersedes the stance written in
@@ -62,7 +64,8 @@ and branch.
   break layer and the coverage layer agree on what a dateless record means.
 - The exclusion is auditable but **quiet**: the INFO issue is not in
   `PUBLICATION_BLOCKING_CODES`, so a suppressed record does not block a publish.
-  Branch 3's risk below is therefore the one thing about this decision that a
+  The residual risk recorded below -- branch 3's policy widening and branch 2's
+  bounded inference -- is therefore the one thing about this decision that a
   reader must not miss.
 - Symbols that hold no accepted in-window fact still read `FACTS_INCOMPLETE`
   after the exclusion — 2 of the 46 flip only as far as that, which is the
@@ -86,16 +89,27 @@ and branch.
 
 ## Risk this decision accepts
 
-Branch 3 is the only place this change *widens* what may pass. If a stale plan
-really did settle inside the window while the supplier's dated record for it is
-missing, excluding the dateless row leaves the series clean and **unmarked** —
-exactly the silent substitution invariant 5 forbids. Two things bound the risk
-without eliminating it: a dateless row can never enter the adjustment recursion
+Two branches widen what may pass, and both are recorded here rather than
+assumed away.
+
+**Branch 2, before the window.** An ex-date is never earlier than its record
+date, which makes *after* the window a derivation and *before* it only a
+bounded inference: a record date within the measured settlement lag (13 days)
+of `start` could still settle inside the window, so the rule keeps such a row
+and excludes a pre-window record date only beyond that margin. The margin is
+not close on this data -- every pre-window `record_date` in the published
+quarantine table is 2000-2010, years before the window -- but it is an
+inference, not a proof.
+
+**Branch 3, the policy one.** If a stale plan really did settle inside the
+window while the supplier's dated record for it is missing, excluding the
+dateless row leaves the series clean and **unmarked** — exactly the silent
+substitution invariant 5 forbids. Two things bound the risk without eliminating
+it: a dateless row can never enter the adjustment recursion
 (`_standardize_source` keys candidates on `(symbol, ex_date)`), so it cannot
 mask an in-window transition it is not itself part of; and 45 of the 46 symbols
 carry dated in-window actions in the published table, so the supplier reports
-their in-window settlements separately. The residual risk is recorded here
-rather than assumed away.
+their in-window settlements separately.
 
 ## Evidence
 

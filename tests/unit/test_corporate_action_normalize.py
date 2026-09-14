@@ -515,15 +515,26 @@ def _quarantine_row(**overrides):
         ),
         # 2. no ex_date: the record date decides (its own transition follows it).
         (
-            _quarantine_row(record_date=datetime.date(2014, 12, 31)),
-            EXCLUSION_RECORD_DATE_OUT_OF_WINDOW,
-        ),
-        (
             _quarantine_row(record_date=datetime.date(2017, 1, 3)),
             EXCLUSION_RECORD_DATE_OUT_OF_WINDOW,
         ),
         (
             _quarantine_row(record_date=datetime.date(2015, 1, 5)),
+            None,
+        ),
+        #    A record date inside the settlement-lag margin of ``start`` is kept:
+        #    its ex-date could still settle inside the window.
+        (
+            _quarantine_row(record_date=datetime.date(2014, 12, 31)),
+            None,
+        ),
+        #    The margin is the measured lag: 2015-01-05 - 13 days = 2014-12-23.
+        (
+            _quarantine_row(record_date=datetime.date(2014, 12, 22)),
+            EXCLUSION_RECORD_DATE_OUT_OF_WINDOW,
+        ),
+        (
+            _quarantine_row(record_date=datetime.date(2014, 12, 23)),
             None,
         ),
         # 3. neither dated fact: a pre-window announcement on an implemented

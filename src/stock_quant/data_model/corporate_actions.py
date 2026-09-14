@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
@@ -216,11 +216,19 @@ def filter_corporate_actions_to_window(
 
 #: Why a quarantined row cannot affect a window.  Each label names the rule
 #: that excluded it, so the audit trail records whether the exclusion rests on
-#: a dated fact (a derivation) or on the pre-window announcement rule for an
+#: a dated fact (a derivation), on the bounded settlement-lag inference for a
+#: pre-window record date, or on the pre-window announcement rule for an
 #: implemented record (a conditional relaxation -- see ADR-006).
 EXCLUSION_EX_DATE_OUT_OF_WINDOW = "ex_date_out_of_window"
 EXCLUSION_RECORD_DATE_OUT_OF_WINDOW = "record_date_out_of_window"
 EXCLUSION_ANNOUNCEMENT_PRE_WINDOW_IMPLEMENTED = "announcement_pre_window_implemented"
+
+#: The widest settlement lag between a record date and its ex-date among the
+#: accepted facts (6,872/6,872 carry both; 1-13 days, no negatives).  It bounds
+#: how far *before* a window a record date may sit and still leave the ex-date
+#: inside it, so a pre-window record date is excluded only beyond this margin
+#: (see ADR-006).
+_EX_DATE_LAG_MAX_DAYS = 13
 
 
 def quarantine_row_out_of_window_reason(
@@ -235,10 +243,12 @@ def quarantine_row_out_of_window_reason(
 
     1. ``ex_date`` known -- an ex-date outside the window is a transition
        outside it.  This is a derivation.
-    2. ``record_date`` known -- also a derivation, because a completed
-       settlement's ex-date is never earlier than its record date (measured on
-       the accepted facts: 6,872/6,872, lag 1-13 days, no negatives).  A
-       record date after the window implies an ex-date after it too.
+    2. ``record_date`` known -- the ex-date is never earlier than its record
+       date (measured on the accepted facts: 6,872/6,872 carry both, lag 1-13
+       days, no negatives).  A record date *after* the window therefore puts the
+       ex-date after it; one more than ``_EX_DATE_LAG_MAX_DAYS`` before ``start``
+       cannot settle inside the window either.  A record date inside that margin
+       before ``start`` keeps the row -- the lag could still land in the window.
     3. no ex_date and no record_date, but an ``announcement_date`` before
        ``start`` on an ``implemented`` record -- excluded.  This *relaxes* the
        policy ``filter_corporate_actions_to_window`` states (an implemented
@@ -255,7 +265,16 @@ def quarantine_row_out_of_window_reason(
     if record_date is not None:
         if start <= record_date <= end:
             return None
-        return EXCLUSION_RECORD_DATE_OUT_OF_WINDOW
+        # An ex-date is never earlier than its record date, so a record date
+        # after the window puts the ex-date after it too.  Before the window
+        # that implication needs the lag bound: a record date this close to
+        # ``start`` may still settle inside it, so the row is kept (fail closed
+        # rather than silently clean).
+        after_window = record_date > end
+        before_window = record_date < start - timedelta(days=_EX_DATE_LAG_MAX_DAYS)
+        if after_window or before_window:
+            return EXCLUSION_RECORD_DATE_OUT_OF_WINDOW
+        return None
     announcement_date = _row_date(row.get("announcement_date"))
     if (
         announcement_date is not None
