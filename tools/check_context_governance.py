@@ -27,6 +27,17 @@ ARCHITECTURE_FILES = (
 )
 ADR_INDEX = "docs/adr/DECISIONS_INDEX.md"
 RULES_DIRECTORY = ".claude/rules"
+ROOT_PROTOCOL_REQUIRED_GUIDANCE = (
+    "用户即时指令 > 安全与平台指令 > 路径规则",
+    "更具体的路径规则优先",
+)
+REQUIRED_RULE_FILES = (
+    "data.md",
+    "research.md",
+    "portfolio.md",
+    "config-and-operations.md",
+    "tests.md",
+)
 
 
 def validate(root: Path) -> list[str]:
@@ -38,6 +49,7 @@ def validate(root: Path) -> list[str]:
     ]
     errors.extend(_line_limit_errors(root))
     errors.extend(_indexed_adr_errors(root))
+    errors.extend(_root_protocol_errors(root))
     errors.extend(_path_rule_errors(root))
     return errors
 
@@ -88,6 +100,19 @@ def _indexed_adr_errors(root: Path) -> list[str]:
     return errors
 
 
+def _root_protocol_errors(root: Path) -> list[str]:
+    """Return errors when the root protocol lacks its required guidance."""
+    protocol = root / "AGENTS.md"
+    if not protocol.is_file():
+        return []
+    content = protocol.read_text(encoding="utf-8")
+    return [
+        "root protocol missing required guidance: AGENTS.md: " + guidance
+        for guidance in ROOT_PROTOCOL_REQUIRED_GUIDANCE
+        if guidance not in content
+    ]
+
+
 def _path_rule_files(root: Path) -> list[Path]:
     rules_directory = root / RULES_DIRECTORY
     return sorted(rules_directory.rglob("*.md")) if rules_directory.is_dir() else []
@@ -99,7 +124,11 @@ def _path_rule_errors(root: Path) -> list[str]:
     if not rule_files:
         return [f"no path rule files found: {RULES_DIRECTORY}"]
 
-    errors: list[str] = []
+    errors = [
+        f"missing required path rule: {RULES_DIRECTORY}/{filename}"
+        for filename in REQUIRED_RULE_FILES
+        if not (root / RULES_DIRECTORY / filename).is_file()
+    ]
     for rule in rule_files:
         relative_path = rule.relative_to(root).as_posix()
         content = rule.read_text(encoding="utf-8")

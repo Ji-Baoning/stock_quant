@@ -31,9 +31,23 @@ def create_complete_governance_tree(root: Path) -> None:
     )
     (adr_directory / "001-existing.md").write_text("ADR\n", encoding="utf-8")
 
-    rule = root / ".claude" / "rules" / "core.md"
-    rule.parent.mkdir(parents=True)
-    rule.write_text("Paths: src/\nRead first: docs/architecture/overview.md\n", encoding="utf-8")
+    (root / "AGENTS.md").write_text(
+        "用户即时指令 > 安全与平台指令 > 路径规则\n更具体的路径规则优先\n",
+        encoding="utf-8",
+    )
+    rule_directory = root / ".claude" / "rules"
+    rule_directory.mkdir(parents=True)
+    for filename in (
+        "data.md",
+        "research.md",
+        "portfolio.md",
+        "config-and-operations.md",
+        "tests.md",
+    ):
+        (rule_directory / filename).write_text(
+            "Paths: src/\nRead first: docs/architecture/overview.md\n",
+            encoding="utf-8",
+        )
 
 
 def run_checker(root: Path) -> subprocess.CompletedProcess[str]:
@@ -141,9 +155,38 @@ def test_checker_rejects_governance_documents_over_line_limits(
 
 def test_checker_requires_at_least_one_path_rule(tmp_path: Path) -> None:
     create_complete_governance_tree(tmp_path)
-    (tmp_path / ".claude" / "rules" / "core.md").unlink()
+    for rule in (tmp_path / ".claude" / "rules").glob("*.md"):
+        rule.unlink()
 
     result = run_checker(tmp_path)
 
     assert result.returncode == 1
     assert "ERROR: no path rule files found: .claude/rules" in result.stdout
+
+
+def test_checker_requires_protocol_priority_and_named_path_rules(tmp_path: Path) -> None:
+    """A usable governance tree names its precedence and all task rule scopes."""
+    create_complete_governance_tree(tmp_path)
+    (tmp_path / "AGENTS.md").write_text("governance document\n", encoding="utf-8")
+    for rule in (tmp_path / ".claude" / "rules").glob("*.md"):
+        rule.unlink()
+    (tmp_path / ".claude" / "rules" / "core.md").write_text(
+        "Paths: src/\nRead first: docs/architecture/overview.md\n",
+        encoding="utf-8",
+    )
+
+    result = run_checker(tmp_path)
+
+    assert result.returncode == 1
+    assert (
+        "ERROR: root protocol missing required guidance: AGENTS.md: "
+        "用户即时指令 > 安全与平台指令 > 路径规则"
+    ) in result.stdout
+    for filename in (
+        "data.md",
+        "research.md",
+        "portfolio.md",
+        "config-and-operations.md",
+        "tests.md",
+    ):
+        assert f"ERROR: missing required path rule: .claude/rules/{filename}" in result.stdout
