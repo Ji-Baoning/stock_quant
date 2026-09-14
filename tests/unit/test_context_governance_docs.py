@@ -1,12 +1,18 @@
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "tools" / "check_context_governance.py"
+ADR_DIRECTORY = ROOT / "docs" / "adr"
+ADR_INDEX = ADR_DIRECTORY / "DECISIONS_INDEX.md"
+ADR_FILENAME = re.compile(r"\d{3}-[a-z0-9-]+\.md")
+ADR_FRONTMATTER_FIELDS = ("status", "date", "decision", "affects")
 
 
 def create_complete_governance_tree(root: Path) -> None:
@@ -209,3 +215,53 @@ def test_checker_requires_protocol_priority_and_named_path_rules(tmp_path: Path)
         "tests.md",
     ):
         assert f"ERROR: missing required path rule: .claude/rules/{filename}" in result.stdout
+
+
+def adr_files() -> list[Path]:
+    """Every numbered ADR file, excluding the index."""
+    if not ADR_DIRECTORY.is_dir():
+        return []
+    return sorted(
+        path
+        for path in ADR_DIRECTORY.glob("*.md")
+        if path.name != ADR_INDEX.name
+    )
+
+
+def adr_frontmatter(path: Path) -> dict:
+    """The YAML frontmatter block of one ADR document."""
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n"), f"ADR must open with YAML frontmatter: {path.name}"
+    return yaml.safe_load(text.split("---\n", 2)[1]) or {}
+
+
+def test_adr_directory_holds_at_least_five_numbered_decisions() -> None:
+    adrs = adr_files()
+
+    assert len(adrs) >= 5, "expected at least five recorded ADRs"
+    for path in adrs:
+        assert ADR_FILENAME.fullmatch(path.name), f"unnumbered ADR: {path.name}"
+
+
+@pytest.mark.parametrize("field", ADR_FRONTMATTER_FIELDS)
+def test_every_adr_declares_required_frontmatter_field(field: str) -> None:
+    adrs = adr_files()
+    assert adrs, "no ADR documents to check"
+
+    for path in adrs:
+        assert field in adr_frontmatter(path), f"{path.name} lacks frontmatter: {field}"
+
+
+def test_every_adr_is_indexed_by_relative_link() -> None:
+    index = ADR_INDEX.read_text(encoding="utf-8")
+
+    for path in adr_files():
+        assert f"]({path.name})" in index, f"{path.name} is not indexed"
+
+
+def test_root_entry_points_link_the_authoritative_layers() -> None:
+    """README and PROJECT_MEMORY must point at the new fact and decision layers."""
+    assert "docs/architecture/" in (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "docs/adr/DECISIONS_INDEX.md" in (ROOT / "PROJECT_MEMORY.md").read_text(
+        encoding="utf-8"
+    )

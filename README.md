@@ -6,6 +6,16 @@ The first phase uses fixed boundary samples, daily market data, a 60-trading-day
 momentum baseline, and three cost scenarios. It is not investment advice, a
 profitability claim, or a live-trading system.
 
+## Where to look
+
+- `docs/architecture/` — current architecture facts: positioning, module map,
+  data flow, and the invariants that must not be broken.
+- `docs/adr/DECISIONS_INDEX.md` — adopted architecture decisions, their
+  consequences and what was rejected.
+- `RUNBOOK.md` — the procedure for each operational command.
+- `PROJECT_MEMORY.md` — long-lived business context and current status.
+- `AGENTS.md` / `CLAUDE.md` — how an agent should load context for a change.
+
 ## Setup
 
 ```bash
