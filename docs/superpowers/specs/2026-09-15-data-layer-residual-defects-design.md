@@ -121,7 +121,8 @@
 
 **追加抓取**（仅对候选，且仅在有意义时）：范围 `[list_date, start)`，
 `start` = build 的 requested start date。若该范围为空（窗口开始后才上市）则跳过，
-不发起调用。该帧与第一遍的帧按 `(symbol, trade_date)` 拼接去重后写入
+不发起调用。探针区间 `[chunk_start, start-1]` 与主抓取区间 `[start, end]` 严格
+不相交，故实现只做 `pd.concat`、不去重，拼接后写入
 `raw_daily_frames[symbol]` —— 那是 `_materialize_suspensions` 的证明输入。
 
 **发布路径不受影响**：拼接帧**不进入 `primary_rows` / `primary_dates`**，也不经过
@@ -242,9 +243,9 @@ D1：
 
 D2（`tests/unit/test_suspensions.py` 与 `tests/integration/test_data_pipeline.py`）：
 
-- 候选且其上市历史内有窗口前 bar（构造为距窗口首日 700 天，**远长于任何固定常数
-  会覆盖的深度**）→ 该停牌 run 落地为 `tushare_suspend` bar，价格取自那根 bar 的
-  `close`；证明不再报 `suspension_run_unverified`。
+- 候选且其上市历史内有窗口前 bar（符号上市日 stub 为 1991-01-02；探针逐块回退，
+  深度以该股上市历史为界，不设固定常数）→ 该停牌 run 落地为 `tushare_suspend`
+  bar，价格取自那根 bar 的 `close`；证明不再报 `suspension_run_unverified`。
 - 候选但在整个上市历史内都没有窗口前 bar → 仍报 `suspension_run_unverified`，
   不落地任何 bar。
 - 非候选（窗口首日有 bar）→ **不发起**追加抓取（以调用计数断言），即候选判定确实
@@ -252,8 +253,10 @@ D2（`tests/unit/test_suspensions.py` 与 `tests/integration/test_data_pipeline.
 - 发布断言：无论上述哪种情形，发布 `daily_bar` 中该股都不含任何早于窗口首个开市
   日的行。
 
-D3（`tests/unit/test_quality_checks.py` 与
-`tests/integration/test_acceptance_checks.py`）：
+D3（`tests/unit/test_corporate_action_normalize.py` 的
+`quarantine_row_out_of_window_reason` 与
+`tests/integration/test_data_pipeline.py` 的
+`test_update_ignores_quarantine_rows_whose_dates_predate_the_window`）：
 
 - 分支矩阵：`ex_date` 在窗口内 / `ex_date` 在窗口外 / `record_date` 在窗口内 /
   `record_date` 在窗口前且 `ex_date` 空 / 仅 `announcement_date` 在窗口前且
