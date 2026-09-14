@@ -1,5 +1,19 @@
 # 固定信号日订单设计（移除执行日信息驱动的重算）
 
+> **更新（2026-09-08，账户对账式调仓）**：本设计经评审后修订为**账户对账式周调仓**（方案 A）。冻结信号日目标书（`target_positions.parquet`）仍是唯一订单意图源，但**顶层计划订单账本 `orders.parquet` 退役**：每个成本情景由引擎在执行日以**自身已实现持仓/现金**对照同一张**情景无关**的目标书逐日生成订单（`BacktestRequest.order_provider` + `AccountAwareWeeklyRebalancer`）。无未来函数不变：订单 = f(冻结信号日目标, 执行日开盘前已实现账户态)，执行日行情只经 `ExecutionSimulator` 决定成交/部分成交/拒单。
+>
+> **准确目标**：消除由理想化 previous_book / stale residual **虚构持仓差额**导致的伪成本非单调与虚假未成交。**不是**"任何路径下成本越高期末权益必越低"——成本路径差异致少买暴涨股时权益可能更高，属真实合理结果（I4）。
+>
+> ### 设计不变量（本节为规范正文，源码实现以此为准）
+>
+> - **U0 符号全集**：某调仓日遍历 `symbols = sorted({lot.symbol for lot in account.lots} | set(targets))`，缺失目标 `targets.get(sym, 0)` 显式视为 0。**离场股不在当期 target 但真实持仓非零 → 仍产出卖单**；只遍历 targets 会把原 bug 原样保留。
+> - **M0 Provider metadata completeness**：对任何调仓日 d，provider 实际可提交的每个 symbol 在 d 日都具备执行所需的 market/readiness 元数据。可提交符号集**不能用 `target_d − target_{d−1}` 推导**——stale residual retry 与目标变化无关（W2 卖 A 被拒、W3 目标仍 0 → W3 仍须能再卖 A）。故 provider 模式 readiness 归 **executor 提交时逐单**（`_static_reason`：缺行 → 可审计 `suspended_or_unknown` 拒单；权威数据恒在场），可能持仓为**窗口级超集** `possible_held_symbols`（= 各期目标符号并集；曾持有 ⇒ 曾 target>0 ⇒ ∈ 并集，因 CA 仅同 ticker），供 CA 覆盖/trust 消费，不需逐日。
+> - **I1a 无陈旧计划残差（无条件，本次真正修复的不变量）**：每期交易意图仅由 `frozen_target − 执行日开盘前真实账户持仓` 决定，不依赖任何历史理想目标书。此前未成交的差额只要持仓仍与之不符，就重新进入本期 deterministic 计算（W2 卖 A 失败 → W3 目标 0 仍再卖 A）。
+> - **I1 情景间持仓收敛（条件式）**：仅当各情景在相关调仓日均有能力完整执行相同目标差额（现金全程充足、无不可交易/lot/CA 残余、有弥补漏买所需后续调仓机会）时收敛到同一 executable target；否则允许真实现金约束造成持仓不同。
+> - **I2 目标收敛（条件式，per-scenario）**：在"持仓可整手（无 CA 奇数残余）、可执行、现金足以完成末次补足、有后续调仓机会"的符号上 `final holdings == executable(final target)`；CA 奇数残余（target=0、持仓=150 → 卖 100 留 50，整手卖约束禁 <100 卖）与现金不足/末周未执行不适用。CA-free、现金全程充足的 fixture 上退化为无条件 `== 末次 target`。
+> - **I3 生成正确性（契约）**：`submitted_d == deterministic_rebalance(frozen_target_d, 执行日开盘前账户态)`。`plan := submitted` 后 reconciliation 只证明 submitted→execution 记账完备性（filled+rejected==submitted、reason 守规、唯一性、missing_open/quality_error breach 守卫），**不再证明生成正确性**。独立性来自：①重平衡器纯单元测试手写 expected order（oracle）；②引擎测试 wrapper 在 provider 调用瞬间抓 `account.state()`，断言 engine submitted == provider 返回（保真，非同一实现重算自己）。
+> - **I4 权益单调 = 业务验收、非普遍定理**：严格单调仅在上界 fixture（无 CA、卖单不挡、每情景现金足以完整执行每期目标差额 ⇒ 成交量价一致、仅费差）成立并作回归断言；真实 run 若仍 fc>ct 或 fc>zero，先诊断剩余持仓 P&L（用 I1 排除）/现金约束/末期末收敛，再判断是否真实成本路径效应，不直接判 rebalancer 错。
+
 ## 目标
 
 把研究运行改为"信号日收盘后固定订单方向与数量，执行日只按当日开盘行情模拟成交 / 部分成交 / 拒单"，并将计划、提交、成交与拒绝订单以稳定 ID 关联、逐笔报告差异与原因。本设计**取代** `2026-09-05-executable-rebalance-design.md` 的执行日可执行性投影核心（P0.3 为其逆命题）。
@@ -12,16 +26,18 @@
 
 ## 核心不变量
 
-信号日输出（计划订单账本 `orders.parquet`）只是信号日可见输入的纯函数：理想目标、上一期目标簿 `previous_book`、信号日收盘价、交易日历。执行日开盘价 / 停牌 / 可交易状态**永不回算订单**，只经 `ExecutionSimulator` 决定逐笔 `成交 / 部分成交 / 拒单` 并记入成交/拒绝账本。
+信号日输出只是信号日可见输入的纯函数：冻结目标书 `target_positions.parquet`（理想目标、信号日收盘价、交易日历）。执行日开盘价 / 停牌 / 可交易状态**永不回算订单**，只经 `ExecutionSimulator` 决定逐笔 `成交 / 部分成交 / 拒单` 并记入成交/拒绝账本。
 
-**验收（P0.3）**：改动任一执行日的开盘价或可交易状态，不改变信号日生成的订单；执行结果仅在成交/拒绝账本中变化。
+**意图源（账户对账式，2026-09-08 起）**：订单意图 = `target_positions`（情景无关）+ 每情景 submitted（引擎 provider 模式以该情景已实现账户态逐日生成）。顶层 `orders.parquet` 不再存在；`submitted = f(冻结目标, 已实现账户)`，见 I1a/I3。
+
+**验收（P0.3，重定位至 schedule 模式）**：改动任一执行日的开盘价或可交易状态，不改变**冻结计划**（schedule 模式的 `submitted_orders`，黄金测试保持）；执行结果仅在成交/拒绝账本中变化。Provider 模式下已实现成交本就反馈到下期订单（I1a 账户对账的本意），故 P0.3 的"订单对执行日行情完全不变"仅对 schedule 模式成立；provider 模式的对应不变式是：**订单生成只读冻结目标与账户态，从不读执行日行情**（重平衡器无价格输入）。
 
 ## 术语
 
 | 术语（中文） | 英文标识 | 含义 | 产物 |
 |---|---|---|---|
-| 计划订单 / 计划订单账本 | planned order / planned-order ledger | 信号日收盘后冻结的净调仓订单（方向 + 数量 + 稳定 ID），scenario-independent、不可变 | `orders.parquet` |
-| 提交订单 / 执行订单 | submitted order | 执行日实际交给模拟器的订单；纯意图下与计划**一一对应** | `submitted_orders.parquet` |
+| ~~计划订单 / 计划订单账本~~ | ~~planned order / planned-order ledger~~ | **已退役（2026-09-08）**：顶层信号日净调仓订单账本被账户对账式调仓取代，意图源改为 `target_positions.parquet` | ~~`orders.parquet`~~ |
+| 提交订单 / 执行订单 | submitted order | 执行日实际交给模拟器的订单；**每情景由 provider 以自身账户态生成，跨情景不再相等（方案 A 本意）** | `submitted_orders.parquet` |
 | 成交 | filled order | 模拟器成交明细 | `fills.parquet` |
 | 拒单 / 部分成交 | rejected order / partial fill | 执行日市场 / 账户现实 | `rejections.parquet` |
 | 订单级差异对账 | order diff | 计划↔提交↔成交↔拒单按 `order_id` 对账的逐笔差异表 | `order_diffs.parquet` |
@@ -30,14 +46,16 @@
 
 ## 架构
 
-信号日（portfolio 阶段）产出冻结计划账本 → 引擎以固定 `schedule`（`OrderDay` 序列）重放、把计划逐笔交给 `ExecutionSimulator` → 执行结果落成交/拒单账本 → 按稳定 ID 对账出 `order_diffs` → metrics / report / rich report 呈现计划-执行差异。成本情景共用**同一份**计划，差异只体现在成交/拒单（费率→现金可买量→部分成交）。
+信号日（portfolio 阶段）产出冻结目标书 → 回测阶段每情景各建一个 `AccountAwareWeeklyRebalancer`，引擎（provider 模式）逐日以该情景账户态生成订单、把订单逐笔交给 `ExecutionSimulator` → 执行结果落成交/拒单账本 → `plan := submitted` 按稳定 ID 对账出 `order_diffs` → metrics / report / rich report 呈现提交-执行差异。成本情景共用**同一张目标书**，但提交订单**情景相关**（成本→现金→可买股数被真正实现）；差异体现在提交、成交与拒单三层。schedule 模式（引擎黄金测试、`BacktestRequest.schedule`）原样保留，两种模式以 `order_provider is None` 判别。
 
-### 1. 计划订单账本（orders.parquet 转正）
+### 1. 冻结目标书（orders.parquet 已退役；意图源 = target_positions + 每情景 submitted）
 
-`_produce_portfolio` 现有的净调仓计算即纯意图账本，逻辑不变，仅每行补一列 `signal_date`（订单级信号归属）。列：`signal_date, execution_date, order_id, side, symbol, quantity`。它从"仅写入 + 哈希"变为"回测消费的权威输入"，仍为独立不可变产物（`REQUIRED_ARTIFACTS` 保留，不改名）。
+`_produce_portfolio` 只产出 `signals.parquet` 与 `target_positions.parquet`（冻结目标书），**不再生成任何订单**。订单由回测阶段每情景的 `AccountAwareWeeklyRebalancer` 以"冻结目标 − 已实现持仓"逐日生成（I1a），生成规则见文首不变量 U0 与数量规则（买不预钳现金、卖 T+1 钳制 + 整手向下取整）。`REQUIRED_ARTIFACTS` 已移除 `orders.parquet`。
 
 ### 2. 引擎（backtest/engine.py, models.py）
 
+- **（2026-09-08 增）provider seam**：`BacktestRequest` 增可选 `order_provider: Callable[[date, Account], Sequence[Order]]` 与 `possible_held_symbols: frozenset[str] | None`；模式判据 = `order_provider is None`（schedule 模式，`schedule=()` 合法）vs `is not None`（provider 模式逐日 `orders = order_provider(day, account)`，汇入同一提交+执行尾）。provider 模式 `possible_held_symbols=None` 是配置错误（ValueError），见 M0。
+- **（2026-09-08 增）metadata 口径见 M0**：`_Market.possible_held_symbols` 按模式判据分支——schedule 模式保持 schedule 并集（含 `schedule=()` → 空并集）；provider 模式取 `request.possible_held_symbols`（窗口级超集）。CA 覆盖/trust 消费者不变；provider 模式无静态逐日预检，readiness 由 executor `_static_reason` 提交时逐单裁决。
 - `BacktestRequest` 删除 `target_schedule`；`TargetDay` 删除；`BacktestResult` 删除 `rebalance_adjustments`、`executable_targets` 及对应列常量、`_rebalance_adjustments_frame`、`_executable_targets_frame`。
 - `run()` 去掉 target 分支（`market.target_on` / `project_rebalance` / `_projection_frame` / `_collect_projection`），统一走固定 `schedule`：`sells, buys = market.schedule_by(day); orders = sells + buys`。
 - **submitted_orders 收集粒度**：引擎在每个开盘日把订单列表交给 `simulator.execute` **之前**，对列表内每一笔 Order 追加一条 submitted 记录（列 `SUBMITTED_ORDER_COLUMNS = (trade_date, order_id, side, symbol, quantity)`）。粒度 = **一笔提交一条**（submit 事件），非一天一行聚合。`order_id` 全窗口全局唯一、每单只在自身 `execution_date` 被执行一次，故**天然无重复，不依赖运行时去重**。
@@ -48,21 +66,21 @@
 
 ### 3. 稳定 ID 链与对账不变量
 
-稳定 ID 链：`orders.parquet.order_id` → `submitted_orders.order_id` → `fills.order_id` / `rejections.order_id`，由引擎提交计划原订单、模拟器原样保留 order_id 保证。以不变量断言固化（**断言顺序固定为：先 ID、后字段**）：
+稳定 ID 链（账户对账式）：provider 生成的 `order_id` → `submitted_orders.order_id` → `fills.order_id` / `rejections.order_id`，由引擎提交原订单、模拟器原样保留 order_id 保证。schedule 模式下计划账本仍是 ID 链起点；provider 模式下 `plan := submitted`，身份断言（下 1、2）经此构造恒真，**仅证明记账完备性**——生成正确性由 I3 承担（重平衡器 oracle 单测 + 引擎保真测试）。断言顺序固定为：先 ID、后字段：
 
-1. `submitted_orders.order_id` 无重复，且其集合 == `orders.parquet.order_id` 集合（ID 是主键，作为连接键）。
-2. 对**每个** `order_id`，`submitted_orders` 的 `(side, symbol, quantity)` 与计划账本一致（三元组只是字段级确认，不是主键）。
-3. `fills.order_id` ∪ `rejections.order_id` ⊆ 计划 `order_id` 集合；窗口内每笔计划订单至少产生一条 fill 或 rejection 记录（引擎窗口 == 计划执行日跨度）。
+1. `submitted_orders.order_id` 无重复，且其集合 == plan（schedule 模式 = `orders.parquet`；provider 模式 = submitted 自身）集合（ID 是主键，作为连接键）。
+2. 对**每个** `order_id`，`submitted_orders` 的 `(side, symbol, quantity)` 与 plan 一致（三元组只是字段级确认，不是主键）。
+3. `fills.order_id` ∪ `rejections.order_id` ⊆ plan `order_id` 集合；窗口内每笔提交订单至少产生一条 fill 或 rejection 记录（引擎窗口 == 计划执行日跨度）。
 
 ### 4. 订单级差异对账 order_diffs.parquet（新产物）
 
-`reconcile` 纯函数按 `order_id` 将计划左连（fills 求和 `filled_quantity`）+（rejections 的 `rejected_quantity` / `reason`）→ 每情景一个 `order_diffs.parquet`。
+`reconcile` 纯函数按 `order_id` 将 plan（schedule 模式 = 冻结计划账本；provider 模式 = 该情景 submitted，见 I3）左连（fills 求和 `filled_quantity`）+（rejections 的 `rejected_quantity` / `reason`）→ 每情景一个 `order_diffs.parquet`。
 
 列与 dtype：
 
 | 列 | dtype | 说明 |
 |---|---|---|
-| `signal_date` | date | 信号日（计划账本注入） |
+| `signal_date` | date | 信号日（schedule 模式由计划账本注入；provider 模式由冻结目标书注入） |
 | `execution_date` | date | 执行日（== 计划 execution_date == submitted.trade_date） |
 | `order_id` | str | 稳定 ID，贯穿 计划→提交→成交/拒单 |
 | `side` | str（BUY/SELL） | |
@@ -98,13 +116,13 @@
 
 ### 6. Runner（research/runner.py）
 
-- `_read_target_schedule()` → `_read_order_schedule()`：读 `orders.parquet` 按 `execution_date` 分组构造 `OrderDay(trade_date, sells, buys)`（保留 `order_id`、`note`），所有成本情景共用同一 `schedule`。
-- `_produce_backtest`：每情景写 `fills / rejections / action_ledger / daily_equity / submitted_orders / order_diffs`；**不再写** `rebalance_adjustments.parquet`、`executable_targets.parquet`。
-- `reconcile` 函数与 `order_diffs` 写入；`models.py` REQUIRED_ARTIFACTS / manifest 工件清单同步替换上述两文件名为 `order_diffs.parquet`（含哈希与每情景产物集合）。
+- **（2026-09-08 改）**`_produce_portfolio` 只写 `signals.parquet` + `target_positions.parquet`（理想账本净额段与 `orders.parquet` 删除）；`_produce_backtest` 每情景独立 `AccountAwareWeeklyRebalancer`，`BacktestRequest(order_provider=…, possible_held_symbols=各期目标符号并集, schedule=())` 逐日按该情景账户态出单；`_read_order_ledger` 退役，内存 plan = submitted（I3）。`_order_schedule` 与 schedule 模式路径原样保留（引擎黄金测试）。
+- 每情景写 `fills / rejections / action_ledger / daily_equity / submitted_orders / order_diffs`；**不再写** `rebalance_adjustments.parquet`、`executable_targets.parquet`。
+- `reconcile` 函数与 `order_diffs` 写入；`models.py` REQUIRED_ARTIFACTS / manifest 工件清单同步：删除 `orders.parquet`。
 
 ### 7. metrics.json / report / CLI 全链改造
 
-`runner._DefaultAnalytics`（运行时写 metrics.json）与 `cli._ExperimentAnalytics`（report_build 重建）**两处**以相同新键替换 pretrade 三键。metrics.json `scenarios[<name>]` 完整嵌套结构（类型化）：
+（2026-09-08 口径更新）`planned_*` / `plan_diverged` 等订单级键的口径 = **该情景实际提交**（provider 模式 submitted；不再是跨情景同一张计划账本）。`runner._DefaultAnalytics`（运行时写 metrics.json）与 `cli._ExperimentAnalytics`（report_build 重建）**两处**以相同新键替换 pretrade 三键。metrics.json `scenarios[<name>]` 完整嵌套结构（类型化）：
 
 ```jsonc
 {
@@ -157,14 +175,16 @@ report.html（runner `_DefaultReport`）与 rich report（`reporting/html.py` `_
 ## 测试与验收
 
 - 引擎重放单元测试：现金不足→部分成交 + 余量拒单；卖超可卖→拒单；停牌缺行→拒单；涨停买→拒单、跌停卖→拒单；并断言引擎**无**执行日重算路径。
+- **（2026-09-08 增）rebalancer 纯单元测试**：手写 expected order（oracle），覆盖 U0 离场股卖单、CA 奇数残余整手截断、T+1 钳制 + 下期自愈、stale-retry 跨周补单、每符号单边、SELL 前置/符号升序、买量整手且不预钳现金。
+- **（2026-09-08 增）引擎 provider-mode 测试**：部分成交/整卖被拒后下期补足/卖出恰为残差（I1a）；stale-retry 引擎级（W2 拦单 → W3 再提交且当日元数据完整，M0）；先卖后买融资；I3 保真（wrapper 抓调用瞬间 `account.state()`，断言 submitted == provider 返回）；模式判据两用例（`schedule=()` 无 provider 照常跑；provider 缺 `possible_held_symbols` → ValueError）。schedule 模式黄金账本与 P0.3 测试不改、必须仍绿。
 - §3 稳定 ID 链与对账不变量测试（断言顺序固定：order_id 集合相等 → 逐 ID 断言字段一致）。避免冗余：`""` 不出现在拒单流水由执行层既有保证覆盖，不重复测试。
 - reconcile 单测：status 派生、reason 透传、逐行恒等、枚举外字符串违约。
-- 集成（test_end_to_end 等）：每情景产物含 `order_diffs`、不含两旧文件；`submitted_orders` 跨情景一致且等于计划；metrics/report 新键齐全、pretrade 键消失；rich report 新列渲染。
-- **P0.3 验收测试**：同一输入构造两份 run，仅改某执行日某标的开盘价 / 停牌 / 涨跌停 ⇒ `signals/targets/orders.parquet` 与 `submitted_orders` 哈希一致，`fills/rejections` 只在触及该标的的订单上不同。
+- 集成（test_end_to_end 等）：每情景产物含 `order_diffs`、不含两旧文件与 `orders.parquet`；order_diffs 记账完备（filled+rejected==submitted）；**I1a/I1/I2/I4 验收**（上界 fixture 上期末持仓互等且 == 末次 target、期末权益 zero ≥ ct ≥ fc）；metrics/report 新键齐全、pretrade 键消失；rich report 新列渲染。
+- **P0.3 验收测试（重定位至 schedule 模式）**：同一输入构造两份 run，仅改某执行日某标的开盘价 / 停牌 / 涨跌停 ⇒ schedule 模式 `submitted_orders` 与 `signals/targets` 哈希一致，`fills/rejections` 只在触及该标的的订单上不同。（provider 模式的对应不变式：订单生成只读冻结目标与账户态，从不读执行日行情；已实现成交反馈下期订单属 I1a 本意。）
 - 质量约束沿用仓库基线：`ruff check` 干净；套件全绿；不 gate 全仓 `ruff format`。
 
 ## 有意的行为后果
 
-1. 若某情景因前期买盘部分成交/拒单（如涨停周）或公司行为改份额导致**实际持仓 < 计划卖出量**，该 SELL 被整单拒单（`insufficient_sellable_quantity`），**不**在执行日截断到可卖量（截断 = 执行日改量，P0.3 禁止）；残余持仓留待下期信号，记入 `order_diffs` / `plan_diverged`。
-2. 计划内订单若撞 ERROR 质量栏 / 无开盘 / 无前收，run 由就绪校验整体 veto（数据完整性护栏，维持现状）。
-3. 成本情景差异**只**体现在成交/拒单结果；提交订单集合严格一致。
+1. 若某情景因前期买盘部分成交/拒单（如涨停周）或公司行为改份额导致**实际持仓 < 目标差额**，该 SELL/BUY 按账户可实现量级提交并被拒（如 `insufficient_sellable_quantity`）/部分成交，**不**在执行日截断到可交易量（截断 = 执行日改量，P0.3 精神禁止）；**残余差额在下期调仓日由账户对账自愈补足**（I1a：只要持仓仍与冻结目标不符，就重新进入下期 deterministic 计算），并记入 `order_diffs` / `plan_diverged`。CA 奇数残余（<100 股）除外——整手卖约束无法处置，留 stale（I2 排除）。
+2. 计划内订单若撞 ERROR 质量栏 / 无开盘 / 无前收，run 由就绪校验整体 veto（数据完整性护栏，维持现状；provider 模式缺行则由 executor 逐单记 `suspended_or_unknown` 可审计拒单，见 M0）。
+3. ~~成本情景差异只体现在成交/拒单结果；提交订单集合严格一致。~~ **已退役（2026-09-08）**：提交订单集跨情景不再相等是账户对账式调仓（方案 A）的本意——成本→现金→可买股数被真正实现（§522）；成本情景持仓/权益差异若为真实路径效应，是预期而非缺陷（I4）。

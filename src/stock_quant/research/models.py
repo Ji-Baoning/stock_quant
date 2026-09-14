@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -134,11 +134,24 @@ class RunState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run_id: str
-    experiment_id: str
+    #: ``None`` only for a preflight failure that happened before an
+    #: experiment identity could be formed (e.g. the data-acceptance gate).
+    experiment_id: str | None
     status: RunStatus = RunStatus.CREATED
     stage: DataStage = DataStage.CREATED
     dataset_version: str
     universe_version: str
+    #: The frozen universe definition identity a formal run was accepted
+    #: under (Task 4): ``universe_id``, ``universe_version``,
+    #: ``rules_version``, ``membership_table_sha256``,
+    #: ``evidence_summary_sha256``, the coverage window, the acceptance
+    #: status and the per-signal-day member counts / snapshot-hash maps.
+    #: ``None`` for runs resolved through the legacy engineering universe.
+    universe: dict[str, Any] | None = None
+    #: Sanitized audit of the pinned real-data acceptance record
+    #: (:func:`acceptance_audit_dict`), or ``None`` when no acceptance was
+    #: resolved (an ENGINEERING diagnostic or a preflight failure).
+    data_acceptance: dict[str, Any] | None = None
     code_commit: str = "unversioned"
     factor_versions: dict[str, str] = Field(default_factory=dict)
     cost_scenarios: list[str] = Field(default_factory=list)
@@ -200,7 +213,6 @@ REQUIRED_ARTIFACTS = frozenset(
         "factor_results.parquet",
         "signals.parquet",
         "target_positions.parquet",
-        "orders.parquet",
         "fills.parquet",
         "cash_ledger.parquet",
         "corporate_action_ledger.parquet",
@@ -222,3 +234,88 @@ CANONICAL_SCENARIO = "full_cost"
 #: Content artifacts recorded (and sha256-hashed) by ``experiment_manifest.json``
 #: -- everything except the two self-describing manifests.
 MANIFESTED_ARTIFACTS = tuple(sorted(REQUIRED_ARTIFACTS - _MANIFEST_NAMES))
+
+# --------------------------------------------------------------------------- #
+# Walk-forward artifact contract
+# --------------------------------------------------------------------------- #
+
+#: Root files a formal walk-forward experiment publishes beside the classic
+#: artifacts.  ``fold_schedule.json`` is written and hashed before any fold
+#: executes and is never modified; ``fold_outcomes.json`` is the separate,
+#: schedule-hash-bound ledger of per-fold results; the manifest binds both
+#: hashes, the snapshot hashes and the stability evaluation; the stability
+#: report carries the verdict and every per-fold/per-scenario metric.
+WALK_FORWARD_ROOT_ARTIFACTS = (
+    "fold_schedule.json",
+    "fold_outcomes.json",
+    "walk_forward_manifest.json",
+    "stability_report.json",
+)
+
+#: The exact file set published under ``folds/<fold_id>/`` for every executed
+#: fold.  ``equity.parquet`` carries the canonical columns ``trade_date``,
+#: ``initial_equity`` and ``net_equity_after_cost`` (the engine's current
+#: ``total_equity`` under its audit-facing name); ``metrics.json`` records
+#: every declared cost scenario's fold metrics;
+#: ``portfolio_construction.parquet`` is the common construction audit
+#: (empty with the exact columns for the equal-weight rule).
+FOLD_ARTIFACTS = (
+    "fold_manifest.json",
+    "signals.parquet",
+    "orders.parquet",
+    "fills.parquet",
+    "equity.parquet",
+    "daily_returns.parquet",
+    "portfolio_construction.parquet",
+    "metrics.json",
+)
+
+#: The scenario-local audit artifacts published under
+#: ``folds/<fold_id>/backtest/<scenario>/``.  ``equity.parquet`` publishes
+#: for every declared cost scenario of every executed fold (the auditable
+#: daily ``cash``/``market_value``/``net_equity_after_cost`` path a one-time
+#: strategy challenge needs for its invested-exposure evidence);
+#: ``rebalance_decisions.parquet`` is the buffered risk-weighted rule's
+#: decision audit: one row per reconciled symbol per rebalance day,
+#: including the band/lot suppressions.
+SCENARIO_ARTIFACTS = ("equity.parquet", "rebalance_decisions.parquet")
+
+#: Every admissible root artifact name across both execution pipelines.
+ADMISSIBLE_ROOT_ARTIFACTS = frozenset(REQUIRED_ARTIFACTS) | frozenset(
+    WALK_FORWARD_ROOT_ARTIFACTS
+)
+
+
+def admissible_artifact_path(name: str) -> bool:
+    """True when ``name`` is a declared root file or a fold artifact path.
+
+    The published-artifact contract is a deterministic map: declared root
+    files, ``folds/<fold_id>/<declared fold artifact>`` paths and
+    ``folds/<fold_id>/backtest/<scenario>/<declared scenario artifact>``
+    paths (with a 64-hex content-hash fold id and a nonblank scenario name)
+    may appear in an experiment manifest.
+    """
+    if name in ADMISSIBLE_ROOT_ARTIFACTS:
+        return True
+    parts = name.split("/")
+    if parts[0] != "folds" or len(parts) < 3:
+        return False
+    fold_id, artifact = parts[1], parts[-1]
+    if len(fold_id) != 64 or any(char not in "0123456789abcdef" for char in fold_id):
+        return False
+    if len(parts) == 3:
+        return artifact in FOLD_ARTIFACTS
+    if len(parts) == 5 and parts[2] == "backtest":
+        scenario = parts[3]
+        return bool(scenario.strip()) and artifact in SCENARIO_ARTIFACTS
+    return False
+
+
+def validate_artifact_paths(names: Iterable[str]) -> None:
+    """Reject any artifact path outside the declared contract."""
+    for name in names:
+        if not admissible_artifact_path(name):
+            raise ValueError(
+                f"artifact path {name!r} is not a declared root file or a "
+                "folds/<fold_id>/<declared-name> artifact"
+            )

@@ -37,9 +37,41 @@ from stock_quant.research.registry import (
     IncompleteRunError,
 )
 from stock_quant.research.spec import ExperimentSpec
+from stock_quant.research.walk_forward.snapshots import build_snapshot_bundle
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src"
+
+#: Static pinned-dataset table hashes for the snapshot bundles identity is
+#: computed from (scheme v2 hashes spec + bundle; the values are constants).
+_DATASET_MANIFEST = {
+    "tables": {
+        "adjusted_bar": {"sha256": "1" * 64},
+        "daily_bar": {"sha256": "2" * 64},
+        "trading_calendar": {"sha256": "3" * 64},
+        "corporate_action": {"sha256": "4" * 64},
+        "corporate_action_coverage": {"sha256": "5" * 64},
+    },
+}
+
+_CONFIG_HASHES = {
+    "costs.yml": "c" * 64,
+    "trading_rules.yml": "e" * 64,
+}
+
+
+def _bundle(spec: ExperimentSpec):
+    """A deterministic snapshot bundle bound to ``spec`` (identity v2)."""
+    return build_snapshot_bundle(
+        spec=spec,
+        dataset_manifest=_DATASET_MANIFEST,
+        universe_definition=None,
+        config_hashes=_CONFIG_HASHES,
+    )
+
+
+def _identity(spec: ExperimentSpec) -> ExperimentIdentity:
+    return ExperimentIdentity.of(spec, _bundle(spec))
 
 _METRICS_JSON = '{"annualized_return": 0.0521, "max_drawdown": -0.13}'
 _EVALUATION_REASON = "below_minimum_qualifying_names"
@@ -51,6 +83,7 @@ def _spec_kwargs(**overrides) -> dict:
         factor_versions={"momentum_60d": "1.0.0"},
         dataset_version="d" * 64,
         universe_version="u" * 64,
+        data_acceptance_id="a" * 64,
         date_range={"start_date": date(2020, 1, 1), "end_date": date(2026, 9, 2)},
         train_validation_holdout_policy="not_applicable_engineering_mvp",
         preprocessing={"winsorization": "none", "standardization": "none"},
@@ -110,7 +143,11 @@ def _stage_publish(
         "status": evaluation,
         "dataset_version": spec.dataset_version,
         "universe_version": spec.universe_version,
+        "data_acceptance_id": spec.data_acceptance_id,
         "code_commit": spec.code_commit,
+        "strategy_snapshot_sha256": identity.strategy_snapshot_sha256,
+        "experiment_snapshot_sha256": identity.experiment_snapshot_sha256,
+        "data_environment_snapshot_sha256": identity.data_environment_snapshot_sha256,
         "evaluation_reason": evaluation_reason,
         "artifacts": artifacts,
     }
@@ -127,7 +164,7 @@ def frozen_spec() -> ExperimentSpec:
 
 @pytest.fixture
 def identity(frozen_spec) -> ExperimentIdentity:
-    return ExperimentIdentity.of(frozen_spec)
+    return _identity(frozen_spec)
 
 
 @pytest.fixture
@@ -182,7 +219,7 @@ def test_republish_of_identical_experiment_from_a_fresh_run_reuses_path(
 def test_rejected_and_accepted_experiments_are_published_and_indexed(tmp_path):
     registry = ExperimentRegistry(tmp_path)
     rejected_spec = _spec(random_seed=1)
-    rejected_id = ExperimentIdentity.of(rejected_spec)
+    rejected_id = _identity(rejected_spec)
     rejected_run = _stage_publish(
         tmp_path / "data" / "runs" / "run_rejected",
         rejected_spec,
@@ -196,7 +233,7 @@ def test_rejected_and_accepted_experiments_are_published_and_indexed(tmp_path):
     assert (_experiments_root(tmp_path) / rejected_id.experiment_id).is_dir()
 
     accepted_spec = _spec(random_seed=2, code_commit="cafe1234")
-    accepted_id = ExperimentIdentity.of(accepted_spec)
+    accepted_id = _identity(accepted_spec)
     accepted_run = _stage_publish(
         tmp_path / "data" / "runs" / "run_accepted",
         accepted_spec,
@@ -286,12 +323,53 @@ def test_publish_validates_declared_artifact_hashes_before_renaming(
     assert not (_experiments_root(tmp_path) / identity.experiment_id).exists()
 
 
+def test_publish_rejects_acceptance_drift_from_the_frozen_spec(
+    tmp_path, identity, frozen_spec
+):
+    """A manifest whose data_acceptance_id disagrees with the frozen spec
+    stored beside it can never be published."""
+    registry = ExperimentRegistry(tmp_path)
+    run_dir = tmp_path / "data" / "runs" / "run_drift"
+    _stage_publish(run_dir, frozen_spec, identity)
+    manifest_path = run_dir / "publish" / "experiment_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["data_acceptance_id"] = "f" * 64
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    with pytest.raises(ExperimentRegistryError):
+        registry.publish(run_dir, identity)
+    assert not (_experiments_root(tmp_path) / identity.experiment_id).exists()
+
+
+def test_rebuild_rejects_acceptance_drift_from_the_frozen_spec(
+    tmp_path, identity, frozen_spec
+):
+    """The rebuilt index re-checks every manifest against its frozen spec."""
+    registry = ExperimentRegistry(tmp_path)
+    run_dir = _stage_publish(
+        tmp_path / "data" / "runs" / "run_ok", frozen_spec, identity
+    )
+    registry.publish(run_dir, identity)
+    manifest_path = (
+        _experiments_root(tmp_path) / identity.experiment_id
+        / "experiment_manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["data_acceptance_id"] = None
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    with pytest.raises(ExperimentRegistryError):
+        registry.rebuild()
+
+
 def test_rebuild_reconstructs_registry_from_immutable_manifests(tmp_path):
     registry = ExperimentRegistry(tmp_path)
     ids = []
     for seed, evaluation in ((1, "REJECTED"), (2, "ACCEPTED"), (3, "REJECTED")):
         spec = _spec(random_seed=seed)
-        experiment_id = ExperimentIdentity.of(spec)
+        experiment_id = _identity(spec)
         ids.append(experiment_id.experiment_id)
         run_dir = _stage_publish(
             tmp_path / "data" / "runs" / f"run_{seed}",

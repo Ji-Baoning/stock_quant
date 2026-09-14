@@ -11,12 +11,13 @@ commission/tax and full-cost) are exercised offline.
 
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from stock_quant.backtest.costs import CostModel
 from stock_quant.backtest.models import BUY, SELL, FeeBreakdown
-from stock_quant.config import CostConfig, CostRate, CostScenario
+from stock_quant.config import CostConfig, CostRate, CostScenario, load_project_config
 
 # --------------------------------------------------------------------------- #
 # Fixtures and helpers
@@ -40,35 +41,32 @@ def rate(
 
 
 def _cost_config() -> CostConfig:
-    """Mirror of ``configs/costs.yml`` (scenario rates effective 2020-01-01)."""
+    """Mirror of ``configs/costs.yml`` (stamp tax split at the 2023-08-28 cut)."""
+
+    def commission_tax_rates() -> list[CostRate]:
+        return [
+            rate(effective_from=date(2015, 1, 1), commission=0.0003,
+                 minimum=5.0, stamp=0.001, slippage=0.0),
+            rate(effective_from=date(2023, 8, 28), commission=0.0003,
+                 minimum=5.0, stamp=0.0005, slippage=0.0),
+        ]
+
+    def full_cost_rates() -> list[CostRate]:
+        return [
+            rate(effective_from=date(2015, 1, 1), commission=0.0003,
+                 minimum=5.0, stamp=0.001, slippage=0.001),
+            rate(effective_from=date(2023, 8, 28), commission=0.0003,
+                 minimum=5.0, stamp=0.0005, slippage=0.001),
+        ]
+
     return CostConfig(
         scenarios=[
             CostScenario(
                 name="zero_cost",
-                rates=[rate(commission=0.0, minimum=0.0, stamp=0.0, slippage=0.0)],
+                rates=[rate(effective_from=date(2015, 1, 1))],
             ),
-            CostScenario(
-                name="commission_tax",
-                rates=[
-                    rate(
-                        commission=0.0003,
-                        minimum=5.0,
-                        stamp=0.0005,
-                        slippage=0.0,
-                    )
-                ],
-            ),
-            CostScenario(
-                name="full_cost",
-                rates=[
-                    rate(
-                        commission=0.0003,
-                        minimum=5.0,
-                        stamp=0.0005,
-                        slippage=0.001,
-                    )
-                ],
-            ),
+            CostScenario(name="commission_tax", rates=commission_tax_rates()),
+            CostScenario(name="full_cost", rates=full_cost_rates()),
         ]
     )
 
@@ -170,14 +168,14 @@ def test_no_rate_effective_on_the_trade_date_is_rejected():
             Decimal("10.00"),
             Decimal("5.00"),
             Decimal("5.00"),
-            Decimal("0.50"),
+            Decimal("1.00"),
         ),
         (
             "full_cost",
             Decimal("10.01"),
             Decimal("5.00"),
             Decimal("5.00"),
-            Decimal("0.50"),
+            Decimal("1.00"),
         ),
     ],
 )
@@ -196,6 +194,15 @@ def test_three_cost_scenarios_price_and_tax_exactly(
     assert sell.stamp_tax == sell_stamp
 
 
+def test_full_cost_prices_the_reduced_stamp_tax_from_the_cut_day():
+    """From 2023-08-28 the sell stamp tax is 0.5 per mille, not 1."""
+    model = CostModel.from_config(_cost_config(), "full_cost")
+    cut_day = model.calculate(SELL, 100, Decimal("10.00"), date(2023, 8, 28))
+    day_before = model.calculate(SELL, 100, Decimal("10.00"), date(2023, 8, 27))
+    assert cut_day.stamp_tax == Decimal("0.50")
+    assert day_before.stamp_tax == Decimal("1.00")
+
+
 def test_from_config_unknown_scenario_raises():
     with pytest.raises(ValueError, match="commission_tax"):
         CostModel.from_config(_cost_config(), "no_such_scenario")
@@ -210,3 +217,47 @@ def test_calculate_returns_an_immutable_fee_breakdown():
     assert quote.stamp_tax == Decimal("0.50")
     with pytest.raises(AttributeError):  # frozen dataclass is immutable
         quote.commission = Decimal("0")  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# The production configs/costs.yml itself
+# --------------------------------------------------------------------------- #
+
+#: ``tests/unit/test_costs.py`` -> repo root -> ``project/``.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2] / "project"
+
+
+def test_production_costs_yml_splits_stamp_tax_at_the_2023_cut():
+    """The real costs.yml carries the official stamp-tax history.
+
+    Stamp tax was 1 per mille on sells until 2023-08-27 and 0.5 per mille from
+    2023-08-28.  A dataset window starting 2015 must therefore price the two
+    regimes from one dated schedule, and the boundary day itself must already
+    select the reduced rate.
+    """
+    config = load_project_config(_PROJECT_ROOT)
+    for scenario in ("commission_tax", "full_cost"):
+        model = CostModel.from_config(config.costs, scenario)
+        assert model.stamp_tax_rate(date(2015, 1, 5)) == Decimal("0.001")
+        assert model.stamp_tax_rate(date(2023, 8, 25)) == Decimal("0.001")
+        assert model.stamp_tax_rate(date(2023, 8, 28)) == Decimal("0.0005")
+        assert model.stamp_tax_rate(date(2026, 1, 5)) == Decimal("0.0005")
+
+
+def test_production_costs_yml_zero_scenario_is_date_invariant():
+    """``zero_cost`` is all-zero on every date in the window."""
+    config = load_project_config(_PROJECT_ROOT)
+    model = CostModel.from_config(config.costs, "zero_cost")
+    for day in (date(2015, 1, 5), date(2023, 8, 28), date(2026, 1, 5)):
+        assert model.commission_rate(day) == Decimal("0")
+        assert model.minimum_commission(day) == Decimal("0")
+        assert model.stamp_tax_rate(day) == Decimal("0")
+        assert model.slippage(day) == Decimal("0")
+
+
+def test_production_costs_yml_rejects_dates_before_the_window():
+    """No rate is effective before the schedule starts; it fails loudly."""
+    config = load_project_config(_PROJECT_ROOT)
+    model = CostModel.from_config(config.costs, "full_cost")
+    with pytest.raises(ValueError, match="no cost rate is effective"):
+        model.stamp_tax_rate(date(2014, 12, 31))

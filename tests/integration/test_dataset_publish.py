@@ -15,13 +15,22 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from stock_quant.data_model.adjusted_bar import build_adjusted_bars
 from stock_quant.data_model.dataset import (
     DatasetNotFoundError,
     DatasetPublisher,
     DatasetReader,
     PublicationBlocked,
 )
-from stock_quant.data_model.schemas import DAILY_COLUMNS, DAILY_SCHEMA
+from stock_quant.data_model.schemas import (
+    ADJUSTED_BAR_SCHEMA,
+    CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_COVERAGE_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_SCHEMA,
+    DAILY_COLUMNS,
+    DAILY_SCHEMA,
+)
 from stock_quant.data_quality.models import QualityIssue, QualityReport, Severity
 
 TRADING_DAYS = [date(2020, 1, 2), date(2020, 1, 3), date(2020, 1, 6)]
@@ -46,10 +55,47 @@ def _daily_frame(closes: list[float]) -> pd.DataFrame:
     )[DAILY_COLUMNS]
 
 
+def empty_corporate_actions() -> pd.DataFrame:
+    return pd.DataFrame(columns=CORPORATE_ACTION_COLUMNS)
+
+
+def empty_quarantine() -> pd.DataFrame:
+    return pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
+
+
+def verified_coverage() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "symbol": "600000.SH",
+                "window_start": date(2020, 1, 1),
+                "window_end": date(2020, 12, 31),
+                "status": "VERIFIED_EMPTY",
+                "reason": "",
+                "sources": "[]",
+                "snapshot_hashes": "[]",
+                "checked_at": INGESTED,
+            }
+        ],
+        columns=CORPORATE_ACTION_COVERAGE_COLUMNS,
+    )
+
+
 def valid_tables(closes: list[float] | None = None) -> dict[str, pd.DataFrame]:
     if closes is None:
         closes = [10.5, 10.8, 11.0]
-    return {"daily_bar": _daily_frame(closes)}
+    daily = _daily_frame(closes)
+    return {
+        "daily_bar": daily,
+        "adjusted_bar": build_adjusted_bars(
+            daily,
+            empty_corporate_actions(),
+            empty_quarantine(),
+            verified_coverage(),
+            symbols=("600000.SH",),
+        ),
+        "corporate_action_quarantine": empty_quarantine(),
+    }
 
 
 def passing_report() -> QualityReport:
@@ -87,15 +133,23 @@ def test_publish_writes_parquet_and_both_json_reports(tmp_path):
     version_dir = ref.path
     names = sorted(p.name for p in version_dir.iterdir())
     assert names == [
+        "adjusted_bar.parquet",
+        "corporate_action_quarantine.parquet",
         "daily_bar.parquet",
         "dataset_manifest.json",
         "quality_report.json",
     ]
     manifest = json.loads((version_dir / "dataset_manifest.json").read_text())
     assert manifest["dataset_version"] == ref.version
-    assert set(manifest["tables"]) == {"daily_bar"}
+    assert set(manifest["tables"]) == {
+        "adjusted_bar",
+        "corporate_action_quarantine",
+        "daily_bar",
+    }
     assert manifest["tables"]["daily_bar"]["row_count"] == 3
     assert manifest["tables"]["daily_bar"]["sha256"]
+    assert manifest["tables"]["adjusted_bar"]["row_count"] == 3
+    assert manifest["tables"]["corporate_action_quarantine"]["row_count"] == 0
     assert json.loads((version_dir / "quality_report.json").read_text())["issues"] == []
 
 
@@ -111,6 +165,21 @@ def test_published_daily_parquet_matches_canonical_schema(tmp_path):
     assert table.columns.tolist() == DAILY_COLUMNS
     assert table["trade_date"].tolist() == TRADING_DAYS
     assert table["close"].tolist() == [10.5, 10.8, 11.0]
+
+
+def test_publish_persists_adjusted_bar_and_quarantine_schemas(tmp_path):
+    ref = DatasetPublisher(tmp_path).publish(valid_tables(), passing_report())
+    assert pq.ParquetFile(
+        ref.path / "adjusted_bar.parquet"
+    ).schema_arrow == ADJUSTED_BAR_SCHEMA
+    assert pq.ParquetFile(
+        ref.path / "corporate_action_quarantine.parquet"
+    ).schema_arrow == CORPORATE_ACTION_QUARANTINE_SCHEMA
+    with DatasetReader(tmp_path).open(ref.version) as context:
+        assert context.read("adjusted_bar")["adjustment"].unique().tolist() == [
+            "internal_total_return_v1"
+        ]
+        assert context.read("corporate_action_quarantine").empty
 
 
 def test_identical_publish_is_idempotent_and_never_rewrites(tmp_path):
@@ -130,6 +199,28 @@ def test_new_content_yields_new_version_and_old_version_is_intact(tmp_path):
     second = publisher.publish(valid_tables([12.5, 12.8, 13.0]), passing_report())
     assert second.version != first.version
     assert {p.name: p.read_bytes() for p in first.path.iterdir()} == old_bytes
+
+
+def test_raw_snapshot_hashes_change_dataset_identity(tmp_path):
+    """Raw build evidence is identity-bearing: it is hashed into the version."""
+    tables = valid_tables()
+    first = DatasetPublisher(tmp_path).publish(
+        tables,
+        QualityReport(),
+        build_config={"raw_snapshots": [{
+            "source": "tushare", "endpoint": "daily", "request_key": "first",
+            "file_sha256": "a" * 64, "manifest_sha256": "c" * 64,
+        }]},
+    )
+    second = DatasetPublisher(tmp_path).publish(
+        tables,
+        QualityReport(),
+        build_config={"raw_snapshots": [{
+            "source": "tushare", "endpoint": "daily", "request_key": "second",
+            "file_sha256": "b" * 64, "manifest_sha256": "d" * 64,
+        }]},
+    )
+    assert first.version != second.version
 
 
 def test_current_tracks_the_latest_publish(tmp_path):

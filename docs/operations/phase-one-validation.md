@@ -2,7 +2,7 @@
 
 本文档是**操作者（operator）验收清单**：在用户本机具备网络与自备凭证后，用真实
 供应商小窗口数据验证阶段一的接口连通与数据契约。它补充 [README](../../README.md)
-（README 记录五个 CLI 命令与数据目录），不重复整篇文档。
+（README 记录六个 CLI 命令、时点化指数成分工作流与数据目录），不重复整篇文档。
 
 工程验证（engineering-validation MVP）目标仅是“链路能连通、契约能核对、门禁能
 给出可解释结论”，**不声称验证数据绝对正确，不构成投资建议或盈利/实盘就绪声明**。
@@ -38,7 +38,11 @@ export TUSHARE_TOKEN=<your_rotated_token>   # 仅环境变量，绝不入库
 | 冒烟（单股小窗口全链路） | `pytest -m smoke -v` | 真实 `data update` 语义、PASS/BLOCK 均可接受 |
 | 数据更新 | `python -m stock_quant data update --start 2024-01-01 --end 2024-12-31 --root <ROOT>` | 拉取并入原始库→清洗→门禁→发布；打印 `run_id`、`resolved_end_date`、`resolved_end_is_fallback`、来源状态、`dataset_version`，发布成功打印 `PASS` |
 | 数据校验 | `python -m stock_quant data validate [--version <VERSION>] --root <ROOT>` | 对指定/当前数据集重跑共享质检；打印摘要与 `PASS` |
-| 正式研究（唯一发布者） | `python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root <ROOT>` | 冻结规格端到端运行并内容寻址发布；打印 `experiment_id=` |
+| 指数成分导入（离线） | `python -m stock_quant data index-membership prepare --universe-id csi300 --input <快照文件> --snapshot-sha256 <64HEX> --source-document-sha256 <64HEX> --source <来源> --source-url <无凭证URL> --effective-date <ISO> --announcement-date <ISO> --output <帧文件>` | 把已存储的官方成分快照规范化为带证据哈希的不可变 `universe_membership` 事实帧；打印 `membership_table_sha256=`（冻结定义必须钉住的哈希）。缺任一证据哈希 = usage error；无网络、无绕过 |
+| 验收准备 | `python -m stock_quant data acceptance prepare --version <VERSION> --operator <OPERATOR> --output <YML> --root <ROOT>` | 为指定数据版本生成脱敏清单：自动项当场离线重跑，人工项全部初始 FAIL（见 §7） |
+| 验收发布 | `python -m stock_quant data acceptance publish --checklist <YML> --root <ROOT>` | 重跑自动检查并重算全部哈希后落盘 ACCEPTED/REJECTED；拒绝先落盘再以非零退出并打印 `reason=`（见 §7） |
+| 验收查询 | `python -m stock_quant data acceptance show --version <VERSION> --root <ROOT>` | 按时间升序列出验收历史与失败原因；无记录打印 `UNACCEPTED`；损坏记录命名并以非零退出（见 §7） |
+| 正式研究（唯一发布者） | `python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root <ROOT>` | 冻结规格端到端运行并内容寻址发布；打印 `experiment_id=`；运行前先做 `universe_acceptance` 成分证据预检（见步骤 E），且前置要求该数据版本持有有效 ACCEPTED 验收记录（见 §7） |
 | 报表 | `python -m stock_quant report build [--experiment <ID>] --root <ROOT>` | 渲染实验 HTML 与当前数据质量 HTML（实验默认取最新发布；`data/reports/<experiment_id>.html`、`data/reports/quality-<version>.html`） |
 
 `data update` / `data validate` 任一失败路径以非零退出并打印 `FAILED: ...`；被门禁
@@ -78,7 +82,9 @@ conda run -n stock-quant python -m pytest -m smoke -v
 - 三个来源 `source_status` 齐全；
 - 门禁结论 ∈ {`PASS`, `BLOCK`}；
 - `dataset_ref is not None` ⇔ 结论为 `PASS`；
-- 若 `PASS`，读取发布的 `daily_bar` 确认窗口内确有该股行。
+- 若 `PASS`，读取发布的 `daily_bar` 确认窗口内确有该股行（`adjusted_bar` 的口径核对
+  见第 4 节第 5 项：发布的 `adjusted_bar` 应只有
+  `adjustment=internal_total_return_v1`）。
 
 **`BLOCK` 是合法诊断结果**（例如 AKShare 端点/符号列漂移、BaoStock 可选来源失败，
 均被管线转为可解释的 issue/status，而不是让测试崩溃）；只有逃逸出管线的 schema 或
@@ -95,9 +101,39 @@ python -m stock_quant data validate --root <ROOT>
 
 记录 `run_id` 与 `dataset_version`。`data update` 打印的 `resolved_end_date` 与
 `resolved_end_is_fallback` 体现“latest-complete-date 规则”（§14）：当任一必需数据
-角色未达最新开市日时回退到上一个确认完整交易日并注明。
+角色未达最新开市日时回退到上一个确认完整交易日并注明。日历证据由 `calendar_coverage`
+span 与版本绑定的 `full_history_acceptance_start` 提供，`resolved_end_is_fallback` 已
+删除；旧 manifest 会被 `data validate` 报 `calendar_coverage_missing`，处置方式是重发布。
 
-### 步骤 E：研究复现与报表
+### 步骤 E：指数成分（csi300）证据导入、定义冻结与预检
+
+正式 `research run` 的候选集不再是 `security_master` 全量标的：因子在每个信号日
+先按时点化 `csi300` 成分过滤。该链必须按序完成，任何一步证据不足即停，**没有
+绕过开关**：
+
+1. **来源与原始快照**：取得中证指数公司官方成分公告（开源 `index-constitution`
+   类项目可用于交叉核对，但不能替代官方证据），把原始快照存入 `data/raw/csi/...`
+   （不入库），记录文件 SHA-256 与无凭证 `source_url`。
+2. **离线导入**：`data index-membership prepare`（或等价的
+   `project/refresh_index_membership.py`）以**必填**的
+   `--snapshot-sha256` / `--source-document-sha256` / 来源 / 日期 / 理由参数把
+   快照规范化为不可变事实帧，打印 `membership_table_sha256=`。缺哈希 =
+   usage error（非零退出并点名缺失参数）。
+3. **数据集发布**：把事实帧作为 `universe_membership` 表并入下一个数据集版本
+   一次性发布；之后每次 `data update` 原样携带，`data validate` 复审（缺证据行
+   或篡改哈希 = FATAL）。
+4. **定义哈希**：用真实值填写 `configs/universes/csi300.yml`（事实表内容哈希、
+   证据摘要哈希、数据集**实际**覆盖区间）。仓库内的占位模板不能通过正式运行。
+5. **预检验证**：`research run` 在因子之前执行 `index_membership_evidence`
+   预检。**证据缺失（`UNIVERSE_EVIDENCE_MISSING`）、成分数量不对
+   （`UNIVERSE_MEMBER_COUNT_MISMATCH`）、退市边界不确定、公告先视、覆盖断裂、
+   定义哈希与数据集成分表不符——任一命中都以 `universe_acceptance` 失败**：
+   非零退出、打印 `FAILED: research run failed at stage universe_acceptance`、
+   在 `data/runs/run_preflight_<hash>/universe_preflight.json` 留下仅含
+   status/failed_stage/error_codes 的 redacted 清单，不产出因子、不回退全量
+   master。更正只能作为带证据的新事实版本重新发布，不得原地改写。
+
+### 步骤 F：研究复现与报表
 
 ```bash
 python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root <ROOT>   # 运行两次
@@ -115,6 +151,9 @@ python -m stock_quant report build --root <ROOT>
 
 1. **最新完整日期规则**：核对 `data update` 的 `resolved_end_date` /
    `resolved_end_is_fallback` 与官方交易所日历一致（目标区间内停市日无误判）。
+   日历证据由 `calendar_coverage` span 与版本绑定的 `full_history_acceptance_start`
+   提供，`resolved_end_is_fallback` 已删除；旧 manifest 会被 `data validate` 报
+   `calendar_coverage_missing`，处置方式是重发布。
 2. **来源行数**：对照 `data/standardized/<version>/daily_bar.parquet` 与原始库
    `data/raw/<source>/<endpoint>/<request_key>/data.parquet` 的行数与窗口交易日数。
 3. **隔离/缺失原因**：阅读质量报告 issue 的缺失行分类原因
@@ -124,8 +163,16 @@ python -m stock_quant report build --root <ROOT>
 4. **跨源最大差异抽查**：同一 (security, trade_date) 的主源与校验源收盘比较；阈值见
    §13.4（绝对差 ≤ ¥0.01 为 INFO，相对差 > 0.05% 为 WARNING，收盘相对差 > 0.20% 为
    ERROR）。阶段一管线不把 BaoStock 行并入 `daily_bar`，抽查时直接从原始库取两帧比对。
-5. **复权抽查**：本阶段只消费未复权 `daily_bar`（见第 5 节限制）；复权核对不适用
-   于现有产物。
+   验收工作表的 `cross_source_price_sample` 不接受外部输入：程序按同一阈值在数据集内
+   逐对比较；无法比对时（版本只有一个价格源 `single_price_source`，或两个源各自覆盖
+   不相交的证券集合 `no_paired_bars`）固定为 `OPERATOR_ATTESTED`，并在工作表里用该
+   稳定原因写明为什么没比。
+5. **复权抽查（adjusted_bar 口径）**：发布的 `adjusted_bar` 只应有
+   `adjustment=internal_total_return_v1` 一种口径；抽查同 (symbol, trade_date) 的
+   `raw_close` 与 `daily_bar.close` 一致、`applied_action_ids` 能回溯到
+   `corporate_action` 标准记录；隔离/覆盖断点日应为 `quality_severity=ERROR` 且
+   `invalid_reason` 有解释（不可信公司行为使跨越它的动量窗口无效，系统不会静默
+   回退未复权收盘）；口径说明见第 5 节。
 6. **供应商原始帧忠实度**：
    - (c) AKShare EM `index_history` 真实载荷**通常无符号列**——跨源核对须按请求
      顺序映射，而不是按符号列匹配；若当前 akshare 已改名 EM 指数接口
@@ -148,8 +195,17 @@ python -m stock_quant report build --root <ROOT>
 10. **历史涨跌幅时间表（与官方来源核对）**：`configs/trading_rules.yml` 各行生效日期
     与比例，对照交易所当时官方规则再用于真实数据验收——创业板普通股票
     2020-08-24 起 10%→20%、科创板开板（2019-07-22）起 20%、主板 ST/*ST 5%，并确认
-    ST 状态为**按生效日（effective-dated）**解析、规则行带文档化生效日期。
+    ST 状态为**按生效日（effective-dated）**解析、规则行带文档化生效日期。验收工作表
+    的 `trading_rule_effective_dates` 用 `--external-input` 提交官方规则摘录：五列
+    CSV，表头恰为 `board,status,effective_from,rate,source_url`，逐条覆盖
+    `configs/trading_rules.yml` 展开后的每个规则行且费率一致，程序才给
+    `EXTERNAL_CORROBORATED`；有未覆盖/冲突行或未提交摘录时为 `OPERATOR_ATTESTED`。
 11. **日历与官方日历核对**：把 fixture/真实日历与官方交易所日历对照验收日期区间。
+    验收工作表的 `exchange_calendar_sample` 用 `--external-input` 提交官方日历文件
+    （与 `bootstrap_seed --calendar-csv` 同款格式）：每行一个 ISO 日期、`#` 注释，
+    第二列 `1|0` 标注开/闭市；两列齐全且与数据集日历双向一致才得
+    `EXTERNAL_CORROBORATED`，单列摘录分不清「官方闭市」与「漏抄」，只能得到
+    `OPERATOR_ATTESTED`。
 12. **秘密扫描（接受活数据前最后一步）**：
 
 ```bash
@@ -164,16 +220,32 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
     研究冻结以「每标的行存在」为 VERIFIED 前提；缺行/空表/旧数据集在 RESEARCH 模式会被
     拒绝（逐标的 `SOURCE_NOT_REQUESTED`），bootstrap 空种子恒被拒。对已发布数据集执行
     `data validate` 复核「事实 vs 行情边界」WARNING 与「coverage↔master 一致性」FATAL。
+14. **指数成分证据与冻结定义核对**：活数据集若携带 `universe_membership` 表，逐条
+    抽查事实能回溯到已存储的官方快照与公告（`snapshot_sha256` /
+    `source_document_sha256` 与 `data/raw/...` 中文件的实际哈希一致、
+    `source_url` 可打开且无凭证、区间闭区间语义正确、同标的事实区间无重叠）；
+    `configs/universes/csi300.yml` 必须钉住**已发布事实表**的内容哈希与数据集
+    **实际**覆盖区间（从版本 manifest 读，不写目标区间）。对任意冻结实验，从
+    `data/experiments/<id>/metrics.json` 的 `meta.universe`（universe_id /
+    universe_version / membership_table_sha256 / coverage）与
+    `meta.universe_daily_snapshots`（每信号日成员快照哈希）复核至原始证据。
 
 ## 5. 阶段一已知限制（对齐操作者预期）
 
-- **不发布 `adjusted_bar` 表**：阶段一只发布规范化的未复权 `daily_bar`；无复权产物
-  可下载或核对，勿期待 adjusted 制品。
+- **复权口径（momentum_60d v2）**：动量 v2 只消费不可变 `adjusted_bar` 表
+  （`adjustment=internal_total_return_v1`，由未复权收盘与已核验现金分红/送股/转增
+  事件导出）；订单、成交、涨跌停判断与账户估值继续使用未复权 `daily_bar` 价格。
+  在 `adjusted_bar` 之前创建的数据集仍可审计，但不能运行 v2 研究实验——跑一次完整
+  `data update` 发布兼容数据集。不可信公司行为断点使跨越它的每个动量窗口无效；
+  系统绝不静默回退到未复权收盘价。每次成功 `data update` 都会重建并发布
+  `adjusted_bar` 与 `corporate_action_quarantine`。复权/公司行为一致性已实现，
+  等待真实数据验收。
 - **BaoStock 仅为可选校验来源**：因子层不消费 BaoStock *复权*序列；研究运行因子的
-  适配器使用规范未复权 `daily_bar`。BaoStock 失败仅记为 WARNING，不阻断发布。
+  适配器只读数据集内的 `adjusted_bar`。BaoStock 失败仅记为 WARNING，不阻断发布。
 - **`data bootstrap` 发布首个基线；`data update` 只扩展**：见第 1 节，
   `python -m stock_quant data bootstrap` 发布 `security_master`/`trading_calendar`
-  （+空 `daily_bar`/`corporate_action`）基线；`data update` 只扩展已有数据集。
+  （+空 `daily_bar`/`corporate_action`/`adjusted_bar`/`corporate_action_quarantine`）
+  基线；`data update` 只扩展已有数据集。
   `bootstrap_seed.py` 是与该 CLI 等价的直调脚本。
 - **tushare `stock_basic` 快照是默认“仅上市（L）”参照**：universe 若含已退市/长期停牌
   样本，会以 `master_snapshot_incomplete` 形式暴露——本期 30 只固定上市样本下属预期
@@ -184,6 +256,15 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
   diagnostic-only；覆盖证据不足时理由改为点明数据 UNTRUSTED + 原因/标的）。stdout 的
   `trust=` 反映数据可信度（可信数据在工程模式下仍打印 `trust=TRUSTED`，但产物仍非正式
   结论），产物进 `data/runs/debug`，不得作为可信绩效发布。
+- **正式研究依赖冻结的 `csi300` 定义，仓库内是占位模板**：`configs/universes/csi300.yml`
+  在操作者用真实证据哈希与实际覆盖区间填写之前不可用，正式运行会在
+  `universe_acceptance` 处失败（这是设计而非缺陷）。指数成分证据链（步骤 E）必须在
+  首次正式研究前完成；证据缺失、数量不对、退市边界不确定一律停止工作，无绕过开关。
+- **真实数据验收（§7）针对数据供给，不针对策略**：验收记录证明“当时该数据
+  版本在 `real-data-v1` 规则下证据齐全、检查全过”，是正式研究的**数据供给侧
+  质量门禁**；它不构成策略有效性或绩效可信度结论——工程模式即使引用有效
+  ACCEPTED 记录，实验评价仍恒为 UNTRUSTED（diagnostic-only）。数据验收与
+  策略验收（绩效可信度）是两个独立决定，永不互相替代。
 - 无任何策略盈利或实盘就绪声明。
 
 ## 6. 记录模板（按数据集/实验 ID 留存，不入库）
@@ -194,3 +275,286 @@ git grep -nE '(TUSHARE_TOKEN=.{8,}|[A-Za-z0-9]{32,})' -- . ':!docs/superpowers'
 
 验收结论记录在本项目之外或 `.superpowers` 文档区；`data/`、`reports/` 等市场数据
 产物永远由 `.gitignore` 排除。
+
+## 7. 真实数据验收操作流（data acceptance，规则版本 real-data-v1）
+
+正式 `research run` 只接受**已验收**的数据集版本：实验规格的
+`data_acceptance_id` 解析为一条有效 ACCEPTED 记录，验收身份随后写入 run
+manifest、`metrics.json["data_acceptance"]`、实验 manifest 与实验报告的
+**真实数据验收**小节（结论/规则/验收 ID/操作者/UTC 时间）。没有验收的 run
+（工程模式诊断）在报告中显示 UNVERIFIED 警示——报告绝不把缺失数据推断为
+ACCEPTED。
+
+**状态声明**：验收机制已实现并全部离线测试覆盖；截至本文档更新，**尚无操作者
+在真实数据上执行过完整验收流程**——首次真实验收仍待执行。
+
+### 7.1 prepare → 操作者编辑 → publish → show
+
+```bash
+# (1) 准备：自动项按 real-data-v1 当场离线重跑（数据集清单/质量报告哈希、
+#     必需表覆盖、日期窗口完整性、证券主数据证据、公司行为证据、原始快照
+#     可追溯、来源角色健康）；人工项全部初始为显式 FAIL。
+python -m stock_quant data acceptance prepare \
+  --version <数据版本哈希> --operator <操作者ID> \
+  --output acceptance-<数据版本哈希>.yml --root <ROOT>
+
+# (2) 操作者手工编辑清单：把 9 条人工项逐条改为 PASS，并附证据。
+#     local 证据 = 项目内的相对路径 + 该文件 sha256 + 一句话摘要；
+#     external 证据永不抓取：sha256 只钉住清单内 UTF-8 摘要文本本身。
+
+# (3) 发布：发布时不信任 (1) 的结果——自动检查与数据集/质量报告/原始快照/
+#     人工证据哈希全部当场重算。全部通过 → decision=ACCEPTED，退出码 0；
+#     任一绑定漂移/人工未过 → 先原子落盘 REJECTED 记录（不可变留档），
+#     打印 acceptance_id 与逐条 reason=，再以退出码 1 结束。
+python -m stock_quant data acceptance publish \
+  --checklist acceptance-<数据版本哈希>.yml --root <ROOT>
+
+# (4) 查询：按 created_at、acceptance_id 稳定升序列出全部记录、结论、规则
+#     版本与 reason= 行；无记录明确打印 UNACCEPTED（缺失绝不解释为通过）。
+python -m stock_quant data acceptance show \
+  --version <数据版本哈希> --root <ROOT>
+```
+
+人工项清单（每条都必须有证据，参见 §4 的核对要点）：
+`exchange_calendar_sample`、`source_row_count_sample`、`missing_reason_sample`、
+`cross_source_price_sample`、`corporate_action_sample`、`benchmark_sample`、
+`trading_rule_effective_dates`、`security_master_sample`、`secret_scan`。
+
+### 7.2 语义与边界（务必记住）
+
+- **CURRENT_ACCEPTED 冻结行为**：可编辑规格可写 `CURRENT_ACCEPTED`（运行时
+  解析为该数据版本最新的有效 ACCEPTED 记录，并**每次运行重新复核**全部绑定
+  哈希与人工证据，复核失败即门禁失败、不回退更早记录），也可显式写 64 位
+  十六进制 id（只验证该条记录）。冻结规格回写解析后的具体 id，绝不保留占位
+  符；`data_acceptance_id` 参与实验身份计算。
+- **REJECTED 记录语义**：先原子持久化、后非零退出；记录不可变、永久留档，
+  但**永不可被研究选中**。只有 REJECTED 记录时正式研究在任何计算前失败，仅
+  留 `data/runs/preflight_acceptance_<uuid>/` 的 FAILED preflight（脱敏原因）。
+- **bootstrap/legacy 迁移**：bootstrap 空种子与在 `build_config` 验收证据出现
+  之前发布的数据集，其自动检查（如 `raw_snapshot_traceability`）必然 FAIL——
+  跑一次完整 `data update` 重新生成溯源后再走验收；旧数据集与旧实验仍可读取
+  审计。工程模式无需验收即可运行，但产物恒记 UNVERIFIED/UNTRUSTED。
+- **证据路径限制**：local 证据只允许项目根内的相对路径；绝对路径、目录穿越、
+  软链越界一律 FAIL（`evidence_path_outside_project` 等）；无法安全持久化的
+  引用在记录中以稳定占位符存储，记录绝不携带操作者路径；external 证据永不
+  抓取。
+- **损坏记录**：`show` 对哈希不匹配/损坏的记录打印
+  `corrupt acceptance_id=<id>`、照常列出其余记录，但以非零退出——损坏绝不
+  解释为通过，也不输出 traceback/路径/载荷。
+- CLI 输出不含 Token、原始供应商载荷或本机绝对路径。
+
+## 8. Walk-Forward 样本外稳定性审计清单（正式研究）
+
+`execution_pipeline: walk_forward_oos_v1` 的正式研究（固定日历年度 OOS fold、
+政策化稳定性结论）在每次运行前后按本清单核对。所有判定语义、产物含义与指标
+公式见 README「Walk-forward OOS stability」与 RUNBOOK 阶段 6；本节只列
+**审计动作**。任何一条不满足都不得把该实验当作正式结论引用。
+
+### 8.1 前置版本核对
+
+- [ ] 数据集版本已通过 `real-data-v1` 验收（§7），且携带 `adjusted_bar`、
+  `corporate_action_coverage`、`security_master_coverage` 与
+  `universe_membership` 证据表。
+- [ ] `configs/universes/<universe_definition>.yml` 钉住已发布事实表内容哈希
+  与数据集实际覆盖区间（不是目标区间）。
+
+### 8.2 运行前：schedule 先于执行并被哈希
+
+- [ ] `data/runs/<run_id>/fold_schedule.json` 在**任何回测之前**已写入，且
+  记录了 `fold_schedule_sha256`（`walk_forward_manifest.json` 与
+  `stability_report.json.schedule` 均绑定它）。
+- [ ] schedule 只含**计划时已知事实**：fold 自然/交易日边界、预热边界（至少三个整年，不足 756 个确认交易日时按整年前延至满足，稀疏日历如实记录不足）、
+  预热与 OOS 会话数、逐日成员快照计划；不携带任何运行后状态（status/reason
+  只出现在 `fold_outcomes.json`）。
+- [ ] 首尾不成完整 12 个月的日期在 `boundaries` 中记录为
+  `not_evaluated_boundary`（含原因），没有被静默丢弃，也没有被当作
+  `skipped` fold。
+
+### 8.3 运行后：schedule 不可变、结果只在 outcome 账本
+
+- [ ] 运行结束后重算 `fold_schedule.json` 的 SHA-256，与运行前一致——失败
+  fold 仍留在 schedule 中，schedule 从不因结果改写。
+- [ ] `fold_outcomes.json` 对 schedule 中**每一个**计划 fold 恰有一条结果
+  （`executed` / `failed_preflight` / `skipped_not_tradeable`），无未知、无
+  重复 fold id，且其 `schedule_sha256` 等于 schedule 的实际哈希。
+- [ ] `walk_forward_manifest.json` 同时固定 `fold_schedule_sha256` 与
+  `fold_outcomes_sha256`。
+
+### 8.4 账户隔离
+
+- [ ] 每个 fold（且每个成本情景）都从**全新账户**开始：`folds/<fold_id>/
+  fold_manifest.json` 与 fold 工件的 `initial_equity` 列显示**相同的固定初始
+  资金**（`configs/project.yml` 的 `initial_cash`），前一 fold 的现金、成交、
+  持仓与权益绝不延续。
+- [ ] 每个 fold 的第一笔订单、第一条收益记录都不早于该 fold 的
+  `first_trading_day`（预热只算因子，不产生订单/成交/绩效）。
+
+### 8.5 收益完整性
+
+- [ ] 对每个 executed fold：`daily_returns.parquet` 对该 fold 的每个确认开市
+  日恰有一条组合收益；fold 首日收益以固定 `initial_equity` 为前值，其后以前一
+  交易日的 `net_equity_after_cost` 为前值。
+- [ ] 跨 fold 拼接的 OOS 收益无重复日期（`stability_report.json` 的
+  `oos_return_observations == annualization_observations == N`，N 等于全部
+  executed fold 的日收益行数之和）；个股停牌日不缺失组合收益（stale
+  mark-to-market 规则补估值，不删除该日）。
+- [ ] 边界未评估区间、非交易日、fold 间空白与预热日都不在 OOS 聚合里。
+
+### 8.6 失败与结论语义
+
+- [ ] 任一 fold/system 完整性失败（预热不足、验收缺失、股票池覆盖、基准缺口、
+  开市日缺组合收益、声明情景产物不完整……）→ 运行 `research_status=FAILED`、
+  `stability_conclusion=null`，以非零退出；**绝不出现 FAILED → INCONCLUSIVE
+  的降级**，且该运行未发布任何实验目录。
+- [ ] `executed` fold 少于 5 或存在合法 `skipped_not_tradeable` fold（必须
+  附全窗口市场级禁交易证据；无证据的全年无开市日是 FAILED）→
+  `COMPLETED` + `INCONCLUSIVE`——研究有效但证据不足，不表示策略差。
+- [ ] 完成的结论（STABLE/UNSTABLE/INCONCLUSIVE）必须携带重算的
+  `stability_policy_hash`；没有该哈希的稳定性结论不是正式结论。
+
+### 8.7 指标与情景合取
+
+- [ ] `stability_report.json` **不含**任何跨 fold 拼接收益计算的全局最大回撤
+  或 Calmar 字段（`aggregate_max_drawdown` / `calmar` 不存在）；逐 fold 最大
+  回撤只用该 fold 自己的 `equity.parquet.net_equity_after_cost` 逐日
+  mark-to-market 计算。
+- [ ] `ExperimentSpec.cost_scenarios` 中**每一个**预声明成本情景都出现在
+  `scenario_results` / `scenario_aggregates` / `fold_metrics` 中——全部情景
+  逐一参加判定并完整展示，无“主情景”择优；最终 STABLE 是全部情景
+  （正收益 fold 比率 ≥ 60% 且最差 fold 年度收益 > -10%）的合取。
+- [ ] 成本指标核对：`explicit_cost_ratio = total_explicit_cost / initial_equity`
+  （分母恒为该 fold 固定期初权益）；`reject_rate` 按唯一 `order_id` 计数
+  （无订单时为 null，不是 0）；同路径成本重放不改变成交集合；`zero_cost`
+  只是改现金路径的反事实情景，从不用于显性成本拖累。
+
+### 8.8 报告核对
+
+- [ ] `report build` 重建的 HTML 渲染 Walk-Forward 小节：全部 fold id、全部
+  成本情景、`stability_policy_hash`、`oos_return_observations` 观测数、逐
+  fold 年度收益与 `per_fold_max_drawdown`，且无全局回撤字段。
+- [ ] CLI `research run` 打印 `research_status=` 与 `stability_conclusion=`；
+  FAILED 非零退出，COMPLETED 的 STABLE/UNSTABLE/INCONCLUSIVE 零退出并保留
+  确切标签。
+
+## 9. 缓冲式风险加权组合审计清单（buffered_risk_weighted，正式研究）
+
+`momentum_60d` 因子与周频调仓不变；本清单只核对组合构建与账户对账的新产物。
+首期预注册参数固定为：`target_count=10`、`entry_rank=10`、`hold_rank=15`、
+`risk_lookback_days=60`、`min_risk_observations=40`、
+`volatility_floor_annualized=0.10`、`max_single_weight=0.15`、
+`rebalance_band_absolute=0.02`、`gross_exposure=1.00`、
+`weight_quantum=1e-12`、仅多头、无杠杆。**看过 fold 结果之后不允许改参数**；
+任何修改都是新的预注册身份，必须先声明再运行。
+
+### 9.1 身份与规则版本
+
+- [ ] `folds/<fold_id>/fold_manifest.json` 的 `portfolio_rule.name` 为
+  `buffered_risk_weighted`，`portfolio_rule.portfolio_rule_version` 为 64 位
+  十六进制（规则参数规范 JSON 的 SHA-256，非手写标签）。
+- [ ] 该版本与每一行 `portfolio_construction.parquet` 的
+  `portfolio_rule_version` 列一致，也与 `metrics.json` 顶层
+  `meta.spec.portfolio_rule`（及 `experiment_spec.yml` 的 `portfolio_rule`）
+  的规范 JSON 内容一致；同一规范内容进入策略快照的 `parameters_hash` 与
+  实验 ID（改参数 = 新实验身份，已注册运行不可变）。
+
+### 9.2 60/40 风险输入
+
+- [ ] 每个候选行的窗口为 `window_start..window_end` 恰 60 个确认交易日且
+  终于信号日；`real_close_observations >= 40` 的候选才允许进入成员资格。
+- [ ] `suspension_carry_days`（可信停牌前值日）贡献零收益且不计入 40 个真实
+  收盘；`risk_invalid_reason` 只出现 `untrusted_missing_observation` 或
+  `insufficient_real_close_observations`，风险无效只淘汰该候选并留原因。
+
+### 9.3 双排名与成员缓冲
+
+- [ ] `raw_momentum_rank` 覆盖全部因子有效候选（动量降序 + symbol 完整字符串
+  升序，与供应商行序无关）；删除风险无效行后 `risk_eligible_rank` 连续重编，
+  风险无效的前十不占名额、后续有效证券前移补位。
+- [ ] 保留成员 `risk_eligible_rank <= 15`，新入成员全部来自
+  `risk_eligible_rank <= 10`，每期成员不超过 10；fold 首个信号日
+  `previous_target_member` 全为 False（fold 间状态完全重置），fold 内只继承
+  冻结目标成员代码（绝不继承数量、成交、现金或任何情景状态）。
+- [ ] `member_status` 只取 `retained|entered|exited|not_selected|risk_invalid`
+  且每行带 `member_reason`；退出候选的目标权重为 0。
+
+### 9.4 封顶权重与现金残余
+
+- [ ] 任选成员手工重算：`risk_score = 1 / max(applied_vol, 0.10)`，目标暴露
+  `min(1.00, 成员数 × 0.15)`，超过 0.15 的固定为 0.15、其余按 score 比例
+  重分；全部权重向下量化到 `1e-12`，量化余数按 symbol 升序逐个分配（不越过
+  上限），不可分配余数记现金。
+- [ ] 每个信号日 `sum(target_weight) + cash_weight == 1.00`（十进制精确相等）；
+  `capped_weight`（封顶后、量化前）与 `raw_weight`（封顶前）同时留档可查。
+
+### 9.5 统一目标与情景对账
+
+- [ ] 三个（或全部预声明的）成本情景的
+  `folds/<fold_id>/backtest/<scenario>/rebalance_decisions.parquet` 都存在，
+  其下单行的 symbol 全部落在统一目标成员集内；统一构建帧
+  `folds/<fold_id>/portfolio_construction.parquet` 每个信号日恰一组成员与
+  目标权重，情景之间完全一致。
+- [ ] 情景之间订单数量/成交/现金可以分化；任何情景的拒单都没有改变下一期的
+  成员选择（下一期 `previous_target_member` 只来自统一目标成员）。
+
+### 9.6 抑制、拒单与风险无效的区分
+
+- [ ] `within_rebalance_band`（继续持有、|权重差| < 0.02，恰好 0.02 要调仓）
+  与 `below_one_lot`（数量差不足一手）都作为决策行留档，含当前/目标权重、
+  权重差、当前/目标数量、signal_close_equity 与原因；抑制金额可用
+  `|weight_difference| × signal_close_equity` 精确重算。
+- [ ] 抑制发生在下单之前，**不是执行拒单**；执行拒单只在
+  `rejections.parquet` / `order_diffs.parquet` 与逐 fold `reject_rate` 中，
+  属于策略结果而非系统失败。报告的“缓冲式组合构建审计”小节分别展示成员
+  变化换手、连续持仓再平衡换手、带宽抑制金额与手数抑制金额，且不把抑制
+  表述为拒单。
+- [ ] 缺失数据、重复 signal/symbol 行或目标 outsiders 使 fold FAILED
+  （`EXECUTION_INTEGRITY`，结论为空），系统绝不静默回退等权。
+
+## 10. 一次性策略挑战审计清单（strategy challenge，不可撤销）
+
+适用命令：`python -m stock_quant research challenge --declaration <strategy_challenge.json>`。
+产物根：`data/strategy_challenges/`（`declarations/`、`consumptions/`、
+`holdout_registry.parquet`、`.holdout.lock`、`results/<challenge_id>/`）。
+
+### 10.1 声明先于读取（consume-before-read）
+
+- [ ] 声明文件的 `declared_before_run_at`（UTC）与声明发布时间先于挑战者实验
+  产物的一切读取；服务顺序为 `declaration_published` → `holdout_consumed` →
+  才打开挑战者产物（该顺序由事件审计与集成测试固定）。
+- [ ] 声明包含基线实验 ID、挑战者策略快照哈希、政策及其重算哈希、fold 日历
+  哈希、完整股票池四元组、策略族与身份方案版本；所有 SHA-256 字段均为 64 位
+  小写十六进制，政策 Decimal 全为有限值；无任何运行期路径/PID/主机/worker 数
+  进入身份。
+- [ ] 基线规则为 `top_n_equal_weight`、挑战者规则为
+  `buffered_risk_weighted`；两侧在数据环境快照、股票池身份、fold 日历哈希、
+  因子信号哈希（不含组合规则）、初始资金、调仓频率与成本情景顺序上完全一致。
+
+### 10.2 消费键唯一与不可逆
+
+- [ ] `holdout_registry.parquet` 与 `consumptions/<challenge_id>.json` 中，
+  `strategy_family + fold_schedule_hash` 组合全局唯一；`.holdout.lock` 在
+  消费完成后不存在。
+- [ ] `strategy_challenge.json`、`holdout_consumption.json`、
+  `holdout_registry.parquet` 行与 `strategy_comparison.json` 四个 JSON/注册表
+  表面都携带**同一份**完整股票池身份（`universe_id`、`universe_version`、
+  `membership_table_sha256`、`evidence_summary_sha256`）与声明哈希。
+- [ ] 消费记录在任何结局（含崩溃、FAILED、REJECTED、INCONCLUSIVE）后保持
+  `consumed`，从不删除或改写；只有相同 `challenge_id` 及全部相同哈希可幂等
+  恢复。
+
+### 10.3 配对与结论
+
+- [ ] `paired_fold_metrics.parquet` 行数恰为 `已执行 fold 数 × 预声明成本
+  情景数`，`(fold_id, cost_scenario)` 无缺失、无重复；合法市场级跳过 fold
+  不出现在配对中，而是作为证据不足记录。
+- [ ] `strategy_comparison.json` 的 `result.scenario_results` 覆盖**每个**
+  预声明情景的全部九条阈值单元格；PROMOTED 当且仅当所有情景所有单元格
+  通过（无主情景、无事后挑选）。
+- [ ] `status == "FAILED"` 当且仅当 `conclusion == null`（并带脱敏
+  `error_code`）；任何失败单元格都在结果 JSON 与 HTML 报告中可见，报告不
+  隐藏失败项、不推荐任何新的参数组合。
+- [ ] `results/<challenge_id>/` 五个产物
+  （`strategy_challenge.json`、`holdout_consumption.json`、
+  `paired_fold_metrics.parquet`、`strategy_comparison.json`、
+  `strategy_comparison_report.html`）的哈希与 `strategy_comparison.json`
+  的 `artifacts` 映射逐一相符；重复运行仅在逐字节一致时复用。

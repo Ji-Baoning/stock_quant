@@ -69,7 +69,27 @@ def test_factor_context_fields_match_contract():
         "start_date",
         "end_date",
         "signal_dates",
+        "members_on",
+        "membership_snapshot_for",
     )
+
+
+def test_factor_context_membership_hooks_default_to_none():
+    """Without point-in-time membership hooks the context stays legacy.
+
+    Only the legacy engineering path (a spec without a ``universe_definition``)
+    leaves the hooks unset; a formal run always populates them from the frozen
+    universe preflight's resolver.
+    """
+    context = FactorContext(
+        dataset=_ReadOnlyStubDataset(),
+        universe_version="universe-v1",
+        start_date=date(2023, 1, 2),
+        end_date=date(2023, 1, 31),
+        signal_dates=(date(2023, 1, 31),),
+    )
+    assert context.members_on is None
+    assert context.membership_snapshot_for is None
 
 
 def test_factor_context_is_frozen():

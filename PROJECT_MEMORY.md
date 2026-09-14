@@ -224,7 +224,7 @@ Tushare Pro 免费 API + AKShare + BaoStock
 ### 7.1 数据源职责
 
 - Tushare Pro 免费 API：第一阶段的未复权日线主源。
-- BaoStock：行情与复权结果的交叉校验源；其涨跌幅复权序列可用于第一阶段动量连续性，不用于推导真实分红送配收益。
+- BaoStock：行情与复权结果的交叉校验源；不提供因子输入——第一阶段动量连续价格由内部 `adjusted_bar`（`internal_total_return_v1`）从未复权收盘与已核验公司行为导出。
 - AKShare：股票列表、指数、市场状态、公司行为及公开数据补充源；公司行为优先采用巨潮资讯口径并由东方财富明细交叉核验。
 - 交易所和巨潮资讯等官方渠道：公告日期、证券状态与异常数据的权威抽检源。
 
@@ -265,7 +265,7 @@ volume, amount, source, ingested_at
 5. 用 Pandas 完成第一个周频组合基准回测。
 6. 根据数据缺口与研究效果，再决定是否引入 VectorBT、RQAlpha或升级数据权限。
 
-第一阶段不直接连接券商，不使用免费未复权数据产生的结果指导真实资金交易。
+第一阶段不直接连接券商，工程验证结果不用于指导真实资金交易。
 
 ### 7.4 第一阶段已确认设计
 
@@ -299,7 +299,79 @@ volume, amount, source, ingested_at
 
 未来可将职责拆分为假设生成、因子实现、独立评价、反例审查和因子组合Agent。启用前必须先把30只工程样本升级为可信的时点化全市场数据，并建立训练/验证/隐藏时间外测试、多重检验、实验谱系和统一评价门禁。Qlib可以承接模型训练与预测，但不能绕过本项目的数据、实验、回测和交易边界。
 
-## 8. 项目质量检查
+## 8. 当前优化优先级与状态（2026-09-08）
+
+当前决定的优化顺序为：
+
+> 回测可信性 → 回测稳定性 → 交易策略
+
+这个顺序不以某次回测收益为依据。可信的数据、时点和样本边界，是判断稳定性与策略增益的前提；在此前调优策略，容易把数据缺陷或样本偶然性误判为预测优势。
+
+### 8.1 回测可信性：进行中，最高优先级
+
+已具备的基础：不可变数据集与实验规格、版本冻结与运行审计、证券主数据和公司行为覆盖证据门禁、A股交易规则/成本/开盘成交约束、正式研究与工程诊断的可信度隔离，以及复权/公司行为一致性：不可变 `adjusted_bar` 表以 `adjustment=internal_total_return_v1` 为唯一口径，由未复权收盘与已核验现金分红/送股/转增事件导出；`momentum_60d` v2 只消费该表，订单、成交、涨跌停判断与账户估值继续使用未复权 `daily_bar` 价格；不可信公司行为断点使跨越它的每个动量窗口无效，系统绝不静默回退到未复权收盘价。复权/公司行为一致性已实现，等待真实数据验收。真实数据验收机制（规则版本 `real-data-v1`）已实现并经离线测试覆盖：不可变内容寻址验收注册表（`data/acceptances/`）、`data acceptance prepare/publish/show` 操作流（拒绝记录先原子落盘再非零退出、历史查询带失败原因与损坏记录命名）、正式研究的验收门禁（`CURRENT_ACCEPTED` 运行时解析为最新有效 ACCEPTED 并每次运行重新复核绑定哈希，冻结规格回写具体验收 id 且参与实验身份），验收身份写入 run manifest、`metrics.json["data_acceptance"]`、实验 manifest 与报告的“真实数据验收”小节（无验收的工程 run 恒记 UNVERIFIED）。
+
+2026-09-09 起，时点化指数股票池（首期 `csi300`）的研究侧机制已建成并合入主干约定：成分事实是不可变、逐条绑定官方快照/文档 SHA-256 证据的资格记录；`configs/universes/csi300.yml` 钉住事实表内容哈希与实际覆盖区间，其内容哈希即 `universe_version` 并进入实验身份；正式研究在任何因子计算前做 `index_membership_evidence` 预检，因子候选先按信号日成员过滤再走质量/历史过滤，调出指数不构成强制卖出。关键决定：**证据驱动、失败即停、无绕过开关**——证据缺失、成分数量异常（csi300 应为 300）或退市边界不确定都以 `universe_acceptance` 失败并留下 redacted 预检清单，更正只能作为带证据的新事实版本发布。操作链（原始快照 → `data index-membership prepare` 离线导入 → 数据集发布 → 定义哈希 → 验收 → 研究）记录于 README、RUNBOOK 阶段 5 与运维验收清单步骤 E。
+
+尚未闭环的关键项：真实数据验收及其留档（验收机制已实现并经离线测试覆盖，等待真实操作者在真实数据上执行完整验收流程）、复权行情与公司行为的一致性验证、时点正确的股票池（含历史成分、上市、退市和状态变化）以及覆盖这些边界的可复跑真实数据集，还有上述股票池机制的**真实证据导入**（`csi300` 定义需要真实官方证据哈希，离线合成环境只能以占位模板与临时定义验证机制本身）。在 `adjusted_bar` 之前创建的数据集仍可审计，但不能运行 v2 研究实验，需完整数据更新发布兼容数据集。当前30只固定样本仅用于工程验证，不能支撑策略有效性或实盘收益结论。
+
+完成判据：研究使用已验收、可追溯、时点化的数据；数据版本、覆盖证据、复权/公司行为核验和股票池边界均可复跑并留有结论记录。
+
+### 8.2 回测稳定性：机制已建成（walk-forward OOS 稳定性已完成），次优先级
+
+已具备的基础：冻结规格可确定性复现，三种成本情景、事件驱动订单回放、交易限制处理，以及单元和集成测试覆盖关键工程契约。
+
+**固定日历 Walk-Forward 样本外稳定性（2026-09-10 完成机制建设并全部离线验证）**：`execution_pipeline: walk_forward_oos_v1` 成为正式研究管线——把请求的 OOS 评估范围切成 1–12 月非重叠年度 fold（1 月 1 日锚定），每个 fold 独立账户、相同固定初始资金，日历预热至少三个整年且 ≥756 个确认交易日（不足时按整年 1 月 1 日锚定前延至满足，有界；稀疏日历如实记录不足并由 fold 预检 FAILED）+ 首个 OOS 日前 60 个稳定历史日，只供因子历史；`fold_schedule.json` 在任何回测前写入并哈希、此后绝不修改，结果写入按 schedule 哈希绑定的独立 `fold_outcomes.json` 账本，失败 fold 永久保留。实验身份（scheme v2）在冻结规格之外纳入三类研究快照（策略/实验/数据环境）及其规范哈希；运行期元数据（路径/时间戳/主机/PID/worker 数）永不进入身份。判定规则版本化哈希化（`stability-v1`）：任一 fold/system 完整性失败 → FAILED 且结论恒为 null（绝不降级 INCONCLUSIVE）；executed fold < 5 或存在合法市场级跳过 → COMPLETED/INCONCLUSIVE（有效但证据不足）；否则逐预锁定成本情景独立判定（正收益 fold 比率 ≥ 60% 且最差 fold 年度收益 > -10%），最终 STABLE 为全部情景的合取。指标口径：每确认开市日恰一条组合收益（fold 首日以 `initial_equity` 为前值）、逐 fold 最大回撤只用该 fold 的 `net_equity_after_cost` 逐日 mark-to-market、**跨 fold 全局回撤与 Calmar 被禁止**、同路径成本重放不改变成交集合、`turnover-v1` 带分子分母留档。发布产物：`fold_schedule.json`、`fold_outcomes.json`、`walk_forward_manifest.json`、`stability_report.json`（必含 `stability_policy_hash`）与逐 fold `folds/<fold_id>/` 资产集；HTML 报告渲染完整 Walk-Forward 审计小节，CLI 打印 `research_status=` 与 `stability_conclusion=`（FAILED 非零退出，COMPLETED 零退出并保留确切标签）。操作语义与公式见 README「Walk-forward OOS stability」、RUNBOOK 阶段 6 与 `docs/operations/phase-one-validation.md` §8 审计清单。
+
+验证命令（全部通过）：`python3 -m pytest tests/unit/test_walk_forward_policy.py tests/unit/test_walk_forward_snapshots.py tests/unit/test_walk_forward_schedule.py tests/unit/test_walk_forward_metrics.py tests/unit/test_walk_forward_evaluation.py tests/integration/test_walk_forward_runner.py -q`（83 passed）及全量 `python3 -m pytest -q`、`ruff check src tests project`。
+
+尚未闭环的关键项：该稳定性机制如同验收与股票池机制，**仍待真实数据上的首次运行**（`csi300` 定义需真实官方证据哈希）；跨牛熊、不同股票池、持仓数、调仓频率、参数与成本/滑点假设的敏感性测试；流动性、成交参与率和延迟成交压力测试。工程层面的“可重复运行”不等同于策略跨条件的“稳定有效”。
+
+完成判据：在预先约定的样本外区间和压力情景下，净收益、回撤、换手与风险暴露的结论保持可解释，并明确记录失效场景。
+
+### 8.3 交易策略：缓冲式规则与一次性挑战机制已完成（正式规则），实盘裁决待真实数据，最后优化
+
+**缓冲式风险加权动量组合（2026-09-10 完成实现并全部离线验证）**：正式规格 `configs/experiments/momentum_60d.yml` 的组合规则已由 `top_n_equal_weight` 切换为预注册的 `buffered_risk_weighted`，首期只有一组冻结参数（target_count=10、entry_rank=10、hold_rank=15、risk_lookback_days=60、min_risk_observations=40、波动率下限 0.10、单票上限 0.15、再平衡带宽 0.02、总暴露 1.00、权重量子 1e-12、仅多头、无杠杆）；`momentum_60d` 因子与周频调仓不变，等权规则仅保留给基线/工程规格。关键边界：全部规范参数进入 `portfolio_rule_version`（规则规范 JSON 的 SHA-256）、策略快照与实验身份，看过 fold 结果之后不得改参数；所有成本情景共享同一成员与理论权重，各情景仅以自己的信号日权益整手化；`within_rebalance_band` 与 `below_one_lot` 是下单前的组合决策抑制而非执行拒单，风险无效只在构建层淘汰候选。发布产物：逐 fold `folds/<fold_id>/portfolio_construction.parquet`（双排名、60/40 风险计数、成员状态、封顶前后与量化后权重、现金残余、规则版本）与逐情景 `folds/<fold_id>/backtest/<scenario>/rebalance_decisions.parquet`，均已纳入 fold manifest 哈希清单。操作与审计程序见 README「Buffered risk-weighted momentum」、RUNBOOK 阶段 7b 与 `docs/operations/phase-one-validation.md` §9 审计清单。
+
+验证命令（全部通过）：`python3 -m pytest tests/unit/test_buffered_portfolio_policy.py tests/unit/test_risk_estimation.py tests/unit/test_buffered_risk_weight.py tests/unit/test_rebalance_band.py tests/unit/test_weight_rebalancer.py tests/integration/test_buffered_strategy_runner.py -q`（103 passed）；全量 `python3 -m pytest -q`（967 passed, 5 deselected）；`ruff check src tests project`。
+
+当前状态：上述缓冲式规则是预注册的正式组合构建实现，不作为已证实有效的策略——它与等权基线的优劣必须由一次性样本外挑战裁决。**一次性样本外挑战机制（2026-09-10 完成实现并全部离线验证）**：`research/strategy_challenge/`（models / registry / compare / service / reporting）实现不可变预注册声明（`ChallengeDeclaration`：基线实验 ID、挑战者策略哈希、冻结 `StrategyComparisonPolicy` 及重算哈希、fold 日历哈希、完整股票池四元组 `universe_id/universe_version/membership_table_sha256/evidence_summary_sha256`、UTC 声明时刻，全部进入内容寻址 `challenge_id`）；holdout 注册表以 `strategy_family + fold_schedule_hash` 为消费键在 `O_CREAT|O_EXCL` 锁下原子消费（`data/strategy_challenges/declarations/<id>.json`、`consumptions/<id>.json`、`holdout_registry.parquet`、`.holdout.lock`），股票池版本参与 `challenge_id` 但永不扩大消费键，消费记录不可删除改写，崩溃/FAILED/REJECTED/INCONCLUSIVE 均保持已消费；服务强制"发布声明 → 原子消费 → 之后才读挑战者产物"的事件审计顺序（`declaration_published` → `holdout_consumed` → `challenger_opened`）；配对比较要求 `(fold_id, cost_scenario)` 一一对应（缺失/重复即 FAILED），按冻结政策逐情景判定九条阈值并全部合取（无主情景），结论词汇 `PROMOTED / REJECTED / INCONCLUSIVE_RESEARCH_ONLY / FAILED`（FAILED 结论恒为 null 并带脱敏错误码）；≥5 个未消费已执行 fold 且无合法市场级跳过才构成晋级/拒绝证据。发布产物：`data/strategy_challenges/results/<challenge_id>/` 下的 `strategy_challenge.json`、`holdout_consumption.json`、`paired_fold_metrics.parquet`（逐对基线/挑战者值、delta/ratio、阈值与通过标记）、`strategy_comparison.json`（两侧实验 ID、三类快照哈希、日历/政策哈希、消费记录与结论）与 `strategy_comparison_report.html`（完整阈值/失败项/消费状态，不推荐新参数）；CLI `python -m stock_quant research challenge --declaration <strategy_challenge.json>`（FAILED 非零退出，其余零退出并保留确切标签）。操作与审计程序见 README「One-time strategy challenge」、RUNBOOK 阶段 8 与 `docs/operations/phase-one-validation.md` §10 审计清单。
+
+验证命令（全部通过）：`python3 -m pytest tests/unit/test_strategy_challenge_models.py tests/unit/test_strategy_challenge_compare.py tests/integration/test_holdout_registry.py tests/integration/test_strategy_challenge_service.py -q`（87 passed）；全量 `python3 -m pytest -q`（1056 passed, 5 deselected）；`ruff check src tests project`；`git diff --check`。
+
+**重要边界**：机制完成不等于挑战已完成——缓冲式组合与等权基线的正式 `PROMOTED/REJECTED` 裁决必须由操作者在真实数据、真实股票池上按 RUNBOOK 阶段 8 预注册执行一次才产生；在此之前不得声称缓冲组合优于等权基线。同样尚未授权以提升回测表现为目标的参数搜索或策略扩展。
+
+启动条件：只有回测可信性和稳定性达到上述完成判据后，才比较行业/风格中性、波动率或风险预算约束、趋势过滤及多因子组合等改进。任何策略变更必须保持冻结规格、独立样本外评价和完整成本归因，避免把测试集变成训练集。
+
+### 8.4 真实数据执行进展（2026-09-10）：链路已跑通，walk-forward/挑战被外部证据阻塞
+
+**预热下限结构缺陷修复（commit 151434e）**：`materialize_schedule` 原把预热窗口写死为恰好 3 个日历年，而 A 股每年约 242 个交易日、3 年仅约 727 个确认开市日，永远达不到 756 的预热下限——任何真实 A 股日历上每个 fold 都会预热预检失败。现语义：预热**至少**三个整年且 ≥756 个确认交易日，不足时按整年（1 月 1 日锚定）向前延伸至满足（有界 10 年，稀疏日历如实记录不足并由 fold 预检 FAILED）。政策常量（`warmup_years=3`、`min_warmup_trading_days=756`）未动，向更早延伸是更保守方向。
+
+**真实数据历史回补（数据集 e834b375…）**：`project/extend_history_offline.py` 按既有离线重建模式把真实数据从 2021-01-04 回补到 2015-01-05（tushare `daily` 单源回补 30 只股票池、akshare eastmoney→sina→tencent 回退链取基准指数、已复核公司行为全历史（1991 年起）驱动 adjusted_bar 重建：67,098 行全部 INFO 无不可信断点；日历 2833 个交易日；`data validate` PASS；tushare `stock_basic` 快照未重拉，security_master 沿用）。`configs/costs.yml` 三情景费率 schedule 由 2020-01-01 向前延伸到 2015-01-01（同一费率的显式建模假设，印花税未按 2023-08-28 前 1‰ 区分，正式研究前需重审）。**真实数据全链路工程诊断已跑通**：等权 Top-10、2015-01..2026-08、三成本情景（2825 个交易日；零成本 +104.0%、佣金税 +92.1%、全成本 +81.3%），`python -m stock_quant backtest momentum_60d --engineering` 产出 UNTRUSTED 诊断（experiment_id a64b961a…），绝不构成可信绩效。
+
+**时点宇宙证据已解锁并固化（2026-09-13 更新）**：`index_weight` 经 tushare relay 与共享代理均可透传，2000 积分档 token 不再是前置（relay 实测 2014-12..2026-08 逐月可用；2021-10 无快照，空文件留证）。`collect_index_weight_membership.py` 已端到端执行：141 份官方月度快照存证 `data/raw/csi/index_weight/`（证据清单哈希 `141a8b6d…`）→ 792 条 / 682 只 attested-boundary 成员事实（`custom_csi300_tw`，`membership_table_sha256 74ecd165…`）→ 数据版本携带成员表发布并写出冻结定义 `configs/universes/custom_csi300_tw.yml`（universe_version `ae26f384…`）。因 `index_membership_evidence` 门禁要求成员事实与 `security_master` 全量可交（`UNIVERSE_UNKNOWN_SYMBOL` 无豁免），`trim_universe_membership.py`（已参数化 `--base-universe-id/--tradable-universe-id` 并携带 build_config 重发布）裁剪出 30 行 / 28 只可交易交集（`custom_csi300_tw_tradable`，`membership_table_sha256 a6eff805…`），数据版本 `b0e36345…` `data validate` PASS。工程诊断规格 `momentum_60d_pit_official.yml` 绑定该定义（universe_version `c211b85c…` 进实验身份）已跑通全链（experiment_id `46f8b74e…`，debug 区，UNTRUSTED）——**最新实验不再 universe_definition: null**。全市场 `stock_basic`（L/D/P 三态合并，退市成员 25 只的事实同样来自官方快照）已把 security_master 扩到 684 只并验证了全成分 master 的可行性（中间版本 `3533ce83…`/`3193eaaa…`），但 validate 的 `universe_master_mismatch` 契约把 master 钉死在 `configs/universe.yml` 的 30 只工程样本，放开属于数据集契约变更，未擅自执行；CURRENT 回到 master=30 的 `b0e36345…`。`board_of_symbol` 补上创业板新号段 302xxx（如 302132.SZ）。脚本修复两处 bug：attested 边界的 `date - Timedelta` 类型错误、重发布丢失 `build_config.calendar_coverage`（曾致 `calendar_coverage_missing` FATAL）。
+
+**仍未解锁项**：正式 `research run` 发布（walk-forward / 一次性挑战）仍需 (1) 对携带成员表的数据版本 `b0e36345…` 重走阶段 5b 真实数据验收（操作者人工项，机制就绪）；(2) 全成分行情与公司行为回补——**该子项已于 2026-09-14 执行**：增量规模实为 **659** 只在市成员（`stock_basic` 按 L/D/P 合并 → master 684，`universe.yml` 取其 659 只在市者；「约 654 只」从未由任何脚本或报告推导过，已作废）。原文「`daily`/`adj_factor`/`dividend` 已确认 relay 可得」按现有证据**不成立**：`adj_factor` 只有单样本逐位一致、无 raw 存证，且 `TushareSource` 根本没有这个 endpoint；`dividend` 在 relay 上**零证据**，角色分工设计明列不集成 tushare `dividend`。实际回补路径 = `daily` 走 tushare relay（659/659）+ 公司行为走 akshare 的 cninfo 分红 / eastmoney 分红 / cninfo 配股三条车道（659/659/659，其中 eastmoney 对 5 只科创板标的取数失败 → 该 5 只覆盖窗口 UNTRUSTED，不阻断发布）。因此原先设想的「单源 tushare 分红会整段 `corporate_action_coverage_untrusted`」不再是本路径的问题；`universe_master_mismatch` 契约也**未**放开——走的是把 `universe.yml` 扩到与 master 集合相等的内部一致解。定位到的 5 处数据层缺陷（D1–D5）与 2 处运行级缺陷（D6 配置目录重复 `universe_id`、D7 发布路径要求显式 `TUSHARE_TRANSPORT=relay`）见 `docs/operations/2026-09-14-blocking-gap-root-cause.md`；幸存者偏差语义（25 只已退市成员不在池内）仍待重审。**2026-09-14 定时任务实测确认（详见 `docs/operations/2026-09-14-wf-oos-stage-result-and-diagnostics.md`）**：正式 `walk_forward_oos_v1` 规格在现行 CURRENT `1709eddb…` 上于 `acceptance` 预检 FAILED（`NoValidAcceptance`），且该版本因 ~629 只成员缺行情/公司行为证据在自动检查上两项 FAIL，回补战役落地前不可能验收；钉死已验收的 `52648bdc…` 则在 `universe_acceptance` 失败（空成员表无法匹配冻结定义）。短路径 = 对 `b0e36345…` 完成最后一项人工确认（`cross_source_price_sample`，清单已 8/9 确认、standing worksheet 就绪）并 publish；绑定该版本的冻结定义已恢复为 `configs/universes/custom_csi300_tw_tradable_28.yml`（universe_version 逐位复现 `c211b85c…`），配套规格模板见运维文档。同日新增解释性诊断脚本 `project/explanatory_diagnostics.py`（逐年/板块 IC、五分位多空、暴露、集中度、参与率、拒单压力、成本归因），对 `46f8b74e…` 的结论：亏损年份（2015/2018/2022/2026YTD）= 多头 beta 定基调 + 恰好信号失效（IC 转负、Q5-Q1 转负）放大，集中度/流动性/执行均非成因，成本为稳定次要拖累（滑点>印花>佣金，每笔 10.2bp 为申报假设非实测）。下列原始解锁路径记录（2026-09-10）保留备查：tushare `index_weight`（官方指数成分权重月度快照）是当前最可行的时点成员证据源，但需要 2000 积分档 token（现有 token 无该接口权限，`index_daily` 的 1 次/小时限速同为低积分表现）。`project/collect_index_weight_membership.py` 已备好端到端流水线：逐月拉取快照存证 `data/raw/csi/index_weight/` + 证据清单哈希 → 合并快照 CSV（_attested-boundary 窗口约定：成员保持至首个不再列出它的快照前一日，新成员自首个列出它的快照日起，月末快照对月中调仓有至多约 1 个月的滞后，已文档化）→ 共享证据绑定导入 → 数据集重发布带成员表 → 生成冻结宇宙定义 YAML。默认 `custom_csi300_tw`（custom 前缀豁免每日恰 300 只的基数校验，证据链要求完全相同；若另持官方调仓生效日证据可改用 `csi300`）。换上有权限 token 后一条命令跑通，再按阶段 5b 完成真实数据验收，然后才能预注册执行阶段 8 的一次性挑战。工程信任模式另有设计约束：`research run` 恒为 RESEARCH 模式（无绕过），工程诊断只走 `backtest --engineering`；`buffered_risk_weighted` 只在 walk-forward 管线执行、单窗口工程管线会响亮拒绝。
+
+### 8.5 数据接口限制实测清单（2026-09-11）
+
+对本 token 与本机网络的实测结论，是长期运行约束，重跑数据链路前先对照：
+
+| 接口 | 限制 / 状态 | 影响 |
+| --- | --- | --- |
+| tushare `stock_basic` | 限流 1 次/分钟；连续触发后惩罚升级为 1 次/小时；**每日配额 5 次，重置边界不在北京零点（2026-09-12 00:20 实测仍超限，疑按 UTC 日界，约北京 08:00）** | 每次 `data update` 恰调用一次；被拒调用也可能重置惩罚窗口，重试须**静默等待且不要轮询**；跨零点重试无效，应在上午 8 点后重试；失败时 CURRENT 不变可安全重试 |
+| tushare `daily` | 全窗口单次调用可用，30 标的连续调用未见限流；**不返回停牌日行** | 日线主源完整可用；停牌日在源侧天然缺席——2026-09-11 全窗口更新后 714 条真实停牌缺口即源于此（此前 8,813 条缺口的主因是管线浮点 bug，已修复，见运维报告） |
+| tushare `suspend_d` | 无访问权限（需更高积分档位） | 推荐的独立停牌证据源不可用，停牌回补建模被阻塞 |
+| tushare `index_daily` | 限 1 次/小时（低积分表现） | 指数行情拉取需长间隔 |
+| tushare `index_weight` | relay/代理均可透传（2026-09-13 实测逐月全历史可用） | 时点 csi300 成员证据已固化（见 8.4 已执行记录） |
+| baostock | 服务器 2026-09-05 起停机，`sources.yml` 已禁用 | 交叉校验源与其原生停牌日行（`tradestatus=0`）不可用；复机后可同时解锁停牌回补 |
+| akshare `stock_tfp_em`（东财停复牌） | 忽略历史日期参数：查 2016-05-19 返回的是近期记录 | 对 2015–2016 停牌潮无历史覆盖，不能作为停牌证据 |
+| akshare cninfo / eastmoney 公司行为端点 | 可用（探针 31 / 28 行）；双源偶发单点冲突 | 冲突走 `configs/corporate_action_reviews.yml` 人工复核；601318.SH 2018-06-07 分红已裁定采信 cninfo |
+| csindex 官方渠道 | 本网络 500 / 404 / 不可达 | canonical `csi300` 官方证据不可得（见 8.4） |
+
+操作教训：`data update` 失败（`source_fetch_failed`）时不发布、`CURRENT` 不变，确认配额与限流窗口后重试即可；CLI 只回显错误计数，失败明细需进程内检查 `result.source_status` 与 FATAL issues。接口限制随积分档位与供应端状态变化，复跑前用 `project/verify_update_readiness.py` 探针确认；完整实测记录见 `docs/operations/2026-09-11-trusted-data-chain.md`。
+
+## 9. 项目质量检查
 
 项目需要持续回答三个问题：
 
@@ -309,13 +381,13 @@ volume, amount, source, ingested_at
 
 如果不能，应优先补足研究与工程基础，而不是增加模型复杂度。
 
-## 9. 规则时效原则
+## 10. 规则时效原则
 
 A股交易制度可能发生变化。交易时间、申报单位、回转交易、涨跌幅限制、风险警示、盘后交易和费用等规则不得散落或永久硬编码在策略中，应按交易所、证券类别、板块、证券状态和生效日期进行配置与版本管理。
 
 研究和实施前，以中国证监会及上海、深圳、北京证券交易所当时有效的官方规则为准，并在实验记录中保存所使用的规则版本。本文件不替代交易所规则或投资建议。
 
-## 10. 尚未决定的事项
+## 11. 尚未决定的事项
 
 - 调仓频率：每日、每周或每月；当前倾向中低频。
 - 正式研究阶段的股票池与基准；第一阶段工程样本和基准已经确定。
@@ -326,7 +398,7 @@ A股交易制度可能发生变化。交易时间、申报单位、回转交易�
 
 这些事项应在后续讨论中逐项确认，并将达成的决定更新到本文件。
 
-## 11. 文档维护约定
+## 12. 文档维护约定
 
 - 本文件保存长期稳定的项目目标、约束、原则和关键决定。
 - 每次形成重要决策时，更新对应章节并记录必要背景。

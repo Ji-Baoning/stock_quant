@@ -87,6 +87,7 @@ class BaoStockSource:
                 request,
                 "baostock.query_history_k_data_plus",
                 self._sdk_version,
+                transport_id="baostock",
                 request_timestamp=request_timestamp,
                 response_timestamp=response_timestamp,
             ),

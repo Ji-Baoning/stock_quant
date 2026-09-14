@@ -65,20 +65,18 @@ _PRIMARY_BENCHMARK = "000300.SH"
 _PLOTLY_CONFIG = {"displaylogo": False}
 
 # Phase-one universal limitations, surfaced in every experiment report's
-# 已知限制 section (and the README).  They are report-only boundaries, not
-# defects: cross-source stock-close disagreement above tolerance is recorded as
+# 已知限制 section (and the README).  It is a report-only boundary, not a
+# defect: cross-source stock-close disagreement above tolerance is recorded as
 # ERROR in the quality report but the Tushare primary close series is
 # authoritative for factors and backtests (design §13.5 keeps the publication
-# gate strategy-independent), and no adjusted (复权) daily series is published
-# or consumed at the factor layer in phase one -- momentum runs on the
-# unadjusted series (adjusted_close=close) and BaoStock adjusted data is fetched
-# only for optional continuity/cross-checks, never for factors.
+# gate strategy-independent).  The former "no adjusted series is published or
+# consumed" limitation is obsolete since momentum_60d v2 consumes the project's
+# internal_total_return_v1 ``adjusted_bar`` series; the 因子价格口径 section
+# now reports that basis, factor versions and break counts explicitly.
 _PHASE_ONE_KNOWN_LIMITATIONS = (
     "跨源收盘价差异超过容差时，仅在质量报告中记录为 ERROR，本阶段不阻断发布："
     "因子与回测以 Tushare 主源收盘序列为准（设计 §13.5 令发布门禁与策略输入无关），"
     "跨源收盘差异仅作报告提示。",
-    "本阶段不发布、也不消费复权日线：动量基于未复权序列计算（adjusted_close=close）；"
-    "BaoStock 复权数据仅用于可选的延续性与交叉核对，不参与因子。",
 )
 
 # --------------------------------------------------------------------------- #
@@ -117,12 +115,43 @@ class ExperimentReportInput:
     primary_benchmark_symbol: str = _PRIMARY_BENCHMARK
     known_limitations: tuple[str, ...] = ()
     generated_at: str = ""
+    #: The persisted ``metrics["factor_input"]`` audit of the pinned
+    #: ``adjusted_bar`` rows the factor actually consumed: ``{"adjustment",
+    #: "factor_versions", "row_count", "error_break_count",
+    #: "invalid_reason_counts"}``.  ``None`` (report inputs that predate the
+    #: audit) simply omits the 因子价格口径 section instead of rendering
+    #: empty provenance claims.
+    factor_input_audit: dict | None = None
     #: The frozen corporate-action trust decision recorded on the run
     #: (``metrics["corporate_action_trust"]``): ``{"trusted", "reasons",
     #: "mode", "dataset_version", "window_start", "window_end"}``.  ``None``
     #: (report inputs that predate the trust gate) reads as a trusted default so
     #: no report renders an untrusted alarm it cannot substantiate.
     corporate_action_trust: dict | None = None
+    #: The frozen universe definition identity recorded on the run
+    #: (``metrics["meta"]["universe"]`` plus the daily snapshot map):
+    #: ``{"universe_id", "universe_version", "rules_version",
+    #: "membership_table_sha256", "coverage_start", "coverage_end",
+    #: "expected_size"}`` and, when the caller composes them in, the
+    #: ``universe_daily_member_counts`` / ``universe_daily_snapshots`` maps.
+    #: ``None``/empty (legacy runs resolved through the engineering universe)
+    #: hides the frozen-universe section entirely.
+    universe: dict | None = None
+    #: The pinned real-data acceptance audit persisted with the run
+    #: (``metrics["data_acceptance"]``): ``{"acceptance_id", "policy_version",
+    #: "operator_id", "created_at", "decision"}``.  ``None`` -- or the
+    #: engineering ``{"acceptance_id": None, "status": "UNVERIFIED"}`` shape
+    #: that carries no decision -- renders the prominent UNVERIFIED alert: a
+    #: report never infers ACCEPTED from missing data.
+    data_acceptance: dict[str, object] | None = None
+    #: The persisted ``stability_report.json`` payload of a formal
+    #: walk-forward run (schedule coverage, boundary exclusions, fold
+    #: statuses, per-scenario aggregate returns, per-fold metrics, the policy
+    #: hash/thresholds and the final conclusion).  ``None`` (single-window
+    #: engineering runs) omits the entire walk-forward section: such a run
+    #: has no formal stability conclusion to show, and the section would
+    #: never render a global drawdown field.
+    walk_forward: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -264,6 +293,103 @@ def _trust_block(corporate_action_trust: dict | None) -> dict[str, object]:
     }
 
 
+def _universe_block(universe: dict | None) -> dict | None:
+    """The report's frozen-universe section model, or ``None``.
+
+    A missing or empty mapping (a run resolved through the legacy engineering
+    universe) renders no frozen-universe section at all.  The daily rows are
+    built from the caller-supplied ``universe_daily_member_counts`` /
+    ``universe_daily_snapshots`` maps, sorted by ISO date so identical inputs
+    always render identical bytes.
+    """
+    if not isinstance(universe, dict) or not universe.get("universe_id"):
+        return None
+    coverage_start = universe.get("coverage_start")
+    coverage_end = universe.get("coverage_end")
+    coverage_text = ""
+    if coverage_start and coverage_end:
+        coverage_text = f"{coverage_start} ~ {coverage_end}"
+    counts = universe.get("universe_daily_member_counts")
+    snapshots = universe.get("universe_daily_snapshots")
+    counts = counts if isinstance(counts, dict) else {}
+    snapshots = snapshots if isinstance(snapshots, dict) else {}
+    daily_rows = [
+        [
+            day,
+            str(counts.get(day, "—")),
+            str(snapshots.get(day, "—")),
+        ]
+        for day in sorted({*counts, *snapshots})
+    ]
+    return {
+        "universe_id": str(universe.get("universe_id", "")),
+        "universe_version": str(universe.get("universe_version", "")),
+        "rules_version": str(universe.get("rules_version", "")),
+        "membership_table_sha256": str(
+            universe.get("membership_table_sha256", "")
+        ),
+        "coverage_text": coverage_text,
+        "expected_size": universe.get("expected_size"),
+        "daily_rows": daily_rows,
+    }
+
+
+def _factor_input_block(factor_input_audit: dict | None) -> dict | None:
+    """Normalize the persisted factor-input audit for the template.
+
+    Returns ``None`` when no audit is supplied so the 因子价格口径 section is
+    omitted rather than rendered with empty claims.  Factor versions and break
+    reasons become sorted ``key: value`` strings (reason strings are attacker-
+    controllable data, so they stay plain values that only Jinja's autoescape
+    ever renders, never markup).
+    """
+    if not isinstance(factor_input_audit, dict):
+        return None
+    versions = factor_input_audit.get("factor_versions")
+    version_items = (
+        sorted(versions.items()) if isinstance(versions, dict) else []
+    )
+    reasons = factor_input_audit.get("invalid_reason_counts")
+    reason_items = sorted(reasons.items()) if isinstance(reasons, dict) else []
+    return {
+        "adjustment": str(factor_input_audit.get("adjustment", "")),
+        "version_text": "、".join(
+            f"{name}: {version}" for name, version in version_items
+        ),
+        "row_count": _int_text(factor_input_audit.get("row_count")),
+        "error_break_count": _int_text(
+            factor_input_audit.get("error_break_count")
+        ),
+        "reason_text": "、".join(
+            f"{reason}: {count}" for reason, count in reason_items
+        ),
+    }
+
+
+def _data_acceptance_block(data_acceptance: dict[str, object] | None) -> dict | None:
+    """Normalize the persisted real-data acceptance audit for the template.
+
+    Returns ``None`` when no audit is supplied -- or when the mapping carries
+    no concrete ``decision`` (the engineering ``{"acceptance_id": None,
+    "status": "UNVERIFIED"}`` shape) -- so the 真实数据验收 section renders its
+    prominent UNVERIFIED alert instead of an empty claim: a report never
+    infers ACCEPTED from missing data.  Every field stays a plain string that
+    only Jinja's autoescape ever renders, never markup.
+    """
+    if not isinstance(data_acceptance, dict):
+        return None
+    decision = data_acceptance.get("decision")
+    if not decision:
+        return None
+    return {
+        "decision": str(decision),
+        "policy_version": str(data_acceptance.get("policy_version", "")),
+        "acceptance_id": str(data_acceptance.get("acceptance_id") or ""),
+        "operator_id": str(data_acceptance.get("operator_id", "")),
+        "created_at": str(data_acceptance.get("created_at", "")),
+    }
+
+
 def _money(value: float | int | None, nd: int = 2) -> str:
     if value is None:
         return "—"
@@ -395,15 +521,44 @@ def _layout(fig: go.Figure, title: str) -> go.Figure:
     return fig
 
 
-def _index_series(frame: pd.DataFrame, value_col: str) -> tuple[list[str], list[float]]:
-    """Chronological date labels plus a start-of-100 index series."""
+def _first_day(frame: pd.DataFrame) -> date | None:
+    """The earliest trade date in ``frame``, or ``None`` when it holds none."""
+    if frame.empty:
+        return None
+    return _day(frame["trade_date"].min())
+
+
+def _common_base_day(frames: list[pd.DataFrame]) -> date | None:
+    """The first day every frame is plotted on, or ``None`` if none has one.
+
+    Indexing each series against its own first point is what made the net-value
+    chart read as a comparison it never was: a benchmark whose history starts
+    years before the strategy got rebased at *its* own first day, so the gap
+    between the lines carried the benchmark's earlier run instead of any
+    relative performance.  One shared base day removes the ambiguity.
+    """
+    firsts = [day for day in (_first_day(frame) for frame in frames) if day]
+    return max(firsts) if firsts else None
+
+
+def _return_series(
+    frame: pd.DataFrame, value_col: str, base_day: date
+) -> tuple[list[str], list[float]]:
+    """Chronological labels plus cumulative return (%) since ``base_day``."""
     data = frame.sort_values("trade_date")
-    first = float(data[value_col].iloc[0]) if len(data) else 0.0
-    xs = [_iso(day) for day in data["trade_date"]]
-    if first > 0:
-        ys = [round(float(v) / first * 100.0, 4) for v in data[value_col]]
+    dated = [
+        (_day(day), float(value))
+        for day, value in zip(data["trade_date"], data[value_col])
+        if _day(day) >= base_day
+    ]
+    if not dated:
+        return [], []
+    base = dated[0][1]
+    xs = [day.isoformat() for day, _ in dated]
+    if base > 0:
+        ys = [round((value / base - 1.0) * 100.0, 4) for _, value in dated]
     else:
-        ys = [0.0] * len(data)
+        ys = [0.0] * len(dated)
     return xs, ys
 
 
@@ -454,19 +609,44 @@ def _summary_rows(experiment: ExperimentReportInput) -> list[list[str]]:
 
 
 def _net_value_figure(experiment: ExperimentReportInput) -> go.Figure:
-    fig = go.Figure()
-    for scenario in experiment.scenarios:
-        xs, ys = _index_series(scenario.equity, "total_equity")
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name=scenario.name))
+    """Every trace as cumulative return over one shared base day.
+
+    Strategy and benchmarks are indexed from the same day, and that day is
+    named in the title: "期初 = 100" per series is only meaningful when the
+    series share an origin, and a benchmark rebased at its own start (which
+    may predate the experiment by years) draws a period difference as if it
+    were relative performance.
+    """
+    plotted: list[tuple[str, pd.DataFrame, str, bool]] = [
+        (scenario.name, scenario.equity, "total_equity", False)
+        for scenario in experiment.scenarios
+    ]
     for symbol in experiment.benchmark_symbols:
         series = experiment.benchmark_closes[
             experiment.benchmark_closes["symbol"] == symbol
         ]
-        xs, ys = _index_series(series, "close")
-        fig.add_trace(
-            go.Scatter(x=xs, y=ys, mode="lines", name=symbol, line={"dash": "dash"})
-        )
-    return _layout(fig, "净值与基准对照（期初 = 100）")
+        plotted.append((symbol, series, "close", True))
+
+    base_day = _common_base_day([frame for _, frame, _, _ in plotted])
+    fig = go.Figure()
+    if base_day is not None:
+        for name, frame, value_col, is_benchmark in plotted:
+            xs, ys = _return_series(frame, value_col, base_day)
+            if not xs:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=xs,
+                    y=ys,
+                    mode="lines",
+                    name=name,
+                    **({"line": {"dash": "dash"}} if is_benchmark else {}),
+                )
+            )
+    title = "同区间累计收益（%）"
+    if base_day is not None:
+        title = f"{title}（基准日 = {base_day.isoformat()}）"
+    return _layout(fig, title)
 
 
 def _drawdown_figure(experiment: ExperimentReportInput) -> go.Figure:
@@ -677,6 +857,139 @@ def _scenario_sections(
     return sections
 
 
+def _walk_forward_block(payload: dict | None) -> dict | None:
+    """Normalize the stability-report payload for the template.
+
+    ``None`` (a single-window engineering run) omits the walk-forward
+    section entirely.  Every dynamic string stays a plain value that only
+    Jinja's autoescape renders.  The block deliberately carries no global
+    drawdown or Calmar field: cross-fold path metrics are forbidden.
+    """
+    if not isinstance(payload, dict) or not payload.get("stability_policy_hash"):
+        return None
+    schedule = payload.get("schedule") or {}
+    boundaries = [
+        {
+            "calendar_start": str(item.get("calendar_start", "")),
+            "calendar_end": str(item.get("calendar_end", "")),
+            "reason": str(item.get("reason", "")),
+        }
+        for item in schedule.get("boundaries", []) or []
+        if isinstance(item, dict)
+    ]
+    fold_statuses = [
+        {
+            "fold_id": str(item.get("fold_id", "")),
+            "status": str(item.get("status", "")),
+            "reason_code": str(item.get("reason_code") or "—"),
+        }
+        for item in payload.get("fold_statuses", []) or []
+        if isinstance(item, dict)
+    ]
+    scenario_rows = [
+        {
+            "scenario": str(item.get("scenario", "")),
+            "aggregate_return": _pct(item.get("aggregate_return")),
+            "annualized_return": _pct(item.get("annualized_return")),
+            "annualized_volatility": _pct(item.get("annualized_volatility")),
+            "sharpe_zero_rf": (
+                "—" if item.get("sharpe_zero_rf") is None
+                else f"{float(item['sharpe_zero_rf']):.4f}"
+            ),
+            "oos_return_observations": str(item.get("oos_return_observations", 0)),
+            "annualization_observations": str(
+                item.get("annualization_observations", 0)
+            ),
+        }
+        for item in payload.get("scenario_aggregates", []) or []
+        if isinstance(item, dict)
+    ]
+    fold_rows = [
+        {
+            "fold_id": str(item.get("fold_id", "")),
+            "scenario": str(item.get("scenario", "")),
+            "fold_calendar_return": _pct(item.get("fold_calendar_return")),
+            "per_fold_max_drawdown": _pct(item.get("per_fold_max_drawdown")),
+            "observation_count": str(item.get("observation_count", 0)),
+            "reject_rate": _pct(item.get("reject_rate")),
+            "turnover": (
+                "—" if item.get("turnover") is None
+                else f"{float(item['turnover']):.4f}"
+            ),
+            "explicit_cost_ratio": _pct(item.get("explicit_cost_ratio")),
+        }
+        for item in payload.get("fold_metrics", []) or []
+        if isinstance(item, dict)
+    ]
+    thresholds = payload.get("thresholds") or {}
+    buffered_payload = payload.get("buffered")
+    buffered = None
+    if isinstance(buffered_payload, dict) and buffered_payload.get(
+        "portfolio_rule_version"
+    ):
+        buffered_folds = [
+            {
+                "fold_id": str(item.get("fold_id", "")),
+                "signal_days": str(item.get("signal_days", 0)),
+                "retained": str(item.get("retained", 0)),
+                "entered": str(item.get("entered", 0)),
+                "exited": str(item.get("exited", 0)),
+                "risk_invalid": str(item.get("risk_invalid", 0)),
+                "achieved_gross_exposure": _pct(
+                    item.get("achieved_gross_exposure")
+                ),
+                "cash_residue": _pct(item.get("cash_residue")),
+            }
+            for item in buffered_payload.get("folds", []) or []
+            if isinstance(item, dict)
+        ]
+        buffered_scenarios = [
+            {
+                "scenario": str(item.get("scenario", "")),
+                "band_suppressed_rows": str(item.get("band_suppressed_rows", 0)),
+                "band_suppressed_amount": _money(
+                    item.get("band_suppressed_amount")
+                ),
+                "lot_suppressed_rows": str(item.get("lot_suppressed_rows", 0)),
+                "lot_suppressed_amount": _money(
+                    item.get("lot_suppressed_amount")
+                ),
+            }
+            for item in buffered_payload.get("scenarios", []) or []
+            if isinstance(item, dict)
+        ]
+        buffered = {
+            "portfolio_rule_version": str(
+                buffered_payload["portfolio_rule_version"]
+            ),
+            "folds": buffered_folds,
+            "scenarios": buffered_scenarios,
+        }
+    return {
+        "research_status": str(payload.get("research_status", "")),
+        "stability_conclusion": str(payload.get("stability_conclusion")),
+        "stability_policy_hash": str(payload["stability_policy_hash"]),
+        "stability_policy_version": str(
+            payload.get("stability_policy_version", "")
+        ),
+        "minimum_executed_folds": str(thresholds.get("minimum_executed_folds", "")),
+        "minimum_positive_fold_ratio": str(
+            thresholds.get("minimum_positive_fold_ratio", "")
+        ),
+        "worst_fold_calendar_return_floor": str(
+            thresholds.get("worst_fold_calendar_return_floor", "")
+        ),
+        "fold_count": str(schedule.get("fold_count", 0)),
+        "boundary_count": str(schedule.get("boundary_count", 0)),
+        "boundaries": boundaries,
+        "fold_statuses": fold_statuses,
+        "scenario_rows": scenario_rows,
+        "fold_rows": fold_rows,
+        "reasons": [str(reason) for reason in payload.get("reasons", []) or []],
+        "buffered": buffered,
+    }
+
+
 def render_experiment_report(
     experiment: ExperimentReportInput,
     destination: Path,
@@ -699,6 +1012,7 @@ def render_experiment_report(
         "code_commit": experiment.code_commit,
         "generated_at": experiment.generated_at,
     }
+    universe = _universe_block(experiment.universe)
     charts = [
         _figure_html(_net_value_figure(experiment)),
         _figure_html(_drawdown_figure(experiment)),
@@ -722,6 +1036,10 @@ def render_experiment_report(
             _pct(benchmark_excess) if benchmark_excess is not None else "—"
         ),
         trust=_trust_block(experiment.corporate_action_trust),
+        universe=universe,
+        factor_input=_factor_input_block(experiment.factor_input_audit),
+        data_acceptance=_data_acceptance_block(experiment.data_acceptance),
+        walk_forward=_walk_forward_block(experiment.walk_forward),
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(body, encoding="utf-8")

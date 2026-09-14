@@ -65,7 +65,7 @@ def _assert_raw_contract(frame: pd.DataFrame, required: set[str]) -> None:
 def test_tushare_daily_live_contract() -> None:
     start, end = _recent_window()
     request = DataRequest("daily", (_TUSHARE_SYMBOL,), start, end, {})
-    result = TushareSource(SourceConfig()).fetch(request)
+    result = TushareSource(SourceConfig(), allow_auto_transport=True).fetch(request)
     _assert_raw_contract(
         result.frame, {"ts_code", "trade_date", *set(_OHLC)}
     )
@@ -80,7 +80,7 @@ def test_tushare_stock_basic_live_contract() -> None:
     """The live whole-market reference carries the master facts columns."""
     start, end = _recent_window()
     request = DataRequest("stock_basic", (), start, end, {})
-    result = TushareSource(SourceConfig()).fetch(request)
+    result = TushareSource(SourceConfig(), allow_auto_transport=True).fetch(request)
     assert not result.frame.empty
     required = {"ts_code", "name", "list_date", "delist_date", "list_status"}
     missing = sorted(required - set(result.frame.columns))

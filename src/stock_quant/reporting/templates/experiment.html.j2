@@ -32,6 +32,7 @@
   .trust-ok { color: #2e7d32; font-weight: 600; }
   .banner.trust-fail { border-color: #c62828; background: #fdecea; }
   .banner.trust-fail strong { color: #b71c1c; }
+  .alert { color: #b71c1c; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -70,6 +71,28 @@
     {% endif %}
   </section>
 
+  {% if factor_input %}
+  <section>
+    <h2>因子价格口径</h2>
+    <p>调整方法：{{ factor_input.adjustment }}</p>
+    <p>因子版本：{{ factor_input.version_text }}</p>
+    <p>输入行数：{{ factor_input.row_count }}；不可信断点：{{ factor_input.error_break_count }}</p>
+    {% if factor_input.reason_text %}<p>断点原因：{{ factor_input.reason_text }}</p>{% endif %}
+  </section>
+  {% endif %}
+
+  <section class="data-acceptance">
+    <h2>真实数据验收</h2>
+    {% if data_acceptance %}
+    <p>结论：{{ data_acceptance.decision }}</p>
+    <p>规则：{{ data_acceptance.policy_version }}</p>
+    <p>验收 ID：<code>{{ data_acceptance.acceptance_id }}</code></p>
+    <p>操作者：{{ data_acceptance.operator_id }}；时间：{{ data_acceptance.created_at }}</p>
+    {% else %}
+    <p class="alert">UNVERIFIED：没有绑定真实数据验收记录。</p>
+    {% endif %}
+  </section>
+
   <section>
     <h2>版本与配置</h2>
     <table class="kv">
@@ -84,6 +107,103 @@
       <tr><td>基准超额（相对 {{ primary_benchmark }}）</td><td>{{ benchmark_excess }}</td></tr>
     </table>
   </section>
+
+  {% if universe %}
+  <section>
+    <h2>股票池冻结</h2>    <p>本实验的候选股票池由冻结的指数成分定义在任一信号日前解析并通过验收门禁；
+    逐信号日成员快照哈希使股票池序列可审计、可复现。</p>
+    <table class="kv">
+      <tr><td>指数池（universe_id）</td><td>{{ universe.universe_id }}</td></tr>
+      <tr><td>股票池版本（universe_version）</td><td>{{ universe.universe_version }}</td></tr>
+      <tr><td>规则版本（rules_version）</td><td>{{ universe.rules_version }}</td></tr>
+      <tr><td>成分表哈希（membership_table_sha256）</td><td>{{ universe.membership_table_sha256 }}</td></tr>
+      <tr><td>覆盖窗口</td><td>{{ universe.coverage_text or "—" }}</td></tr>
+    </table>
+    {% if universe.daily_rows %}
+    <details class="daily-trade-snapshot">
+      <summary>逐信号日成员快照（{{ universe.daily_rows | length }} 天）</summary>
+      <table>
+        <thead><tr><th>信号日</th><th>成员数</th><th>成员快照哈希</th></tr></thead>
+        <tbody>
+          {% for row in universe.daily_rows %}<tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </details>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if walk_forward %}
+  <section class="walk-forward">
+    <h2>Walk-Forward 样本外稳定性</h2>
+    <p>研究状态：{{ walk_forward.research_status }}；稳定性结论：
+    <strong>{{ walk_forward.stability_conclusion }}</strong>（仅在研究 COMPLETED 时存在）。</p>
+    <table class="kv">
+      <tr><td>stability_policy_hash</td><td><code>{{ walk_forward.stability_policy_hash }}</code></td></tr>
+      <tr><td>政策版本</td><td>{{ walk_forward.stability_policy_version }}</td></tr>
+      <tr><td>最少已执行 fold 数（minimum_executed_folds）</td><td>{{ walk_forward.minimum_executed_folds }}</td></tr>
+      <tr><td>正收益 fold 比率阈值（minimum_positive_fold_ratio）</td><td>{{ walk_forward.minimum_positive_fold_ratio }}</td></tr>
+      <tr><td>最差 fold 年度收益下限（worst_fold_calendar_return_floor）</td><td>{{ walk_forward.worst_fold_calendar_return_floor }}</td></tr>
+      <tr><td>计划 fold 数</td><td>{{ walk_forward.fold_count }}</td></tr>
+      <tr><td>边界未评估区间数（not_evaluated_boundary）</td><td>{{ walk_forward.boundary_count }}</td></tr>
+    </table>
+    {% if walk_forward.reasons %}
+    <p>判定理由：</p>
+    <ul>{% for reason in walk_forward.reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+    {% endif %}
+    <h3>边界未评估区间（不计入 OOS 聚合，非 skipped）</h3>
+    {% if walk_forward.boundaries %}
+    <table>
+      <thead><tr><th>起</th><th>止</th><th>原因</th></tr></thead>
+      <tbody>
+        {% for boundary in walk_forward.boundaries %}<tr><td>{{ boundary.calendar_start }}</td><td>{{ boundary.calendar_end }}</td><td>{{ boundary.reason }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="empty">无边界未评估区间。</p>{% endif %}
+    <h3>fold 状态（失败 fold 保留，绝不被删除）</h3>
+    <table>
+      <thead><tr><th>fold</th><th>状态</th><th>原因代码</th></tr></thead>
+      <tbody>
+        {% for row in walk_forward.fold_statuses %}<tr><td>{{ row.fold_id }}</td><td>{{ row.status }}</td><td>{{ row.reason_code }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    <h3>逐成本情景 OOS 聚合（全部预锁定情景逐一展示，不做择优）</h3>
+    <table>
+      <thead><tr><th>情景</th><th>累计收益</th><th>年化收益</th><th>年化波动</th><th>Sharpe（零无风险）</th><th>oos_return_observations</th><th>annualization_observations</th></tr></thead>
+      <tbody>
+        {% for row in walk_forward.scenario_rows %}<tr><td>{{ row.scenario }}</td><td>{{ row.aggregate_return }}</td><td>{{ row.annualized_return }}</td><td>{{ row.annualized_volatility }}</td><td>{{ row.sharpe_zero_rf }}</td><td>{{ row.oos_return_observations }}</td><td>{{ row.annualization_observations }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    <h3>逐 fold 指标（年度收益 / 逐 fold 最大回撤 / 执行质量 / 成本）</h3>
+    <table>
+      <thead><tr><th>fold</th><th>情景</th><th>fold 年度收益</th><th>per_fold_max_drawdown</th><th>观测数</th><th>拒单率</th><th>换手率</th><th>显性成本比率</th></tr></thead>
+      <tbody>
+        {% for row in walk_forward.fold_rows %}<tr><td>{{ row.fold_id }}</td><td>{{ row.scenario }}</td><td>{{ row.fold_calendar_return }}</td><td>{{ row.per_fold_max_drawdown }}</td><td>{{ row.observation_count }}</td><td>{{ row.reject_rate }}</td><td>{{ row.turnover }}</td><td>{{ row.explicit_cost_ratio }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    <p class="empty">跨 fold 拼接的最大回撤与 Calmar 被政策禁止，本报告不含任何全局回撤字段。</p>
+    {% if walk_forward.buffered %}
+    <h3>缓冲式组合构建审计</h3>
+    <p>规则版本（portfolio_rule_version）：<code>{{ walk_forward.buffered.portfolio_rule_version }}</code>。
+    换手来源拆分为成员变化换手（新入/退出）与连续持仓再平衡换手；带宽与手数抑制是调仓前的
+    组合决策，<strong>不是执行拒单</strong>，拒单见上方逐 fold 拒单率与未成交记录。</p>
+    <h4>逐 fold 成员变化换手与构建质量</h4>
+    <table>
+      <thead><tr><th>fold</th><th>信号日数</th><th>保留（连续持仓再平衡换手基数）</th><th>新入（成员变化换手）</th><th>退出（成员变化换手）</th><th>风险无效</th><th>实现总暴露</th><th>现金残余</th></tr></thead>
+      <tbody>
+        {% for row in walk_forward.buffered.folds %}<tr><td>{{ row.fold_id }}</td><td>{{ row.signal_days }}</td><td>{{ row.retained }}</td><td>{{ row.entered }}</td><td>{{ row.exited }}</td><td>{{ row.risk_invalid }}</td><td>{{ row.achieved_gross_exposure }}</td><td>{{ row.cash_residue }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    <h4>逐情景带宽抑制金额与手数抑制金额</h4>
+    <table>
+      <thead><tr><th>情景</th><th>带宽抑制行数</th><th>带宽抑制金额（元）</th><th>手数抑制行数</th><th>手数抑制金额（元）</th></tr></thead>
+      <tbody>
+        {% for row in walk_forward.buffered.scenarios %}<tr><td>{{ row.scenario }}</td><td>{{ row.band_suppressed_rows }}</td><td>{{ row.band_suppressed_amount }}</td><td>{{ row.lot_suppressed_rows }}</td><td>{{ row.lot_suppressed_amount }}</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+  {% endif %}
 
   <section>
     <h2>绩效汇总</h2>

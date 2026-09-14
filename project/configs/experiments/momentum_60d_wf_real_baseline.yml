@@ -1,0 +1,55 @@
+# 真实行情 Walk-Forward ENGINEERING 基线规格（等权；非投资建议，非可信绩效声明）。
+#
+# 与 momentum_60d_wf_real_challenger.yml 构成一次性策略挑战的两侧：
+# 除 portfolio_rule（top_n_equal_weight vs buffered_risk_weighted）外，
+# 数据集/宇宙/fold 日历/初始资金/因子信号/调仓频率/成本情景顺序完全一致。
+#
+# 数据集 = extend_history_offline.py 发布的扩展真实数据版本（2015-01..2026-08，
+# tushare 单源回补 + 已复核公司行为全历史），未绑定 raw 拉取证据，无
+# data_acceptance_id，评价恒为 UNTRUSTED 工程诊断，永不发布 ACCEPTED 实验，
+# 也永不产生正式稳定性/晋级结论。
+#
+# execution_pipeline: walk_forward_oos_v1 —— 正式 Walk-Forward 管线在工程信任
+# 模式下的诊断运行：请求范围 2020-01-01..2026-08-28 产生 2020..2025 六个完整
+# 年度 fold（2026 年部分年度记录为 not_evaluated_boundary）；每个 fold 预热
+# 至少三个整年且 ≥756 个确认交易日（2016 年起），独立账户、相同初始资金。
+hypothesis: >-
+  过去 60 个交易日的复权收益在 A 股样本内对随后短期收益存在一定持续性；
+  等权 Top-10 基线用于与缓冲式风险加权挑战者在完全相同的真实行情
+  Walk-Forward 输入上做工程级对比。外部数据源故障期间仅作 ENGINEERING
+  诊断，不声称统计有效性，也不构成投资建议或可信绩效声明。
+execution_pipeline: walk_forward_oos_v1
+factor_versions:
+  momentum_60d: 2.0.0
+dataset_version: CURRENT
+universe_version: CURRENT
+universe_definition: custom_csi300_ic_tradable
+trust_mode: engineering
+# 工程诊断不绑定真实数据验收记录（缺省 CURRENT_ACCEPTED 会触发验收门禁）。
+data_acceptance_id: null
+# walk_forward_oos_v1 要求冻结的时点宇宙定义（universe_definition）来提供
+# 逐 fold 的时点成分；缺失时 runner 在 schedule 阶段直接失败（runner.py 中
+# "a formal walk-forward run requires a frozen universe definition"）。
+# 本规格绑定方案一产出的时点过滤定义，ENGINEERING 诊断模式下不绑定真实
+# 数据验收记录。但 fold preflight 仍无条件要求 ACCEPTED 且绑定当前数据集的
+# 验收审计（ACCEPTANCE_MISSING，engineering 无豁免分支），验收记录（方案二）
+# 落地前本规格在 folds 阶段失败（2026-09-12 实测）。
+date_range:
+  start_date: 2020-01-01
+  end_date: 2026-08-28
+train_validation_holdout_policy: not_applicable_engineering_mvp
+preprocessing:
+  winsorization: none
+  standardization: none
+portfolio_rule:
+  name: top_n_equal_weight
+  top_n: 10
+  lot_size: 100
+cost_scenarios:
+  - zero_cost
+  - commission_tax
+  - full_cost
+random_seed: 42
+code_commit: unversioned
+parent_experiment_ids: []
+agent_id: null

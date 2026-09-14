@@ -1,0 +1,42 @@
+# 真实行情离线 ENGINEERING 复跑规格(非投资建议,非可信绩效声明)。
+#
+# 该规格在「离线重建数据集」版本上以 ENGINEERING 信任模式运行 momentum_60d
+# 2.0.0:数据集由当前已存真实表(daily_bar 2021-01-04..2026-08-28 + 已复核
+# corporate_action)离线重建 adjusted_bar 而来,未绑定任何 raw 拉取证据,
+# 因此不携带 data_acceptance_id,评估为 UNTRUSTED 诊断。
+#
+# dataset_version / universe_version 用 CURRENT 占位:运行期由 runner 读取
+# CURRENT 指针一次、解析为显式版本后冻结(ExperimentSpec.freeze),冻结后的
+# 规格只引用显式版本,永不保留 CURRENT。
+#
+# trust_mode: engineering —— 没有正式验收记录也允许跑通全链路,但 metrics
+# 与报告只能呈现为 UNTRUSTED,永不产生可发布的 ACCEPTED 实验。
+hypothesis: >-
+  过去 60 个交易日的复权收益在 A 股样本内对随后短期收益存在一定持续性;
+  本规格在真实行情(2021-01 至 2026-08)上复跑工程链路,验证离线重建数据
+  集上 2.0.0 复权因子全流程可重现并产出报告。外部数据源故障期间仅作
+  ENGINEERING 诊断,不声称统计有效性,也不构成投资建议或可信绩效声明。
+factor_versions:
+  momentum_60d: 2.0.0
+dataset_version: CURRENT
+universe_version: CURRENT
+trust_mode: engineering
+date_range:
+  start_date: 2021-01-01
+  end_date: 2026-08-21
+train_validation_holdout_policy: not_applicable_engineering_mvp
+preprocessing:
+  winsorization: none
+  standardization: none
+portfolio_rule:
+  name: top_n_equal_weight
+  top_n: 10
+  lot_size: 100
+cost_scenarios:
+  - zero_cost
+  - commission_tax
+  - full_cost
+random_seed: 42
+code_commit: unversioned
+parent_experiment_ids: []
+agent_id: null

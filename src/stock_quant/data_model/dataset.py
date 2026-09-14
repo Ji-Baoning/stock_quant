@@ -24,7 +24,7 @@ import shutil
 import tempfile
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,12 +35,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from stock_quant.data_model.schemas import (
+    ADJUSTED_BAR_SCHEMA,
     CORPORATE_ACTION_COVERAGE_SCHEMA,
+    CORPORATE_ACTION_QUARANTINE_SCHEMA,
     CORPORATE_ACTION_SCHEMA,
     DAILY_SCHEMA,
     SECURITY_MASTER_COVERAGE_SCHEMA,
     SECURITY_MASTER_SCHEMA,
     TRADING_CALENDAR_SCHEMA,
+    UNIVERSE_MEMBERSHIP_SCHEMA,
 )
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import QualityReport, issue_dict_dumps
@@ -50,11 +53,14 @@ from stock_quant.data_quality.models import QualityReport, issue_dict_dumps
 #: be registered here before they can be published.
 STANDARDIZED_SCHEMAS: dict[str, pa.Schema] = {
     "daily_bar": DAILY_SCHEMA,
+    "adjusted_bar": ADJUSTED_BAR_SCHEMA,
     "security_master": SECURITY_MASTER_SCHEMA,
     "security_master_coverage": SECURITY_MASTER_COVERAGE_SCHEMA,
     "corporate_action": CORPORATE_ACTION_SCHEMA,
+    "corporate_action_quarantine": CORPORATE_ACTION_QUARANTINE_SCHEMA,
     "corporate_action_coverage": CORPORATE_ACTION_COVERAGE_SCHEMA,
     "trading_calendar": TRADING_CALENDAR_SCHEMA,
+    "universe_membership": UNIVERSE_MEMBERSHIP_SCHEMA,
 }
 
 _MANIFEST_NAME = "dataset_manifest.json"
@@ -185,6 +191,7 @@ class DatasetReader:
             path=version_dir,
             tables=tables,
             connection=connection,
+            manifest=manifest,
         )
 
 
@@ -196,6 +203,10 @@ class DatasetContext:
     path: Path
     tables: tuple[str, ...]
     connection: duckdb.DuckDBPyConnection
+    #: The parsed ``dataset_manifest.json`` of this version.  Exposed so the
+    #: pipeline and the acceptance chain can read the sanitized build
+    #: evidence (calendar coverage, raw bindings) without re-reading bytes.
+    manifest: Mapping[str, Any] = field(default_factory=dict)
 
     def read(self, table: str) -> pd.DataFrame:
         """Read one standardized table through its pinned DuckDB view."""

@@ -9,15 +9,20 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
+from stock_quant.data_model.calendar_coverage import coverage_payload, seed_span
 from stock_quant.data_model.dataset import DatasetPublisher
 from stock_quant.data_model.schemas import (
+    ADJUSTED_BAR_COLUMNS,
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
 )
 from stock_quant.data_model.security_master import ListStatus
 from stock_quant.data_model.universe import Universe
+from stock_quant.data_model.universe_membership import membership_frame
+from stock_quant.data_pipeline import DATASET_BUILD_CONTRACT_VERSION
 from stock_quant.data_quality.models import QualityReport
 
 
@@ -51,11 +56,34 @@ def bootstrap_dataset(
         raise ValueError("no trading days in range; check --calendar-csv / dates")
     tables = {
         "daily_bar": _empty_daily(),
+        "adjusted_bar": _empty_adjusted_bar(),
         "security_master": _security_master(universe),
         "corporate_action": _empty_corporate_action(),
+        "corporate_action_quarantine": _empty_quarantine(),
         "trading_calendar": _trading_calendar(days),
+        # The canonical schema contract registers universe_membership too; a
+        # fresh project is born with the empty canonical frame so operator
+        # acceptance (required-table coverage) can pass before any membership
+        # refresh workflow appends real facts.
+        "universe_membership": membership_frame([]),
     }
-    version = DatasetPublisher(root).publish(tables, QualityReport()).version
+    version = DatasetPublisher(root).publish(
+        tables,
+        QualityReport(),
+        build_config={
+            "origin": "bootstrap",
+            "pipeline_contract_version": DATASET_BUILD_CONTRACT_VERSION,
+            # The offline seed is the only calendar source a brand-new project
+            # has.  It is published as an explicit bootstrap_seed span so the
+            # first data update can tell "approximated weekdays" apart from
+            # relay facts -- and so full-history acceptance can refuse to call
+            # a seed day a verified trading day.  No universe scan happens here
+            # (bootstrap must stay offline): the acceptance start is bound by
+            # the first data update that actually scans the definitions.
+            "calendar_coverage": coverage_payload([seed_span(start, end)]),
+            "full_history_acceptance_start": None,
+        },
+    ).version
     return BootstrapResult(version, len(universe.entries), len(days), start, end)
 
 
@@ -146,3 +174,13 @@ def _empty_corporate_action() -> pd.DataFrame:
             "status": pd.Series(dtype="object"),
         }
     )[CORPORATE_ACTION_COLUMNS]
+
+
+def _empty_adjusted_bar() -> pd.DataFrame:
+    """The canonical empty total-return table (no bars to adjust yet)."""
+    return pd.DataFrame(columns=ADJUSTED_BAR_COLUMNS)
+
+
+def _empty_quarantine() -> pd.DataFrame:
+    """The canonical empty corporate-action quarantine table."""
+    return pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)

@@ -13,13 +13,16 @@ stale share of equity.  Carried prices are valuation-only and never feed fills.
 
 The engine is a pure reader over already-fixed inputs -- one exact
 ``dataset_version``, the confirmed calendar, the rule book, one cost model,
-unadjusted daily bars, accepted corporate actions, benchmark closes and a
-precomputed order schedule.  Before the account is touched it runs
-backtest-readiness checks (benchmark coverage over the whole window, a clean
-executable bar with a prior close for every scheduled order, and held-period
-corporate actions all implemented and mutually consistent) and refuses the
-scenario with an explanatory error when any check fails, so no partially
-mutated account is ever produced.
+unadjusted daily bars, accepted corporate actions and benchmark closes -- plus
+one of two order sources: a precomputed order ``schedule`` (the classic frozen
+plan, byte-identical replay) or an ``order_provider`` called once per open day
+with the live account, so each scenario generates its own orders from its
+realized account state against a frozen, scenario-independent target book.
+Before the account is touched it runs backtest-readiness checks (benchmark
+coverage over the whole window, a clean executable bar with a prior close for
+every scheduled order, and held-period corporate actions all implemented and
+mutually consistent) and refuses the scenario with an explanatory error when
+any check fails, so no partially mutated account is ever produced.
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Iterable, Mapping, Sequence
 
 import pandas as pd
 
@@ -54,6 +57,15 @@ from stock_quant.backtest.models import (
 from stock_quant.backtest.valuation import AccountValuation, value_account
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.trading_rules import TradingRuleBook
+
+if TYPE_CHECKING:
+    from stock_quant.backtest.account import Account
+
+#: Provider-mode order source: called once per open day with the live account,
+#: it returns that day's orders from the realized account state.  The quoted
+#: forward reference keeps the alias import-order safe at runtime (the RHS is
+#: a ``typing`` ForwardRef, not a resolved import of ``Account``).
+OrderProvider = Callable[[date, "Account"], Sequence[Order]]
 
 #: Frame columns of the produced ledgers, in their canonical order.
 FILL_COLUMNS = (
@@ -139,7 +151,20 @@ class OrderDay:
 
 @dataclass(frozen=True)
 class BacktestRequest:
-    """Everything the engine needs for one replay -- all inputs are fixed."""
+    """Everything the engine needs for one replay -- all inputs are fixed.
+
+    The mode judgment is ``order_provider is None`` (schedule mode) versus
+    ``is not None`` (provider mode) -- never the schedule's emptiness, because
+    a ``schedule=()`` request is a legitimate schedule-mode replay of a plan
+    with no orders.  In provider mode the engine asks ``order_provider(day,
+    account)`` for every open day's orders, so each cost scenario generates
+    them from its own realized account state against a scenario-independent
+    target book; ``possible_held_symbols`` is then mandatory -- the
+    window-level superset of names any generated order could touch replaces
+    the schedule as the corporate-action coverage universe, and accepting
+    ``None`` silently would turn that contract into "works if the caller
+    remembers".
+    """
 
     dataset_version: str
     initial_cash: object
@@ -151,10 +176,18 @@ class BacktestRequest:
     schedule: tuple[OrderDay, ...] = ()
     benchmark_symbols: tuple[str, ...] = ("000300.SH", "000905.SH")
     benchmarks: pd.DataFrame = field(default_factory=pd.DataFrame)
+    order_provider: OrderProvider | None = None
+    possible_held_symbols: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         if not self.dataset_version:
             raise ValueError("dataset_version must be non-empty")
+        if self.order_provider is not None and self.possible_held_symbols is None:
+            raise ValueError(
+                "order_provider mode requires possible_held_symbols: the "
+                "window-level possibly-held superset replaces the schedule as "
+                "the corporate-action coverage universe"
+            )
 
 
 @dataclass(frozen=True)
@@ -197,8 +230,14 @@ class BacktestEngine:
 
         for day in market.window:
             self._apply_actions(account, market, day)
-            sells, buys = market.schedule_by(day)
-            orders = list(sells) + list(buys)
+            if request.order_provider is not None:
+                # Provider mode: the day's orders come from the scenario's own
+                # realized account state.  The executor still runs accepted
+                # sells before accepted buys, so one flat list is safe.
+                orders = list(request.order_provider(day, account))
+            else:
+                sells, buys = market.schedule_by(day)
+                orders = list(sells) + list(buys)
             if orders:
                 # One submitted record per plan order, before execute (spec
                 # section 2): the audit trail is the frozen plan itself.
@@ -577,7 +616,18 @@ class _Market:
 
     @property
     def possible_held_symbols(self) -> set[str]:
-        """Symbols any schedule order touches (the potentially-held set)."""
+        """Symbols any order could touch (the potentially-held set).
+
+        The branch follows the mode judgment, not the schedule's emptiness:
+        schedule mode unions the frozen schedule's symbols (a ``schedule=()``
+        request yields the empty union, exactly as before), while provider
+        mode reads the caller-declared window-level superset (non-None by
+        ``__post_init__``).  Either way this is the corporate-action coverage
+        universe; per-order readiness in provider mode is decided by the
+        executor at submission time.
+        """
+        if self.request.order_provider is not None:
+            return set(self.request.possible_held_symbols)
         return {
             order.symbol
             for orders in self.schedule_by_day.values()

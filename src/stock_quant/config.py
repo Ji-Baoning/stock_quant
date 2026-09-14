@@ -8,6 +8,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from stock_quant.project_root import resolve_project_root
+
 
 class SourceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -66,9 +68,8 @@ class ProjectConfig(BaseModel):
     publication_time: dt_time = Field(
         default=dt_time(15, 0),
         description=(
-            "Wall-clock boundary before which a same-day bar set is not "
-            "treated as a complete trading day by end-date discovery (design "
-            "spec §14)."
+            "Recorded market publication time. Informational only: update end "
+            "dates come from the published trading calendar, never from the clock."
         ),
     )
 
@@ -79,8 +80,15 @@ class ProjectConfig(BaseModel):
         return self
 
 
-def load_project_config(root: Path) -> ProjectConfig:
-    """Load project, source, and cost configuration without reading secrets."""
+def load_project_config(root: str | Path) -> ProjectConfig:
+    """Load project, source, and cost configuration without reading secrets.
+
+    ``root`` is validated through :func:`resolve_project_root` first; every
+    YAML file is then opened from that resolved root only — there is no
+    fallback to the working directory or the repository root.
+    """
+
+    root = resolve_project_root(root)
 
     def read(name: str) -> dict[str, object]:
         return yaml.safe_load((root / "configs" / name).read_text()) or {}

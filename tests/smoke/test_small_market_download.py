@@ -27,18 +27,31 @@ import pandas as pd
 import pytest
 import yaml
 
+from stock_quant.data_model.adjusted_bar import build_adjusted_bars
+from stock_quant.data_model.calendar_coverage import coverage_payload, seed_span
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_COVERAGE_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
 )
-from stock_quant.data_pipeline import DataPipeline, DataUpdateRequest
+from stock_quant.data_pipeline import (
+    DATASET_BUILD_CONTRACT_VERSION,
+    DataPipeline,
+    DataUpdateRequest,
+)
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import QualityReport
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: The committed configuration template the smoke project copies.  The
+#: repository root carries no live ``configs/`` tree; the template directory
+#: is a copy source only and is never resolved as a project root.
+_TEMPLATE_CONFIG = _REPO_ROOT / "templates" / "project-config"
 
 #: The single equity the smoke updates.  ``600000.SH`` is the canonical form the
 #: Tushare role and the standardized ``daily_bar`` use.
@@ -161,21 +174,36 @@ def _trading_calendar(sessions: list[date]) -> pd.DataFrame:
 def build_smoke_project(root: Path) -> Path:
     """Materialise a one-symbol live project: configs plus a synthetic baseline.
 
-    The repository ``configs/`` tree is copied so source/cost/rule shapes match
-    the real project; ``project.yml`` and ``universe.yml`` are overridden for a
-    one-symbol universe over a recent backfill window.  A synthetic four-table
-    dataset is published so ``DataPipeline.update`` has the carried
-    master/calendar baseline it requires.  No market data or credentials are
-    committed; the project lives under ``tmp_path``.
+    The committed ``templates/project-config`` tree is copied so source/cost/
+    rule shapes match the real project, and ``sources.yml`` is rewritten with
+    every supplier enabled -- the smoke requires the optional ``baostock``
+    validation series, which the template may ship disabled.  ``project.yml``
+    and ``universe.yml`` are overridden for a
+    one-symbol universe over a recent backfill window.  A synthetic six-table
+    dataset (including ``adjusted_bar`` and the quarantine table, built with
+    the production adjusted-bar builder) is published so
+    ``DataPipeline.update`` has the carried master/calendar baseline it
+    requires.  No market data or credentials are committed; the project lives
+    under ``tmp_path``.
     """
     root = Path(root)
     config_dir = root / "configs"
     config_dir.mkdir(parents=True, exist_ok=True)
     for name in _CONFIG_NAMES:
         (config_dir / name).write_text(
-            (_REPO_ROOT / "configs" / name).read_text(encoding="utf-8"),
+            (_TEMPLATE_CONFIG / name).read_text(encoding="utf-8"),
             encoding="utf-8",
         )
+    sources = yaml.safe_load(
+        (_TEMPLATE_CONFIG / "sources.yml").read_text(encoding="utf-8")
+    )
+    for settings in sources.values():
+        if isinstance(settings, dict):
+            settings["enabled"] = True
+    (config_dir / "sources.yml").write_text(
+        yaml.safe_dump(sources, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
 
     today = date.today()
     _, window_end = _recent_window()
@@ -213,13 +241,38 @@ def build_smoke_project(root: Path) -> Path:
     )
 
     sessions = _weekdays(baseline_start, window_end)
+    daily = _bars(sessions)
+    corporate_actions = _corporate_action()
+    empty_quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
     tables = {
-        "daily_bar": _bars(sessions),
+        "daily_bar": daily,
+        "adjusted_bar": build_adjusted_bars(
+            daily,
+            corporate_actions,
+            empty_quarantine,
+            # The synthetic baseline carries no coverage evidence table yet;
+            # an empty frame keeps the adjusted rows at INFO until the live
+            # update republishes real per-window evidence.
+            pd.DataFrame(columns=CORPORATE_ACTION_COVERAGE_COLUMNS),
+            symbols=(_SMOKE_SYMBOL,),
+        ),
         "security_master": _security_master(),
-        "corporate_action": _corporate_action(),
+        "corporate_action": corporate_actions,
+        "corporate_action_quarantine": empty_quarantine,
         "trading_calendar": _trading_calendar(sessions),
     }
-    DatasetPublisher(root).publish(tables, QualityReport())
+    DatasetPublisher(root).publish(
+        tables,
+        QualityReport(),
+        build_config={
+            "origin": "bootstrap",
+            "pipeline_contract_version": DATASET_BUILD_CONTRACT_VERSION,
+            "calendar_coverage": coverage_payload(
+                [seed_span(baseline_start, window_end)]
+            ),
+            "full_history_acceptance_start": None,
+        },
+    )
     return root
 
 

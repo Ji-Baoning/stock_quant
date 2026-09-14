@@ -1,10 +1,17 @@
 """Operator-facing command line for the offline quant engineering loop.
 
-Four thin groups over the existing ports, all offline-testable against a
+Five thin groups over the existing ports, all offline-testable against a
 synthetic project and never printing a token or a raw supplier response:
 
 - ``data update`` / ``data validate`` -- drive :class:`DataPipeline`, the only
-  writer of the immutable published dataset.
+  writer of the immutable published dataset. ``data index-membership prepare``
+  is the offline first step of the membership workflow: it normalizes one
+  already-stored official snapshot into the canonical ``universe_membership``
+  frame, bound to the snapshot/document SHA-256 evidence the operator passes
+  as mandatory arguments (no network access, no bypass flag).
+- ``data acceptance prepare|publish|show`` -- the operator workflow over the
+  real-data acceptance registry: prepare the redacted checklist YAML, publish
+  it (rejections are recorded before the nonzero exit), and inspect history.
 - ``research run`` -- the **only** formal publisher: runs one experiment spec
   end-to-end (freeze -> factor -> portfolio -> backtest -> metrics -> report)
   through :class:`ResearchRunner` and publishes into ``data/experiments``.
@@ -28,17 +35,23 @@ dataset's benchmark closes.  Nothing here is investment advice.
 from __future__ import annotations
 
 import json
+import logging
 import os
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
+from typing import Annotated
 
 import pandas as pd
 import typer
+from pydantic import ValidationError
 
 from stock_quant.analytics.performance import PerformanceMetrics, compute_metrics
 from stock_quant.bootstrap import bootstrap_dataset
 from stock_quant.config import load_project_config
 from stock_quant.data_model.dataset import DatasetReader
+from stock_quant.data_model.index_membership_import import prepare_membership_file
+from stock_quant.data_model.universe_membership import MembershipReason
 from stock_quant.data_pipeline import DataPipeline, DataUpdateRequest
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import (
@@ -46,6 +59,7 @@ from stock_quant.data_quality.models import (
     QualityReport,
     Severity,
 )
+from stock_quant.project_root import ProjectRootError, resolve_project_root
 from stock_quant.reporting.html import (
     ExperimentReportInput,
     ExperimentScenario,
@@ -53,6 +67,18 @@ from stock_quant.reporting.html import (
     render_experiment_report,
     render_quality_report,
 )
+from stock_quant.research.acceptance.evidence import EVIDENCE_DIRNAME
+from stock_quant.research.acceptance.models import AcceptanceRecord
+from stock_quant.research.acceptance.registry import (
+    AcceptanceIntegrityError,
+    AcceptanceRegistry,
+)
+from stock_quant.research.acceptance.service import (
+    AcceptanceRejected,
+    prepare_checklist,
+    publish_checklist,
+)
+from stock_quant.research.acceptance.worksheet import WorksheetError, confirm
 from stock_quant.research.models import ResearchRunFailed
 from stock_quant.research.reconcile import (
     STATUS_FILLED,
@@ -61,6 +87,10 @@ from stock_quant.research.reconcile import (
 )
 from stock_quant.research.registry import ExperimentRegistry, PublishedExperiment
 from stock_quant.research.runner import AnalyticsInput, ResearchRunner
+from stock_quant.research.strategy_challenge.service import (
+    ChallengeServiceError,
+    StrategyChallengeService,
+)
 from stock_quant.research.trust import DataTrustMode
 
 app = typer.Typer(
@@ -72,11 +102,22 @@ app = typer.Typer(
 )
 
 data_app = typer.Typer(help="Fetch, quality-check and publish one dataset window.")
+index_membership_app = typer.Typer(
+    help=(
+        "Offline evidence-bound preparation of immutable universe_membership "
+        "facts (snapshot/document hashes are mandatory arguments)."
+    )
+)
+acceptance_app = typer.Typer(
+    help="Prepare, publish, and inspect data acceptance records."
+)
 research_app = typer.Typer(help="Run and publish one formal experiment spec.")
 backtest_app = typer.Typer(help="Scratch backtests that never publish experiments.")
 report_app = typer.Typer(help="Render self-contained reports from committed artifacts.")
 
 app.add_typer(data_app, name="data")
+data_app.add_typer(index_membership_app, name="index-membership")
+data_app.add_typer(acceptance_app, name="acceptance")
 app.add_typer(research_app, name="research")
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(report_app, name="report")
@@ -103,6 +144,22 @@ def _secret_values() -> tuple[object, ...]:
 
 def _echo_failure(message: str) -> None:
     typer.echo(f"FAILED: {message}")
+
+
+def _resolved_project_root(root: Path) -> Path:
+    """Validate ``root`` once, before any service object is constructed.
+
+    Every command resolves its ``--root`` through this helper *first*: an
+    invalid or incomplete root is reported as a clean ``FAILED`` line and a
+    nonzero exit before ``DataPipeline``, ``DatasetReader``, the raw store,
+    staging or any network path can ever be reached.  Downstream code only
+    ever receives the resolved root.
+    """
+    try:
+        return resolve_project_root(root)
+    except ProjectRootError as error:
+        _echo_failure(str(error))
+        raise typer.Exit(code=1) from None
 
 
 def _report_summary(report: QualityReport) -> str:
@@ -165,8 +222,9 @@ def data_bootstrap(
     ),
 ) -> None:
     """Publish the baseline dataset required before the first data update."""
+    project_root = _resolved_project_root(root)
     try:
-        result = bootstrap_dataset(root, calendar_csv=calendar_csv)
+        result = bootstrap_dataset(project_root, calendar_csv=calendar_csv)
     except Exception as error:  # noqa: BLE001 - surface cleanly to the operator
         _echo_failure(str(error))
         raise typer.Exit(code=1) from None
@@ -183,13 +241,39 @@ def data_bootstrap(
     )
 
 
+def _enable_transport_logging() -> None:
+    """Surface the resolved transport on the operator's terminal.
+
+    The transport resolver logs one INFO line per resolution; without a
+    handler it would be invisible, and the design requires the run log --
+    not only the evidence chain -- to show which transport answered.
+
+    Scoped to the ``stock_quant`` package tree instead of the root logger:
+    ``logging.basicConfig`` would switch INFO on for every module in the
+    process, and none of those other INFO lines were reviewed for what they
+    may print.  The resolver's logger (``stock_quant.data_sources.*``) is a
+    descendant, so its line still reaches the operator unchanged.
+    """
+    logger = logging.getLogger("stock_quant")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        logger.addHandler(handler)
+
+
 @data_app.command("update")
 def data_update(
     start: str | None = typer.Option(
         None, "--start", help="Inclusive start (YYYY-MM-DD)."
     ),
     end: str | None = typer.Option(
-        None, "--end", help="Inclusive end (YYYY-MM-DD)."
+        None,
+        "--end",
+        help=(
+            "Inclusive end (YYYY-MM-DD). Defaults to the newest published "
+            "calendar day."
+        ),
     ),
     sources: str | None = typer.Option(
         None, "--sources", help="Comma-separated source subset."
@@ -197,7 +281,8 @@ def data_update(
     root: Path = typer.Option(".", "--root", help="Project root."),
 ) -> None:
     """Fetch one window into the raw-store and publish when the gate passes."""
-    project_root = Path(root)
+    _enable_transport_logging()
+    project_root = _resolved_project_root(root)
     request = DataUpdateRequest(
         start_date=date.fromisoformat(start) if start else None,
         end_date=date.fromisoformat(end) if end else None,
@@ -210,16 +295,10 @@ def data_update(
         raise typer.Exit(code=1) from None
     typer.echo(f"run_id={result.run_id}")
     typer.echo(f"resolved_end_date={result.resolved_end_date or ''}")
-    typer.echo(f"resolved_end_is_fallback={str(result.resolved_end_is_fallback).lower()}")
     typer.echo(_report_summary(result.quality_report))
     for status in result.source_status:
         state = "ok" if status.ok else "not_ok"
         typer.echo(f"source {status.source}: {state}")
-    if result.resolved_end_is_fallback:
-        typer.echo(
-            "note: coverage was incomplete for the latest date; end date walked "
-            "back to the last confirmed complete trading day"
-        )
     if result.dataset_ref is not None:
         typer.echo(f"dataset_version={result.dataset_ref.version}")
         typer.echo("PASS")
@@ -234,7 +313,7 @@ def data_validate(
     root: Path = typer.Option(".", "--root", help="Project root."),
 ) -> None:
     """Re-run the shared quality checks over one published dataset version."""
-    project_root = Path(root)
+    project_root = _resolved_project_root(root)
     pipeline = DataPipeline(project_root)
     try:
         if version is None:
@@ -259,6 +338,312 @@ def data_validate(
     raise typer.Exit(code=1)
 
 
+@index_membership_app.command("prepare")
+def data_index_membership_prepare(
+    universe_id: str = typer.Option(
+        ..., "--universe-id", help="Canonical universe id, e.g. csi300."
+    ),
+    input_path: Path = typer.Option(
+        ...,
+        "--input",
+        exists=True,
+        dir_okay=False,
+        help="Already-downloaded membership list (.csv or .parquet).",
+    ),
+    snapshot_sha256: str = typer.Option(
+        ...,
+        "--snapshot-sha256",
+        help="SHA-256 of the stored raw snapshot this import is bound to.",
+    ),
+    source_document_sha256: str = typer.Option(
+        ...,
+        "--source-document-sha256",
+        help="SHA-256 of the stored official source document.",
+    ),
+    source: str = typer.Option(
+        ...,
+        "--source",
+        help="Evidence source label, e.g. csi_index_announcement.",
+    ),
+    source_url: str = typer.Option(
+        ...,
+        "--source-url",
+        help="Credential-free http(s) locator of the evidence document.",
+    ),
+    effective_date: str = typer.Option(
+        ...,
+        "--effective-date",
+        help="Default raw_effective_from for rows without their own (ISO).",
+    ),
+    announcement_date: str = typer.Option(
+        ...,
+        "--announcement-date",
+        help="Default announcement_date for rows without their own (ISO).",
+    ),
+    reason: MembershipReason = typer.Option(
+        MembershipReason.INITIAL_CONSTITUENT,
+        "--reason",
+        help="Default reason for rows without their own.",
+    ),
+    output: Path = typer.Option(
+        ...,
+        "--output",
+        help="Destination for the canonical frame (.parquet or .csv).",
+    ),
+) -> None:
+    """Normalize one official snapshot into immutable membership facts.
+
+    Every fact is bound to the stored snapshot/document evidence named by the
+    mandatory arguments; a missing or invalid argument is rejected before any
+    output byte is written. Prints the ``membership_table_sha256=`` that the
+    frozen universe definition must pin. There is no bypass flag: unevidenced
+    facts cannot be prepared.
+    """
+    try:
+        result = prepare_membership_file(
+            input_path,
+            universe_id=universe_id,
+            source=source,
+            source_url=source_url,
+            snapshot_sha256=snapshot_sha256,
+            source_document_sha256=source_document_sha256,
+            effective_date=date.fromisoformat(effective_date),
+            announcement_date=date.fromisoformat(announcement_date),
+            reason=reason.value,
+            output=output,
+        )
+    except (ValueError, TypeError) as error:
+        _echo_failure(f"membership import rejected: {error}")
+        raise typer.Exit(code=1) from None
+    typer.echo(f"rows={len(result.frame)}")
+    typer.echo(f"universe_id={result.universe_id}")
+    typer.echo(f"membership_table_sha256={result.content_hash}")
+    typer.echo(f"output={output}")
+
+
+# --------------------------------------------------------------------------- #
+# data acceptance group (operator workflows over the registry; read-only
+# except the single append-only registry write done by publish)
+# --------------------------------------------------------------------------- #
+
+
+@acceptance_app.command("prepare")
+def data_acceptance_prepare(
+    version: Annotated[str, typer.Option("--version", help="Dataset version hash.")],
+    operator: Annotated[str, typer.Option("--operator", help="Operator id.")],
+    output: Annotated[
+        Path, typer.Option("--output", help="Destination checklist YAML file.")
+    ],
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help=(
+                "Restore already signed rows into a rebuilt checklist. Never "
+                "overwrites or deletes a signed worksheet."
+            ),
+        ),
+    ] = False,
+    root: Path = typer.Option(".", "--root", help="Project root."),
+) -> None:
+    """Write the checklist YAML and its deterministic evidence pack.
+
+    Automated rows carry the fresh offline checker verdicts; all nine manual
+    rows start as ``PENDING_CONFIRMATION``, six of them pointing at evidence
+    this command generated under ``data/acceptance-evidence/<version>/`` and
+    three requiring external corroboration only the operator can supply.
+    Each manual row also gets an unsigned worksheet under
+    ``data/acceptance-worksheets/<version>/``.  Nothing here marks a manual
+    row PASS: an already signed version is refused before anything is written
+    unless ``--force`` restores its signed rows into the rebuilt checklist.
+    """
+    project_root = _resolved_project_root(root)
+    try:
+        checklist = prepare_checklist(
+            project_root, version, operator, output, force=force
+        )
+    except WorksheetError as error:
+        typer.echo(f"reason={error.category}")
+        raise typer.Exit(code=1) from None
+    typer.echo(f"checklist={output.name}")
+    typer.echo(f"evidence_dir=data/{EVIDENCE_DIRNAME}/{version}")
+    typer.echo(
+        "evidence_attached="
+        f"{sum(1 for row in checklist.manual_checks if row.evidence)}"
+    )
+    typer.echo(
+        f"manual_checks={len(checklist.manual_checks)} pending_confirmation"
+    )
+
+
+@acceptance_app.command("confirm")
+def data_acceptance_confirm(
+    checklist: Annotated[
+        Path, typer.Option("--checklist", help="Checklist YAML file.")
+    ],
+    code: Annotated[
+        str, typer.Option("--code", help="Manual check code to confirm.")
+    ],
+    operator: Annotated[
+        str, typer.Option("--operator", help="Signing operator id.")
+    ],
+    external_input: Annotated[
+        Path | None,
+        typer.Option(
+            "--external-input",
+            help=(
+                "Official excerpt for an external check. Copied into the "
+                "project's content-addressed input store."
+            ),
+        ),
+    ] = None,
+    acknowledge: Annotated[
+        int | None,
+        typer.Option(
+            "--acknowledge",
+            help="Number of queued rows the operator reviewed before signing.",
+        ),
+    ] = None,
+    fail: Annotated[
+        bool, typer.Option("--fail", help="Reject this check.")
+    ] = False,
+    supersede: Annotated[
+        bool,
+        typer.Option(
+            "--supersede",
+            help="Replace this check's signed revision. Never overwrites it.",
+        ),
+    ] = False,
+    conclusion: Annotated[
+        str | None,
+        typer.Option("--conclusion", help="Signature conclusion text."),
+    ] = None,
+    conclusion_file: Annotated[
+        Path | None,
+        typer.Option("--conclusion-file", help="Read the conclusion from a file."),
+    ] = None,
+    root: Path = typer.Option(".", "--root", help="Project root."),
+) -> None:
+    """Confirm or reject one manual check, appending one worksheet revision.
+
+    Read-only on everything else: no row is added, no automated row changes,
+    no evidence file is generated, and the container's ``operator_id`` stays
+    where ``prepare`` put it.  Only the named row flips, and only after the
+    worksheet revision citing it is in place.
+    """
+    if conclusion is not None and conclusion_file is not None:
+        typer.echo("reason=conclusion_required")
+        raise typer.Exit(code=1)
+    text = (
+        conclusion_file.read_text(encoding="utf-8")
+        if conclusion_file is not None
+        else conclusion
+    )
+    try:
+        updated = confirm(
+            _resolved_project_root(root),
+            checklist,
+            code=code,
+            operator_id=operator,
+            decision="FAIL" if fail else "PASS",
+            conclusion=text,
+            external_input=external_input,
+            acknowledge=acknowledge,
+            supersede=supersede,
+        )
+    except WorksheetError as error:
+        typer.echo(f"reason={error.category}")
+        raise typer.Exit(code=1) from None
+    except (OSError, ValueError, ValidationError) as error:
+        typer.echo("reason=invalid_checklist")
+        typer.echo(f"error={type(error).__name__}")
+        raise typer.Exit(code=1) from None
+    row = next(item for item in updated.manual_checks if item.code == code)
+    typer.echo(f"code={code}")
+    typer.echo(f"decision={row.status.value}")
+    typer.echo(f"evidence={row.evidence[0].reference}")
+
+
+@acceptance_app.command("publish")
+def data_acceptance_publish(
+    checklist: Annotated[
+        Path, typer.Option("--checklist", help="Checklist YAML file.")
+    ],
+    root: Path = typer.Option(".", "--root", help="Project root."),
+) -> None:
+    """Verify and publish one checklist; rejections are recorded, then fail.
+
+    The decision -- ACCEPTED or REJECTED -- is persisted atomically before
+    this command returns; a rejection prints its id and reason codes and
+    exits nonzero, so the registry history always explains the failure.  An
+    unreadable or schema-invalid checklist is invalid input, not a decision:
+    it fails cleanly without publishing any record.
+    """
+    project_root = _resolved_project_root(root)
+    try:
+        record = publish_checklist(project_root, checklist)
+    except AcceptanceRejected as error:
+        typer.echo(f"acceptance_id={error.record.acceptance_id}")
+        typer.echo("decision=REJECTED")
+        for reason in error.record.reasons:
+            typer.echo(f"reason={reason}")
+        raise typer.Exit(code=1) from None
+    except (ValidationError, ValueError, OSError) as error:
+        typer.echo("reason=invalid_checklist")
+        typer.echo(f"error={type(error).__name__}")
+        raise typer.Exit(code=1) from None
+    typer.echo(f"acceptance_id={record.acceptance_id}")
+    typer.echo("decision=ACCEPTED")
+
+
+@acceptance_app.command("show")
+def data_acceptance_show(
+    version: Annotated[str, typer.Option("--version", help="Dataset version hash.")],
+    root: Path = typer.Option(".", "--root", help="Project root."),
+) -> None:
+    """List one dataset version's acceptance history, oldest first.
+
+    Every record prints its stored decision; a record that carries rejection
+    (or other) reasons appends one ``reason=`` line each.  A stored record
+    that fails its integrity check is named with ``corrupt acceptance_id=``
+    instead of surfacing a traceback, the remaining history is still listed,
+    and the command exits nonzero so corruption is never mistaken for a pass.
+    """
+    registry = AcceptanceRegistry(_resolved_project_root(root))
+    directory = registry.root / version
+    if not directory.is_dir():
+        typer.echo("UNACCEPTED")
+        return
+    records: list[AcceptanceRecord] = []
+    corrupt_ids: list[str] = []
+    for child in sorted(directory.iterdir()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        try:
+            records.append(registry.get(version, child.name))
+        except AcceptanceIntegrityError:
+            # Integrity validation stays in the registry; here the damaged
+            # record is only named so the history remains readable and the
+            # corrupted id is auditable without leaking paths or payloads.
+            corrupt_ids.append(child.name)
+    if not records and not corrupt_ids:
+        typer.echo("UNACCEPTED")
+        return
+    for record in sorted(
+        records, key=lambda row: (row.created_at, row.acceptance_id)
+    ):
+        typer.echo(
+            f"{record.created_at.isoformat()} {record.acceptance_id} "
+            f"{record.policy_version} {record.decision.value}"
+        )
+        for reason in record.reasons:
+            typer.echo(f"reason={reason}")
+    for acceptance_id in corrupt_ids:
+        typer.echo(f"corrupt acceptance_id={acceptance_id}")
+    if corrupt_ids:
+        raise typer.Exit(code=1)
+
+
 # --------------------------------------------------------------------------- #
 # research group (the only formal publisher)
 # --------------------------------------------------------------------------- #
@@ -275,12 +660,59 @@ def research_run(
 
     Formal research always applies the RESEARCH corporate-action trust bar and
     refuses to backtest a dataset whose pinned coverage is not trusted, so a
-    formal run can never lower its own evidence bar.
+    formal run can never lower its own evidence bar.  A walk-forward run
+    prints its research status and its nullable stability conclusion: FAILED
+    exits nonzero; a COMPLETED STABLE/UNSTABLE/INCONCLUSIVE research retains
+    the exact label and exits zero.
     """
-    published = _run_one_research(Path(root), spec)
+    published = _run_one_research(_resolved_project_root(root), spec)
     typer.echo(f"experiment_id={published.experiment_id}")
     typer.echo(f"published={published.path}")
+    _echo_stability(published)
     _echo_trust(published)
+
+
+def _echo_stability(published: "PublishedExperiment") -> None:
+    """Print the research status and the nullable stability conclusion."""
+    report_path = Path(published.path) / "stability_report.json"
+    if not report_path.is_file():
+        typer.echo("research_status=COMPLETED")
+        typer.echo("stability_conclusion=none")
+        return
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    typer.echo(f"research_status={report.get('research_status', 'COMPLETED')}")
+    typer.echo(f"stability_conclusion={report.get('stability_conclusion')}")
+
+
+@research_app.command("challenge")
+def research_challenge(
+    declaration: Path = typer.Option(
+        ...,
+        "--declaration",
+        help="Strategy-challenge declaration JSON path.",
+    ),
+    root: Path = typer.Option(".", "--root", help="Project root."),
+) -> None:
+    """Run the one-time strategy challenge for one published declaration.
+
+    The declaration is durably published and the strategy-family/calendar
+    holdout irreversibly consumed *before* any challenger artifact is
+    opened; consumption survives every outcome, including a crash.  A
+    terminal FAILED exits nonzero; PROMOTED, REJECTED and
+    INCONCLUSIVE_RESEARCH_ONLY are completed research outcomes and exit
+    zero with the exact label.
+    """
+    service = StrategyChallengeService(_resolved_project_root(root))
+    try:
+        result = service.run(Path(declaration))
+    except ChallengeServiceError as error:
+        _echo_failure(str(error))
+        raise typer.Exit(code=1) from None
+    typer.echo(f"challenge_id={result.challenge_id}")
+    typer.echo(f"challenge_status={result.status}")
+    typer.echo(f"challenge_conclusion={result.conclusion or 'none'}")
+    if result.status == "FAILED":
+        raise typer.Exit(code=1)
 
 
 # --------------------------------------------------------------------------- #
@@ -319,8 +751,9 @@ def backtest_momentum_60d(
     diagnostic from a trusted performance claim.
     """
     mode = DataTrustMode.ENGINEERING if engineering else DataTrustMode.RESEARCH
+    project_root = _resolved_project_root(root)
     published = _run_one_research(
-        Path(root), spec, registry=_DebugRegistry(Path(root)), trust_mode=mode
+        project_root, spec, registry=_DebugRegistry(project_root), trust_mode=mode
     )
     typer.echo(f"experiment_id={published.experiment_id}")
     typer.echo(f"debug={published.path}")
@@ -348,7 +781,7 @@ def report_build(
     ``data/reports``.  The quality HTML is reconstructed from the persisted
     ``quality_report.json`` / version manifest -- nothing is recomputed.
     """
-    project_root = Path(root)
+    project_root = _resolved_project_root(root)
     experiment_id = experiment or _latest_experiment_id(project_root)
     if experiment_id is None:
         _echo_failure("no published experiment found under data/experiments")
@@ -402,9 +835,38 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
     spec = meta.get("spec", {})
     run_id = str(meta.get("run_id", ""))
     dataset_version = str(meta.get("dataset_version", ""))
-    scenario_names = tuple(str(item) for item in spec.get("cost_scenarios", ()))
     benchmark_symbols = tuple(str(item) for item in meta.get("benchmark_symbols", ()))
     run_dir = project_root / "data" / "runs" / run_id
+    # A formal walk-forward experiment carries its complete audit section in
+    # stability_report.json and no classic per-scenario backtest tree: the
+    # report renders the walk-forward section over an empty scenario list.
+    stability_path = experiment_dir / "stability_report.json"
+    if stability_path.is_file():
+        # A walk-forward experiment plots no scenario curves, so its window is
+        # the spec's own date range: the benchmark is still cut to it rather
+        # than left spanning the whole dataset.
+        benchmark = _within_window(
+            _benchmark_closes(project_root, dataset_version, benchmark_symbols),
+            *_experiment_window(spec, ()),
+        )
+        run_input = ExperimentReportInput(
+            experiment_id=experiment_id,
+            dataset_version=dataset_version,
+            universe_version=str(meta.get("universe_version", "")),
+            code_commit=str(meta.get("code_commit", "")),
+            scenarios=(),
+            benchmark_closes=benchmark,
+            benchmark_symbols=benchmark_symbols,
+            run_id=run_id,
+            hypothesis=str(spec.get("hypothesis", "")),
+            initial_cash=float(meta.get("initial_cash", 0.0)),
+            corporate_action_trust=metrics.get("corporate_action_trust"),
+            factor_input_audit=metrics.get("factor_input"),
+            data_acceptance=metrics.get("data_acceptance"),
+            walk_forward=json.loads(stability_path.read_text(encoding="utf-8")),
+        )
+        return run_input
+    scenario_names = tuple(str(item) for item in spec.get("cost_scenarios", ()))
     committed_scenarios = metrics.get("scenarios", {})
 
     benchmark = _benchmark_closes(project_root, dataset_version, benchmark_symbols)
@@ -454,7 +916,12 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
         universe_version=str(meta.get("universe_version", "")),
         code_commit=str(meta.get("code_commit", "")),
         scenarios=tuple(scenarios),
-        benchmark_closes=benchmark,
+        # The benchmarks are cut to the window the strategy curves actually
+        # cover: unclipped they draw the dataset's whole history, which the
+        # experiment never ran over.
+        benchmark_closes=_within_window(
+            benchmark, *_experiment_window(spec, scenarios)
+        ),
         benchmark_symbols=benchmark_symbols,
         run_id=run_id,
         hypothesis=str(spec.get("hypothesis", "")),
@@ -462,11 +929,74 @@ def _experiment_report_input(project_root: Path, experiment_id: str):
         # The frozen trust decision persisted in metrics.json; the report reads
         # it and renders trusted or untrusted state from these committed bytes.
         corporate_action_trust=metrics.get("corporate_action_trust"),
+        # The persisted factor-input audit (metrics["factor_input"]) so the
+        # rebuilt report states the same adjustment basis and break counts the
+        # run recorded; older metrics without the key simply omit the section.
+        factor_input_audit=metrics.get("factor_input"),
+        # The pinned real-data acceptance audit (metrics["data_acceptance"]);
+        # metrics without the key render the UNVERIFIED alert, never an
+        # inferred ACCEPTED decision.
+        data_acceptance=metrics.get("data_acceptance"),
+    )
+    return run_input
+
+
+def _as_date(value: object) -> date:
+    """The plain date behind a frame's trade-date value."""
+    return pd.Timestamp(value).date()
+
+
+def _experiment_window(
+    spec: dict, scenarios: Sequence[ExperimentScenario]
+) -> tuple[date | None, date | None]:
+    """The window the report's own curves cover, else the spec's date range.
+
+    A benchmark read without a window spans the whole dataset, so it draws
+    years the experiment never covered -- and, indexed from its own first day,
+    it turns a period difference into what reads as relative performance.
+    """
+    days: list[date] = []
+    for scenario in scenarios:
+        equity = scenario.equity
+        if not equity.empty:
+            days.append(_as_date(equity["trade_date"].min()))
+            days.append(_as_date(equity["trade_date"].max()))
+    if days:
+        return min(days), max(days)
+    window = spec.get("date_range") or {}
+    start = window.get("start_date")
+    end = window.get("end_date")
+    return (
+        date.fromisoformat(str(start)) if start else None,
+        date.fromisoformat(str(end)) if end else None,
     )
 
 
+def _within_window(
+    frame: pd.DataFrame, start: date | None, end: date | None
+) -> pd.DataFrame:
+    """``frame`` cut to ``[start, end]``; either side may be ``None``.
+
+    The rows are kept by comparing plain dates, never the column against a
+    ``date``: a ``datetime64[us]`` column (what ``DatasetReader`` hands back)
+    raises ``TypeError`` on that comparison rather than warning, and a frame
+    read straight from Parquet carries object ``date`` values instead.
+    """
+    if frame.empty or (start is None and end is None):
+        return frame.reset_index(drop=True)
+    keep = [
+        index
+        for index, value in enumerate(frame["trade_date"])
+        if (start is None or _as_date(value) >= start)
+        and (end is None or _as_date(value) <= end)
+    ]
+    return frame.iloc[keep].reset_index(drop=True)
+
+
 def _benchmark_closes(
-    project_root: Path, dataset_version: str, benchmark_symbols: tuple[str, ...]
+    project_root: Path,
+    dataset_version: str,
+    benchmark_symbols: tuple[str, ...],
 ) -> pd.DataFrame:
     empty = pd.DataFrame(columns=["symbol", "trade_date", "close"])
     if not dataset_version or not benchmark_symbols:

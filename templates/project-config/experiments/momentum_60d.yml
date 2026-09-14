@@ -1,0 +1,57 @@
+# 正式研究示例规格：60 日动量（一期工程验证，非投资建议）。
+#
+# 该文件是 research run（任务 11）消费的配置示例，需与本仓已实现因子
+# momentum_60d / 2.0.0 保持一致，日期范围落在 2020-01-01 至最近完整交易日内。
+# dataset_version 与 universe_version 用 CURRENT 占位：运行期由 runner 读取
+# 数据层 CURRENT 指针一次、解析为显式版本（ExperimentSpec.freeze）后再计算
+# experiment_id；冻结后写入实验目录的规格只引用显式版本，永不保留 CURRENT。
+#
+# universe_definition 指向冻结的时点化指数成分定义（configs/universes/
+# csi300.yml）：runner 在计算实验身份之前先对该定义做预检——数据集固定后校验
+# 成分表哈希并强制 index_membership_evidence 验收门禁，通过后把 universe_version
+# 冻结为定义版本。正式研究必须经由定义解析股票池；遗留 configs/universe.yml
+# 仅保留给工程路径。
+#
+# data_acceptance_id 同理：CURRENT_ACCEPTED 请求当前有效的真实数据验收记录，
+# runner 在计算实验身份前解析并冻结为显式验收 id（正式 RESEARCH 必需）。
+#
+# execution_pipeline 声明本研究的执行政策：walk_forward_oos_v1（固定日历年度
+# OOS fold、独立账户、政策化稳定性结论）是正式研究管线。date_range 是请求的
+# OOS 评估范围，不含预热：每个 fold 的三年日历预热在范围之外由 runner 计算，
+# 未能形成完整 12 个月 fold 的首尾日期记录为 not_evaluated_boundary。
+# engineering_single_window（遗留单窗口工程诊断路径）不产出正式稳定性结论。
+execution_pipeline: walk_forward_oos_v1
+hypothesis: >-
+  过去 60 个交易日的复权收益在 A 股样本内对随后短期收益存在一定持续性；
+  一期仅验证工程链路可复现并跑通全部运行状态，不声称统计有效性，也不构成投资建议。
+factor_versions:
+  momentum_60d: 2.0.0
+dataset_version: CURRENT
+universe_version: CURRENT
+universe_definition: csi300
+data_acceptance_id: CURRENT_ACCEPTED
+date_range:
+  start_date: 2020-01-01
+  end_date: 2026-09-02
+train_validation_holdout_policy: not_applicable_engineering_mvp
+preprocessing:
+  winsorization: none
+  standardization: none
+# portfolio_rule 选择 buffered_risk_weighted（缓冲式风险加权动量）。首期只有
+# 这一组预注册参数：target_count=10 / entry_rank=10 / hold_rank=15 /
+# risk_lookback_days=60 / min_risk_observations=40 / volatility_floor=0.10 /
+# max_single_weight=0.15 / rebalance_band_absolute=0.02 / gross_exposure=1.00 /
+# weight_quantum=1e-12、仅多头、无杠杆（省略字段即取冻结默认值）。策略参数的
+# 全部规范 JSON 内容进入 portfolio_rule_version、策略快照与实验 ID：任何显式
+# 参数修改都是新的策略身份，永不改变已注册的运行。等权规则（top_n_equal_weight）
+# 仅保留给基线/工程规格。
+portfolio_rule:
+  name: buffered_risk_weighted
+cost_scenarios:
+  - zero_cost
+  - commission_tax
+  - full_cost
+random_seed: 42
+code_commit: unversioned
+parent_experiment_ids: []
+agent_id: null

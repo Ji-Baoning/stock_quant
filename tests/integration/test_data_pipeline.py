@@ -1,8 +1,7 @@
 """Unit behaviour of ``stock_quant.data_pipeline`` (Task 13 Step 3).
 
 Imported before ``stock_quant.data_pipeline`` exists so the file fails during
-import in Step 2.  ``resolve_latest_complete_date`` is tested as a pure
-function; ``DataPipeline.update`` / ``DataPipeline.validate`` run against stub
+import in Step 2.  ``DataPipeline.update`` / ``DataPipeline.validate`` run against stub
 ``DataSource`` adapters that never touch a network or a token.  Every test
 builds its own synthetic project (updates change ``CURRENT``, so they must not
 share the session dataset used by the CLI / end-to-end modules).
@@ -10,7 +9,7 @@ share the session dataset used by the CLI / end-to-end modules).
 
 from __future__ import annotations
 
-import datetime as _dt
+import json
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -18,13 +17,20 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import yaml
-from conftest import build_fixture_project  # noqa: E402
+from conftest import CAL_END, CAL_START, build_fixture_project  # noqa: E402
 
-from stock_quant.data_model.calendar import TradingCalendar
+from stock_quant.data_model.calendar_coverage import CODE_CALENDAR_COVERAGE_GAP
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.security_master import master_coverage_frame
+from stock_quant.data_model.trade_calendar_facts import (
+    CODE_CALENDAR_EXCHANGE_MISMATCH,
+    CODE_CALENDAR_PRETRADE_CONTINUITY_BROKEN,
+)
 from stock_quant.data_model.universe import Universe
+from stock_quant.data_model.universe_membership import membership_frame
 from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
+    CODE_ADJUSTED_BAR_MISSING_FROM_DATASET,
+    CODE_CALENDAR_EMPTY_NO_END,
     CODE_MASTER_BAR_BOUNDARY,
     CODE_MASTER_COVERAGE_MISMATCH,
     CODE_MASTER_SNAPSHOT_INCOMPLETE,
@@ -33,14 +39,13 @@ from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
     CODE_UNIVERSE_MASTER_MISMATCH,
     DataPipeline,
     DataUpdateRequest,
-    SourceCoverage,
-    resolve_latest_complete_date,
 )
 from stock_quant.data_quality.models import (
     CODE_NONPOSITIVE_PRICE,
     QualityReport,
     Severity,
 )
+from stock_quant.data_quality.raw_checks import UNIVERSE_EVIDENCE_MISSING
 from stock_quant.data_sources.base import (
     AuthenticationError,
     DataRequest,
@@ -64,12 +69,15 @@ def _weekdays(start: date, end: date) -> list[date]:
 _WINDOW_START = date(2021, 11, 1)
 _WINDOW_END = date(2021, 11, 30)
 
+#: The ex-date baked into the stub cross-confirmed cash-dividend frames.
+_EVENT_DAY = date(2021, 11, 11)
+
 
 #: The repository fixture universe every stub project is built from (30 symbols
 #: mirrored from ``conftest._REPO_ROOT`` / ``configs/universe.yml``).
 _FIXTURE_UNIVERSE_SYMBOLS = tuple(
     Universe.from_yaml(
-        Path(__file__).resolve().parents[2] / "configs" / "universe.yml"
+        Path(__file__).resolve().parents[2] / "templates" / "project-config" / "universe.yml"
     ).symbols
 )
 _STOCK_BASIC_LIST_DATE = date(2001, 1, 2)
@@ -95,6 +103,8 @@ class StubAdapter:
     ``stock_basic_symbols`` narrows the whole-market ``stock_basic`` response
     to a subset (defaults to the fixture universe) and
     ``stock_basic_list_date_by_symbol`` overrides a symbol's ``list_date``.
+    The ``trade_cal_*`` knobs shape the per-exchange ``trade_cal`` halo
+    responses (see ``_trade_cal_frame``).
     """
 
     name: str
@@ -104,6 +114,10 @@ class StubAdapter:
     action_frames: dict[str, dict[str, pd.DataFrame]] | None = None
     stock_basic_symbols: tuple[str, ...] | None = None
     stock_basic_list_date_by_symbol: dict[str, date] | None = None
+    trade_cal_is_open_by_exchange: dict[tuple[str, date], int] | None = None
+    trade_cal_failing_exchanges: tuple[str, ...] = ()
+    trade_cal_missing_dates: tuple[date, ...] = ()
+    trade_cal_pretrade_overrides: dict[date, str] | None = None
     calls: list = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -113,6 +127,16 @@ class StubAdapter:
             self,
             "stock_basic_list_date_by_symbol",
             self.stock_basic_list_date_by_symbol or {},
+        )
+        object.__setattr__(
+            self,
+            "trade_cal_is_open_by_exchange",
+            self.trade_cal_is_open_by_exchange or {},
+        )
+        object.__setattr__(
+            self,
+            "trade_cal_pretrade_overrides",
+            self.trade_cal_pretrade_overrides or {},
         )
 
     def fetch(self, request: DataRequest) -> FetchResult:
@@ -124,18 +148,29 @@ class StubAdapter:
             raise failure(f"{self.name} supplier failure on {request.endpoint}")
         if self.raise_with is not None:
             raise self.raise_with(f"{self.name} supplier failure")
+        if (
+            request.endpoint == "trade_cal"
+            and request.params.get("exchange") in self.trade_cal_failing_exchanges
+        ):
+            raise AuthenticationError(f"{self.name} supplier failure on trade_cal")
         frame = self._frame(request)
         return FetchResult(
             source=self.name,
             endpoint=request.endpoint,
             request_key=request_key(request),
             frame=frame,
-            metadata={"source": self.name, "sdk_version": "stub"},
+            metadata={
+                "source": self.name,
+                "sdk_version": "stub",
+                "transport_id": self.name,
+            },
         )
 
     def _frame(self, request: DataRequest) -> pd.DataFrame:
         if request.endpoint == "stock_basic":
             return self._stock_basic_frame()
+        if request.endpoint == "trade_cal":
+            return self._trade_cal_frame(request)
         symbol = request.symbols[0]
         sessions = _weekdays(request.start_date, request.end_date)
         if request.endpoint == "index_history":
@@ -205,6 +240,37 @@ class StubAdapter:
                 for symbol in symbols
             ]
         )
+
+    def _trade_cal_frame(self, request: DataRequest) -> pd.DataFrame:
+        """One row per halo natural day; weekends closed, pretrade chained.
+
+        ``trade_cal_is_open_by_exchange`` is keyed by ``(exchange, date)`` so a
+        test can make exactly one exchange disagree; the response carries no
+        symbol scope, so the exchange is read from ``request.params``.
+        """
+        exchange = str(request.params.get("exchange"))
+        assert exchange in ("SSE", "SZSE")
+        rows: list[dict[str, object]] = []
+        current = request.start_date
+        while current <= request.end_date:
+            if current not in self.trade_cal_missing_dates:
+                previous = current - timedelta(days=1)
+                while previous.weekday() >= 5:
+                    previous -= timedelta(days=1)
+                rows.append(
+                    {
+                        "exchange": exchange,
+                        "cal_date": current.strftime("%Y%m%d"),
+                        "is_open": self.trade_cal_is_open_by_exchange.get(
+                            (exchange, current), 1 if current.weekday() < 5 else 0
+                        ),
+                        "pretrade_date": self.trade_cal_pretrade_overrides.get(
+                            current, previous.strftime("%Y%m%d")
+                        ),
+                    }
+                )
+            current += timedelta(days=1)
+        return pd.DataFrame(rows)
 
 
 def _all_stubs(**overrides) -> dict[str, DataSource]:
@@ -481,155 +547,6 @@ def project(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# resolve_latest_complete_date
-# --------------------------------------------------------------------------- #
-
-
-def _freeze_now(monkeypatch, iso: str) -> None:
-    now = _dt.datetime.fromisoformat(iso)
-
-    class _FixedDatetime(_dt.datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return now.replace(tzinfo=tz)
-
-    monkeypatch.setattr("stock_quant.data_pipeline._datetime", _FixedDatetime)
-
-
-def _november_calendar() -> TradingCalendar:
-    return TradingCalendar.from_open_days(
-        tuple(_weekdays(date(2021, 11, 1), date(2021, 11, 30)))
-    )
-
-
-def test_resolver_returns_newest_complete_open_day_after_publication_time(
-    monkeypatch,
-):
-    calendar = _november_calendar()
-    latest = calendar.open_days[-1]
-    coverage = SourceCoverage(
-        stock_primary=latest,
-        benchmarks={"000300.SH": latest, "000905.SH": latest},
-        validation={"baostock": latest},
-    )
-    _freeze_now(monkeypatch, "2021-11-30T15:30:00")
-    assert resolve_latest_complete_date(
-        coverage, calendar, _dt.time(15, 0)
-    ) == latest
-
-
-def test_resolver_waits_until_publication_time_for_today(monkeypatch):
-    calendar = _november_calendar()
-    latest = calendar.open_days[-1]
-    coverage = SourceCoverage(
-        stock_primary=latest,
-        benchmarks={"000300.SH": latest, "000905.SH": latest},
-        validation={"baostock": latest},
-    )
-    _freeze_now(monkeypatch, "2021-11-30T09:30:00")  # before the 15:00 gate
-    assert resolve_latest_complete_date(
-        coverage, calendar, _dt.time(15, 0)
-    ) == calendar.open_days[-2]
-
-
-def test_resolver_falls_back_when_a_required_series_lags(monkeypatch):
-    calendar = _november_calendar()
-    stock_latest = calendar.open_days[-3]
-    coverage = SourceCoverage(
-        stock_primary=stock_latest,
-        benchmarks={
-            "000300.SH": calendar.open_days[-1],
-            "000905.SH": calendar.open_days[-1],
-        },
-        validation={"baostock": calendar.open_days[-1]},
-    )
-    _freeze_now(monkeypatch, "2021-11-30T15:30:00")
-    assert resolve_latest_complete_date(
-        coverage, calendar, _dt.time(15, 0)
-    ) == stock_latest
-
-
-def test_resolver_is_limited_by_a_late_validation_source(monkeypatch):
-    calendar = _november_calendar()
-    validation_latest = calendar.open_days[-2]
-    coverage = SourceCoverage(
-        stock_primary=calendar.open_days[-1],
-        benchmarks={
-            "000300.SH": calendar.open_days[-1],
-            "000905.SH": calendar.open_days[-1],
-        },
-        validation={"baostock": validation_latest},
-    )
-    _freeze_now(monkeypatch, "2021-11-30T15:30:00")
-    assert resolve_latest_complete_date(
-        coverage, calendar, _dt.time(15, 0)
-    ) == validation_latest
-
-
-def test_resolver_returns_none_without_required_coverage(monkeypatch):
-    calendar = _november_calendar()
-    coverage = SourceCoverage(
-        stock_primary=None,
-        benchmarks={"000300.SH": calendar.open_days[-1]},
-        validation={},
-    )
-    _freeze_now(monkeypatch, "2021-11-30T15:30:00")
-    assert (
-        resolve_latest_complete_date(coverage, calendar, _dt.time(15, 0))
-        is None
-    )
-
-
-def test_resolver_uses_previous_open_day_when_today_is_a_weekend(monkeypatch):
-    """A non-trading today never waits for the publication-time gate."""
-    calendar = _november_calendar()
-    latest = calendar.open_days[-1]  # 2021-11-30 (Tuesday)
-    coverage = SourceCoverage(
-        stock_primary=latest,
-        benchmarks={"000300.SH": latest, "000905.SH": latest},
-        validation={"akshare": latest},
-    )
-    # Saturday 2021-12-04, well before the 15:00 gate.
-    _freeze_now(monkeypatch, "2021-12-04T09:00:00")
-    assert (
-        resolve_latest_complete_date(coverage, calendar, _dt.time(15, 0))
-        == latest
-    )
-
-
-def test_resolver_walks_back_from_a_non_trading_weekend_today(monkeypatch):
-    """A lagging required series still walks back over a weekend today."""
-    calendar = _november_calendar()
-    stock_latest = calendar.open_days[-2]
-    coverage = SourceCoverage(
-        stock_primary=stock_latest,
-        benchmarks={
-            "000300.SH": calendar.open_days[-1],
-            "000905.SH": calendar.open_days[-1],
-        },
-        validation={"akshare": calendar.open_days[-1]},
-    )
-    _freeze_now(monkeypatch, "2021-12-04T09:00:00")
-    assert (
-        resolve_latest_complete_date(coverage, calendar, _dt.time(15, 0))
-        == stock_latest
-    )
-
-
-def test_resolver_returns_none_for_an_empty_calendar():
-    calendar = TradingCalendar.from_open_days(())
-    coverage = SourceCoverage(
-        stock_primary=None,
-        benchmarks={},
-        validation={},
-    )
-    assert (
-        resolve_latest_complete_date(coverage, calendar, _dt.time(15, 0))
-        is None
-    )
-
-
-# --------------------------------------------------------------------------- #
 # DataPipeline.update / validate over a fresh synthetic project
 # --------------------------------------------------------------------------- #
 
@@ -645,6 +562,102 @@ def test_update_with_explicit_end_publishes_merged_dataset(project):
     assert result.dataset_ref.version != project.version
     assert result.resolved_end_date == _WINDOW_END
     assert all(status.ok for status in result.source_status)
+
+
+def test_successful_update_binds_sanitized_build_evidence(project):
+    """The dataset manifest must carry sanitized, identity-bearing evidence.
+
+    ``build_config`` records where every byte came from: hashes, stable reason
+    codes and the request window -- never exception text, URLs, local paths or
+    reason prose, so identical builds stay byte-identical apart from run_id.
+    """
+    result = DataPipeline(project.root, sources=_all_stubs()).update(_request())
+    manifest = json.loads(
+        (result.dataset_ref.path / "dataset_manifest.json").read_text()
+    )
+    build = manifest["build_config"]
+    assert build["origin"] == "data_update"
+    assert build["pipeline_contract_version"] == 1
+    assert build["run_id"] == result.run_id
+    assert build["requested_start_date"] == _WINDOW_START.isoformat()
+    assert build["effective_start_date"] == _WINDOW_START.isoformat()
+    assert build["requested_end_date"] == _WINDOW_END.isoformat()
+    assert build["resolved_end_date"] == _WINDOW_END.isoformat()
+    assert "resolved_end_is_fallback" not in build
+    assert build["raw_snapshots"] == sorted(
+        build["raw_snapshots"],
+        key=lambda row: (
+            row["source"],
+            row["endpoint"],
+            row["transport_id"] or "",
+            row["request_key"],
+            row["file_sha256"],
+        ),
+    )
+    assert all(
+        set(row)
+        == {
+            "source",
+            "endpoint",
+            "transport_id",
+            "request_key",
+            "file_sha256",
+            "manifest_sha256",
+        }
+        for row in build["raw_snapshots"]
+    )
+    assert all(
+        set(row) == {"source", "required", "ok", "reason_code"}
+        for row in build["source_status"]
+    )
+    assert all(row["reason_code"] == "ok" for row in build["source_status"])
+    assert "token" not in json.dumps(build).lower()
+
+
+def test_update_records_configured_start_when_request_omits_start(project):
+    """Manifest evidence distinguishes an omitted start from its effective value."""
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(end_date=_WINDOW_END)
+    )
+
+    manifest = json.loads(
+        (result.dataset_ref.path / "dataset_manifest.json").read_text()
+    )
+    build = manifest["build_config"]
+    assert build["requested_start_date"] is None
+    assert build["effective_start_date"] == "2020-01-01"
+
+
+def test_update_ignores_review_before_the_requested_window(project):
+    """A carried historical review cannot block a later incremental update.
+
+    The update window is November 2021, while this explicitly pinned 2018
+    conflict is already outside that refresh window.  Removing the production
+    window filter for reviews must make this test fail because the reconciler
+    cannot find a 2018 conflict in the current supplier responses.
+    """
+    (project.root / "configs" / "corporate_action_reviews.yml").write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "symbol": "601318.SH",
+                    "ex_date": "2018-06-07",
+                    "selected_source": "cninfo",
+                    "record_date": "2018-06-06",
+                    "cash_dividend_per_share": 1.2,
+                    "bonus_share_ratio": 0.0,
+                    "capitalization_ratio": 0.0,
+                    "rationale": "already reconciled in carried history",
+                }
+            ],
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = DataPipeline(project.root, sources=_all_stubs()).update(_request())
+
+    assert result.dataset_ref is not None
 
 
 def test_update_refreshes_master_and_publishes_master_coverage(project):
@@ -663,6 +676,62 @@ def test_update_refreshes_master_and_publishes_master_coverage(project):
     assert set(coverage["list_status"]) == {"L"}
     assert set(coverage["source"]) == {"tushare.stock_basic"}
     assert coverage["snapshot_sha256"].str.len().eq(64).all()
+
+
+def test_update_publishes_internal_total_return_rows(project):
+    """A successful update publishes the total-return bars and quarantine.
+
+    Every published ``adjusted_bar`` row carries the single internal
+    ``internal_total_return_v1`` basis over the whole pinned universe, and the
+    quarantine table ships alongside it so trust breaks stay auditable.
+    """
+    result = DataPipeline(project.root, sources=_all_stubs()).update(_request())
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        adjusted = context.read("adjusted_bar")
+        assert set(adjusted["adjustment"]) == {"internal_total_return_v1"}
+        assert set(adjusted["symbol"]) == set(_FIXTURE_UNIVERSE_SYMBOLS)
+        assert "corporate_action_quarantine" in context.tables
+
+
+def _run_update_with_actions(project, action_symbols):
+    """One full update; each named symbol cross-reports one cash dividend."""
+    frames = {
+        symbol: {
+            "cninfo_corporate_actions": _cninfo_single_cash(symbol),
+            "eastmoney_corporate_actions": _eastmoney_cash(symbol),
+        }
+        for symbol in action_symbols
+    }
+    sources = _all_stubs(akshare=StubAdapter("akshare", action_frames=frames))
+    return DataPipeline(project.root, sources=sources).update(_request())
+
+
+def _read_adjusted(root, version: str) -> pd.DataFrame:
+    with DatasetReader(root).open(version) as context:
+        return context.read("adjusted_bar")
+
+
+def test_later_action_does_not_rewrite_pre_ex_date_adjusted_rows(project):
+    """A newly discovered event only affects rows from its ex_date onward.
+
+    Two sequential updates over the same window; the second learns one
+    cross-confirmed cash dividend ex-dated 2021-11-11.  Every adjusted row
+    strictly before that ex_date must be frame-equal across both published
+    versions -- a later action can never rewrite past total-return values.
+    """
+    first = _run_update_with_actions(project, [])
+    assert first.dataset_ref is not None
+    before = _read_adjusted(project.root, first.dataset_ref.version)
+    second = _run_update_with_actions(project, ["600036.SH"])
+    assert second.dataset_ref is not None
+    after = _read_adjusted(project.root, second.dataset_ref.version)
+    cutoff = before["trade_date"] < pd.Timestamp(_EVENT_DAY)
+    assert cutoff.any()
+    pd.testing.assert_frame_equal(
+        before.loc[cutoff].reset_index(drop=True),
+        after.loc[cutoff].reset_index(drop=True),
+    )
 
 
 def test_stock_basic_fetch_failure_blocks_update(project):
@@ -868,6 +937,33 @@ def test_disabled_required_source_is_never_called(tmp_path):
     assert not tushare_status.ok and tushare_status.required
 
 
+def test_disabled_baostock_is_never_constructed_or_fetched(project, monkeypatch):
+    """``--sources baostock`` cannot bypass ``baostock.enabled: false``.
+
+    A config-disabled source is never built through ``_build_source`` and
+    never requested: naming it in the update request only narrows the enabled
+    set to nothing, so the run fails (or carries it as not-run) without the
+    adapter ever existing.
+    """
+    from conftest import write_sources
+
+    write_sources(project.root, baostock=False)
+    constructed: list[str] = []
+
+    def build(name, _config):
+        constructed.append(name)
+        if name == "baostock":
+            raise AssertionError("disabled baostock constructed")
+        return _all_stubs()[name]
+
+    monkeypatch.setattr("stock_quant.data_pipeline._build_source", build)
+    result = DataPipeline(project.root).update(
+        DataUpdateRequest(sources=("baostock",))
+    )
+    assert constructed == []
+    assert result.dataset_ref is None
+
+
 def test_validate_returns_clean_report_over_current_dataset(project):
     pipeline = DataPipeline(project.root)
     report = pipeline.validate()
@@ -924,71 +1020,179 @@ def test_update_blocks_publication_when_universe_mismatches_master(project):
     assert result.quality_report.by_code()[CODE_UNIVERSE_MASTER_MISMATCH] == 1
 
 
-def test_discovery_passes_configured_publication_time_to_resolver(
-    project, monkeypatch
-):
-    """The configured ``publication_time`` -- not a hard-coded 15:00 -- governs."""
-    config_path = project.root / "configs" / "project.yml"
-    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    payload["publication_time"] = "23:59"
-    config_path.write_text(
-        yaml.safe_dump(payload), encoding="utf-8"
-    )
+def test_update_without_end_uses_the_max_published_calendar_date(project):
+    """``--end`` omission means the newest published calendar day, nothing else.
 
-    captured: dict = {}
-
-    def fake_resolve(status, calendar, publication_time):
-        captured["publication_time"] = publication_time
-        return date(2021, 11, 30)
-
-    monkeypatch.setattr(
-        "stock_quant.data_pipeline.resolve_latest_complete_date", fake_resolve
-    )
-    pipeline = DataPipeline(project.root, sources=_all_stubs())
-    result = pipeline.update(
+    No clock is consulted: the resolved end is exactly the maximum
+    ``trading_calendar.calendar_date`` of the carried dataset (2022-01-07,
+    years before "today"), never the current natural day.
+    """
+    with DatasetReader(project.root).open(project.version) as context:
+        published = context.read("trading_calendar")
+    expected = max(published["calendar_date"]).date()
+    assert expected != date.today()
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
         DataUpdateRequest(start_date=_WINDOW_START, end_date=None)
     )
-    assert captured["publication_time"] == _dt.time(23, 59)
+    assert result.resolved_end_date == expected
+    assert not hasattr(result, "resolved_end_is_fallback")
+
+
+def test_update_without_end_fails_when_no_calendar_is_published(tmp_path):
+    """An empty published calendar must ask the operator for an explicit --end."""
+    project = build_fixture_project(tmp_path / "project")
+    publisher = DatasetPublisher(project.root)
+    with DatasetReader(project.root).open(project.version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+    tables["trading_calendar"] = tables["trading_calendar"].iloc[0:0]
+    publisher.publish(tables, QualityReport())
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(start_date=None, end_date=None)
+    )
+    assert result.dataset_ref is None
+    assert CODE_CALENDAR_EMPTY_NO_END in result.quality_report.by_code()
+
+
+# --------------------------------------------------------------------------- #
+# Relay trading-calendar refresh, manifest evidence and the publish span gate
+# --------------------------------------------------------------------------- #
+
+
+def test_update_records_two_trade_cal_snapshots_and_binds_a_relay_span(project):
+    """A successful update binds both exchanges' raw calendars into the manifest."""
+    stub = StubAdapter("tushare")
+    result = DataPipeline(project.root, sources=_all_stubs(tushare=stub)).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
     assert result.dataset_ref is not None
-    assert result.resolved_end_date == date(2021, 11, 30)
-
-
-def _republish_with_benchmark_trim(root, symbol, cutoff) -> None:
-    """Re-publish CURRENT with one benchmark symbol trimmed to ``<= cutoff``."""
-    reader = DatasetReader(root)
-    version = DatasetPublisher(root).current().version
-    with reader.open(version) as context:
-        daily = context.read("daily_bar")
-        master = context.read("security_master")
-        ca = context.read("corporate_action")
+    assert [call for call in stub.calls if call[0] == "trade_cal"] == [
+        ("trade_cal", None),
+        ("trade_cal", None),
+    ]
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        build = context.manifest["build_config"]
         calendar = context.read("trading_calendar")
-    keep = ~(
-        (daily["symbol"] == symbol)
-        & (daily["trade_date"] > pd.Timestamp(cutoff))
-    )
-    trimmed = daily.loc[keep].reset_index(drop=True)
-    DatasetPublisher(root).publish(
-        {
-            "daily_bar": trimmed,
-            "security_master": master,
-            "corporate_action": ca,
-            "trading_calendar": calendar,
-        },
-        QualityReport(),
-    )
+    relay = [
+        span
+        for span in build["calendar_coverage"]
+        if span["source"] == "tushare_relay"
+    ]
+    assert len(relay) == 1
+    # The fixture's carried span already covers [CAL_START, CAL_END] and the
+    # window sits inside it, so the merged span keeps those bounds.
+    assert relay[0]["start_date"] == CAL_START.isoformat()
+    assert relay[0]["end_date"] == CAL_END.isoformat()
+    assert sorted(relay[0]["snapshot_sha256s"]) == ["SSE", "SZSE"]
+    fresh = set(result.raw_snapshots)
+    for hashes in relay[0]["snapshot_sha256s"].values():
+        assert set(hashes) & fresh, "this round's snapshot hash must be bound"
+    assert build["full_history_acceptance_start"] == CAL_START.isoformat()
+    assert build["universe_coverage_definition_hashes"]
+    assert build["universe_coverage_skipped"] == []
+    assert "resolved_end_is_fallback" not in build
+    assert max(calendar["calendar_date"]).date() == CAL_END
 
 
-def test_discovery_reports_fallback_when_a_benchmark_series_lags(project, monkeypatch):
-    """A lagging required benchmark walks the end date back and flags it."""
-    _freeze_now(monkeypatch, "2022-01-07T16:00:00")
-    _republish_with_benchmark_trim(project.root, "000300.SH", date(2022, 1, 5))
-    pipeline = DataPipeline(project.root, sources=_all_stubs())
-    result = pipeline.update(
-        DataUpdateRequest(start_date=date(2021, 11, 1), end_date=None)
+def test_update_fails_when_the_two_exchanges_disagree(project):
+    """One exchange calling 2021-11-10 closed is an SSE/SZSE conflict."""
+    stub = StubAdapter(
+        "tushare", trade_cal_is_open_by_exchange={("SZSE", date(2021, 11, 10)): 0}
     )
-    assert result.dataset_ref is not None
-    assert result.resolved_end_date == date(2022, 1, 5)
-    assert result.resolved_end_is_fallback is True
+    result = DataPipeline(project.root, sources=_all_stubs(tushare=stub)).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+    assert result.dataset_ref is None
+    assert CODE_CALENDAR_EXCHANGE_MISMATCH in result.quality_report.by_code()
+
+
+def test_update_blocks_on_a_broken_pretrade_chain(project):
+    """Both exchanges agree on a wrong pretrade link; the chain kills the run."""
+    stub = StubAdapter(
+        "tushare",
+        trade_cal_pretrade_overrides={date(2021, 11, 10): "20211101"},
+    )
+    result = DataPipeline(project.root, sources=_all_stubs(tushare=stub)).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+    assert result.dataset_ref is None
+    assert CODE_CALENDAR_PRETRADE_CONTINUITY_BROKEN in result.quality_report.by_code()
+    assert result.raw_snapshots, "a blocked calendar run still records raw responses"
+
+
+def test_update_keeps_current_and_raw_when_the_calendar_fetch_fails(project):
+    """A half-fetched calendar is fatal: raw kept, CURRENT untouched, no replay."""
+    before = DatasetPublisher(project.root).current().version
+    partial = StubAdapter("tushare", trade_cal_failing_exchanges=("SZSE",))
+    result = DataPipeline(project.root, sources=_all_stubs(tushare=partial)).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+    assert result.dataset_ref is None
+    assert CODE_SOURCE_FETCH_FAILED in result.quality_report.by_code()
+    assert DatasetPublisher(project.root).current().version == before
+    assert result.raw_snapshots, "the SSE response was already written to the raw store"
+    # The next run asks the supplier again for both exchanges; old raw bytes are
+    # never replayed as a calendar cache.
+    retry = StubAdapter("tushare")
+    DataPipeline(project.root, sources=_all_stubs(tushare=retry)).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+    assert [call for call in retry.calls if call[0] == "trade_cal"] == [
+        ("trade_cal", None),
+        ("trade_cal", None),
+    ]
+
+
+def test_update_blocks_a_window_that_leaves_a_hole_in_calendar_coverage(project):
+    """A left-side window that is not adjacent to coverage fails the span gate.
+
+    Continuity passes here (the merged table holds no earlier open day at all,
+    so the boundary rows land in ``allowed_pre_coverage``), which is how this
+    case isolates the post-merge span gate from the chain check.
+    """
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(start_date=date(2017, 12, 4), end_date=date(2017, 12, 29))
+    )
+    assert result.dataset_ref is None
+    assert CODE_CALENDAR_COVERAGE_GAP in result.quality_report.by_code()
+
+
+def test_rerun_merges_adjacent_relay_spans_and_keeps_every_snapshot_hash(project):
+    """A window that extends coverage merges into the carried relay span."""
+    first = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+    assert first.dataset_ref is not None
+    with DatasetReader(project.root).open(first.dataset_ref.version) as context:
+        before = [
+            span
+            for span in context.manifest["build_config"]["calendar_coverage"]
+            if span["source"] == "tushare_relay"
+        ]
+    assert len(before) == 1
+    before_hashes = {
+        exchange: set(hashes)
+        for exchange, hashes in before[0]["snapshot_sha256s"].items()
+    }
+    extended_end = CAL_END + timedelta(days=20)
+    second = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(
+            start_date=CAL_END + timedelta(days=1), end_date=extended_end
+        )
+    )
+    assert second.dataset_ref is not None
+    with DatasetReader(project.root).open(second.dataset_ref.version) as context:
+        after = [
+            span
+            for span in context.manifest["build_config"]["calendar_coverage"]
+            if span["source"] == "tushare_relay"
+        ]
+    assert len(after) == 1, "adjacent same-source spans merge into one"
+    assert after[0]["start_date"] == CAL_START.isoformat()
+    assert after[0]["end_date"] == extended_end.isoformat()
+    fresh = set(second.raw_snapshots)
+    for exchange, hashes in after[0]["snapshot_sha256s"].items():
+        assert before_hashes[exchange] < set(hashes), "merging never drops evidence"
+        assert fresh & set(hashes), "this round's snapshot is bound as well"
 
 
 # --------------------------------------------------------------------------- #
@@ -1001,11 +1205,13 @@ def _republish_current_tables(
     *,
     master_coverage: pd.DataFrame | None = None,
     include_master_coverage: bool = True,
+    include_corporate_action: bool = True,
 ) -> str:
-    """Republish CURRENT with an optional security_master_coverage variant.
+    """Republish CURRENT with optional canonical-table variants.
 
     ``master_coverage`` replaces the published table; ``include_master_coverage
-    = False`` omits it entirely (the "older dataset" shape).  Used only to stage
+    = False`` omits it entirely, and ``include_corporate_action=False`` omits
+    the facts table (the "older dataset" shapes).  Used only to stage
     validate-only audit breaches the pipeline itself can never write.
     """
     publisher = DatasetPublisher(root)
@@ -1015,12 +1221,13 @@ def _republish_current_tables(
         tables = {
             "daily_bar": context.read("daily_bar"),
             "security_master": context.read("security_master"),
-            "corporate_action": context.read("corporate_action"),
             "corporate_action_coverage": context.read(
                 "corporate_action_coverage"
             ),
             "trading_calendar": context.read("trading_calendar"),
         }
+        if include_corporate_action:
+            tables["corporate_action"] = context.read("corporate_action")
         if include_master_coverage:
             tables["security_master_coverage"] = (
                 master_coverage
@@ -1028,6 +1235,55 @@ def _republish_current_tables(
                 else context.read("security_master_coverage")
             )
     return publisher.publish(tables, QualityReport()).version
+
+
+def test_validate_fails_closed_without_total_return_tables(project):
+    """A dataset manifest without adjusted_bar can never validate clean.
+
+    The publisher accepts table subsets silently, so ``validate`` must fail
+    closed on the missing total-return tables instead of waving a legacy (or
+    trimmed) dataset through as trusted.
+    """
+    pipeline, result = _update_and_validate(project)
+    assert result.dataset_ref is not None
+    # Republish CURRENT from an update-published dataset minus both new
+    # tables -- the exact shape a pre-migration or trimmed dataset has.
+    _republish_current_tables(project.root)
+    report = pipeline.validate()
+    issue = next(
+        item
+        for item in report.issues
+        if item.code == CODE_ADJUSTED_BAR_MISSING_FROM_DATASET
+    )
+    assert issue.severity is Severity.FATAL
+    assert issue.table == "adjusted_bar"
+    assert issue.details["missing_tables"] == [
+        "adjusted_bar",
+        "corporate_action_quarantine",
+    ]
+
+
+def test_validate_fails_closed_without_corporate_action(project):
+    """The same coded FATAL guards the facts the lineage checks read.
+
+    A dataset without ``corporate_action`` could not have its adjusted rows
+    audited, so it must fail closed too -- never crash on the bare read.
+    """
+    pipeline, _ = _update_and_validate(project)
+    _republish_current_tables(project.root, include_corporate_action=False)
+    report = pipeline.validate()
+    issue = next(
+        item
+        for item in report.issues
+        if item.code == CODE_ADJUSTED_BAR_MISSING_FROM_DATASET
+    )
+    assert issue.severity is Severity.FATAL
+    assert issue.table == "adjusted_bar"
+    assert issue.details["missing_tables"] == [
+        "corporate_action",
+        "adjusted_bar",
+        "corporate_action_quarantine",
+    ]
 
 
 def _update_and_validate(project, **tushare_overrides):
@@ -1108,3 +1364,166 @@ def test_validate_surfaces_missing_master_coverage_as_fatal(project):
     )
     assert issue.severity is Severity.FATAL
     assert issue.details["missing"]
+
+
+# --------------------------------------------------------------------------- #
+# Carried universe_membership raw table (point-in-time universe task)
+# --------------------------------------------------------------------------- #
+
+
+def _membership_fixture_frame() -> pd.DataFrame:
+    """A small, fully evidenced csi300 fact table over fixture symbols."""
+    return membership_frame(
+        [
+            {
+                "universe_id": "csi300",
+                "symbol": symbol,
+                "raw_effective_from": date(2018, 1, 2),
+                "raw_effective_to": None,
+                "announcement_date": date(2018, 1, 2),
+                "status": "active",
+                "reason": "initial_constituent",
+                "source": "csi_index_announcement",
+                "source_url": "https://www.csindex.com.cn/fixture.pdf",
+                "snapshot_sha256": "a1" * 32,
+                "source_document_sha256": "b2" * 32,
+            }
+            for symbol in ("600000.SH", "000333.SZ")
+        ]
+    )
+
+
+def _publish_baseline_with_membership(root: Path, membership: pd.DataFrame):
+    """Republish CURRENT with the membership table added to its tables.
+
+    The carried ``build_config`` is bound again unchanged: only the membership
+    table differs, and stripping the build evidence would turn the baseline
+    into a legacy manifest whose calendar coverage the update span gate
+    rejects (``calendar_uncovered``) -- which is not what this helper tests.
+    """
+    publisher = DatasetPublisher(root)
+    reader = DatasetReader(root)
+    with reader.open(publisher.current().version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+        build_config = context.manifest.get("build_config")
+    tables["universe_membership"] = membership
+    return publisher.publish(
+        tables, QualityReport(), build_config=build_config
+    ).version
+
+
+def _publish_legacy_baseline_without_membership(root: Path):
+    """Republish CURRENT without the membership table (a pre-membership
+    legacy baseline that post-dates bootstrap but predates the membership
+    era and carries no universe_membership table at all).  The carried
+    ``build_config`` is bound again unchanged; only the membership table
+    differs, so the update span gate still sees relay calendar coverage."""
+    publisher = DatasetPublisher(root)
+    reader = DatasetReader(root)
+    with reader.open(publisher.current().version) as context:
+        tables = {
+            name: context.read(name)
+            for name in context.tables
+            if name != "universe_membership"
+        }
+        build_config = context.manifest.get("build_config")
+    return publisher.publish(
+        tables, QualityReport(), build_config=build_config
+    ).version
+
+
+def test_update_carries_universe_membership_table_unchanged(project):
+    """Membership facts are immutable: an update carries the registered raw
+    table through to the new dataset version byte-for-byte and the auditor
+    stays clean over it."""
+    membership = _membership_fixture_frame()
+    _publish_baseline_with_membership(project.root, membership)
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        _request()
+    )
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        assert "universe_membership" in context.tables
+        carried = context.read("universe_membership")
+    pd.testing.assert_frame_equal(carried, membership, check_dtype=False)
+    report = DataPipeline(project.root).validate()
+    assert report.by_severity()[Severity.FATAL.value] == 0
+    assert report.by_severity()[Severity.ERROR.value] == 0
+
+
+def test_update_publishes_without_membership_table_when_absent(project):
+    """A pre-membership legacy baseline stays publishable; the update must
+    not invent an empty membership table for it (older datasets simply
+    update without the table until an explicit membership refresh)."""
+    _publish_legacy_baseline_without_membership(project.root)
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        _request()
+    )
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        assert "universe_membership" not in context.tables
+
+
+def test_validate_surfaces_tampered_membership_evidence_as_fatal(project):
+    """A membership row without evidence cannot pass ``data validate``: the
+    auditor runs the same fatal fact checks the acceptance gate relies on."""
+    membership = _membership_fixture_frame()
+    membership.loc[0, "snapshot_sha256"] = ""
+    _publish_baseline_with_membership(project.root, membership)
+    report = DataPipeline(project.root).validate()
+    assert report.by_code()[UNIVERSE_EVIDENCE_MISSING] == 1
+    issue = next(
+        item
+        for item in report.issues
+        if item.code == UNIVERSE_EVIDENCE_MISSING
+    )
+    assert issue.severity is Severity.FATAL
+    assert issue.table == "universe_membership"
+
+
+def test_validate_reports_calendar_evidence_of_the_fixture(project):
+    report = DataPipeline(project.root).validate()
+    codes = report.by_code()
+    assert "calendar_coverage_missing" not in codes
+    assert "bootstrap_seed_in_full_history" not in codes
+    assert "removed_fallback_field_present" not in codes
+    assert report.by_severity()[Severity.FATAL.value] == 0
+
+
+def test_validate_flags_a_legacy_manifest_without_calendar_coverage(project):
+    """A pre-calendar-manifest dataset cannot claim calendar provenance."""
+    with DatasetReader(project.root).open(project.version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+        build = dict(context.manifest["build_config"])
+    build.pop("calendar_coverage")
+    build.pop("full_history_acceptance_start")
+    version = DatasetPublisher(project.root).publish(
+        tables, QualityReport(), build_config=build
+    ).version
+    codes = DataPipeline(project.root).validate(version).by_code()
+    assert "calendar_coverage_missing" in codes
+
+
+def test_validate_ignores_a_compatible_legacy_fallback_field_but_not_a_new_one(
+    project,
+):
+    with DatasetReader(project.root).open(project.version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+        build = dict(context.manifest["build_config"])
+    legacy = dict(build)
+    legacy.pop("calendar_coverage")
+    legacy.pop("full_history_acceptance_start")
+    legacy["resolved_end_is_fallback"] = False
+    legacy_version = DatasetPublisher(project.root).publish(
+        tables, QualityReport(), build_config=legacy
+    ).version
+    assert "removed_fallback_field_present" not in DataPipeline(
+        project.root
+    ).validate(legacy_version).by_code()
+    fresh = dict(build, resolved_end_is_fallback=False)
+    fresh_version = DatasetPublisher(project.root).publish(
+        tables, QualityReport(), build_config=fresh
+    ).version
+    assert "removed_fallback_field_present" in DataPipeline(
+        project.root
+    ).validate(fresh_version).by_code()

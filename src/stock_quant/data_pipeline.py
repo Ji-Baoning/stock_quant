@@ -20,34 +20,57 @@ Role model (kept deliberately small and explicit):
   publishes.
 
 ``DataPipeline.update`` always fetches into the immutable raw-store *before*
-normalizing, merges the fresh canonical bars/corporate actions over the existing
-immutable dataset (security master and trading calendar are carried unchanged),
-renders the shared quality report, and publishes **only** when the neutral gate
-passes and no ``FATAL`` pipeline issue exists.  A blocked or failed update
+normalizing, refreshes the trading calendar for the window from the required
+relay ``trade_cal`` responses, merges the fresh canonical bars/corporate
+actions over the existing immutable dataset (the security master carries over
+with refreshed listing facts, and the immutable ``universe_membership`` table
+is carried unchanged), renders the shared quality report, and publishes
+**only** when the neutral gate passes and no ``FATAL`` pipeline issue exists.
+A blocked or failed update
 returns ``dataset_ref is None`` while remaining diagnosable through
 ``quality_report`` / ``source_status`` / ``raw_snapshots``.
 
-Live end-date discovery (``--end`` omitted) reuses the previously published
-dataset as the coverage evidence for ``resolve_latest_complete_date``; an
-explicit ``--end`` bypasses discovery but the merged window still runs the full
-quality checks.  This is engineering scaffolding for the MVP, not evidence of
-alpha -- nothing here is investment advice.
+When ``--end`` is omitted the end date is the newest open day of the
+*published* ``trading_calendar`` -- never a wall-clock heuristic; an empty
+published calendar is a FATAL that asks the operator for an explicit ``--end``.
+An explicit ``--end`` bypasses resolution but the merged window still runs the
+full quality checks.  This is engineering scaffolding for the MVP, not evidence
+of alpha -- nothing here is investment advice.
 """
 
 from __future__ import annotations
 
+import json
 import time as _sleep_module
 import uuid
-from dataclasses import dataclass
-from datetime import date
-from datetime import datetime as _datetime
-from datetime import time as dt_time
-from typing import Any, Mapping
+from dataclasses import asdict, dataclass
+from datetime import date, timedelta
+from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
 from stock_quant.config import SourceConfig, load_project_config
+from stock_quant.data_model.adjusted_bar import (
+    ADJUSTMENT_NAME,
+    action_id_of,
+    build_adjusted_bars,
+)
 from stock_quant.data_model.calendar import TradingCalendar
+from stock_quant.data_model.calendar_coverage import (
+    ACCEPTANCE_START_KEY,
+    COVERAGE_KEY,
+    COVERAGE_WARNING_CODES,
+    DEFINITION_HASHES_KEY,
+    SKIPPED_DEFINITIONS_KEY,
+    SOURCE_TUSHARE_RELAY,
+    CalendarCoverageError,
+    CalendarCoverageSpan,
+    coverage_from_payload,
+    coverage_payload,
+    merge_window,
+    supplier_span,
+    validate_build_calendar_evidence,
+)
 from stock_quant.data_model.corporate_action_coverage import (
     OUTCOME_FAILED,
     OUTCOME_SUCCESS_EMPTY,
@@ -76,11 +99,14 @@ from stock_quant.data_model.dataset import (
 )
 from stock_quant.data_model.normalize import normalize_daily
 from stock_quant.data_model.schemas import (
+    ADJUSTED_BAR_SCHEMA,
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     DAILY_SCHEMA,
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
+    UNIVERSE_MEMBERSHIP_COLUMNS,
 )
 from stock_quant.data_model.security_master import (
     MASTER_SOURCE_STOCK_BASIC,
@@ -88,20 +114,38 @@ from stock_quant.data_model.security_master import (
     master_coverage_frame,
     master_coverage_record,
 )
+from stock_quant.data_model.suspensions import suspension_rows
+from stock_quant.data_model.trade_calendar_facts import (
+    EXCHANGES as CALENDAR_EXCHANGES,
+)
+from stock_quant.data_model.trade_calendar_facts import (
+    ExchangeCalendarFacts,
+    TradeCalendarFactError,
+    check_exchange_agreement,
+    check_pretrade_continuity,
+    materialize_open_days,
+    parse_trade_cal_frame,
+)
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import (
+    CODE_ADJUSTED_BAR_MISSING_RAW,
+    CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH,
+    CODE_ADJUSTED_BAR_UNKNOWN_ACTION,
+    CODE_ADJUSTED_BAR_WRONG_BASIS,
     TABLE_CORPORATE_ACTION,
     QualityIssue,
     QualityReport,
     Severity,
 )
 from stock_quant.data_quality.raw_checks import (
+    TABLE_UNIVERSE_MEMBERSHIP,
     check_daily_values,
     check_primary_key_conflicts,
     check_provenance,
     check_schema,
     classify_missing_row,
+    validate_membership_facts,
 )
 from stock_quant.data_sources.base import (
     AuthenticationError,
@@ -111,7 +155,16 @@ from stock_quant.data_sources.base import (
     fetch_with_retry,
     translate_supplier_error,
 )
-from stock_quant.data_sources.raw_store import RawStore
+from stock_quant.data_sources.raw_store import (
+    RawSnapshot,
+    RawSnapshotEvidence,
+    RawStore,
+)
+from stock_quant.project_root import resolve_project_root
+from stock_quant.research.universe import (
+    UniverseCoverageError,
+    load_universe_coverage_criterion,
+)
 
 # --------------------------------------------------------------------------- #
 # Pipeline-level issue codes (kept out of the shared neutral-gate vocabulary:
@@ -121,12 +174,21 @@ from stock_quant.data_sources.raw_store import RawStore
 CODE_SOURCE_FETCH_FAILED = "source_fetch_failed"
 CODE_REQUIRED_SOURCE_DISABLED = "required_source_disabled"
 CODE_NO_CURRENT_DATASET = "no_current_dataset"
-CODE_DATA_DISCOVERY_UNRESOLVED = "data_discovery_unresolved"
+CODE_CALENDAR_EMPTY_NO_END = "calendar_empty_requires_explicit_end"
 CODE_OPTIONAL_SOURCE_FAILURE = "optional_source_failure"
 CODE_UNIVERSE_MASTER_MISMATCH = "universe_master_mismatch"
 CODE_MASTER_SNAPSHOT_INCOMPLETE = "master_snapshot_incomplete"
 CODE_MASTER_BAR_BOUNDARY = "master_bar_boundary"
 CODE_MASTER_COVERAGE_MISMATCH = "master_coverage_mismatch"
+CODE_UNIVERSE_DEFINITION_INVALID = "universe_definition_invalid"
+CODE_ADJUSTED_BAR_MISSING_FROM_DATASET = "adjusted_bar_missing_from_dataset"
+
+#: Canonical standardized table holding untrusted corporate-action rows.
+TABLE_CORPORATE_ACTION_QUARANTINE = "corporate_action_quarantine"
+
+#: Contract version of the sanitized ``build_config`` this pipeline writes into
+#: every published dataset manifest (and which is hashed into the version id).
+DATASET_BUILD_CONTRACT_VERSION = 1
 
 _CONFIGURED_SOURCES = ("tushare", "akshare", "baostock")
 _REQUIRED_ROLE = {"tushare": True, "akshare": True, "baostock": False}
@@ -139,36 +201,25 @@ _REQUIRED_ROLE = {"tushare": True, "akshare": True, "baostock": False}
 
 @dataclass(frozen=True)
 class SourceStatus:
-    """Outcome of one configured source within an update."""
+    """Outcome of one configured source within an update.
+
+    ``reason`` is free operator-facing prose; ``reason_code`` is the stable,
+    sanitized code that (and only that) travels into dataset build evidence.
+    """
 
     source: str
     required: bool
     ok: bool
     reason: str | None = None
-
-
-@dataclass(frozen=True)
-class SourceCoverage:
-    """Latest *contiguous* complete open day each data role has reached.
-
-    ``stock_primary`` is the required primary stock daily series; ``benchmarks``
-    maps each benchmark symbol to its latest complete open day; ``validation``
-    maps each *non-primary* source actually present (``akshare`` benchmark
-    frames and any ``baostock`` optional validation series) to its latest
-    complete open day.
-    """
-
-    stock_primary: date | None
-    benchmarks: Mapping[str, date]
-    validation: Mapping[str, date]
+    reason_code: str | None = None
 
 
 @dataclass(frozen=True)
 class DataUpdateRequest:
     """Idempotent request for one data update run.
 
-    ``end_date`` ``None`` triggers latest-complete-date discovery over the
-    currently published dataset; ``sources`` restricts to a subset of the
+    ``end_date`` ``None`` resolves the end to the newest open day of the
+    published ``trading_calendar``; ``sources`` restricts to a subset of the
     configured names.
     """
 
@@ -179,14 +230,7 @@ class DataUpdateRequest:
 
 @dataclass(frozen=True)
 class DataUpdateResult:
-    """One update's outcome: always diagnosable, published only when gated.
-
-    ``resolved_end_is_fallback`` records whether ``resolved_end_date`` was
-    reached by walking back from the nominal latest complete open day (design
-    spec §14: "条件不满足时回退到上一个确认完整交易日并在报告注明").  It is
-    ``False`` when the end date was either chosen explicitly (``--end``) or is
-    the nominal date with full coverage.
-    """
+    """One update's outcome: always diagnosable, published only when gated."""
 
     quality_report: QualityReport
     dataset_ref: Any
@@ -194,80 +238,173 @@ class DataUpdateResult:
     resolved_end_date: date | None
     source_status: tuple[SourceStatus, ...]
     raw_snapshots: tuple[str, ...]
-    resolved_end_is_fallback: bool = False
 
 
-def _nominal_candidate(
-    calendar: TradingCalendar, publication_time: dt_time
-) -> date | None:
-    """The newest open day an operator could call complete given only the clock.
+def _source_evidence(
+    statuses: Mapping[str, SourceStatus],
+) -> list[dict[str, object]]:
+    """Sanitized per-source rows: identifiers and stable codes only.
 
-    Today when today is an open day and ``publication_time`` has already passed;
-    otherwise the newest open day strictly before today.  A non-trading today
-    never counts, so discovery always walks to a real open day.  ``None`` for an
-    empty calendar.
+    ``reason`` prose never enters build evidence -- a missing code falls back
+    to ``ok`` / ``unspecified_failure`` so the row stays diagnosable without
+    leaking exception text.  Rows are sorted by source so identical builds
+    render identical evidence.
     """
-    open_days = calendar.open_days
-    if not open_days:
-        return None
-    now = _datetime.now()
-    today = now.date()
-    if calendar.is_trading_day(today):
-        if now.time() >= publication_time:
-            return today
-        return _previous_open_day(open_days, today)
-    return _previous_open_day(open_days, today)
-
-
-def resolve_latest_complete_date(
-    status: SourceCoverage,
-    calendar: TradingCalendar,
-    publication_time: dt_time,
-) -> date | None:
-    """Return the newest open day every required data role is complete through.
-
-    A day ``d`` is *complete* when the primary stock series, every benchmark
-    symbol and at least one validation source each reach ``d``.  Walking starts
-    at the nominal candidate (see :func:`_nominal_candidate`); when the nominal
-    day is not complete the walk continues backwards over confirmed open days.
-    Returns ``None`` when no open day in the calendar satisfies the
-    requirements.
-    """
-    open_days = calendar.open_days
-    if not open_days:
-        return None
-    first_candidate = _nominal_candidate(calendar, publication_time)
-    if first_candidate is None:
-        return None
-    candidates = [
-        day for day in reversed(open_days) if day <= first_candidate
+    return [
+        {
+            "source": status.source,
+            "required": status.required,
+            "ok": status.ok,
+            "reason_code": status.reason_code
+            or ("ok" if status.ok else "unspecified_failure"),
+        }
+        for status in sorted(statuses.values(), key=lambda row: row.source)
     ]
-    for day in candidates:
-        if _day_complete(status, day):
-            return day
-    return None
 
 
-def _previous_open_day(open_days: tuple[date, ...], day: date) -> date | None:
-    for candidate in reversed(open_days):
-        if candidate < day:
-            return candidate
-    return None
+def _raw_snapshot_evidence_rows(
+    snapshots: Sequence[RawSnapshot],
+) -> list[dict[str, str]]:
+    """Sanitized raw-snapshot rows, deduplicated and deterministically sorted."""
+    unique: dict[tuple[str, str, str, str, str], dict[str, str]] = {}
+    for snapshot in snapshots:
+        evidence = RawSnapshotEvidence.from_snapshot(snapshot)
+        row = asdict(evidence)
+        key = (
+            evidence.source,
+            evidence.endpoint,
+            evidence.transport_id or "",
+            evidence.request_key,
+            evidence.file_sha256,
+        )
+        unique[key] = row
+    return [unique[key] for key in sorted(unique)]
 
 
-def _day_complete(status: SourceCoverage, day: date) -> bool:
-    if status.stock_primary is None or status.stock_primary < day:
-        return False
-    if not status.benchmarks:
-        return False
-    if any(latest is None or latest < day for latest in status.benchmarks.values()):
-        return False
-    if not status.validation:
-        return False
-    return any(
-        latest is not None and latest >= day
-        for latest in status.validation.values()
+def dataset_build_config(
+    *,
+    run_id: str,
+    request: DataUpdateRequest,
+    effective_start_date: date,
+    resolved_end_date: date,
+    statuses: Mapping[str, SourceStatus],
+    raw_snapshots: Sequence[RawSnapshot],
+    calendar_spans: Sequence[CalendarCoverageSpan],
+    acceptance_start: date | None,
+    definition_hashes: Mapping[str, str],
+    skipped_definitions: Sequence[str],
+) -> dict[str, object]:
+    """The exact sanitized payload hashed into a published dataset version.
+
+    Carries hashes, identifiers, dates and stable status codes only -- never
+    exception text, URLs, local paths or reason prose -- so the dataset
+    version is bound to the raw evidence it was built from.  The calendar
+    evidence keys (``calendar_coverage`` and siblings) are the shape marker
+    for the build-config contract: ``DATASET_BUILD_CONTRACT_VERSION`` stays
+    ``1`` on purpose, so a manifest without ``calendar_coverage`` is a legacy
+    payload read compatibly but never accepted as fully evidenced.
+    """
+    return {
+        "origin": "data_update",
+        "pipeline_contract_version": DATASET_BUILD_CONTRACT_VERSION,
+        "run_id": run_id,
+        "requested_start_date": (
+            request.start_date.isoformat() if request.start_date else None
+        ),
+        "effective_start_date": effective_start_date.isoformat(),
+        "requested_end_date": (
+            request.end_date.isoformat() if request.end_date else None
+        ),
+        "resolved_end_date": resolved_end_date.isoformat(),
+        "source_status": _source_evidence(statuses),
+        "raw_snapshots": _raw_snapshot_evidence_rows(raw_snapshots),
+        COVERAGE_KEY: coverage_payload(calendar_spans),
+        ACCEPTANCE_START_KEY: (
+            acceptance_start.isoformat() if acceptance_start is not None else None
+        ),
+        DEFINITION_HASHES_KEY: dict(definition_hashes),
+        SKIPPED_DEFINITIONS_KEY: list(skipped_definitions),
+    }
+
+
+def _calendar_open_days(calendar_frame: pd.DataFrame) -> tuple[date, ...]:
+    """The published open days of one ``trading_calendar`` frame, sorted."""
+    return tuple(
+        sorted(
+            day.date()
+            for day, flag in zip(
+                calendar_frame["calendar_date"],
+                calendar_frame["is_trading_day"],
+            )
+            if bool(flag)
+        )
     )
+
+
+def _calendar_issues(
+    violations: Sequence[tuple[str, Mapping[str, object]]],
+) -> list[QualityIssue]:
+    """Pipeline issues for calendar violations (one shared severity map)."""
+    return [
+        _issue(
+            Severity.WARNING if code in COVERAGE_WARNING_CODES else Severity.FATAL,
+            code,
+            table="trading_calendar",
+            details=dict(details),
+        )
+        for code, details in violations
+    ]
+
+
+def master_bar_boundary_issues(
+    master: pd.DataFrame, daily: pd.DataFrame
+) -> list[QualityIssue]:
+    """WARNING when a bar row lies outside its symbol's listing window.
+
+    A bar before ``list_date`` (or after ``delist_date``) contradicts the
+    refreshed master facts.  Missing rows are *not* this check's job -- they
+    are classified separately by ``classify_missing_row``.  A WARNING never
+    blocks publication; it surfaces a source-vs-master disagreement.
+    """
+    if daily is None or daily.empty:
+        return []
+    bounds = {
+        str(row["symbol"]): (_as_date(row["list_date"]),
+                             _as_date(row["delist_date"]))
+        for row in master.to_dict("records")
+    }
+    issues: list[QualityIssue] = []
+    for record in daily.to_dict("records"):
+        symbol = str(record["symbol"])
+        list_date, delist_date = bounds.get(symbol, (None, None))
+        if list_date is None and delist_date is None:
+            continue
+        trade_date = _as_date(record["trade_date"])
+        if trade_date is None:
+            continue
+        if list_date is not None and trade_date < list_date:
+            boundary = "before_list_date"
+        elif delist_date is not None and trade_date > delist_date:
+            boundary = "after_delist_date"
+        else:
+            continue
+        issues.append(
+            _issue(
+                Severity.WARNING,
+                CODE_MASTER_BAR_BOUNDARY,
+                symbol=symbol,
+                trade_date=trade_date,
+                table="daily_bar",
+                details={
+                    "boundary": boundary,
+                    "list_date": list_date.isoformat()
+                    if list_date is not None else None,
+                    "delist_date": delist_date.isoformat()
+                    if delist_date is not None else None,
+                },
+            )
+        )
+    return issues
 
 
 # --------------------------------------------------------------------------- #
@@ -280,20 +417,18 @@ class DataPipeline:
 
     def __init__(
         self,
-        project_root,
+        project_root: str | Path,
         *,
-        config_root=None,
         sources: Mapping[str, DataSource] | None = None,
         sleeper=_sleep_module.sleep,
     ) -> None:
-        self._project_root = type(project_root)(project_root)
-        self._config_root = (
-            type(project_root)(config_root) if config_root is not None
-            else self._project_root
-        )
+        # One validated root: config, dataset and raw-store paths all derive
+        # from it, and an invalid root fails here -- before any source, raw
+        # store, staging or network path is ever reached.
+        self._project_root = resolve_project_root(project_root)
         self._overrides = dict(sources or {})
         self._sleeper = sleeper
-        self._project_config = load_project_config(self._config_root)
+        self._project_config = load_project_config(self._project_root)
         self._raw_store = RawStore(self._project_root)
 
     # -- public surface --------------------------------------------------- #
@@ -321,12 +456,76 @@ class DataPipeline:
             issues.extend(check_daily_values(daily, table="daily_bar"))
             issues.extend(check_provenance(daily, table="daily_bar"))
             master = context.read("security_master")
+            calendar_frame = context.read("trading_calendar")
+            build = (
+                context.manifest.get("build_config")
+                if isinstance(context.manifest, Mapping)
+                else None
+            )
+            membership = None
+            if TABLE_UNIVERSE_MEMBERSHIP in context.tables:
+                membership = context.read(TABLE_UNIVERSE_MEMBERSHIP)
             coverage = None
             if "security_master_coverage" in context.tables:
                 coverage = context.read("security_master_coverage")
+            missing_tables = [
+                name
+                for name in (
+                    TABLE_CORPORATE_ACTION,
+                    "adjusted_bar",
+                    TABLE_CORPORATE_ACTION_QUARANTINE,
+                )
+                if name not in context.tables
+            ]
+            if missing_tables:
+                # Fail closed: the publisher accepts table subsets silently, so
+                # a legacy (or trimmed) dataset without these canonical tables
+                # must never validate clean -- and reading a missing table
+                # would otherwise crash with a bare ValueError.
+                issues.append(
+                    _issue(
+                        Severity.FATAL,
+                        CODE_ADJUSTED_BAR_MISSING_FROM_DATASET,
+                        table="adjusted_bar",
+                        details={
+                            "message": (
+                                "published dataset is missing required "
+                                "canonical tables; run a full data update to "
+                                "republish"
+                            ),
+                            "missing_tables": missing_tables,
+                        },
+                    )
+                )
+            else:
+                corporate_actions = context.read(TABLE_CORPORATE_ACTION)
+                adjusted = context.read("adjusted_bar")
+                issues.extend(
+                    check_schema(
+                        adjusted, ADJUSTED_BAR_SCHEMA, table="adjusted_bar"
+                    )
+                )
+                issues.extend(
+                    check_primary_key_conflicts(
+                        adjusted, table="adjusted_bar"
+                    )
+                )
+                issues.extend(
+                    check_adjusted_bar_lineage(
+                        adjusted, daily, corporate_actions
+                    )
+                )
         issues.extend(self._universe_master_issues(master))
+        issues.extend(self._membership_issues(membership, calendar_frame))
         issues.extend(self._master_bar_boundary_issues(master, daily))
         issues.extend(self._master_coverage_consistency_issues(master, coverage))
+        issues.extend(
+            _calendar_issues(
+                validate_build_calendar_evidence(
+                    build, open_days=_calendar_open_days(calendar_frame)
+                )
+            )
+        )
         return QualityReport(issues=tuple(issues))
 
     def update(self, request: DataUpdateRequest) -> DataUpdateResult:
@@ -334,7 +533,7 @@ class DataPipeline:
         run_id = f"data_update_{uuid.uuid4().hex[:12]}"
         statuses: dict[str, SourceStatus] = {}
         issues: list[QualityIssue] = []
-        raw_snapshots: list[str] = []
+        raw_snapshots: list[RawSnapshot] = []
 
         enabled = self._enabled_names(request)
         for name in _CONFIGURED_SOURCES:
@@ -343,6 +542,7 @@ class DataPipeline:
                 required=_REQUIRED_ROLE[name],
                 ok=False,
                 reason="not_run",
+                reason_code="not_run",
             )
 
         # ---- the carried, immutable baseline --------------------------- #
@@ -352,7 +552,15 @@ class DataPipeline:
             return self._result(
                 issues, None, run_id, None, statuses, raw_snapshots
             )
-        master, calendar_open, current_daily, current_ca = baseline
+        (
+            master,
+            published_open_days,
+            current_daily,
+            current_ca,
+            membership,
+            current_quarantine,
+            baseline_spans,
+        ) = baseline
         issues.extend(self._universe_master_issues(master))
 
         # ---- required-source availability gate -------------------------- #
@@ -367,22 +575,18 @@ class DataPipeline:
                 raw_snapshots,
             )
 
+        # ---- end resolution: the published calendar is the only clock ----- #
         end = request.end_date
-        resolved_end: date | None = end
-        end_fallback = False
         if end is None:
-            resolved_end, end_fallback = self._discover_end(
-                calendar_open, current_daily
-            )
-            if resolved_end is None:
+            if not published_open_days:
                 issues.append(
                     _issue(
                         Severity.FATAL,
-                        CODE_DATA_DISCOVERY_UNRESOLVED,
+                        CODE_CALENDAR_EMPTY_NO_END,
                         details={
                             "message": (
-                                "no latest complete date could be resolved; pass "
-                                "an explicit --end or update the calendar first"
+                                "the published trading_calendar has no open day; "
+                                "pass an explicit --end"
                             )
                         },
                     )
@@ -390,7 +594,7 @@ class DataPipeline:
                 return self._result(
                     issues, None, run_id, None, statuses, raw_snapshots
                 )
-            end = resolved_end
+            end = published_open_days[-1]
         start = request.start_date or self._project_config.start_date
         if end < start:
             issues.append(
@@ -407,6 +611,25 @@ class DataPipeline:
                 issues, None, run_id, end, statuses, raw_snapshots
             )
 
+        # ---- required trading-calendar refresh --------------------------- #
+        # Runs before every other fetch so a calendar failure blocks the run
+        # before any window data is pulled, and so the whole update publishes
+        # as one atomic unit with its calendar evidence.
+        refreshed = self._refresh_calendar(
+            start,
+            end,
+            published_open_days,
+            issues,
+            statuses,
+            raw_snapshots,
+            baseline_spans,
+        )
+        if refreshed is None:
+            return self._result(
+                issues, None, run_id, end, statuses, raw_snapshots
+            )
+        calendar_open, calendar_spans = refreshed
+
         # ---- required security-master reference (tushare stock_basic) ----- #
         master, master_coverage = self._refresh_security_master(
             start, end, issues, statuses, raw_snapshots, master,
@@ -414,13 +637,13 @@ class DataPipeline:
         if master is None:
             return self._result(
                 issues, None, run_id, end, statuses, raw_snapshots,
-                resolved_end_is_fallback=end_fallback,
             )
 
         # ---- required primary stock daily ------------------------------- #
         equity_symbols = _equity_symbols(master)
         primary_rows: list[pd.DataFrame] = []
-        primary_dates: set[date] = set()
+        primary_dates: set[tuple[str, date]] = set()
+        raw_daily_frames: dict[str, pd.DataFrame] = {}
         fatal = self._fetch_primary_stock(
             enabled,
             equity_symbols,
@@ -431,6 +654,7 @@ class DataPipeline:
             raw_snapshots,
             primary_rows,
             primary_dates,
+            raw_daily_frames,
         )
         if fatal:
             return self._result(
@@ -440,7 +664,6 @@ class DataPipeline:
                 end,
                 statuses,
                 raw_snapshots,
-                resolved_end_is_fallback=end_fallback,
             )
 
         # ---- required benchmark history --------------------------------- #
@@ -466,22 +689,25 @@ class DataPipeline:
                 end,
                 statuses,
                 raw_snapshots,
-                resolved_end_is_fallback=end_fallback,
             )
 
         # ---- best-effort corporate actions ------------------------------ #
         corporate_action = current_ca
+        corporate_action_quarantine = current_quarantine
         coverage = coverage_frame([])
         if "akshare" in enabled:
-            corporate_action, coverage = self._refresh_corporate_actions(
-                enabled,
-                equity_symbols,
-                start,
-                end,
-                issues,
-                statuses,
-                raw_snapshots,
-                current_ca,
+            corporate_action, coverage, corporate_action_quarantine = (
+                self._refresh_corporate_actions(
+                    enabled,
+                    equity_symbols,
+                    start,
+                    end,
+                    issues,
+                    statuses,
+                    raw_snapshots,
+                    current_ca,
+                    current_quarantine,
+                )
             )
 
         # ---- optional validation daily ---------------------------------- #
@@ -500,6 +726,19 @@ class DataPipeline:
 
         # ---- quality report over the merged canonical daily ------------- #
         ingested = pd.Timestamp.now(tz="UTC")
+        self._materialize_suspensions(
+            raw_daily_frames,
+            equity_symbols,
+            master,
+            calendar_open,
+            start,
+            end,
+            corporate_action,
+            primary_rows,
+            primary_dates,
+            issues,
+            ingested,
+        )
         new_daily = self._merge_daily(
             current_daily,
             primary_rows,
@@ -528,6 +767,21 @@ class DataPipeline:
         )
         issues.extend(self._master_bar_boundary_issues(master, new_daily))
 
+        # ---- total-return bars over the merged canonical daily ---------- #
+        adjusted = build_adjusted_bars(
+            new_daily,
+            corporate_action,
+            corporate_action_quarantine,
+            coverage,
+            symbols=equity_symbols,
+        )
+        issues.extend(
+            check_schema(adjusted, ADJUSTED_BAR_SCHEMA, table="adjusted_bar")
+        )
+        issues.extend(
+            check_primary_key_conflicts(adjusted, table="adjusted_bar")
+        )
+
         report = QualityReport(issues=tuple(issues))
         decision = evaluate_publication(report)
         fatal_present = any(
@@ -541,25 +795,63 @@ class DataPipeline:
                 end,
                 statuses,
                 raw_snapshots,
-                resolved_end_is_fallback=end_fallback,
             )
 
         # ---- publish ---------------------------------------------------- #
+        try:
+            criterion = load_universe_coverage_criterion(
+                self._project_root / "configs" / "universes"
+            )
+        except UniverseCoverageError as error:
+            issues.append(
+                _issue(
+                    Severity.FATAL,
+                    CODE_UNIVERSE_DEFINITION_INVALID,
+                    details={"message": str(error)},
+                )
+            )
+            return self._result(issues, None, run_id, end, statuses, raw_snapshots)
         tables = {
             "daily_bar": new_daily,
+            "adjusted_bar": adjusted,
             "security_master": master[list(SECURITY_MASTER_COLUMNS)],
             "security_master_coverage": master_coverage,
             "corporate_action": corporate_action[
                 list(CORPORATE_ACTION_COLUMNS)
+            ],
+            "corporate_action_quarantine": corporate_action_quarantine[
+                list(CORPORATE_ACTION_QUARANTINE_COLUMNS)
             ],
             "corporate_action_coverage": coverage,
             "trading_calendar": _calendar_frame(calendar_open)[
                 list(TRADING_CALENDAR_COLUMNS)
             ],
         }
+        if membership is not None:
+            # Membership facts are immutable qualification records: an update
+            # never rewrites them, it carries the registered raw table
+            # unchanged so every published dataset keeps one auditable
+            # membership version (appends happen only through the explicit
+            # membership refresh workflow).
+            tables[TABLE_UNIVERSE_MEMBERSHIP] = membership[
+                list(UNIVERSE_MEMBERSHIP_COLUMNS)
+            ]
         try:
             dataset_ref = DatasetPublisher(self._project_root).publish(
-                tables, report, build_config={"run_id": run_id}
+                tables,
+                report,
+                build_config=dataset_build_config(
+                    run_id=run_id,
+                    request=request,
+                    effective_start_date=start,
+                    resolved_end_date=end,
+                    statuses=statuses,
+                    raw_snapshots=raw_snapshots,
+                    calendar_spans=calendar_spans,
+                    acceptance_start=criterion.acceptance_start,
+                    definition_hashes=criterion.definition_hashes,
+                    skipped_definitions=criterion.skipped,
+                ),
             )
         except PublicationBlocked as error:
             issues.append(
@@ -576,7 +868,6 @@ class DataPipeline:
                 end,
                 statuses,
                 raw_snapshots,
-                resolved_end_is_fallback=end_fallback,
             )
         return self._result(
             issues,
@@ -585,7 +876,6 @@ class DataPipeline:
             end,
             statuses,
             raw_snapshots,
-            resolved_end_is_fallback=end_fallback,
         )
 
     # ------------------------------------------------------------------ #
@@ -615,7 +905,7 @@ class DataPipeline:
         publication.
         """
         universe = Universe.from_yaml(
-            self._config_root / "configs" / "universe.yml"
+            self._project_root / "configs" / "universe.yml"
         )
         master_symbols = set(str(value) for value in master["symbol"])
         universe_symbols = set(universe.symbols)
@@ -651,45 +941,7 @@ class DataPipeline:
         are classified separately by ``classify_missing_row``.  A WARNING never
         blocks publication; it surfaces a source-vs-master disagreement.
         """
-        if daily is None or daily.empty:
-            return []
-        bounds = {
-            str(row["symbol"]): (_as_date(row["list_date"]),
-                                 _as_date(row["delist_date"]))
-            for row in master.to_dict("records")
-        }
-        issues: list[QualityIssue] = []
-        for record in daily.to_dict("records"):
-            symbol = str(record["symbol"])
-            list_date, delist_date = bounds.get(symbol, (None, None))
-            if list_date is None and delist_date is None:
-                continue
-            trade_date = _as_date(record["trade_date"])
-            if trade_date is None:
-                continue
-            if list_date is not None and trade_date < list_date:
-                boundary = "before_list_date"
-            elif delist_date is not None and trade_date > delist_date:
-                boundary = "after_delist_date"
-            else:
-                continue
-            issues.append(
-                _issue(
-                    Severity.WARNING,
-                    CODE_MASTER_BAR_BOUNDARY,
-                    symbol=symbol,
-                    trade_date=trade_date,
-                    table="daily_bar",
-                    details={
-                        "boundary": boundary,
-                        "list_date": list_date.isoformat()
-                        if list_date is not None else None,
-                        "delist_date": delist_date.isoformat()
-                        if delist_date is not None else None,
-                    },
-                )
-            )
-        return issues
+        return master_bar_boundary_issues(master, daily)
 
     def _master_coverage_consistency_issues(
         self, master: pd.DataFrame, coverage: pd.DataFrame | None
@@ -750,6 +1002,30 @@ class DataPipeline:
             )
         ]
 
+    def _membership_issues(
+        self,
+        membership: pd.DataFrame | None,
+        calendar_frame: pd.DataFrame,
+    ) -> list[QualityIssue]:
+        """Audit the carried ``universe_membership`` table, when present.
+
+        Row-level fact checks run through ``validate_membership_facts`` with
+        an empty ``expected_sizes`` mapping: evidence, symbols, intervals,
+        overlap, announcement visibility and (with no master snapshot in this
+        context) convention checks only. Cardinality acceptance belongs to the
+        research-facing membership acceptance gate, which pins expected sizes,
+        master boundaries and official exceptions. Datasets predating the
+        membership table carry no rows and therefore raise nothing here.
+        """
+        if membership is None:
+            return []
+        open_days = _calendar_open_days(calendar_frame)
+        return validate_membership_facts(
+            membership,
+            calendar=TradingCalendar.from_open_days(open_days),
+            expected_sizes={},
+        )
+
     def _source(self, name: str) -> DataSource:
         override = self._overrides.get(name)
         if override is not None:
@@ -767,7 +1043,19 @@ class DataPipeline:
             ) from None
 
     def _read_baseline(self, issues: list[QualityIssue]):
-        """The carried master/calendar/current tables, or None + fatal issue."""
+        """The carried master/calendar/daily/action/membership/quarantine state.
+
+        Returns ``(master, open_days, daily, ca, membership, quarantine,
+        baseline_spans)``, or ``None`` after a FATAL issue when no dataset
+        exists yet.  The immutable ``universe_membership`` raw table is
+        carried too when the baseline dataset already has one (older datasets
+        simply update without it), and a pre-migration dataset without a
+        ``corporate_action_quarantine`` table yields an empty canonical frame
+        so it stays updatable.  ``baseline_spans`` parses the manifest's
+        ``calendar_coverage`` evidence; a legacy manifest without the key
+        yields no spans and the publish-time span gate then requires this
+        window to cover the whole published calendar range.
+        """
         try:
             ref = DatasetPublisher(self._project_root).current()
         except DatasetNotFoundError:
@@ -785,22 +1073,35 @@ class DataPipeline:
             )
             return None
         reader = DatasetReader(self._project_root)
+        manifest: Mapping[str, Any] | None = None
         with reader.open(ref.version) as context:
+            manifest = context.manifest
             master = context.read("security_master")
             calendar_frame = context.read("trading_calendar")
             daily = context.read("daily_bar")
             ca = context.read(TABLE_CORPORATE_ACTION)
-        open_days = tuple(
-            sorted(
-                day.date()
-                for day, flag in zip(
-                    calendar_frame["calendar_date"],
-                    calendar_frame["is_trading_day"],
-                )
-                if bool(flag)
+            membership = (
+                context.read(TABLE_UNIVERSE_MEMBERSHIP)
+                if TABLE_UNIVERSE_MEMBERSHIP in context.tables
+                else None
             )
-        )
-        return master, open_days, daily, ca
+            if TABLE_CORPORATE_ACTION_QUARANTINE in context.tables:
+                quarantine = context.read(TABLE_CORPORATE_ACTION_QUARANTINE)
+            else:
+                # A pre-migration dataset carries no quarantine table; update
+                # it by seeding the canonical empty frame instead of failing.
+                quarantine = pd.DataFrame(
+                    columns=CORPORATE_ACTION_QUARANTINE_COLUMNS
+                )
+        open_days = _calendar_open_days(calendar_frame)
+        build = manifest.get("build_config") if isinstance(manifest, Mapping) else None
+        raw_spans = build.get(COVERAGE_KEY, []) if isinstance(build, Mapping) else []
+        try:
+            spans = coverage_from_payload(raw_spans)
+        except CalendarCoverageError as error:
+            issues.extend(_calendar_issues(error.violations))
+            return None
+        return master, open_days, daily, ca, membership, quarantine, spans
 
     def _require_available(
         self,
@@ -818,6 +1119,7 @@ class DataPipeline:
                     required=True,
                     ok=False,
                     reason=f"required source {name!r} is not enabled in config",
+                    reason_code="required_source_disabled",
                 )
                 issues.append(
                     _issue(
@@ -840,6 +1142,7 @@ class DataPipeline:
         raw_snapshots,
         primary_rows,
         primary_dates,
+        raw_daily_frames,
     ) -> bool:
         if "tushare" not in enabled:
             return False
@@ -855,16 +1158,94 @@ class DataPipeline:
                 statuses["tushare"] = SourceStatus(
                     "tushare", True, False,
                     reason=f"required fetch failed for {symbol}",
+                    reason_code="source_fetch_failed",
                 )
                 return True
             raw_snapshots.append(self._record_raw(result))
+            # The raw response (pre_close in particular) is the suspension
+            # evidence consumed later by _materialize_suspensions.
+            raw_daily_frames[symbol] = result.frame
             clean = normalize_daily(
                 result.frame, "tushare", _ingest_time(result.metadata)
             )
             primary_rows.append(clean.valid)
-            primary_dates.update(clean.valid["trade_date"].dt.date)
-        statuses["tushare"] = SourceStatus("tushare", True, True)
+            # (symbol, date) pairs: _missing_issues tests tuple membership, so
+            # bare dates here would warn on every open day of every symbol.
+            primary_dates.update(
+                zip(clean.valid["symbol"], clean.valid["trade_date"].dt.date)
+            )
+        statuses["tushare"] = SourceStatus(
+            "tushare", True, True, reason_code="ok"
+        )
         return False
+
+    def _materialize_suspensions(
+        self,
+        raw_daily_frames,
+        equity_symbols,
+        master,
+        calendar_open,
+        start,
+        end,
+        corporate_action,
+        primary_rows,
+        primary_dates,
+        issues,
+        ingested,
+    ) -> None:
+        """Append proven suspension bars for every equity symbol in place.
+
+        The raw tushare ``daily`` response proves each absent open day: when
+        the next present row's ``pre_close`` chains to the last close, the
+        missing days were suspended, not lost.  See
+        ``data_model/suspensions.py`` for the proof rules; chain frames from
+        responses without ``pre_close`` (offline stubs) are skipped silently.
+        """
+        listing = {
+            str(row["symbol"]): (
+                _as_date(row.get("list_date")),
+                _as_date(row.get("delist_date")),
+            )
+            for row in master.to_dict("records")
+        }
+        window = [
+            day
+            for day in calendar_open
+            if isinstance(day, date) and start <= day <= end
+        ]
+        for symbol in equity_symbols:
+            raw = raw_daily_frames.get(symbol)
+            if raw is None or "pre_close" not in raw.columns:
+                continue
+            date_column = next(
+                (name for name in ("trade_date", "date") if name in raw.columns),
+                None,
+            )
+            if date_column is None or "close" not in raw.columns:
+                continue
+            chain = pd.DataFrame(
+                {
+                    "trade_date": pd.to_datetime(raw[date_column].astype(str)),
+                    "close": pd.to_numeric(raw["close"]),
+                    "pre_close": pd.to_numeric(raw["pre_close"]),
+                }
+            )
+            list_date, delist_date = listing.get(symbol, (None, None))
+            rows, suspension_issues = suspension_rows(
+                symbol,
+                chain,
+                window,
+                list_date=list_date,
+                delist_date=delist_date,
+                actions=corporate_action,
+                ingested_at=ingested,
+            )
+            if not rows.empty:
+                primary_rows.append(rows)
+                primary_dates.update(
+                    zip(rows["symbol"], rows["trade_date"].dt.date)
+                )
+            issues.extend(suspension_issues)
 
     def _fetch_benchmarks(
         self,
@@ -892,6 +1273,7 @@ class DataPipeline:
                 statuses["akshare"] = SourceStatus(
                     "akshare", True, False,
                     reason=f"required fetch failed for {symbol}",
+                    reason_code="source_fetch_failed",
                 )
                 return True
             raw_snapshots.append(self._record_raw(result))
@@ -911,13 +1293,166 @@ class DataPipeline:
                     )
                 )
                 statuses["akshare"] = SourceStatus(
-                    "akshare", True, False, reason=str(error)
+                    "akshare", True, False, reason=str(error),
+                    reason_code="source_fetch_failed",
                 )
                 return True
             benchmark_rows.append(clean)
             benchmark_dates.update(clean["trade_date"].dt.date)
-        statuses["akshare"] = SourceStatus("akshare", True, True)
+        statuses["akshare"] = SourceStatus(
+            "akshare", True, True, reason_code="ok"
+        )
         return False
+
+    def _refresh_calendar(
+        self,
+        start,
+        end,
+        published_open_days,
+        issues,
+        statuses,
+        raw_snapshots,
+        baseline_spans,
+    ) -> tuple[tuple[date, ...], tuple[CalendarCoverageSpan, ...]] | None:
+        """Fetch, validate and materialise this window's trading calendar.
+
+        Both exchanges are requested over the validation halo ``[start - 1,
+        end + 1]`` and saved to the raw store as ordinary responses (also on
+        the failure path).  Values are validated per exchange, then compared
+        day by day, then used to replace the window's open days and to check
+        the ``pretrade_date`` chain over the merged candidate table.  Returns
+        ``(open_days, spans)`` or ``None`` after a FATAL issue: a raised
+        calendar never publishes, never writes a partial span, and never
+        reuses a previous run's raw response (the supplier is re-requested on
+        every run).
+        """
+        source = self._adapter_or_fail("tushare", statuses)
+        if source is None:
+            issues.append(
+                _issue(
+                    Severity.FATAL,
+                    CODE_SOURCE_FETCH_FAILED,
+                    details={
+                        "source": "tushare",
+                        "endpoint": "trade_cal",
+                        "message": (
+                            statuses["tushare"].reason or "adapter unavailable"
+                        ),
+                    },
+                )
+            )
+            return None
+        halo_start = start - timedelta(days=1)
+        halo_end = end + timedelta(days=1)
+        config = self._project_config.sources.get("tushare", SourceConfig())
+        policy = RetryPolicy(
+            max_attempts=min(config.max_retries + 1, 3),
+            maximum_wait_seconds=min(config.timeout_seconds, 30),
+        )
+        facts: dict[str, ExchangeCalendarFacts] = {}
+        hashes: dict[str, list[str]] = {
+            exchange: [] for exchange in CALENDAR_EXCHANGES
+        }
+        for exchange in CALENDAR_EXCHANGES:
+            request = DataRequest(
+                "trade_cal", (), halo_start, halo_end, {"exchange": exchange}
+            )
+            try:
+                result = fetch_with_retry(
+                    source, request, policy, sleeper=self._sleeper
+                )
+            except Exception as error:  # noqa: BLE001 - required calendar
+                issues.append(
+                    _issue(
+                        Severity.FATAL,
+                        CODE_SOURCE_FETCH_FAILED,
+                        details={
+                            "source": "tushare",
+                            "endpoint": "trade_cal",
+                            "exchange": exchange,
+                            "message": str(translate_supplier_error(error)),
+                        },
+                    )
+                )
+                statuses["tushare"] = SourceStatus(
+                    "tushare", True, False,
+                    reason=f"trade_cal fetch failed: {error}",
+                    reason_code="source_fetch_failed",
+                )
+                return None
+            snapshot = self._record_raw(result)
+            raw_snapshots.append(snapshot)
+            hashes[exchange].append(snapshot.sha256)
+            try:
+                facts[exchange] = parse_trade_cal_frame(
+                    result.frame,
+                    exchange=exchange,
+                    halo_start=halo_start,
+                    halo_end=halo_end,
+                )
+            except TradeCalendarFactError as error:
+                issues.extend(_calendar_issues(error.violations))
+                statuses["tushare"] = SourceStatus(
+                    "tushare", True, False,
+                    reason=f"trade_cal {exchange} raw validation failed",
+                    reason_code="partial_fetch_failure",
+                )
+                return None
+        violations = check_exchange_agreement(facts["SSE"], facts["SZSE"])
+        if violations:
+            issues.extend(_calendar_issues(violations))
+            statuses["tushare"] = SourceStatus(
+                "tushare", True, False,
+                reason="SSE and SZSE calendars disagree",
+                reason_code="partial_fetch_failure",
+            )
+            return None
+        open_days = materialize_open_days(
+            published_open_days, facts=facts["SSE"], start=start, end=end
+        )
+        continuity = check_pretrade_continuity(
+            facts["SSE"].rows, open_days, start=start, end=end
+        )
+        if continuity.violations:
+            issues.extend(_calendar_issues(continuity.violations))
+            statuses["tushare"] = SourceStatus(
+                "tushare", True, False,
+                reason="calendar pretrade chain is broken",
+                reason_code="partial_fetch_failure",
+            )
+            return None
+        for boundary in continuity.allowed_pre_coverage:
+            issues.append(
+                _issue(
+                    Severity.INFO,
+                    "calendar_pre_coverage_boundary",
+                    trade_date=boundary,
+                    details={"calendar_date": boundary.isoformat()},
+                )
+            )
+        # SOURCE_TUSHARE_RELAY is the only allowed span source: this pipeline
+        # has no official break-glass branch.  If break-glass ever ships, the
+        # span source must be decided by the transport's ``kind``, never
+        # filled in freely by the caller.
+        replacement = supplier_span(
+            start,
+            end,
+            source=SOURCE_TUSHARE_RELAY,
+            snapshots_by_exchange=hashes,
+        )
+        try:
+            spans = merge_window(
+                baseline_spans,
+                start=start,
+                end=end,
+                replacement=replacement,
+                open_days=open_days,
+            )
+        except CalendarCoverageError as error:
+            issues.extend(_calendar_issues(error.violations))
+            return None
+        statuses["tushare"] = SourceStatus("tushare", True, True, reason_code="ok")
+        return open_days, spans
 
     def _refresh_security_master(
         self, start, end, issues, statuses, raw_snapshots, master,
@@ -981,14 +1516,15 @@ class DataPipeline:
             statuses["tushare"] = SourceStatus(
                 "tushare", True, False,
                 reason=f"stock_basic fetch failed: {error}",
+                reason_code="source_fetch_failed",
             )
             return None, None
-        snapshot_sha256 = self._record_raw(result)
-        raw_snapshots.append(snapshot_sha256)
+        snapshot = self._record_raw(result)
+        raw_snapshots.append(snapshot)
         applied = _apply_stock_basic(
             master,
             result.frame,
-            snapshot_sha256,
+            snapshot.sha256,
             sdk_version=str(result.metadata.get("sdk_version", "unknown")),
             checked_at=_ingest_time(result.metadata),
         )
@@ -1010,9 +1546,12 @@ class DataPipeline:
             statuses["tushare"] = SourceStatus(
                 "tushare", True, False,
                 reason="stock_basic snapshot incomplete",
+                reason_code="partial_fetch_failure",
             )
             return None, None
-        statuses["tushare"] = SourceStatus("tushare", True, True)
+        statuses["tushare"] = SourceStatus(
+            "tushare", True, True, reason_code="ok"
+        )
         return applied
 
     def _refresh_corporate_actions(
@@ -1025,15 +1564,18 @@ class DataPipeline:
         statuses,
         raw_snapshots,
         current_ca,
+        current_quarantine,
     ):
         """Reconcile cninfo/eastmoney per held security, best-effort.
 
-        Returns ``(facts, coverage)``: the merged canonical corporate-action
-        facts and one evidence row per symbol/window recording every endpoint's
-        outcome plus the content hash of each successful raw snapshot.  Empty
-        facts are never trusted by default -- only an explicit successful
-        no-event answer from *every* requested endpoint yields ``VERIFIED_EMPTY``,
-        and any endpoint failure leaves the window ``UNTRUSTED``.
+        Returns ``(facts, coverage, quarantine)``: the merged canonical
+        corporate-action facts, one evidence row per symbol/window recording
+        every endpoint's outcome plus the content hash of each successful raw
+        snapshot, and the merged quarantine rows (carried history plus this
+        update's reconciled-and-reviewed untrusted events).  Empty facts are
+        never trusted by default -- only an explicit successful no-event
+        answer from *every* requested endpoint yields ``VERIFIED_EMPTY``, and
+        any endpoint failure leaves the window ``UNTRUSTED``.
         """
         source = self._overrides.get("akshare") or self._build_lazy("akshare")
         if source is None:
@@ -1129,9 +1671,13 @@ class DataPipeline:
             ]
         )
         if accepted.empty:
-            return current_ca, coverage
+            return current_ca, coverage, merged_quarantine
         canonical = _corporate_actions_canonical(accepted)
-        return _merge_corporate_actions(current_ca, canonical), coverage
+        return (
+            _merge_corporate_actions(current_ca, canonical),
+            coverage,
+            merged_quarantine,
+        )
 
     def _reconcile_action_frames(self, cninfo_frames, eastmoney_frames, issues):
         """Reconcile collected supplier frames; empty defaults on failure."""
@@ -1175,6 +1721,7 @@ class DataPipeline:
             statuses["baostock"] = SourceStatus(
                 "baostock", False, False,
                 reason="optional source unavailable",
+                reason_code="optional_source_unavailable",
             )
             return
         failures = 0
@@ -1196,9 +1743,12 @@ class DataPipeline:
             statuses["baostock"] = SourceStatus(
                 "baostock", False, False,
                 reason=f"{failures} of {len(symbols)} validation requests failed",
+                reason_code="partial_fetch_failure",
             )
         else:
-            statuses["baostock"] = SourceStatus("baostock", False, True)
+            statuses["baostock"] = SourceStatus(
+                "baostock", False, True, reason_code="ok"
+            )
 
     def _adapter_or_fail(self, name, statuses):
         try:
@@ -1209,6 +1759,7 @@ class DataPipeline:
                 required=True,
                 ok=False,
                 reason=str(error),
+                reason_code="source_unavailable",
             )
             return None
 
@@ -1291,9 +1842,14 @@ class DataPipeline:
         )
         return fetch_with_retry(source, request, policy, sleeper=self._sleeper)
 
-    def _record_raw(self, result) -> str:
-        snapshot = self._raw_store.save(result)
-        return snapshot.sha256
+    def _record_raw(self, result) -> RawSnapshot:
+        """Persist one adapter response and hand back the full raw snapshot.
+
+        The public ``DataUpdateResult.raw_snapshots`` contract stays a tuple of
+        content hashes -- the conversion to ``snapshot.sha256`` happens inside
+        ``_result``, so no caller ever receives local paths or manifests.
+        """
+        return self._raw_store.save(result)
 
     def _merge_daily(
         self,
@@ -1370,63 +1926,6 @@ class DataPipeline:
                 )
         return issues
 
-    def _discover_end(
-        self, calendar_open, current_daily
-    ) -> tuple[date | None, bool]:
-        """Resolve the latest complete open day over the *carried* dataset.
-
-        Coverage is built honestly from the per-row ``source`` tag actually
-        saved in ``current_daily`` -- never by copying one source's coverage
-        into another source's slot.  The primary series is the ``tushare``
-        equity coverage; the *validation* map is fed by every non-primary frame
-        present (``akshare`` benchmark rows plus any ``baostock`` rows).  Returns
-        ``(resolved_end, is_fallback)`` where ``is_fallback`` is True when the
-        resolved day was walked back below the nominal candidate.
-        """
-        if not calendar_open:
-            return None, False
-        calendar = TradingCalendar.from_open_days(calendar_open)
-        benchmark_symbols = tuple(self._project_config.benchmark_symbols)
-        by_symbol = {symbol: set() for symbol in benchmark_symbols}
-        tushare_dates: set[date] = set()
-        akshare_dates: set[date] = set()
-        baostock_dates: set[date] = set()
-        for record in current_daily.to_dict("records"):
-            symbol = str(record["symbol"])
-            day = _as_date(record["trade_date"])
-            if symbol in by_symbol:
-                by_symbol[symbol].add(day)
-            source = str(record.get("source", ""))
-            if source == "akshare":
-                akshare_dates.add(day)
-            elif source == "baostock":
-                baostock_dates.add(day)
-            elif source == "tushare":
-                tushare_dates.add(day)
-        if not tushare_dates or any(
-            not dates for dates in by_symbol.values()
-        ):
-            return None, False
-        validation: dict[str, date] = {}
-        if akshare_dates:
-            validation["akshare"] = max(akshare_dates)
-        if baostock_dates:
-            validation["baostock"] = max(baostock_dates)
-        coverage = SourceCoverage(
-            stock_primary=max(tushare_dates),
-            benchmarks={s: max(dates) for s, dates in by_symbol.items()},
-            validation=validation,
-        )
-        publication_time = self._project_config.publication_time
-        resolved = resolve_latest_complete_date(
-            coverage, calendar, publication_time
-        )
-        nominal = _nominal_candidate(calendar, publication_time)
-        is_fallback = (
-            resolved is not None and nominal is not None and resolved != nominal
-        )
-        return resolved, is_fallback
-
     def _result(
         self,
         issues,
@@ -1435,8 +1934,6 @@ class DataPipeline:
         resolved_end,
         statuses,
         raw_snapshots,
-        *,
-        resolved_end_is_fallback: bool = False,
     ) -> DataUpdateResult:
         return DataUpdateResult(
             quality_report=QualityReport(issues=tuple(issues)),
@@ -1446,8 +1943,9 @@ class DataPipeline:
             source_status=tuple(
                 statuses[name] for name in _CONFIGURED_SOURCES
             ),
-            raw_snapshots=tuple(raw_snapshots),
-            resolved_end_is_fallback=resolved_end_is_fallback,
+            raw_snapshots=tuple(
+                snapshot.sha256 for snapshot in raw_snapshots
+            ),
         )
 
 
@@ -1785,6 +2283,142 @@ def _merge_corporate_actions(
     ]
     merged = pd.concat([kept, fresh], ignore_index=True)
     return merged[list(CORPORATE_ACTION_COLUMNS)]
+
+
+def _merge_corporate_action_quarantine(
+    current: pd.DataFrame, fresh: pd.DataFrame
+) -> pd.DataFrame:
+    """Carry prior quarantine rows and merge this update's reviewed rows.
+
+    Rows key on ``(symbol, ex_date, confirmed_by, reason)``; dates and the
+    string key columns are normalised first so carried (parquet ``NaT``/``None``)
+    and freshly reconciled (object ``NaN``) frames key identically instead of
+    colliding on dtype.  A fresh row replaces a carried row with the same key
+    and the merged frame is ordered by the key columns, so identical inputs
+    publish byte-identical quarantine tables.
+    """
+    current = _normalised_quarantine(current)
+    fresh = _normalised_quarantine(fresh)
+    if current.empty:
+        return _sorted_quarantine(fresh)
+    if fresh.empty:
+        return _sorted_quarantine(current)
+    key = ["symbol", "ex_date", "confirmed_by", "reason"]
+    kept = current.loc[
+        ~current.set_index(key).index.isin(fresh.set_index(key).index)
+    ]
+    merged = pd.concat([kept, fresh], ignore_index=True)
+    return _sorted_quarantine(merged)
+
+
+def _normalised_quarantine(frame: pd.DataFrame | None) -> pd.DataFrame:
+    """The canonical quarantine frame with merge-safe key dtypes.
+
+    ``ex_date`` becomes a timezone-free datetime and ``symbol`` /
+    ``confirmed_by`` / ``reason`` become plain ``str`` so the merge key never
+    compares ``NaN`` against ``NaT`` or ``None``.
+    """
+    columns = list(CORPORATE_ACTION_QUARANTINE_COLUMNS)
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=columns)
+    out = frame[columns].copy()
+    out["ex_date"] = pd.to_datetime(out["ex_date"], errors="coerce")
+    for column in ("symbol", "confirmed_by", "reason"):
+        out[column] = out[column].fillna("").astype(str)
+    return out
+
+
+def _sorted_quarantine(frame: pd.DataFrame) -> pd.DataFrame:
+    """Deterministic quarantine ordering by the merge-key columns."""
+    if frame.empty:
+        return frame
+    return frame.sort_values(
+        ["symbol", "ex_date", "confirmed_by", "reason"], kind="stable"
+    ).reset_index(drop=True)
+
+
+def check_adjusted_bar_lineage(
+    adjusted: pd.DataFrame,
+    daily: pd.DataFrame,
+    corporate_actions: pd.DataFrame,
+) -> list[QualityIssue]:
+    """FATAL lineage breaks between the total-return and raw close series.
+
+    Every ``adjusted_bar`` row must reference an existing ``daily_bar`` close
+    at the identical value, carry the single internal adjustment basis, and
+    list only action ids derivable from the canonical corporate-action facts.
+    A breach means the published series cannot be audited back to its inputs
+    and must never reach (or keep) a dataset version.
+    """
+    issues: list[QualityIssue] = []
+    if adjusted is None or adjusted.empty:
+        return issues
+    raw_closes: dict[tuple[str, date], float] = {}
+    for record in daily.to_dict("records"):
+        day = _as_date(record["trade_date"])
+        if day is not None:
+            raw_closes[(str(record["symbol"]), day)] = float(record["close"])
+    known_action_ids = {
+        action_id_of(str(record["symbol"]), _as_date(record["ex_date"]))
+        for record in corporate_actions.to_dict("records")
+        if _as_date(record.get("ex_date")) is not None
+    }
+    for row in adjusted.to_dict("records"):
+        symbol = str(row["symbol"])
+        day = _as_date(row["trade_date"])
+        key = (symbol, day)
+        if day is None or key not in raw_closes:
+            issues.append(
+                _adjusted_issue(CODE_ADJUSTED_BAR_MISSING_RAW, symbol, day)
+            )
+        elif float(row["raw_close"]) != raw_closes[key]:
+            issues.append(
+                _adjusted_issue(
+                    CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH, symbol, day
+                )
+            )
+        if str(row["adjustment"]) != ADJUSTMENT_NAME:
+            issues.append(
+                _adjusted_issue(CODE_ADJUSTED_BAR_WRONG_BASIS, symbol, day)
+            )
+        for action_id in _applied_action_ids(row):
+            if action_id not in known_action_ids:
+                issues.append(
+                    _adjusted_issue(
+                        CODE_ADJUSTED_BAR_UNKNOWN_ACTION, symbol, day
+                    )
+                )
+    return issues
+
+
+def _applied_action_ids(row: dict) -> list[str]:
+    """The JSON-encoded ``applied_action_ids`` list, tolerating blank cells."""
+    raw = row.get("applied_action_ids")
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        return []
+    return [str(item) for item in decoded] if isinstance(decoded, list) else []
+
+
+def _adjusted_issue(
+    code: str, symbol: str, day: date | None
+) -> QualityIssue:
+    return _issue(
+        Severity.FATAL,
+        code,
+        symbol=symbol,
+        trade_date=day,
+        table="adjusted_bar",
+        details={
+            "message": (
+                f"adjusted_bar lineage check {code!r} failed for {symbol} at "
+                f"{day.isoformat() if day is not None else 'an unknown date'}"
+            ),
+        },
+    )
 
 
 def _calendar_frame(open_days: tuple[date, ...]) -> pd.DataFrame:

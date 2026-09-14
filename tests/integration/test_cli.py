@@ -10,14 +10,21 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import date
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import build_fixture_project  # noqa: E402
 from test_end_to_end import run_offline_fixture  # noqa: E402  (after app import)
 from test_reports import _experiment_input  # noqa: E402  (synthetic report helper)
 
-from stock_quant.cli import app  # noqa: F401  (gates Step 2 collection)
+from stock_quant.cli import (  # gates Step 2 collection
+    _experiment_window,
+    _within_window,
+    app,
+)
+from stock_quant.data_pipeline import DataPipeline
 from stock_quant.reporting.html import render_experiment_report
 
 
@@ -75,10 +82,37 @@ def test_debug_backtest_writes_only_to_run_debug_dir(
     assert published == before, "debug backtest must not publish an experiment"
 
 
-def test_data_update_without_token_fails_and_prints_failed(
+class _RecordingPipeline(DataPipeline):
+    """A ``DataPipeline`` that retains its result for the assertion below.
+
+    The ``data update`` CLI echoes each source's ``ok``/``not_ok`` state but
+    never its ``reason`` prose, so the missing-transport explanation is not
+    reachable from ``result.stdout``.  This subclass runs the real pipeline
+    unchanged and keeps the result so the test can assert on the recorded
+    reason itself rather than only on the exit code.
+    """
+
+    last_result = None
+
+    def update(self, request):
+        result = super().update(request)
+        type(self).last_result = result
+        return result
+
+
+def test_data_update_without_transport_fails_and_prints_failed(
     cli_runner, fixture_root, monkeypatch
 ):
+    # The published ``data update`` path refuses *before* any credential is
+    # read: with no explicit ``TUSHARE_TRANSPORT`` the resolver raises and
+    # never reaches a client.  Clearing the transport (not just the token) is
+    # what makes that first refusal the failure under test, and it keeps the
+    # test offline even under launch-day ``set -a; . ./.env; set +a``, where a
+    # ``TUSHARE_TRANSPORT=relay`` plus relay credentials would otherwise build
+    # a live relay client and attempt a real fetch against the fixture.
+    monkeypatch.delenv("TUSHARE_TRANSPORT", raising=False)
     monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+    monkeypatch.setattr("stock_quant.cli.DataPipeline", _RecordingPipeline)
     result = cli_runner.invoke(
         app,
         [
@@ -94,6 +128,38 @@ def test_data_update_without_token_fails_and_prints_failed(
     )
     assert result.exit_code != 0
     assert "FAILED" in result.stdout
+    # The *reason* is the thing under test: the failure must name the missing
+    # transport, not merely exit non-zero.  The required ``tushare`` source's
+    # recorded reason is where that explanation lives.
+    statuses = {s.source: s for s in _RecordingPipeline.last_result.source_status}
+    assert not statuses["tushare"].ok
+    assert "TUSHARE_TRANSPORT" in (statuses["tushare"].reason or "")
+
+
+def test_data_update_with_empty_root_fails_before_any_service(
+    cli_runner, tmp_path, monkeypatch
+):
+    """An empty ``--root`` fails before any service object is constructed.
+
+    A directory without the required config files must produce a nonzero
+    exit naming the missing ``configs/project.yml`` -- and ``DataPipeline``
+    (with it the raw store, staging and any network path) must never be
+    constructed for that root.
+    """
+    empty_root = tmp_path / "empty-root"
+    empty_root.mkdir()
+    constructions: list[object] = []
+
+    def _spy(*args, **kwargs):
+        constructions.append(args)
+        raise AssertionError("DataPipeline constructed for an invalid root")
+
+    monkeypatch.setattr("stock_quant.cli.DataPipeline", _spy)
+    result = cli_runner.invoke(app, ["data", "update", "--root", str(empty_root)])
+    assert result.exit_code != 0
+    assert "FAILED" in result.stdout
+    assert "configs/project.yml" in result.stdout
+    assert constructions == []
 
 
 def test_data_validate_reports_current_dataset(
@@ -122,9 +188,11 @@ def test_data_bootstrap_publishes_initial_dataset(cli_runner, tmp_path):
     root = tmp_path / "seed-project"
     configs = root / "configs"
     configs.mkdir(parents=True)
-    repo_configs = Path(__file__).resolve().parents[2] / "configs"
-    for name in ("project.yml", "universe.yml"):
-        shutil.copy(repo_configs / name, configs / name)
+    template_configs = (
+        Path(__file__).resolve().parents[2] / "templates" / "project-config"
+    )
+    for name in ("project.yml", "sources.yml", "costs.yml", "universe.yml"):
+        shutil.copy(template_configs / name, configs / name)
 
     result = cli_runner.invoke(app, ["data", "bootstrap", "--root", str(root)])
 
@@ -215,6 +283,13 @@ def test_report_build_renders_quality_html_with_markers_and_no_external_refs(
         project.root / "data" / "reports" / f"{outcome.experiment_id}.html"
     )
     assert experiment_path.is_file()
+    # The rebuilt rich report renders the persisted factor-input audit from
+    # metrics.json: the run consumed the internal total-return series with no
+    # trusted-evidence breaks, exactly like the direct `research run` report.
+    experiment_html = experiment_path.read_text(encoding="utf-8")
+    assert "因子价格口径" in experiment_html
+    assert "internal_total_return_v1" in experiment_html
+    assert "不可信断点：0" in experiment_html
 
 
 def test_report_build_fails_when_backtest_workspace_pruned(
@@ -236,6 +311,33 @@ def test_report_build_fails_when_backtest_workspace_pruned(
     assert result.exit_code != 0
     assert "FAILED" in result.stdout
     assert "backtest workspace was pruned" in result.stdout
+
+
+def test_experiment_window_follows_the_plotted_curves():
+    """The benchmark is cut to the strategy's own span, not the dataset's.
+
+    Unclipped, the benchmark drew years the experiment never ran over -- and
+    indexed from its own first day, it printed that earlier run as if it were
+    relative performance.
+    """
+    scenarios = _experiment_input().scenarios
+    plotted = _experiment_window({}, scenarios)
+    assert plotted == (date(2024, 1, 2), date(2024, 1, 8))
+
+    # A walk-forward report plots no scenario curves: its window is the spec's.
+    spec = {"date_range": {"start_date": "2021-01-01", "end_date": "2026-08-21"}}
+    assert _experiment_window(spec, ()) == (date(2021, 1, 1), date(2026, 8, 21))
+
+
+def test_within_window_cuts_the_benchmark_to_the_experiment():
+    equity = _experiment_input().scenarios[0].equity
+    days = [day.isoformat() for day in equity["trade_date"]]
+
+    cut = _within_window(equity, date(2024, 1, 3), date(2024, 1, 5))
+    assert [day.isoformat() for day in cut["trade_date"]] == days[1:4]
+    # Either edge may be absent; an absent edge cuts nothing.
+    assert len(_within_window(equity, None, None)) == len(equity)
+    assert _within_window(equity, date(2030, 1, 1), None).empty
 
 
 # --------------------------------------------------------------------------- #
@@ -295,3 +397,419 @@ def test_fixture_project_dataset_publishes_trusted_coverage(fixture_root):
         coverage = context.read("corporate_action_coverage")
     assert not coverage.empty
     assert set(coverage["status"]) == {"VERIFIED_EMPTY"}
+
+
+# --------------------------------------------------------------------------- #
+# Task 6: point-in-time index membership on the operator surface
+# --------------------------------------------------------------------------- #
+
+#: The formal spec written into the membership fixture project: the same short
+#: momentum spec the other CLI tests run, but naming the frozen csi300
+#: definition (``universe_definition: csi300``) so the run preflights it.
+_BAD_UNIVERSE_SPEC = "momentum_60d_csi300_unverified.yml"
+
+_FACTS_START = date(2018, 1, 2)
+_FACTS_ANNOUNCED = date(2017, 12, 15)
+_FACTS_END = date(2022, 1, 7)
+_RULES_VERSION = "csi-index-rules-cli-fixture-2026h2"
+
+# One evidence-backed open csi300 fact, following the Task 4 fixture shape.
+def _fact_payload(symbol: str) -> dict:
+    return {
+        "universe_id": "csi300",
+        "symbol": symbol,
+        "raw_effective_from": _FACTS_START,
+        "raw_effective_to": None,
+        "announcement_date": _FACTS_ANNOUNCED,
+        "status": "active",
+        "reason": "initial_constituent",
+        "source": "csi_index_announcement",
+        "source_url": "https://www.csindex.com.cn/announcement-2017-12.pdf",
+        "snapshot_sha256": "a1" * 32,
+        "source_document_sha256": "b2" * 32,
+    }
+
+
+@pytest.fixture(scope="module")
+def membership_project(tmp_path_factory):
+    """A synthetic project whose dataset carries *insufficient* csi300 evidence.
+
+    Built exactly like ``fixture_root``, then republished with an evidenced
+    ``universe_membership`` table (the 30 fixture symbols only) and a REAL
+    ``configs/universes/csi300.yml`` definition pinned to exactly those facts.
+    The definition itself is valid; the evidence fails the mandatory csi300
+    cardinality check (30 members vs 300 expected), so a formal run naming the
+    definition must stop at ``universe_acceptance`` before any factor work --
+    the operator-facing shape of "a wrong member count stops work".
+    """
+    from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+    from stock_quant.data_model.universe import Universe
+    from stock_quant.data_model.universe_membership import (
+        membership_content_hash,
+        membership_frame,
+    )
+    from stock_quant.data_quality.models import QualityReport
+
+    project = build_fixture_project(tmp_path_factory.mktemp("membership"))
+    universe = Universe.from_yaml(project.root / "configs" / "universe.yml")
+    facts = [_fact_payload(entry.symbol) for entry in universe.entries]
+
+    reader = DatasetReader(project.root)
+    version = DatasetPublisher(project.root).current().version
+    with reader.open(version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+    tables["universe_membership"] = membership_frame(facts)
+    DatasetPublisher(project.root).publish(tables, QualityReport())
+
+    definition = {
+        "schema_version": 1,
+        "universe_id": "csi300",
+        "rules_version": _RULES_VERSION,
+        "membership_table_sha256": membership_content_hash(facts),
+        "coverage_start": _FACTS_START.isoformat(),
+        "coverage_end": _FACTS_END.isoformat(),
+        "evidence_summary_sha256": "cd" * 32,
+    }
+    (project.root / "configs" / "universes").mkdir(parents=True, exist_ok=True)
+    (project.root / "configs" / "universes" / "csi300.yml").write_text(
+        yaml.safe_dump(definition, sort_keys=True), encoding="utf-8"
+    )
+    (project.root / "configs" / "experiments" / _BAD_UNIVERSE_SPEC).write_text(
+        _BAD_SPEC_YAML, encoding="utf-8"
+    )
+    return project
+
+
+#: Same frozen spec the offline fixtures run, plus the formal universe
+#: definition name. The date range stays fully inside the synthetic bars.
+_BAD_SPEC_YAML = """\
+# 离线验收用：指向冻结 csi300 定义的正式规格，但数据集只携带不足的成分证据
+#（30 只 vs 300 预期）——按操作规程必须在 universe_acceptance 处大声停止。
+hypothesis: >-
+  过去 60 个交易日的复权收益在合成样本内对随后短期收益存在持续性；
+  仅验证离线 CLI 工程链路可复现并跑通全部运行状态，不构成投资建议。
+factor_versions:
+  momentum_60d: 1.0.0
+dataset_version: CURRENT
+universe_version: CURRENT
+universe_definition: csi300
+date_range:
+  start_date: 2020-01-01
+  end_date: 2021-12-31
+train_validation_holdout_policy: not_applicable_engineering_mvp
+preprocessing:
+  winsorization: none
+  standardization: none
+portfolio_rule:
+  name: top_n_equal_weight
+  top_n: 10
+  lot_size: 100
+cost_scenarios:
+  - zero_cost
+  - commission_tax
+  - full_cost
+random_seed: 42
+code_commit: unversioned
+parent_experiment_ids: []
+agent_id: null
+"""
+
+
+def test_membership_preflight_returns_nonzero_without_factor(
+    cli_runner, membership_project
+):
+    """Formal research over insufficient membership evidence stops loudly.
+
+    The operator rule under test: a wrong member count is a STOP, never a
+    bypass. ``research run`` must exit non-zero, name the
+    ``universe_acceptance`` stage, leave only the redacted preflight manifest
+    under ``data/runs`` and never publish an experiment or factor artifact.
+    """
+    result = cli_runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            "--spec",
+            f"configs/experiments/{_BAD_UNIVERSE_SPEC}",
+            "--root",
+            str(membership_project.root),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "universe_acceptance" in result.output
+
+    runs = membership_project.root / "data" / "runs"
+    manifests = sorted(runs.glob("run_preflight_*/universe_preflight.json"))
+    assert manifests, "the failed run must write its redacted preflight manifest"
+    record = json.loads(manifests[-1].read_text(encoding="utf-8"))
+    assert record["failed_stage"] == "universe_acceptance"
+    assert record["error_codes"], "the rejection must name its stable codes"
+
+    # The redacted preflight workspace is the ONLY run artifact: no factor
+    # stage ever started and no experiment was published.
+    assert sorted(path.name for path in runs.iterdir()) == [
+        manifests[-1].parent.name
+    ]
+    experiments = membership_project.root / "data" / "experiments"
+    published = (
+        sorted(path.name for path in experiments.iterdir())
+        if experiments.is_dir()
+        else []
+    )
+    assert published == []
+
+
+def test_membership_import_requires_snapshot_hash(cli_runner, tmp_path):
+    """``data index-membership prepare`` refuses unevidenced imports.
+
+    The snapshot hash is a mandatory argument: calling prepare without it is a
+    usage error that names the missing flag, so an import can never publish
+    facts that are not bound to a stored raw snapshot.
+    """
+    source_file = tmp_path / "members.csv"
+    source_file.write_text("symbol\n600000.SH\n000001.SZ\n", encoding="utf-8")
+    result = cli_runner.invoke(
+        app,
+        [
+            "data",
+            "index-membership",
+            "prepare",
+            "--universe-id",
+            "csi300",
+            "--input",
+            str(source_file),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--snapshot-sha256" in result.output
+
+
+def test_membership_import_prepare_writes_canonical_facts(cli_runner, tmp_path):
+    """The documented happy path: prepare prints the hash a definition pins.
+
+    ``prepare`` binds every row to the operator-supplied snapshot/document
+    evidence, writes the canonical ``universe_membership`` frame and prints
+    the ``membership_table_sha256=`` line the frozen universe definition must
+    pin (see README / RUNBOOK). It performs no network access.
+    """
+    source_file = tmp_path / "members.csv"
+    source_file.write_text("symbol\n600000.SH\n000001.SZ\n", encoding="utf-8")
+    output = tmp_path / "membership" / "universe_membership.parquet"
+    result = cli_runner.invoke(
+        app,
+        [
+            "data",
+            "index-membership",
+            "prepare",
+            "--universe-id",
+            "csi300",
+            "--input",
+            str(source_file),
+            "--snapshot-sha256",
+            "a1" * 32,
+            "--source-document-sha256",
+            "b2" * 32,
+            "--source",
+            "csi_index_announcement",
+            "--source-url",
+            "https://www.csindex.com.cn/announcement-2017-12.pdf",
+            "--effective-date",
+            "2018-01-02",
+            "--announcement-date",
+            "2017-12-15",
+            "--output",
+            str(output),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "rows=2" in result.output
+    assert "universe_id=csi300" in result.output
+    assert "membership_table_sha256=" in result.output
+    assert output.is_file()
+
+    from stock_quant.data_model.universe_membership import (
+        membership_content_hash,
+    )
+
+    printed_hash = next(
+        line.split("=", 1)[1]
+        for line in result.output.splitlines()
+        if line.startswith("membership_table_sha256=")
+    )
+    assert printed_hash == membership_content_hash(
+        [_fact_payload("600000.SH"), _fact_payload("000001.SZ")]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Walk-forward CLI behaviour: status + nullable conclusion, nonzero on failure
+# --------------------------------------------------------------------------- #
+
+
+def test_walk_forward_research_prints_status_and_nullable_conclusion(
+    cli_runner, fixture_root
+):
+    """A completed walk-forward run exits zero retaining the exact label.
+
+    The 2021-only spec completes with one executed fold: a valid process with
+    fewer than five executed folds is INCONCLUSIVE -- valid-but-insufficient
+    evidence, never a statement about strategy quality.
+    """
+    result = cli_runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            "--spec",
+            "configs/experiments/walk_forward.yml",
+            "--root",
+            str(fixture_root.root),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "research_status=COMPLETED" in result.stdout
+    assert "stability_conclusion=INCONCLUSIVE" in result.stdout
+    experiment_id = next(
+        line.split("=", 1)[1].strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("experiment_id=")
+    )
+    root = fixture_root.root / "data" / "experiments" / experiment_id
+    assert (root / "fold_schedule.json").is_file()
+    assert (root / "fold_outcomes.json").is_file()
+    assert (root / "stability_report.json").is_file()
+    assert (root / "walk_forward_manifest.json").is_file()
+
+
+def test_walk_forward_fold_failure_exits_nonzero_and_publishes_nothing(
+    cli_runner, fixture_root
+):
+    """A fold/system preflight failure is FAILED with a null conclusion.
+
+    The early-2019 spec's only fold cannot satisfy the 756-session warmup
+    floor: the run fails before any account exists, exits nonzero, and the
+    published experiment registry receives no incomplete experiment.
+    """
+    experiments = fixture_root.root / "data" / "experiments"
+    before = (
+        set(p.name for p in experiments.iterdir()) if experiments.is_dir() else set()
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            "--spec",
+            "configs/experiments/walk_forward_early.yml",
+            "--root",
+            str(fixture_root.root),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "FAILED" in result.stdout
+    published = (
+        set(p.name for p in experiments.iterdir()) if experiments.is_dir() else set()
+    )
+    assert published == before, "a failed fold can never publish an experiment"
+
+
+# --------------------------------------------------------------------------- #
+# One-time strategy challenge CLI: completed research exits zero with the
+# exact label; a terminal FAILED exits nonzero.
+# --------------------------------------------------------------------------- #
+
+
+def test_challenge_cli_completed_exits_zero_with_exact_label(
+    cli_runner, tmp_path
+):
+    """A completed challenge exits zero and prints the exact conclusion.
+
+    Both walk-forward experiments over the offline synthetic project publish
+    on identical inputs (only the portfolio rule differs); the single 2021
+    fold is valid-but-insufficient evidence, so the exact label is
+    INCONCLUSIVE_RESEARCH_ONLY -- a completed research outcome, never a
+    failure.
+    """
+    from test_strategy_challenge_service import build_challenge_project
+
+    project = build_challenge_project(tmp_path / "challenge")
+    result = cli_runner.invoke(
+        app,
+        [
+            "research",
+            "challenge",
+            "--declaration",
+            str(project.declaration_path),
+            "--root",
+            str(project.root),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "challenge_status=COMPLETED" in result.stdout
+    assert "challenge_conclusion=INCONCLUSIVE_RESEARCH_ONLY" in result.stdout
+
+
+def test_challenge_cli_failed_exits_nonzero(cli_runner, fixture_root, tmp_path):
+    """A terminal identity failure publishes FAILED and exits nonzero.
+
+    The declaration pins a baseline experiment id that was never published:
+    the holdout is still consumed (irreversibly), a FAILED
+    strategy_comparison.json is published with a null conclusion, and the
+    CLI exits nonzero.
+    """
+    from datetime import datetime, timezone
+
+    from stock_quant.research.strategy_challenge.models import (
+        ChallengeDeclaration,
+        StrategyComparisonPolicy,
+        canonical_challenge_json_text,
+        canonical_challenge_sha256,
+        compute_challenge_id,
+    )
+
+    policy = StrategyComparisonPolicy()
+    declaration = ChallengeDeclaration.model_validate({
+        "identity_scheme_version": "strategy-challenge-v1",
+        "strategy_family": "momentum_60d_cli_failure",
+        "baseline_experiment_id": "1a" * 32,
+        "challenger_strategy_hash": "2b" * 32,
+        "fold_schedule_hash": "3c" * 32,
+        "universe_definition": {
+            "universe_id": "csi300",
+            "universe_version": "a" * 64,
+            "membership_table_sha256": "b" * 64,
+            "evidence_summary_sha256": "c" * 64,
+        },
+        "comparison_policy": policy.model_dump(mode="json"),
+        "comparison_policy_hash": canonical_challenge_sha256(
+            policy.model_dump(mode="json")
+        ),
+        "declared_before_run_at": datetime(
+            2026, 9, 9, tzinfo=timezone.utc
+        ).isoformat(),
+    })
+    declaration_path = tmp_path / "declaration.json"
+    declaration_path.write_text(
+        canonical_challenge_json_text(declaration.model_dump(mode="json")),
+        encoding="utf-8",
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "research",
+            "challenge",
+            "--declaration",
+            str(declaration_path),
+            "--root",
+            str(fixture_root.root),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "challenge_status=FAILED" in result.stdout
+    assert "challenge_conclusion=none" in result.stdout
+    consumption = (
+        Path(fixture_root.root) / "data" / "strategy_challenges"
+        / "consumptions" / f"{compute_challenge_id(declaration)}.json"
+    )
+    assert consumption.is_file()

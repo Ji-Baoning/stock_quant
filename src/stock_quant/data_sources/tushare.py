@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import os
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 
 from stock_quant.config import SourceConfig
 from stock_quant.data_sources.base import (
-    AuthenticationError,
     ContractError,
     DataRequest,
     FetchResult,
@@ -19,44 +17,98 @@ from stock_quant.data_sources.base import (
     translate_supplier_error,
     validate_supplier_frame,
 )
+from stock_quant.data_sources.tushare_proxy import TushareProxyClient
+from stock_quant.data_sources.tushare_relay import TushareRelayClient
+from stock_quant.data_sources.tushare_transport import (
+    _STUB_HOST,
+    OFFICIAL,
+    PROXY,
+    RELAY,
+    TushareTransport,
+    client_host,
+    resolve_transport,
+)
+
+#: The exchanges a published trading calendar must agree on.
+_TRADE_CAL_EXCHANGES = ("SSE", "SZSE")
+
+#: The native columns a ``trade_cal`` response must carry.
+_TRADE_CAL_COLUMNS = ("cal_date", "is_open", "pretrade_date")
 
 
 class TushareSource:
-    """Fetch raw Tushare `daily` responses without column normalization."""
+    """Fetch raw Tushare ``daily`` responses without column normalization.
+
+    The transport is resolved once, explicitly, at construction (see
+    :mod:`stock_quant.data_sources.tushare_transport`): a published build must
+    name it and may only name the relay, while development and diagnostic
+    callers opt into the ``relay -> official`` auto-order with
+    ``allow_auto_transport=True``.  The request client is always an object
+    that really has ``daily`` / ``index_daily`` / ``stock_basic``; provenance
+    comes from ``self.transport``, never from the client's type -- an official
+    session and a relay session are the same class, and only the base URL
+    tells them apart.
+    """
 
     name = "tushare"
 
-    def __init__(self, config: SourceConfig, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        config: SourceConfig,
+        client: Any | None = None,
+        *,
+        transport: TushareTransport | None = None,
+        sdk: Any | None = None,
+        allow_auto_transport: bool = False,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
         self.config = config
-        token = os.environ["TUSHARE_TOKEN"]
-        if client is None:
-            import tushare as ts
+        if transport is None:
+            transport = (
+                resolve_transport(
+                    config,
+                    allow_auto_transport=allow_auto_transport,
+                    sdk=sdk,
+                    environ=environ,
+                )
+                if client is None
+                else injected_transport(client)
+            )
+        self._transport = transport
+        self._client = transport.client
+        self._sdk_version = transport.sdk_version
 
-            try:
-                client = ts.pro_api(token)
-            except Exception:
-                raise AuthenticationError(
-                    "Tushare client initialization failed"
-                ) from None
-            self._sdk_version = getattr(ts, "__version__", "unknown")
-        else:
-            self._sdk_version = getattr(client, "__version__", "unknown")
-        self._client = client
+    @property
+    def transport(self) -> TushareTransport:
+        """The resolved transport, for diagnostics and tests."""
+        return self._transport
+
+    def _supplier_endpoint(self, endpoint: str) -> str:
+        return self._transport.supplier_endpoint(endpoint)
 
     def fetch(self, request: DataRequest) -> FetchResult:
         if request.endpoint == "stock_basic":
             return self._fetch_stock_basic(request)
-        if request.endpoint != "daily":
-            raise ValueError(
-                "TushareSource supports only the unadjusted daily endpoint"
-            )
+        if request.endpoint == "trade_cal":
+            return self._fetch_trade_cal(request)
+        if request.endpoint in ("daily", "index_daily"):
+            return self._fetch_symbol_series(request)
+        raise ValueError(
+            "TushareSource supports only the daily, index_daily, stock_basic, "
+            "and trade_cal endpoints"
+        )
+
+    def _fetch_symbol_series(self, request: DataRequest) -> FetchResult:
+        """Fetch one symbol-scoped unadjusted series (stock or index daily)."""
         if len(request.symbols) != 1:
-            raise ValueError("Tushare daily requests require exactly one symbol")
+            raise ValueError(
+                f"Tushare {request.endpoint} requests require exactly one symbol"
+            )
         if request.params.get("adjustment", "unadjusted") != "unadjusted":
             raise ValueError("Tushare daily data is available only unadjusted")
         request_timestamp = _utc_timestamp()
         try:
-            frame = self._client.daily(
+            frame = getattr(self._client, request.endpoint)(
                 ts_code=request.symbols[0],
                 start_date=request.start_date.strftime("%Y%m%d"),
                 end_date=request.end_date.strftime("%Y%m%d"),
@@ -68,18 +120,20 @@ class TushareSource:
             raise translated from None
         response_timestamp = _utc_timestamp()
         self._validate(frame, request)
+        metadata = request_metadata(
+            request,
+            self._supplier_endpoint(request.endpoint),
+            self._sdk_version,
+            transport_id=self._transport.transport_id,
+            request_timestamp=request_timestamp,
+            response_timestamp=response_timestamp,
+        )
         return FetchResult(
             source=self.name,
             endpoint=request.endpoint,
             request_key=request_key(request),
             frame=frame,
-            metadata=request_metadata(
-                request,
-                "tushare.pro.daily",
-                self._sdk_version,
-                request_timestamp=request_timestamp,
-                response_timestamp=response_timestamp,
-            ),
+            metadata=metadata,
         )
 
     def _fetch_stock_basic(self, request: DataRequest) -> FetchResult:
@@ -106,18 +160,20 @@ class TushareSource:
             raise translated from None
         response_timestamp = _utc_timestamp()
         self._validate_stock_basic(frame)
+        metadata = request_metadata(
+            request,
+            self._supplier_endpoint("stock_basic"),
+            self._sdk_version,
+            transport_id=self._transport.transport_id,
+            request_timestamp=request_timestamp,
+            response_timestamp=response_timestamp,
+        )
         return FetchResult(
             source=self.name,
             endpoint=request.endpoint,
             request_key=request_key(request),
             frame=frame,
-            metadata=request_metadata(
-                request,
-                "tushare.pro.stock_basic",
-                self._sdk_version,
-                request_timestamp=request_timestamp,
-                response_timestamp=response_timestamp,
-            ),
+            metadata=metadata,
         )
 
     @staticmethod
@@ -136,6 +192,77 @@ class TushareSource:
         if frame["ts_code"].isna().any() or frame["list_status"].isna().any():
             raise ContractError("supplier response has a blank identity column")
 
+    def _fetch_trade_cal(self, request: DataRequest) -> FetchResult:
+        """Fetch one exchange's calendar for the requested date range.
+
+        ``trade_cal`` is a per-exchange request: ``request.symbols`` must be
+        empty and ``params["exchange"]`` must be one of SSE / SZSE.  The
+        exchange is part of the request key, so the two exchanges of one
+        refresh are two independent raw snapshots.  Values are validated
+        later, by ``trade_calendar_facts.parse_trade_cal_frame``; this method
+        only enforces the endpoint contract.
+        """
+        if request.symbols:
+            raise ValueError(
+                "Tushare trade_cal is a whole-exchange request, not a "
+                "symbol-scoped query"
+            )
+        exchange = request.params.get("exchange")
+        if exchange not in _TRADE_CAL_EXCHANGES:
+            raise ValueError(
+                "Tushare trade_cal requires an exchange of "
+                f"{' or '.join(_TRADE_CAL_EXCHANGES)}, got {exchange!r}"
+            )
+        client_endpoint = getattr(self._client, "trade_cal", None)
+        if client_endpoint is None:
+            raise ValueError(
+                f"tushare transport {self._transport.transport_id} has no "
+                "trade_cal endpoint"
+            )
+        request_timestamp = _utc_timestamp()
+        try:
+            frame = client_endpoint(
+                exchange=exchange,
+                start_date=request.start_date.strftime("%Y%m%d"),
+                end_date=request.end_date.strftime("%Y%m%d"),
+            )
+        except Exception as error:
+            translated = translate_supplier_error(error)
+            if translated is error:
+                raise
+            raise translated from None
+        response_timestamp = _utc_timestamp()
+        self._validate_trade_cal(frame)
+        metadata = request_metadata(
+            request,
+            self._supplier_endpoint("trade_cal"),
+            self._sdk_version,
+            transport_id=self._transport.transport_id,
+            request_timestamp=request_timestamp,
+            response_timestamp=response_timestamp,
+        )
+        return FetchResult(
+            source=self.name,
+            endpoint=request.endpoint,
+            request_key=request_key(request),
+            frame=frame,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _validate_trade_cal(frame: pd.DataFrame) -> None:
+        """Validate the native shape; day-set and value checks come later."""
+        if not isinstance(frame, pd.DataFrame):
+            raise ContractError("supplier response is not a pandas DataFrame")
+        if frame.empty:
+            raise ContractError("supplier returned an empty trade_cal response")
+        missing = [name for name in _TRADE_CAL_COLUMNS if name not in frame.columns]
+        if missing:
+            raise ContractError(
+                "supplier trade_cal response is missing columns: "
+                + ", ".join(missing)
+            )
+
     @staticmethod
     def _validate(frame: pd.DataFrame, request: DataRequest) -> None:
         try:
@@ -147,3 +274,36 @@ class TushareSource:
             )
         except ContractError:
             raise
+
+
+def injected_transport(client: Any) -> TushareTransport:
+    """Describe a caller-injected request client (tests and local stubs).
+
+    Injection is not a published path: the caller hands over the object, so a
+    stub may have no URL to derive an identity from.  A client that declares a
+    reachable ``host`` (the relay and proxy clients both do) is taken at its
+    word; a stub that does not is labelled by its kind, and those kind labels
+    (``proxy`` / ``relay`` / the official host) are documented as stub-only --
+    ``resolve_transport`` never produces them.
+
+    The two wrappers do not expose the same surface, so the *request client*
+    is unwrapped per kind: ``TushareProxyClient`` answers the named endpoints
+    itself, while ``TushareRelayClient`` only has ``query`` -- its named
+    methods live on the SDK session it holds, which is why ``.api`` is used.
+    """
+    sdk_version = getattr(client, "sdk_version", None) or getattr(
+        client, "__version__", "unknown"
+    )
+    if isinstance(client, TushareProxyClient):
+        kind = PROXY
+        session = client
+    elif isinstance(client, TushareRelayClient):
+        kind = RELAY
+        session = client.api
+    else:
+        kind = OFFICIAL
+        session = client
+    host = client_host(client) or _STUB_HOST[kind]
+    return TushareTransport(
+        kind=kind, client=session, sdk_version=sdk_version, host=host
+    )

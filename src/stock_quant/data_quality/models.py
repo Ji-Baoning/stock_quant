@@ -50,6 +50,22 @@ CODE_WITHIN_TOLERANCE = "within_tolerance"
 CODE_PRICE_DIFFERENCE = "price_difference"
 CODE_CLOSE_DIFFERENCE = "close_difference"
 
+# Adjusted-bar lineage codes: a published ``adjusted_bar`` that cannot be
+# reconciled row-by-row against ``daily_bar`` and the canonical corporate
+# actions is untrusted end to end (all four block publication).
+CODE_ADJUSTED_BAR_MISSING_RAW = "adjusted_bar_missing_raw"
+CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH = "adjusted_bar_raw_close_mismatch"
+CODE_ADJUSTED_BAR_WRONG_BASIS = "adjusted_bar_wrong_basis"
+CODE_ADJUSTED_BAR_UNKNOWN_ACTION = "adjusted_bar_unknown_action"
+
+# Suspension bars materialized from the primary source's own pre_close chain:
+# a proven run is an audited INFO; a run with no anchor row is an honest
+# WARNING; a chain break no accepted action explains is real data loss and
+# blocks publication (all gap rows must be proven, never assumed).
+CODE_SUSPENSION_ROW = "suspension_row_materialized"
+CODE_SUSPENSION_RUN_UNVERIFIED = "suspension_run_unverified"
+CODE_UNEXPLAINED_PRIMARY_GAP = "unexplained_primary_gap"
+
 # Missing-row classification labels, in classification precedence order.
 MISSING_NOT_LISTED = "not_listed"
 MISSING_DELISTED = "delisted"

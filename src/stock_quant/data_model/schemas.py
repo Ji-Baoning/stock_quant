@@ -96,10 +96,63 @@ SECURITY_MASTER_COLUMNS = [
     "list_status",
 ]
 
+# Immutable index-membership facts (point-in-time universe task): one row per
+# raw inclusive membership interval, bound to auditable snapshot and document
+# evidence. The resolved view of these facts is never persisted here; only the
+# raw fact table is registered (design spec: 原始区间与实际资格区间).
+UNIVERSE_MEMBERSHIP_COLUMNS = [
+    "universe_id",
+    "symbol",
+    "raw_effective_from",
+    "raw_effective_to",
+    "announcement_date",
+    "status",
+    "reason",
+    "source",
+    "source_url",
+    "snapshot_sha256",
+    "source_document_sha256",
+]
+
 # Trading calendar marks which calendar dates are confirmed open days.
 TRADING_CALENDAR_COLUMNS = [
     "calendar_date",
     "is_trading_day",
+]
+
+# Adjusted bars are the point-in-time total-return series derived from the
+# unadjusted ``daily_bar`` closes plus accepted corporate actions.  ``raw_*``
+# columns keep the audit trail back to ``daily_bar``; ``applied_action_ids``
+# carries the deterministic JSON list of action ids first applied that day.
+ADJUSTED_BAR_COLUMNS = [
+    "trade_date",
+    "symbol",
+    "source",
+    "adjustment",
+    "raw_close",
+    "adjusted_close",
+    "adjustment_factor",
+    "quality_severity",
+    "invalid_reason",
+    "applied_action_ids",
+]
+
+# Corporate-action quarantine holds the reconciled-but-untrusted events
+# (``QUARANTINE_COLUMNS`` from the reconciler, persisted verbatim) so quality
+# gates and the adjusted-bar builder can mark exact trust breaks per ex_date.
+CORPORATE_ACTION_QUARANTINE_COLUMNS = [
+    "symbol",
+    "announcement_date",
+    "record_date",
+    "ex_date",
+    "cash_dividend_per_share",
+    "bonus_share_ratio",
+    "capitalization_ratio",
+    "rights_issue_ratio",
+    "rights_issue_price",
+    "status",
+    "confirmed_by",
+    "reason",
 ]
 
 
@@ -176,6 +229,22 @@ def _security_master_coverage_fields() -> list[pa.Field]:
     ]
 
 
+def _universe_membership_fields() -> list[pa.Field]:
+    return [
+        pa.field("universe_id", pa.string()),
+        pa.field("symbol", pa.string()),
+        pa.field("raw_effective_from", pa.date32()),
+        pa.field("raw_effective_to", pa.date32()),
+        pa.field("announcement_date", pa.date32()),
+        pa.field("status", pa.string()),
+        pa.field("reason", pa.string()),
+        pa.field("source", pa.string()),
+        pa.field("source_url", pa.string()),
+        pa.field("snapshot_sha256", pa.string()),
+        pa.field("source_document_sha256", pa.string()),
+    ]
+
+
 def _trading_calendar_fields() -> list[pa.Field]:
     return [
         pa.field("calendar_date", pa.date32()),
@@ -183,9 +252,44 @@ def _trading_calendar_fields() -> list[pa.Field]:
     ]
 
 
+def _adjusted_bar_fields() -> list[pa.Field]:
+    return [
+        pa.field("trade_date", pa.date32()),
+        pa.field("symbol", pa.string()),
+        pa.field("source", pa.string()),
+        pa.field("adjustment", pa.string()),
+        pa.field("raw_close", pa.float64()),
+        pa.field("adjusted_close", pa.float64()),
+        pa.field("adjustment_factor", pa.float64()),
+        pa.field("quality_severity", pa.string()),
+        pa.field("invalid_reason", pa.string()),
+        pa.field("applied_action_ids", pa.string()),
+    ]
+
+
+def _corporate_action_quarantine_fields() -> list[pa.Field]:
+    return [
+        pa.field("symbol", pa.string()),
+        pa.field("announcement_date", pa.date32()),
+        pa.field("record_date", pa.date32()),
+        pa.field("ex_date", pa.date32()),
+        pa.field("cash_dividend_per_share", pa.float64()),
+        pa.field("bonus_share_ratio", pa.float64()),
+        pa.field("capitalization_ratio", pa.float64()),
+        pa.field("rights_issue_ratio", pa.float64()),
+        pa.field("rights_issue_price", pa.float64()),
+        pa.field("status", pa.string()),
+        pa.field("confirmed_by", pa.string()),
+        pa.field("reason", pa.string()),
+    ]
+
+
 DAILY_SCHEMA = pa.schema(_daily_fields())
 CORPORATE_ACTION_SCHEMA = pa.schema(_corporate_action_fields())
 CORPORATE_ACTION_COVERAGE_SCHEMA = pa.schema(_corporate_action_coverage_fields())
+CORPORATE_ACTION_QUARANTINE_SCHEMA = pa.schema(_corporate_action_quarantine_fields())
 SECURITY_MASTER_SCHEMA = pa.schema(_security_master_fields())
 SECURITY_MASTER_COVERAGE_SCHEMA = pa.schema(_security_master_coverage_fields())
+UNIVERSE_MEMBERSHIP_SCHEMA = pa.schema(_universe_membership_fields())
 TRADING_CALENDAR_SCHEMA = pa.schema(_trading_calendar_fields())
+ADJUSTED_BAR_SCHEMA = pa.schema(_adjusted_bar_fields())

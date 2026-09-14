@@ -27,9 +27,44 @@ from stock_quant.research.spec import (
     compute_experiment_id,
     load_experiment_spec,
 )
+from stock_quant.research.trust import DataTrustMode
+from stock_quant.research.walk_forward.snapshots import build_snapshot_bundle
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_EXAMPLE_SPEC = _REPO_ROOT / "configs" / "experiments" / "momentum_60d.yml"
+_EXAMPLE_SPEC = _REPO_ROOT / "templates" / "project-config" / "experiments" / "momentum_60d.yml"
+
+#: Static pinned-dataset table hashes for identity tests.  Identity is
+#: spec + snapshot bundle, so every identity call needs a bundle built from
+#: the same frozen spec; the table hashes themselves are arbitrary constants.
+_DATASET_MANIFEST = {
+    "tables": {
+        "adjusted_bar": {"sha256": "1" * 64},
+        "daily_bar": {"sha256": "2" * 64},
+        "trading_calendar": {"sha256": "3" * 64},
+        "corporate_action": {"sha256": "4" * 64},
+        "corporate_action_coverage": {"sha256": "5" * 64},
+    },
+}
+
+_CONFIG_HASHES = {
+    "costs.yml": "c" * 64,
+    "trading_rules.yml": "e" * 64,
+}
+
+
+def bundle_for(spec: ExperimentSpec):
+    """A deterministic snapshot bundle bound to ``spec`` (identity v2)."""
+    return build_snapshot_bundle(
+        spec=spec,
+        dataset_manifest=_DATASET_MANIFEST,
+        universe_definition=None,
+        config_hashes=_CONFIG_HASHES,
+    )
+
+
+def experiment_id(spec: ExperimentSpec) -> str:
+    """The scheme-v2 identity of ``spec``: the spec plus its bundle."""
+    return compute_experiment_id(spec, bundle_for(spec))
 
 
 def spec_kwargs(**overrides):
@@ -42,6 +77,9 @@ def spec_kwargs(**overrides):
         factor_versions={"momentum_60d": "1.0.0"},
         dataset_version="d" * 64,
         universe_version="u" * 64,
+        # An explicit acceptance id keeps the default helper spec frozen; the
+        # CURRENT_ACCEPTED placeholder tests override it explicitly.
+        data_acceptance_id="a" * 64,
         date_range={"start_date": date(2020, 1, 1), "end_date": date(2026, 9, 2)},
         train_validation_holdout_policy="not_applicable_engineering_mvp",
         preprocessing={"winsorization": "none", "standardization": "none"},
@@ -56,26 +94,38 @@ def spec_kwargs(**overrides):
     return kwargs
 
 
-def make_spec(**overrides) -> ExperimentSpec:
+def spec_factory(**overrides) -> ExperimentSpec:
     return ExperimentSpec.model_validate(spec_kwargs(**overrides))
 
 
 @pytest.fixture
+def make_spec():
+    """The spec factory as a fixture (the buffered plan's test signature)."""
+    return spec_factory
+
+
+@pytest.fixture
+def snapshots_for():
+    """The snapshot-bundle builder bound to a spec (identity v2)."""
+    return bundle_for
+
+
+@pytest.fixture
 def spec() -> ExperimentSpec:
-    return make_spec()
+    return spec_factory()
 
 
 def test_experiment_id_is_deterministic_and_sensitive_to_result_inputs(spec):
-    assert compute_experiment_id(spec) == compute_experiment_id(
+    assert experiment_id(spec) == experiment_id(
         spec.model_copy(deep=True)
     )
     changed = spec.model_copy(update={"random_seed": spec.random_seed + 1})
-    assert compute_experiment_id(spec) != compute_experiment_id(changed)
+    assert experiment_id(spec) != experiment_id(changed)
 
 
 def test_experiment_id_survives_a_serialization_round_trip(spec):
     rebuilt = ExperimentSpec.model_validate_json(spec.model_dump_json())
-    assert compute_experiment_id(rebuilt) == compute_experiment_id(spec)
+    assert experiment_id(rebuilt) == experiment_id(spec)
 
 
 @pytest.mark.parametrize(
@@ -83,6 +133,7 @@ def test_experiment_id_survives_a_serialization_round_trip(spec):
     [
         {"dataset_version": "e" * 64},
         {"universe_version": "v" * 64},
+        {"data_acceptance_id": "c" * 64},
         {"code_commit": "another-commit"},
         {"factor_versions": {"momentum_60d": "2.0.0"}},
         {"random_seed": 7},
@@ -99,13 +150,13 @@ def test_experiment_id_survives_a_serialization_round_trip(spec):
     ],
 )
 def test_experiment_id_changes_when_an_input_changes(change):
-    base = make_spec()
-    changed = make_spec(**change)
-    assert compute_experiment_id(base) != compute_experiment_id(changed)
+    base = spec_factory()
+    changed = spec_factory(**change)
+    assert experiment_id(base) != experiment_id(changed)
 
 
 def test_freeze_resolves_current_placeholders_to_explicit_versions():
-    placeholder = make_spec(dataset_version="CURRENT", universe_version="CURRENT")
+    placeholder = spec_factory(dataset_version="CURRENT", universe_version="CURRENT")
     assert not placeholder.is_frozen
     frozen = placeholder.freeze(
         dataset_version="resolved-dataset", universe_version="resolved-universe"
@@ -113,31 +164,31 @@ def test_freeze_resolves_current_placeholders_to_explicit_versions():
     assert frozen.dataset_version == "resolved-dataset"
     assert frozen.universe_version == "resolved-universe"
     assert frozen.is_frozen
-    identical = make_spec(
+    identical = spec_factory(
         dataset_version="resolved-dataset", universe_version="resolved-universe"
     )
-    assert compute_experiment_id(frozen) == compute_experiment_id(identical)
+    assert experiment_id(frozen) == experiment_id(identical)
 
 
 def test_freeze_keeps_already_explicit_versions(spec):
     frozen = spec.freeze()
     assert frozen.dataset_version == spec.dataset_version
-    assert compute_experiment_id(frozen) == compute_experiment_id(spec)
+    assert experiment_id(frozen) == experiment_id(spec)
 
 
 def test_freeze_can_stamp_the_code_commit(spec):
     stamped = spec.freeze(code_commit="repo-head-sha")
     assert stamped.code_commit == "repo-head-sha"
-    assert compute_experiment_id(stamped) != compute_experiment_id(spec)
+    assert experiment_id(stamped) != experiment_id(spec)
 
 
 def test_freeze_requires_an_explicit_version_for_each_current_field():
-    dataset_only = make_spec(dataset_version="CURRENT")
+    dataset_only = spec_factory(dataset_version="CURRENT")
     with pytest.raises(ValueError):
         dataset_only.freeze()
     with pytest.raises(ValueError):
         dataset_only.freeze(universe_version="resolved-universe")
-    both = make_spec(dataset_version="CURRENT", universe_version="CURRENT")
+    both = spec_factory(dataset_version="CURRENT", universe_version="CURRENT")
     with pytest.raises(ValueError):
         both.freeze(dataset_version="resolved-dataset")
     frozen = both.freeze(
@@ -147,14 +198,129 @@ def test_freeze_requires_an_explicit_version_for_each_current_field():
 
 
 def test_compute_experiment_id_rejects_unresolved_current_spec():
-    placeholder = make_spec(dataset_version="CURRENT")
+    placeholder = spec_factory(dataset_version="CURRENT")
     with pytest.raises(ExperimentNotFrozenError):
-        compute_experiment_id(placeholder)
+        experiment_id(placeholder)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: the frozen universe definition is part of experiment identity
+# ---------------------------------------------------------------------------
+
+
+def test_definition_version_changes_experiment_id():
+    """The plan's identity rule: the frozen universe_version is hashed.
+
+    Two specs identical except for the resolved universe definition version
+    must receive different experiment ids: research identity incorporates the
+    point-in-time universe, not just the dataset version.
+    """
+    assert experiment_id(
+        spec_factory(universe_version="a" * 64)
+    ) != experiment_id(spec_factory(universe_version="b" * 64))
+
+
+# ---------------------------------------------------------------------------
+# Buffered risk-weighted rule: canonical content is part of the identity
+# ---------------------------------------------------------------------------
+
+
+def test_portfolio_parameter_change_changes_experiment_identity(
+    make_spec, snapshots_for
+):
+    left = spec_factory(portfolio_rule={"name": "buffered_risk_weighted"})
+    right = spec_factory(
+        portfolio_rule={"name": "buffered_risk_weighted", "hold_rank": 14}
+    )
+    assert compute_experiment_id(left, snapshots_for(left)) != \
+        compute_experiment_id(right, snapshots_for(right))
+
+
+def test_buffered_rule_identity_is_distinct_from_equal_weight_identity():
+    buffered = spec_factory(portfolio_rule={"name": "buffered_risk_weighted"})
+    equal = spec_factory(
+        portfolio_rule={"name": "top_n_equal_weight", "top_n": 10, "lot_size": 100}
+    )
+    assert experiment_id(buffered) != experiment_id(equal)
+
+
+def test_buffered_rule_snapshot_carries_canonical_policy_version():
+    from stock_quant.research.walk_forward.policy import canonical_sha256
+
+    spec = spec_factory(portfolio_rule={"name": "buffered_risk_weighted"})
+    bundle = bundle_for(spec)
+    snapshot = bundle.strategy_snapshot
+    # portfolio_rule_version is the canonical policy JSON hash, never a
+    # handwritten label, and the same canonical content sits in the
+    # parameters hash beside preprocessing and the seed.
+    expected_version = canonical_sha256(
+        spec.portfolio_rule.model_dump(mode="json")
+    )
+    assert snapshot.portfolio_rule_version == expected_version
+    assert snapshot.parameters_hash == canonical_sha256(
+        {
+            "preprocessing": spec.preprocessing.model_dump(mode="json"),
+            "portfolio_rule": spec.portfolio_rule.model_dump(mode="json"),
+            "random_seed": spec.random_seed,
+        }
+    )
+
+
+def test_spec_defaults_to_no_universe_definition():
+    """A spec without ``universe_definition`` keeps the legacy path."""
+    assert spec_factory().universe_definition is None
+
+
+def test_spec_accepts_a_universe_definition_name_and_freezes_with_it():
+    spec = spec_factory(universe_definition="csi300")
+    assert spec.universe_definition == "csi300"
+    frozen = spec.freeze(
+        dataset_version="d" * 64, universe_version="e" * 64, code_commit="head"
+    )
+    assert frozen.universe_definition == "csi300"
+    # the named definition participates in identity: the same frozen versions
+    # under a different definition name yield a different experiment id
+    assert experiment_id(frozen) != experiment_id(
+        frozen.model_copy(update={"universe_definition": "csi500"})
+    )
+
+
+@pytest.mark.parametrize("bad", ["", "   ", " csi300", "csi300 "])
+def test_spec_rejects_blank_or_padded_universe_definition(bad):
+    with pytest.raises(ValidationError):
+        spec_factory(universe_definition=bad)
+
+
+def test_research_spec_is_not_frozen_with_current_accepted():
+    spec = spec_factory(data_acceptance_id="CURRENT_ACCEPTED")
+    assert not spec.is_frozen
+    frozen = spec.freeze(data_acceptance_id="a" * 64)
+    assert frozen.data_acceptance_id == "a" * 64
+    assert frozen.is_frozen
+
+
+def test_acceptance_id_changes_experiment_identity():
+    first = spec_factory(data_acceptance_id="a" * 64)
+    second = spec_factory(data_acceptance_id="b" * 64)
+    assert experiment_id(first) != experiment_id(second)
+
+
+def test_engineering_spec_may_freeze_without_acceptance():
+    spec = spec_factory(data_acceptance_id=None, trust_mode=DataTrustMode.ENGINEERING)
+    assert spec.is_frozen
+
+
+def test_freeze_rejects_research_spec_without_acceptance():
+    with pytest.raises(
+        ValueError,
+        match="research specs require an explicit data_acceptance_id",
+    ):
+        spec_factory().freeze(data_acceptance_id=None)
 
 
 def test_spec_forbids_extra_fields():
     with pytest.raises(ValidationError):
-        make_spec(unexpected_key="not part of the spec")
+        spec_factory(unexpected_key="not part of the spec")
 
 
 def test_load_experiment_spec_rejects_unknown_top_level_keys(tmp_path):
@@ -168,12 +334,12 @@ def test_load_experiment_spec_rejects_unknown_top_level_keys(tmp_path):
 
 def test_spec_rejects_non_mvp_train_validation_holdout_policy():
     with pytest.raises(ValidationError):
-        make_spec(train_validation_holdout_policy="kfold_time_split")
+        spec_factory(train_validation_holdout_policy="kfold_time_split")
 
 
 def test_spec_rejects_date_range_end_before_start():
     with pytest.raises(ValidationError):
-        make_spec(
+        spec_factory(
             date_range={
                 "start_date": date(2020, 1, 1),
                 "end_date": date(2019, 12, 31),
@@ -192,19 +358,19 @@ def test_spec_rejects_date_range_end_before_start():
 )
 def test_spec_rejects_empty_or_blank_factor_entries(factor_versions):
     with pytest.raises(ValidationError):
-        make_spec(factor_versions=factor_versions)
+        spec_factory(factor_versions=factor_versions)
 
 
 def test_spec_rejects_blank_hypothesis_or_cost_scenarios():
     with pytest.raises(ValidationError):
-        make_spec(hypothesis="   ")
+        spec_factory(hypothesis="   ")
     with pytest.raises(ValidationError):
-        make_spec(cost_scenarios=[])
+        spec_factory(cost_scenarios=[])
 
 
 def test_committed_example_spec_is_coherent_and_loadable():
     loaded = load_experiment_spec(_EXAMPLE_SPEC)
-    assert loaded.factor_versions == {"momentum_60d": "1.0.0"}
+    assert loaded.factor_versions == {"momentum_60d": "2.0.0"}
     assert loaded.date_range.start_date == date(2020, 1, 1)
     assert loaded.date_range.start_date <= loaded.date_range.end_date
     assert (
@@ -212,19 +378,33 @@ def test_committed_example_spec_is_coherent_and_loadable():
     )
     assert loaded.dataset_version == "CURRENT"
     assert loaded.universe_version == "CURRENT"
+    # Formal research resolves the universe through the frozen csi300
+    # definition (never the legacy engineering universe.yml).
+    assert loaded.universe_definition == "csi300"
+    # The committed example requests the newest valid acceptance record and is
+    # therefore not frozen until the runner resolves it.
+    assert loaded.data_acceptance_id == "CURRENT_ACCEPTED"
+    assert not loaded.is_frozen
     # resolve-to-explicit semantics: freezing the same example twice with the
-    # same explicit versions yields one stable id; a different data version
-    # yields a different id.
+    # same explicit versions and acceptance yields one stable id; a different
+    # data version or a different acceptance yields a different id.
     frozen_once = loaded.freeze(
         dataset_version="aa" * 32,
         universe_version="bb" * 32,
+        data_acceptance_id="ac" * 32,
         code_commit="example-head",
     )
     frozen_twice = load_experiment_spec(_EXAMPLE_SPEC).freeze(
         dataset_version="aa" * 32,
         universe_version="bb" * 32,
+        data_acceptance_id="ac" * 32,
         code_commit="example-head",
     )
-    assert compute_experiment_id(frozen_once) == compute_experiment_id(frozen_twice)
+    assert frozen_once.is_frozen
+    assert experiment_id(frozen_once) == experiment_id(frozen_twice)
     other_data = frozen_once.freeze(dataset_version="cc" * 32)
-    assert compute_experiment_id(frozen_once) != compute_experiment_id(other_data)
+    assert experiment_id(frozen_once) != experiment_id(other_data)
+    other_acceptance = frozen_once.freeze(data_acceptance_id="ad" * 32)
+    assert experiment_id(frozen_once) != experiment_id(
+        other_acceptance
+    )

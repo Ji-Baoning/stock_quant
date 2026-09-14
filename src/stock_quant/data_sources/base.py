@@ -90,10 +90,19 @@ def request_metadata(
     supplier_endpoint: str,
     sdk_version: str,
     *,
+    transport_id: str,
     request_timestamp: str | None = None,
     response_timestamp: str | None = None,
 ) -> dict[str, str]:
-    """Build audit metadata while keeping tokens out of supplier results."""
+    """Build audit metadata while keeping tokens out of supplier results.
+
+    ``transport_id`` is the path-safe identity of the party that actually
+    answered -- the base-URL host for tushare, the winning upstream for
+    akshare, the supplier's own name for baostock (design §2.3).  It has no
+    default on purpose: a fallback value would let two different upstreams
+    collapse into one content-addressed path and silently keep each other's
+    ``supplier_endpoint``.
+    """
     parameters = {
         "symbols": list(request.symbols),
         "start_date": request.start_date.isoformat(),
@@ -106,6 +115,7 @@ def request_metadata(
         "response_timestamp": response_timestamp or _utc_timestamp(),
         "supplier_endpoint": supplier_endpoint,
         "sdk_version": sdk_version,
+        "transport_id": transport_id,
     }
 
 
@@ -240,6 +250,22 @@ def _comparison_symbol(value: object) -> str:
     if symbol.isdigit() and len(symbol) <= 6:
         return symbol.zfill(6)
     return symbol
+
+
+def host_of(url: str) -> str:
+    """The bare host of a base URL, or ``""`` when there is none.
+
+    Transport provenance is derived from the URL a client will actually
+    reach, never from the client's type, so this is the single place that
+    answers "which host is this?".  It is deliberately lenient: an
+    unparseable or empty URL yields ``""`` and the caller decides whether
+    that is fatal.
+    """
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    without_scheme = text.split("//", 1)[-1]
+    return without_scheme.split("/", 1)[0].split("?", 1)[0].strip()
 
 
 def _utc_timestamp() -> str:

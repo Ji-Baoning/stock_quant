@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 from stock_quant.cli import (
     app,  # noqa: F401  (imported before the CLI exists to gate Step 2)
@@ -67,6 +68,27 @@ def test_cached_end_to_end_run_is_reproducible(fixture_root):
     assert first.manifest["artifacts"] == second.manifest["artifacts"]
 
 
+def test_published_manifest_records_the_accepted_data_identity(fixture_root):
+    """The formal CLI run pins the fixture's ACCEPTED record everywhere: the
+    frozen spec, the experiment manifest and metrics.json carry the same
+    concrete acceptance id -- never the CURRENT_ACCEPTED placeholder."""
+    outcome = run_offline_fixture(fixture_root.root)
+    assert fixture_root.acceptance_id is not None
+    assert outcome.manifest["data_acceptance_id"] == fixture_root.acceptance_id
+    spec = yaml.safe_load(
+        (outcome.path / "experiment_spec.yml").read_text(encoding="utf-8")
+    )
+    assert spec["data_acceptance_id"] == fixture_root.acceptance_id
+    metrics = json.loads(
+        (outcome.path / "metrics.json").read_text(encoding="utf-8")
+    )
+    audit = metrics["data_acceptance"]
+    assert audit["acceptance_id"] == fixture_root.acceptance_id
+    assert audit["policy_version"] == "real-data-v1"
+    assert audit["decision"] == "ACCEPTED"
+    assert audit["operator_id"] == "integration-fixture"
+
+
 def test_published_experiment_holds_complete_immutable_artifact_contract(
     fixture_root,
 ):
@@ -95,29 +117,60 @@ def test_published_experiment_holds_complete_immutable_artifact_contract(
         assert "planned_order_count" in summary
         assert "filled_order_count" in summary
         assert "unfilled_reason_counts" in summary
+
+    # There is no top-level plan ledger under account-aware rebalancing: each
+    # scenario's submitted stream *is* its plan, so the acceptance proves
+    # per-scenario bookkeeping completeness plus the I1a/I1/I2/I4 invariants
+    # on this fixture (CA-free, sells unblocked, cash sufficient -- the I1
+    # premises hold, so convergence is unconditional).
     run_id = metrics["meta"]["run_id"]
-    plan = pd.read_parquet(outcome.path / "orders.parquet")
-    submitted_frames: list[pd.DataFrame] = []
+    final_holdings: dict[str, dict[str, int]] = {}
+    final_equity: dict[str, float] = {}
     for scenario in scenarios:
         scenario_dir = (
             Path(fixture_root.root) / "data" / "runs" / run_id / "backtest" / scenario
         )
         submitted = pd.read_parquet(scenario_dir / "submitted_orders.parquet")
-        submitted_frames.append(submitted)
         assert (scenario_dir / "order_diffs.parquet").is_file()
         assert not (scenario_dir / "rebalance_adjustments.parquet").exists()
         assert not (scenario_dir / "executable_targets.parquet").exists()
-        # The submitted set is exactly the frozen plan ledger.
-        sub = submitted[["order_id", "side", "symbol", "quantity"]].sort_values(
-            "order_id"
-        ).reset_index(drop=True)
-        planned = plan[["order_id", "side", "symbol", "quantity"]].sort_values(
-            "order_id"
-        ).reset_index(drop=True)
-        assert sub.equals(planned)
-    # Submitted orders are scenario-independent (spec section 6).
-    for frame in submitted_frames[1:]:
-        assert submitted_frames[0].equals(frame)
+        # Bookkeeping completeness: every submitted order reconciles to fills
+        # plus exact-reason rejections (filled + rejected == submitted).
+        diffs = pd.read_parquet(scenario_dir / "order_diffs.parquet")
+        assert len(diffs) == len(submitted)
+        assert (
+            diffs["planned_quantity"]
+            == diffs["filled_quantity"] + diffs["rejected_quantity"]
+        ).all()
+        assert (
+            diffs["status"].isin(["FILLED", "REJECTED", "PARTIAL"]).all()
+        )
+        fills = pd.read_parquet(scenario_dir / "fills.parquet")
+        bought = fills[fills["side"] == "BUY"].groupby("symbol")["quantity"].sum()
+        sold = fills[fills["side"] == "SELL"].groupby("symbol")["quantity"].sum()
+        final_holdings[scenario] = (
+            bought.subtract(sold, fill_value=0).astype(int).to_dict()
+        )
+        equity = pd.read_parquet(scenario_dir / "daily_equity.parquet")
+        final_equity[scenario] = float(equity["total_equity"].iloc[-1])
+
+    # I1: scenarios converge to identical realized holdings.
+    assert final_holdings["zero_cost"] == final_holdings["commission_tax"]
+    assert final_holdings["zero_cost"] == final_holdings["full_cost"]
+    # I2: ...and to the executable final target book.
+    targets = pd.read_parquet(outcome.path / "target_positions.parquet")
+    last_signal = targets["trade_date"].max()
+    final_targets = (
+        targets[targets["trade_date"] == last_signal]
+        .set_index("symbol")["target_quantity"]
+        .astype(int)
+        .to_dict()
+    )
+    assert final_holdings["zero_cost"] == final_targets
+    # I4: business-level cost monotonicity on this upper-bound fixture (same
+    # executed quantities, fee-only differences).
+    assert final_equity["zero_cost"] >= final_equity["commission_tax"]
+    assert final_equity["commission_tax"] >= final_equity["full_cost"]
     html = (outcome.path / "report.html").read_text(encoding="utf-8")
     assert len(html) > 0
 

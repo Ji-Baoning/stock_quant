@@ -17,6 +17,41 @@ from stock_quant.data_sources.base import (
     validate_supplier_frame,
 )
 
+#: The upstream vendor behind each AKShare endpoint this adapter can reach.
+#: Provenance needs the answering *vendor* rather than the akshare wrapper,
+#: because two vendors can return byte-identical frames (design §2.3) -- and
+#: ``index_history`` really does switch between them at runtime.
+_UPSTREAM_VENDOR = {
+    "akshare.stock_zh_index_daily_em": "eastmoney",
+    "akshare.stock_zh_index_hist_em": "eastmoney",
+    "akshare.stock_zh_index_daily": "sina",
+    "akshare.stock_zh_index_daily_tx": "tencent",
+    "akshare.stock_info_a_code_name": "eastmoney",
+    "akshare.stock_dividend_cninfo": "cninfo",
+    "akshare.stock_fhps_detail_em": "eastmoney",
+    "akshare.stock_fhps_detail_ths": "ths",
+}
+
+
+def _transport_id(supplier_endpoint: str) -> str:
+    """The interface that answered, as a path-safe id (design §2.3).
+
+    The vendor alone is **not** enough.  ``stock_zh_index_daily_em`` and
+    ``stock_zh_index_hist_em`` are two different EastMoney interfaces serving
+    the same logical ``index_history`` endpoint, and ``_index_history``'s
+    fallback chain can switch between them run to run.  If both were labelled
+    ``eastmoney``, two byte-identical frames would land on one
+    content-addressed path and the second save would silently keep the first
+    one's ``supplier_endpoint`` -- precisely the collision the transport layer
+    exists to prevent.  So the id carries the vendor *and* the interface.
+
+    An endpoint with no vendor mapping names itself under an ``akshare``
+    prefix rather than sharing a constant.
+    """
+    slug = supplier_endpoint.rsplit(".", 1)[-1].replace("_", "-")
+    vendor = _UPSTREAM_VENDOR.get(supplier_endpoint, "akshare")
+    return f"{vendor}.{slug}"
+
 
 class AkShareSource:
     """Expose the AKShare endpoints needed by the raw-source boundary."""
@@ -112,6 +147,7 @@ class AkShareSource:
                 request,
                 supplier_endpoint,
                 self._sdk_version,
+                transport_id=_transport_id(supplier_endpoint),
                 request_timestamp=request_timestamp,
                 response_timestamp=response_timestamp,
             ),

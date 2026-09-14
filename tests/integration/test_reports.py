@@ -11,6 +11,7 @@ by a synthetic input rendered under a ``tmp_path`` (never committed).
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import date
 
 import pandas as pd
@@ -34,6 +35,7 @@ from stock_quant.reporting.html import (
     FieldDifference,
     QualityReportInput,
     SourceStatus,
+    _net_value_figure,
     render_experiment_report,
     render_quality_report,
 )
@@ -224,6 +226,8 @@ def _holdings() -> pd.DataFrame:
 def _experiment_input(
     known_limitations: tuple[str, ...] | None = None,
     corporate_action_trust: dict | None = None,
+    factor_input_audit: dict | None = None,
+    data_acceptance: dict | None = None,
 ) -> ExperimentReportInput:
     benchmark = _benchmark()
     scenarios: list[ExperimentScenario] = []
@@ -263,6 +267,8 @@ def _experiment_input(
         generated_at="2024-01-09T09:00:00",
         known_limitations=known_limitations,
         corporate_action_trust=corporate_action_trust,
+        factor_input_audit=factor_input_audit,
+        data_acceptance=data_acceptance,
     )
 
 
@@ -517,15 +523,17 @@ def test_experiment_html_is_self_contained(tmp_path):
 
 def test_experiment_html_always_surfaces_phase_one_known_limitations(tmp_path):
     # The CLI report build path supplies no run-specific known limitations; the
-    # two phase-one boundaries must still render in the 已知限制 section.
+    # remaining phase-one boundary must still render in the 已知限制 section.
+    # The obsolete "no adjusted series is consumed" limitation is gone: the
+    # 因子价格口径 section now states the consumed basis explicitly.
     path = render_experiment_report(
         _experiment_input(known_limitations=()), tmp_path / "report.html"
     )
     html = path.read_text(encoding="utf-8")
     assert "跨源收盘价差异超过容差" in html
     assert "Tushare 主源收盘序列为准" in html
-    assert "不发布、也不消费复权日线" in html
-    assert "adjusted_close=close" in html
+    assert "不发布、也不消费复权日线" not in html
+    assert "adjusted_close=close" not in html
     # Run-specific limitations still follow the phase-one boundaries when given.
     with_extra = _experiment_input(
         known_limitations=("自定义实验限制：示例。",)
@@ -536,6 +544,150 @@ def test_experiment_html_always_surfaces_phase_one_known_limitations(tmp_path):
     phase_one_pos = combined.index("跨源收盘价差异超过容差")
     extra_pos = combined.index("自定义实验限制：示例。")
     assert phase_one_pos < extra_pos
+
+
+def test_experiment_html_shows_factor_price_basis(tmp_path):
+    audit = {
+        "adjustment": "internal_total_return_v1",
+        "factor_versions": {"momentum_60d": "2.0.0"},
+        "row_count": 100,
+        "error_break_count": 2,
+        "invalid_reason_counts": {"cross_source_conflict": 2},
+    }
+    path = render_experiment_report(
+        _experiment_input(factor_input_audit=audit), tmp_path / "report.html"
+    )
+    html = path.read_text(encoding="utf-8")
+    assert "因子价格口径" in html
+    assert "internal_total_return_v1" in html
+    assert "momentum_60d: 2.0.0" in html
+    assert "cross_source_conflict" in html
+    assert "100" in html  # 输入行数
+    assert "不可信断点" in html
+
+
+def test_experiment_html_omits_factor_price_basis_without_audit(tmp_path):
+    # Reports rebuilt before the audit existed render no empty claims.
+    html = render_experiment_report(
+        _experiment_input(), tmp_path / "report.html"
+    ).read_text(encoding="utf-8")
+    assert "因子价格口径" not in html
+
+
+def test_experiment_html_escapes_factor_audit_reasons(tmp_path):
+    audit = {
+        "adjustment": "internal_total_return_v1",
+        "factor_versions": {"momentum_60d": "2.0.0"},
+        "row_count": 1,
+        "error_break_count": 1,
+        "invalid_reason_counts": {"<script>alert(1)</script>": 1},
+    }
+    html = render_experiment_report(
+        _experiment_input(factor_input_audit=audit), tmp_path / "report.html"
+    ).read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+
+
+# --------------------------------------------------------------------------- #
+# Real-data acceptance audit section (plan Task 7)
+# --------------------------------------------------------------------------- #
+
+
+def test_experiment_report_shows_data_acceptance(tmp_path):
+    report = _experiment_input(
+        data_acceptance={
+            "acceptance_id": "a" * 64,
+            "policy_version": "real-data-v1",
+            "operator_id": "operator-a",
+            "created_at": "2026-09-08T12:00:00+00:00",
+            "decision": "ACCEPTED",
+        }
+    )
+    path = render_experiment_report(report, tmp_path / "report.html")
+    html = path.read_text(encoding="utf-8")
+    assert "真实数据验收" in html
+    assert "real-data-v1" in html
+    assert "operator-a" in html
+    assert "a" * 64 in html
+    assert "ACCEPTED" in html
+    assert "2026-09-08T12:00:00+00:00" in html
+    # The audit section leads the performance presentation, never follows it.
+    assert html.index("真实数据验收") < html.index("绩效汇总")
+    assert html.index("真实数据验收") < html.index("净值与回撤")
+
+
+def test_experiment_html_flags_unverified_without_acceptance(tmp_path):
+    # No acceptance audit (or the engineering {"acceptance_id": None,
+    # "status": "UNVERIFIED"} shape) must render the prominent UNVERIFIED
+    # alert and never an inferred ACCEPTED claim.
+    for missing in (None, {"acceptance_id": None, "status": "UNVERIFIED"}):
+        html = render_experiment_report(
+            _experiment_input(data_acceptance=missing), tmp_path / "r.html"
+        ).read_text(encoding="utf-8")
+        assert "真实数据验收" in html
+        assert "UNVERIFIED" in html
+        assert "ACCEPTED" not in html
+        assert "real-data-v1" not in html
+
+
+def _benchmark_on(days: list[date]) -> pd.DataFrame:
+    """The benchmark fixture over an explicit day list."""
+    rows: list[dict] = []
+    for index, day in enumerate(days):
+        rows.append(
+            {"symbol": "000300.SH", "trade_date": day, "close": 3000.0 + 60.0 * index}
+        )
+        rows.append(
+            {"symbol": "000905.SH", "trade_date": day, "close": 5000.0 + 50.0 * index}
+        )
+    return pd.DataFrame(rows)
+
+
+def test_net_value_chart_indexes_every_series_from_one_base_day():
+    """A benchmark predating the strategy must not set its own origin.
+
+    Indexing each series at its own first point let a benchmark whose history
+    began years earlier draw that earlier run as if it were relative
+    performance.  Every trace now starts at the base day the title names.
+    """
+    history = [date(2023, 6, 1), date(2023, 6, 2)] + _DATES
+    experiment = replace(_experiment_input(), benchmark_closes=_benchmark_on(history))
+
+    fig = _net_value_figure(experiment)
+
+    assert fig.layout.title.text == "同区间累计收益（%）（基准日 = 2024-01-02）"
+    for trace in fig.data:
+        assert list(trace.x)[0] == "2024-01-02", trace.name
+        assert list(trace.y)[0] == 0.0, trace.name
+    benchmark = next(trace for trace in fig.data if trace.name == "000300.SH")
+    assert min(benchmark.x) == "2024-01-02"  # the 2023 tail is not drawn
+
+
+def test_net_value_chart_plots_cumulative_return_over_the_window():
+    """The traces are cumulative return (%), not per-series net values."""
+    fig = _net_value_figure(_experiment_input())
+    plotted = {trace.name: list(trace.y) for trace in fig.data}
+
+    assert plotted["zero_cost"] == [0.0, 1.0, 3.0, 2.0, 4.0]
+    assert plotted["full_cost"] == [0.0, 0.5, 2.5, 1.2, 2.8]
+    # 3000 -> 3240 over the same days, on the same base day.
+    assert plotted["000300.SH"] == [0.0, 2.0, 4.0, 6.0, 8.0]
+
+
+def test_experiment_html_escapes_data_acceptance_fields(tmp_path):
+    audit = {
+        "acceptance_id": "b" * 64,
+        "policy_version": "real-data-v1",
+        "operator_id": "<script>alert(1)</script>",
+        "created_at": "2026-09-08T12:00:00+00:00",
+        "decision": "ACCEPTED",
+    }
+    html = render_experiment_report(
+        _experiment_input(data_acceptance=audit), tmp_path / "report.html"
+    ).read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
 
 
 # --------------------------------------------------------------------------- #
@@ -596,3 +748,230 @@ def test_templates_resolve_independent_of_cwd(tmp_path, monkeypatch):
     )
     assert "工程验证" in exp_path.read_text(encoding="utf-8")
     assert "门禁决定" in qual_path.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# Walk-forward audit section
+# --------------------------------------------------------------------------- #
+
+
+def _walk_forward_payload() -> dict:
+    return {
+        "research_status": "COMPLETED",
+        "stability_conclusion": "UNSTABLE",
+        "stability_policy_hash": "ab" * 32,
+        "stability_policy_version": "stability-v1",
+        "thresholds": {
+            "policy_version": "stability-v1",
+            "minimum_executed_folds": 5,
+            "minimum_positive_fold_ratio": 0.60,
+            "worst_fold_calendar_return_floor": -0.10,
+            "annualization_sessions": 252,
+            "risk_free_rate": 0.0,
+        },
+        "integrity_failures": [],
+        "skipped_fold_ids": [],
+        "reasons": ["unstable scenarios: full_cost"],
+        "schedule": {
+            "requested_start": "2020-01-01",
+            "requested_end": "2025-12-31",
+            "fold_count": 5,
+            "boundary_count": 1,
+            "boundaries": [
+                {
+                    "calendar_start": "2026-01-01",
+                    "calendar_end": "2026-09-02",
+                    "reason": "trailing_partial_year",
+                }
+            ],
+            "fold_schedule_sha256": "cd" * 32,
+            "fold_outcomes_sha256": "de" * 32,
+        },
+        "fold_statuses": [
+            {"fold_id": "fold-0001", "status": "executed", "reason_code": None},
+            {"fold_id": "fold-0002", "status": "failed_preflight",
+             "reason_code": "DATA_GAP"},
+        ],
+        "scenario_results": [
+            {
+                "scenario": "full_cost",
+                "executed_fold_count": 5,
+                "positive_fold_count": 2,
+                "positive_fold_ratio": 0.4,
+                "worst_fold_calendar_return": -0.5,
+                "minimum_positive_fold_ratio": 0.6,
+                "worst_fold_calendar_return_floor": -0.1,
+                "policy_version": "stability-v1",
+                "passed": False,
+                "reasons": ["positive fold ratio 0.4 < 0.6"],
+            }
+        ],
+        "scenario_aggregates": [
+            {
+                "scenario": "full_cost",
+                "aggregate_return": 0.21,
+                "annualized_return": 0.039,
+                "annualized_volatility": 0.18,
+                "sharpe_zero_rf": 0.216,
+                "oos_return_observations": 1220,
+                "annualization_observations": 1220,
+            }
+        ],
+        "fold_metrics": [
+            {
+                "fold_id": "fold-0001",
+                "scenario": "full_cost",
+                "fold_calendar_return": 0.05,
+                "per_fold_max_drawdown": -0.03,
+                "observation_count": 244,
+                "reject_rate": 0.1,
+                "turnover": 0.42,
+                "explicit_cost_ratio": 0.001,
+            },
+            {
+                "fold_id": "fold-0002",
+                "scenario": "full_cost",
+                "fold_calendar_return": -0.5,
+                "per_fold_max_drawdown": -0.55,
+                "observation_count": 244,
+                "reject_rate": 0.2,
+                "turnover": 0.51,
+                "explicit_cost_ratio": 0.002,
+            },
+        ],
+        "experiment_id": "exp-abc123",
+        "dataset_version": "dataset-v1",
+        "universe_version": "universe-v1",
+    }
+
+
+def test_experiment_html_renders_the_walk_forward_audit_section(tmp_path):
+    payload = _walk_forward_payload()
+    run_input = _experiment_input()
+    report_input = ExperimentReportInput(
+        experiment_id=run_input.experiment_id,
+        dataset_version=run_input.dataset_version,
+        universe_version=run_input.universe_version,
+        code_commit=run_input.code_commit,
+        scenarios=(),
+        benchmark_closes=run_input.benchmark_closes,
+        benchmark_symbols=run_input.benchmark_symbols,
+        run_id=run_input.run_id,
+        hypothesis=run_input.hypothesis,
+        initial_cash=run_input.initial_cash,
+        walk_forward=payload,
+    )
+    destination = tmp_path / "walk_forward.html"
+    render_experiment_report(report_input, destination)
+    html = destination.read_text(encoding="utf-8")
+    # every fold id, every scenario, the policy hash and observation counts
+    assert "fold-0001" in html
+    assert "fold-0002" in html
+    assert "full_cost" in html
+    assert ("ab" * 32) in html
+    assert "stability_policy_hash" in html
+    assert "oos_return_observations" in html
+    # per-fold drawdowns are rendered; no global drawdown field exists
+    assert "per_fold_max_drawdown" in html
+    assert "-55.00%" in html
+    assert "aggregate_max_drawdown" not in html
+    assert "全局最大回撤" not in html
+    # no Calmar metric field exists anywhere; the policy disclaimer names it
+    assert "calmar_ratio" not in html
+    assert "Calmar" in html and "被政策禁止" in html
+    # boundary exclusions are recorded, never silently dropped
+    assert "trailing_partial_year" in html
+    assert "not_evaluated_boundary" in html or "边界未评估" in html
+    # failed folds remain listed
+    assert "failed_preflight" in html
+    # the conclusion and its null-on-failure rule are visible
+    assert "UNSTABLE" in html
+
+
+def test_experiment_html_omits_walk_forward_section_without_payload(tmp_path):
+    destination = tmp_path / "plain.html"
+    render_experiment_report(_experiment_input(), destination)
+    html = destination.read_text(encoding="utf-8")
+    assert "stability_policy_hash" not in html
+    assert "Walk-Forward" not in html
+
+
+# --------------------------------------------------------------------------- #
+# Buffered construction audit section (buffered plan Task 5)
+# ---------------------------------------------------------------------------
+
+
+def _buffered_walk_forward_payload() -> dict:
+    payload = _walk_forward_payload()
+    payload["buffered"] = {
+        "portfolio_rule_version": "ef" * 32,
+        "folds": [
+            {
+                "fold_id": "fold-0001",
+                "signal_days": 50,
+                "retained": 210,
+                "entered": 42,
+                "exited": 40,
+                "risk_invalid": 7,
+                "achieved_gross_exposure": 0.97,
+                "cash_residue": 0.03,
+            }
+        ],
+        "scenarios": [
+            {
+                "scenario": "full_cost",
+                "band_suppressed_rows": 30,
+                "band_suppressed_amount": 125000.5,
+                "lot_suppressed_rows": 12,
+                "lot_suppressed_amount": 9000.25,
+            }
+        ],
+    }
+    return payload
+
+
+def test_buffered_report_explains_turnover_sources(tmp_path):
+    run_input = _experiment_input()
+    report_input = ExperimentReportInput(
+        experiment_id=run_input.experiment_id,
+        dataset_version=run_input.dataset_version,
+        universe_version=run_input.universe_version,
+        code_commit=run_input.code_commit,
+        scenarios=(),
+        benchmark_closes=run_input.benchmark_closes,
+        benchmark_symbols=run_input.benchmark_symbols,
+        run_id=run_input.run_id,
+        hypothesis=run_input.hypothesis,
+        initial_cash=run_input.initial_cash,
+        walk_forward=_buffered_walk_forward_payload(),
+    )
+    rendered_html = render_experiment_report(
+        report_input, tmp_path / "buffered.html"
+    ).read_text(encoding="utf-8")
+    assert "成员变化换手" in rendered_html
+    assert "连续持仓再平衡换手" in rendered_html
+    assert "带宽抑制金额" in rendered_html
+    assert "手数抑制金额" in rendered_html
+    # the canonical rule version renders, and suppression is never presented
+    # as an execution rejection
+    assert "ef" * 32 in rendered_html
+    assert "不是执行拒单" in rendered_html
+
+
+def test_plain_report_has_no_buffered_section(tmp_path):
+    run_input = _experiment_input()
+    report_input = ExperimentReportInput(
+        experiment_id=run_input.experiment_id,
+        dataset_version=run_input.dataset_version,
+        universe_version=run_input.universe_version,
+        code_commit=run_input.code_commit,
+        scenarios=(),
+        benchmark_closes=run_input.benchmark_closes,
+        benchmark_symbols=run_input.benchmark_symbols,
+        walk_forward=_walk_forward_payload(),
+    )
+    rendered_html = render_experiment_report(
+        report_input, tmp_path / "plain.html"
+    ).read_text(encoding="utf-8")
+    assert "成员变化换手" not in rendered_html
+    assert "带宽抑制金额" not in rendered_html
