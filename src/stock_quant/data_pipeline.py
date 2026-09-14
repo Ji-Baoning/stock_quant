@@ -1579,7 +1579,7 @@ class DataPipeline:
         """
         source = self._overrides.get("akshare") or self._build_lazy("akshare")
         if source is None:
-            return current_ca, coverage_frame([]), current_quarantine
+            return current_ca, coverage_frame([])
         frames_by_symbol: dict[str, dict[str, list[pd.DataFrame]]] = {}
         outcomes_by_symbol: dict[str, dict[str, dict[str, object]]] = {}
         for symbol in symbols:
@@ -1594,8 +1594,8 @@ class DataPipeline:
                         source,
                         DataRequest(endpoint, (symbol,), start, end, {}),
                     )
-                    snapshot = self._record_raw(result)
-                    raw_snapshots.append(snapshot)
+                    snapshot_sha256 = self._record_raw(result)
+                    raw_snapshots.append(snapshot_sha256)
                     frame = result.frame
                     if not frame.empty:
                         if endpoint == "cninfo_corporate_actions":
@@ -1607,7 +1607,7 @@ class DataPipeline:
                     symbol_outcomes[endpoint] = {
                         "ok": True,
                         "empty": bool(frame.empty),
-                        "snapshot_sha256": snapshot.sha256,
+                        "snapshot_sha256": snapshot_sha256,
                         "checked_at": _ingest_time(result.metadata),
                     }
                 except Exception as error:  # noqa: BLE001 - best-effort role
@@ -1653,14 +1653,10 @@ class DataPipeline:
             [
                 review.model_dump()
                 for review in self._project_config.corporate_action_reviews
-                if start <= review.ex_date <= end
             ],
         )
         accepted = reviewed.accepted
         quarantined = reviewed.quarantined
-        merged_quarantine = _merge_corporate_action_quarantine(
-            current_quarantine, quarantined
-        )
         coverage = coverage_frame(
             [
                 _coverage_record_for(
