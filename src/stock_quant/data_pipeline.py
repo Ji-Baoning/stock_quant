@@ -668,6 +668,22 @@ class DataPipeline:
                 raw_snapshots,
             )
 
+        # ---- proof-only pre-window anchors ------------------------------ #
+        # Runs before _materialize_suspensions reads the raw frames, and after
+        # the primary fetch whose responses it deepens.
+        self._deepen_head_anchors(
+            enabled,
+            equity_symbols,
+            master,
+            calendar_open,
+            start,
+            end,
+            issues,
+            statuses,
+            raw_snapshots,
+            raw_daily_frames,
+        )
+
         # ---- required benchmark history --------------------------------- #
         benchmark_symbols = tuple(self._project_config.benchmark_symbols)
         benchmark_rows: list[pd.DataFrame] = []
@@ -1180,6 +1196,80 @@ class DataPipeline:
             "tushare", True, True, reason_code="ok"
         )
         return False
+
+    def _deepen_head_anchors(
+        self,
+        enabled,
+        symbols,
+        master,
+        calendar_open,
+        start,
+        end,
+        issues,
+        statuses,
+        raw_snapshots,
+        raw_daily_frames,
+    ) -> None:
+        """Fetch a proof-only pre-window anchor for head-suspended symbols.
+
+        A suspension run that *opens* the window has no ``before`` bar inside
+        the requested range, so ``suspension_rows`` cannot prove it and the run
+        stays an unproven gap.  The bar that proves it exists -- it is simply
+        outside the range the primary fetch asked for.  For the symbols whose
+        window opens inside a run this walks backwards from ``start`` until it
+        finds a bar or reaches the symbol's own ``list_date``; the frame it
+        finds is appended to ``raw_daily_frames[symbol]``, which is
+        ``_materialize_suspensions``' proof input.
+
+        Proof input only: the deepened frame is never normalized, never enters
+        ``primary_rows``/``primary_dates``, and so never reaches the published
+        ``daily_bar``.  A failed probe is not fatal -- the run degrades to the
+        pre-existing behaviour, an unproven head run that stays an honest gap.
+        """
+        if "tushare" not in enabled or not raw_daily_frames:
+            return
+        first_open_day = next(
+            (
+                day
+                for day in calendar_open
+                if isinstance(day, date) and start <= day <= end
+            ),
+            None,
+        )
+        if first_open_day is None:
+            return
+        source = self._adapter_or_fail("tushare", statuses)
+        if source is None:
+            return
+        listing = {
+            str(row["symbol"]): _as_date(row.get("list_date"))
+            for row in master.to_dict("records")
+        }
+        for symbol in symbols:
+            raw = raw_daily_frames.get(symbol)
+            if not _carries_proof_chain(raw) or _has_bar_on(raw, first_open_day):
+                continue
+            list_date = listing.get(symbol)
+            if list_date is None or list_date >= start:
+                continue
+            chunk_end = start - timedelta(days=1)
+            while chunk_end >= list_date:
+                chunk_start = max(
+                    list_date, chunk_end - timedelta(days=_ANCHOR_PROBE_DAYS - 1)
+                )
+                result = self._dispatch(
+                    "tushare", source, "daily", symbol, chunk_start, chunk_end,
+                    {"adjustment": "unadjusted"}, required=False, issues=issues,
+                )
+                if result is None:
+                    break
+                raw_snapshots.append(self._record_raw(result))
+                if not result.frame.empty:
+                    raw_daily_frames[symbol] = pd.concat(
+                        [result.frame, raw], ignore_index=True
+                    )
+                    break
+                chunk_end = chunk_start - timedelta(days=1)
 
     def _materialize_suspensions(
         self,
@@ -2498,6 +2588,34 @@ def _as_date(value: object) -> date | None:
     if value is None or pd.isna(value):
         return None
     return pd.Timestamp(value).date()
+
+
+#: Page size of the proof-only pre-window probe.  A *stride*, never a boundary:
+#: the probe keeps stepping back until it finds a bar or reaches the symbol's
+#: own ``list_date``, so how far back it looks is decided by the data.  The
+#: stride exists only to stay under the supplier's per-response row cap.
+_ANCHOR_PROBE_DAYS = 3650
+
+
+def _carries_proof_chain(raw: pd.DataFrame | None) -> bool:
+    """Whether a raw daily response can prove a suspension run at all.
+
+    Mirrors ``_materialize_suspensions``' own guard: without ``pre_close``
+    there is nothing to chain a gap against, so such a symbol is not worth a
+    pre-window probe either.
+    """
+    if raw is None or "close" not in raw.columns or "pre_close" not in raw.columns:
+        return False
+    return any(name in raw.columns for name in ("trade_date", "date"))
+
+
+def _has_bar_on(raw: pd.DataFrame, day: date) -> bool:
+    """Whether a raw daily response already carries a row on ``day``."""
+    if raw.empty:
+        return False
+    column = "trade_date" if "trade_date" in raw.columns else "date"
+    days = pd.to_datetime(raw[column].astype(str), errors="coerce").dt.date
+    return bool((days == day).any())
 
 
 def _issue(

@@ -1,7 +1,7 @@
 """Suspension-bar materialization proven by the primary source's pre_close chain."""
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -281,6 +281,13 @@ _UNIVERSE_SYMBOLS = tuple(
 _GAPPY_SYMBOL = "000001.SZ"
 _GAP_DAYS = {date(2021, 11, 2), date(2021, 11, 3), date(2021, 11, 4)}
 
+#: A name whose suspension run opens the window: absent from the window's first
+#: open day onwards, so the run has no ``before`` bar inside the requested range.
+_HEAD_GAP_SYMBOL = "601318.SH"
+_HEAD_GAP_DAYS = frozenset(date(2021, 11, day) for day in (1, 2, 3, 4, 5, 8, 9))
+#: The same shape, but the symbol has never traded before the window opens.
+_BARE_HEAD_GAP_SYMBOL = "601398.SH"
+
 
 def _weekdays(start: date, end: date) -> list[date]:
     days: list[date] = []
@@ -292,13 +299,31 @@ def _weekdays(start: date, end: date) -> list[date]:
     return days
 
 
+#: ``stock_basic`` 的上市日 stub 复用的固定值。
+_STUB_LIST_DATE = date(1991, 1, 2)
+
+
 @dataclass(frozen=True)
 class _SuspendStub:
     """Stubs whose primary daily carries pre_close and one suspended name."""
 
     name: str
+    #: Per-symbol absent days that *open* the window (a head-suspended name).
+    head_gap_days: dict[str, frozenset[date]] = field(default_factory=dict)
+    #: Symbols with no bar at all before the window opens.
+    bare_before_window: frozenset[str] = frozenset()
+    #: Every request this stub answered, as (endpoint, symbol, start, end).
+    calls: list[tuple[str, str | None, date, date]] = field(default_factory=list)
 
     def fetch(self, request: DataRequest) -> FetchResult:
+        self.calls.append(
+            (
+                request.endpoint,
+                request.symbols[0] if request.symbols else None,
+                request.start_date,
+                request.end_date,
+            )
+        )
         return FetchResult(
             source=self.name,
             endpoint=request.endpoint,
@@ -318,7 +343,7 @@ class _SuspendStub:
                     {
                         "ts_code": symbol,
                         "name": f"stub_{symbol}",
-                        "list_date": "19910102",
+                        "list_date": _STUB_LIST_DATE.strftime("%Y%m%d"),
                         "delist_date": "",
                         "list_status": "L",
                     }
@@ -360,11 +385,15 @@ class _SuspendStub:
                 current += timedelta(days=1)
             return pd.DataFrame(rows)
         symbol = request.symbols[0]
+        absent = self.head_gap_days.get(symbol, frozenset())
         days = [
             day
             for day in _weekdays(request.start_date, request.end_date)
             if not (symbol == _GAPPY_SYMBOL and day in _GAP_DAYS)
+            and day not in absent
         ]
+        if symbol in self.bare_before_window:
+            days = [day for day in days if day >= _WINDOW_START]
         return pd.DataFrame(
             [
                 {
@@ -432,3 +461,104 @@ def test_update_materializes_proven_suspension_bars(tmp_path):
         if _WINDOW_START <= day <= _WINDOW_END
     ]
     assert _missing_row_failures(daily, master, grid) == []
+
+
+def _fixture_root(tmp_path) -> Path:
+    """A fresh synthetic project bootstrapped from the repository templates."""
+    root = tmp_path / "project"
+    root.mkdir()
+    configs = root / "configs"
+    configs.mkdir()
+    for name in (
+        "project.yml",
+        "sources.yml",
+        "costs.yml",
+        "trading_rules.yml",
+        "universe.yml",
+    ):
+        shutil.copy(_REPO_ROOT / "templates" / "project-config" / name, configs / name)
+    bootstrap_dataset(root)
+    return root
+
+
+def _probes(stub: _SuspendStub) -> list[tuple[str, str | None, date, date]]:
+    """Requests the stub answered with a start before the window opened."""
+    return [
+        call
+        for call in stub.calls
+        if call[0] == "daily" and call[2] < _WINDOW_START
+    ]
+
+
+def test_update_anchors_a_suspension_run_that_opens_the_window(tmp_path):
+    """A run with no bar inside the window is proven by the symbol's own
+    pre-window bar, fetched for proof only and never published."""
+    root = _fixture_root(tmp_path)
+    tushare = _SuspendStub("tushare", head_gap_days={_HEAD_GAP_SYMBOL: _HEAD_GAP_DAYS})
+    stubs = {
+        "tushare": tushare,
+        "akshare": _SuspendStub("akshare"),
+        "baostock": _SuspendStub("baostock"),
+    }
+    result = DataPipeline(root, sources=stubs).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+
+    assert result.dataset_ref is not None, result.quality_report
+    codes = {issue.code for issue in result.quality_report.issues}
+    assert CODE_SUSPENSION_RUN_UNVERIFIED not in codes
+
+    with DatasetReader(root).open(result.dataset_ref.version) as dataset:
+        daily = dataset.read("daily_bar")
+    carried = daily[
+        (daily["symbol"] == _HEAD_GAP_SYMBOL)
+        & (daily["trade_date"] == pd.Timestamp("2021-11-01"))
+    ]
+    assert len(carried) == 1
+    row = carried.iloc[0]
+    assert row["source"] == "tushare_suspend"
+    assert row["volume"] == 0
+    assert row["close"] == 55.0
+
+    # The proof input stays proof input: no pre-window bar is published.
+    assert daily["trade_date"].min() >= pd.Timestamp(_WINDOW_START)
+    # Only the candidate was probed -- the mid-window gap name already has a bar
+    # on the window's first open day, so its run never needs an outside anchor.
+    assert [call[1] for call in _probes(tushare)] == [_HEAD_GAP_SYMBOL]
+
+
+def test_update_leaves_a_head_run_with_no_pre_window_history_unproven(tmp_path):
+    """A symbol that never traded before the window has no anchor to find, so
+    its head run stays an honest gap instead of a materialized bar."""
+    root = _fixture_root(tmp_path)
+    tushare = _SuspendStub(
+        "tushare",
+        head_gap_days={_BARE_HEAD_GAP_SYMBOL: _HEAD_GAP_DAYS},
+        bare_before_window=frozenset({_BARE_HEAD_GAP_SYMBOL}),
+    )
+    stubs = {
+        "tushare": tushare,
+        "akshare": _SuspendStub("akshare"),
+        "baostock": _SuspendStub("baostock"),
+    }
+    result = DataPipeline(root, sources=stubs).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+
+    assert result.dataset_ref is not None, result.quality_report
+    codes = {issue.code for issue in result.quality_report.issues}
+    assert CODE_SUSPENSION_RUN_UNVERIFIED in codes
+
+    with DatasetReader(root).open(result.dataset_ref.version) as dataset:
+        daily = dataset.read("daily_bar")
+    assert daily[
+        (daily["symbol"] == _BARE_HEAD_GAP_SYMBOL)
+        & (daily["source"] == "tushare_suspend")
+    ].empty
+
+    # The probe stepped back more than once and stopped at the listing date:
+    # the depth is the symbol's own history, not a guessed constant.
+    probes = _probes(tushare)
+    assert [call[1] for call in probes] == [_BARE_HEAD_GAP_SYMBOL] * len(probes)
+    assert len(probes) >= 2
+    assert min(call[2] for call in probes) == _STUB_LIST_DATE
