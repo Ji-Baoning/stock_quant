@@ -14,6 +14,7 @@ were already in place before they were written up as ADRs.
 | [003 Point-in-time index universe](003-point-in-time-universe.md) | accepted | 2026-09-14 | `src/stock_quant/research/universe.py`, `src/stock_quant/data_model/universe_membership.py`, `configs/universes/**` | PIT, membership evidence, universe_version, no override | You change membership facts, universe resolution, or the preflight gate. |
 | [004 Pre-frozen walk-forward OOS](004-walk-forward-oos.md) | accepted | 2026-09-14 | `src/stock_quant/research/walk_forward/**` | walk-forward, fold schedule, stability-v1, OOS | You change fold scheduling, fold metrics, or the stability verdict. |
 | [005 Explicit project root](005-explicit-project-root.md) | accepted | 2026-09-14 | `src/stock_quant/project_root.py`, `src/stock_quant/cli.py`, `project/**` | --root, no fallback, config validation | You change how a command finds its configuration or data. |
+| [006 Corporate-action window scope](006-corporate-action-window-scope.md) | accepted | 2026-09-15 | `src/stock_quant/data_model/corporate_actions.py`, `src/stock_quant/data_pipeline.py`, `src/stock_quant/data_quality/models.py` | quarantine, coverage, window scope, ADR-006, supersedes a filter policy | You change how a quarantined corporate action counts against a symbol/window, or the coverage verdict. |
 
 ## Not yet recorded
 
