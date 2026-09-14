@@ -153,6 +153,25 @@ def test_checker_rejects_governance_documents_over_line_limits(
     assert expected_error in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("relative_path", "required_text"),
+    [
+        ("docs/architecture/overview.md", "reproducible"),
+        ("docs/architecture/module-map.md", "data_sources"),
+        ("docs/architecture/data-flow.md", "dataset"),
+        ("docs/architecture/invariants.md", "MUST NOT"),
+    ],
+)
+def test_architecture_documents_cover_required_topics(
+    relative_path: str, required_text: str
+) -> None:
+    """Each architecture fact file states the topic it is the authority for."""
+    path = ROOT / relative_path
+    assert path.is_file(), f"missing architecture document: {relative_path}"
+
+    assert required_text in path.read_text(encoding="utf-8")
+
+
 def test_checker_requires_at_least_one_path_rule(tmp_path: Path) -> None:
     create_complete_governance_tree(tmp_path)
     for rule in (tmp_path / ".claude" / "rules").glob("*.md"):
