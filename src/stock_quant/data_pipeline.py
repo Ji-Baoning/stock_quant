@@ -90,6 +90,7 @@ from stock_quant.data_model.corporate_actions import (
     normalize_corporate_actions,
     prepare_cninfo_dividend_frame,
     prepare_eastmoney_dividend_frame,
+    quarantine_row_out_of_window_reason,
 )
 from stock_quant.data_model.dataset import (
     DatasetNotFoundError,
@@ -133,6 +134,7 @@ from stock_quant.data_quality.models import (
     CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH,
     CODE_ADJUSTED_BAR_UNKNOWN_ACTION,
     CODE_ADJUSTED_BAR_WRONG_BASIS,
+    CODE_QUARANTINE_OUT_OF_WINDOW,
     TABLE_CORPORATE_ACTION,
     QualityIssue,
     QualityReport,
@@ -1661,6 +1663,12 @@ class DataPipeline:
         merged_quarantine = _merge_corporate_action_quarantine(
             current_quarantine, quarantined
         )
+        # Narrow only the coverage input, once: the exclusion records an INFO
+        # trace, so it must not re-run inside the per-symbol comprehension or
+        # each symbol would append a duplicate audit row for the same exclusion.
+        relevant_quarantine = _window_relevant_quarantine(
+            quarantined, start, end, issues
+        )
         coverage = coverage_frame(
             [
                 _coverage_record_for(
@@ -1669,7 +1677,7 @@ class DataPipeline:
                     end,
                     outcomes_by_symbol[symbol],
                     _accepted_symbols(accepted),
-                    _quarantine_reasons_by_symbol(quarantined),
+                    _quarantine_reasons_by_symbol(relevant_quarantine),
                 )
                 for symbol in symbols
             ]
@@ -2195,11 +2203,14 @@ def _coverage_verdict(
 
     ``VERIFIED`` requires a fully accounted window: every requested endpoint
     answered, at least one returned events, and the symbol holds an accepted
-    reconciled fact with *nothing* quarantined.  A quarantined event (cross-
-    source conflict / unsupported action / incomplete record) for the symbol
-    makes the window ``UNTRUSTED`` even when a sibling event for the same
-    symbol/window was accepted, so a conflicting or unbooked event can never
-    be masked by an accepted row while the coverage reads ``VERIFIED``.
+    reconciled fact with *no relevant* quarantine.  A quarantined event *that
+    can affect this window* (cross-source conflict / unsupported action /
+    incomplete record) makes the window ``UNTRUSTED`` even when a sibling event
+    for the same symbol/window was accepted, so a conflicting or unbooked event
+    can never be masked by an accepted row while the coverage reads
+    ``VERIFIED``.  A row whose every known date lies outside the window is
+    excluded by ``_window_relevant_quarantine`` before this decision
+    (ADR-006).
     """
     if any(not outcome["ok"] for outcome in outcomes.values()):
         return CoverageStatus.UNTRUSTED, CoverageReason.SOURCE_FETCH_FAILED
@@ -2250,6 +2261,49 @@ def _accepted_symbols(accepted: pd.DataFrame) -> frozenset[str]:
     if accepted.empty or "symbol" not in accepted.columns:
         return frozenset()
     return frozenset(str(value) for value in accepted["symbol"])
+
+
+def _window_relevant_quarantine(
+    quarantined: pd.DataFrame,
+    start: date,
+    end: date,
+    issues: list[QualityIssue],
+) -> pd.DataFrame:
+    """Drop quarantined rows that provably cannot affect ``[start, end]``.
+
+    The coverage verdict answers a question about *this window*, so a row whose
+    every known date lies outside it is evidence about another period and must
+    not mark the window UNTRUSTED (ADR-006).  Only the coverage input is
+    narrowed: ``merged_quarantine`` -- the published table -- keeps every row,
+    and each exclusion is recorded as an INFO issue grouped by symbol and
+    branch so a suppressed decision leaves a trace.
+    """
+    if quarantined.empty or "symbol" not in quarantined.columns:
+        return quarantined
+    kept: list[bool] = []
+    excluded: dict[tuple[str, str], int] = {}
+    for record in quarantined.to_dict("records"):
+        branch = quarantine_row_out_of_window_reason(record, start, end)
+        kept.append(branch is None)
+        if branch is not None:
+            key = (str(record["symbol"]), branch)
+            excluded[key] = excluded.get(key, 0) + 1
+    for (symbol, branch), rows in sorted(excluded.items()):
+        issues.append(
+            _issue(
+                Severity.INFO,
+                CODE_QUARANTINE_OUT_OF_WINDOW,
+                table=TABLE_CORPORATE_ACTION_QUARANTINE,
+                symbol=symbol,
+                details={
+                    "rows": rows,
+                    "branch": branch,
+                    "window_start": start.isoformat(),
+                    "window_end": end.isoformat(),
+                },
+            )
+        )
+    return quarantined.iloc[[index for index, keep in enumerate(kept) if keep]]
 
 
 def _quarantine_reasons_by_symbol(

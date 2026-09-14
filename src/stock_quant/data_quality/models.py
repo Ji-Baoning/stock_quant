@@ -66,6 +66,13 @@ CODE_SUSPENSION_ROW = "suspension_row_materialized"
 CODE_SUSPENSION_RUN_UNVERIFIED = "suspension_run_unverified"
 CODE_UNEXPLAINED_PRIMARY_GAP = "unexplained_primary_gap"
 
+# A quarantined corporate action whose every known date lies outside a window
+# cannot affect that window's series, so it no longer marks the symbol/window
+# UNTRUSTED.  The exclusion is INFO-only audit trail -- the published
+# quarantine table still carries every row -- and its ``branch`` detail names
+# the rule that excluded it (ADR-006).
+CODE_QUARANTINE_OUT_OF_WINDOW = "quarantine_out_of_window"
+
 # Missing-row classification labels, in classification precedence order.
 MISSING_NOT_LISTED = "not_listed"
 MISSING_DELISTED = "delisted"

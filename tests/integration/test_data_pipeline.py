@@ -42,6 +42,7 @@ from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
 )
 from stock_quant.data_quality.models import (
     CODE_NONPOSITIVE_PRICE,
+    CODE_QUARANTINE_OUT_OF_WINDOW,
     QualityReport,
     Severity,
 )
@@ -523,6 +524,54 @@ def _eastmoney_cash_out_of_window(symbol: str) -> pd.DataFrame:
     )
 
 
+def _cninfo_cash_plus_stale_plan(symbol: str) -> pd.DataFrame:
+    """The cross-confirmable cash dividend plus a stale implemented plan.
+
+    The appended row is a 1998 plan the supplier marks ``实施`` but reports with
+    no ex-date and no record date.  It cannot be booked (``_standardize_source``
+    keys candidates on ``(symbol, ex_date)``), and it survives
+    ``filter_corporate_actions_to_window`` on purpose -- that filter keeps an
+    implemented record whose ex-date is missing so reconciliation can flag it
+    -- so it lands in the quarantine table as ``incomplete``.
+    """
+    code = symbol.split(".")[0]
+    stale = pd.DataFrame(
+        [
+            {
+                "证券代码": code,
+                "证券简称": "placeholder",
+                "公告日期": "1998-06-01",
+                "股权登记日": "",
+                "除权除息日": "",
+                "派息(税前)(元/10股)": 1.0,
+                "送股(股/10股)": 0.0,
+                "转增(股/10股)": 0.0,
+                "进度": "实施",
+                "方案": "10派1元(含税)",
+            }
+        ],
+        columns=_ACTION_CNINFO_COLUMNS,
+    )
+    # The dividend row is the same one ``_cninfo_single_cash`` proves books at
+    # 0.46/share; composing keeps the two fixtures from drifting apart.
+    return pd.concat([_cninfo_single_cash(symbol), stale], ignore_index=True)
+
+
+def _stale_pre_window_plan_sources() -> dict[str, DataSource]:
+    """``600036.SH`` holds an in-window accepted dividend AND a 1998 implemented
+    plan with no ex-date; every other symbol answers no events."""
+    source = StubAdapter(
+        "akshare",
+        action_frames={
+            "600036.SH": {
+                "cninfo_corporate_actions": _cninfo_cash_plus_stale_plan("600036.SH"),
+                "eastmoney_corporate_actions": _eastmoney_cash("600036.SH"),
+            }
+        },
+    )
+    return _all_stubs(akshare=source)
+
+
 def _out_of_window_cash_sources() -> dict[str, DataSource]:
     """``600036.SH`` reports only implemented dividends dated past the window
     on both endpoints; every other symbol answers no events."""
@@ -864,6 +913,50 @@ def test_update_events_only_outside_window_read_verified_empty(project):
     row = coverage.loc[coverage["symbol"] == "600036.SH"].iloc[0]
     assert row["status"] == "VERIFIED_EMPTY"
     assert pd.isna(row["reason"])
+
+
+def test_update_ignores_quarantine_rows_whose_dates_predate_the_window(project):
+    """A quarantine row that cannot affect the window must not mark it UNTRUSTED.
+
+    ``600036.SH`` books an in-window dividend while carrying a 1998 implemented
+    plan the supplier reports without any date.  That stale record has nothing
+    to say about 2021-11, so the window reads VERIFIED -- yet it stays in the
+    published quarantine table (evidence is not hidden) and the exclusion
+    leaves an INFO trace naming the rule that dropped it (ADR-006).
+    """
+    result = DataPipeline(
+        project.root, sources=_stale_pre_window_plan_sources()
+    ).update(_request())
+    assert result.dataset_ref is not None, result.quality_report
+
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        facts = context.read("corporate_action")
+        coverage = context.read("corporate_action_coverage")
+        quarantine = context.read("corporate_action_quarantine")
+
+    # The in-window dividend still books and the window reads VERIFIED.
+    booked = facts.loc[facts["symbol"] == "600036.SH"]
+    assert len(booked) == 1
+    row = coverage.loc[coverage["symbol"] == "600036.SH"].iloc[0]
+    assert row["status"] == "VERIFIED"
+    assert pd.isna(row["reason"])
+
+    # Evidence is not hidden: the stale plan is still published.
+    stale = quarantine.loc[quarantine["symbol"] == "600036.SH"]
+    assert len(stale) == 1
+    assert stale.iloc[0]["reason"] == "incomplete"
+
+    # ... and the suppression left an auditable trace.
+    trace = [
+        issue
+        for issue in result.quality_report.issues
+        if issue.code == CODE_QUARANTINE_OUT_OF_WINDOW
+    ]
+    assert len(trace) == 1
+    assert trace[0].severity is Severity.INFO
+    assert trace[0].symbol == "600036.SH"
+    assert trace[0].details["rows"] == 1
+    assert trace[0].details["branch"] == "announcement_pre_window_implemented"
 
 
 def test_update_publishes_akshare_11823_cninfo_dividend(project):
