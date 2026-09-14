@@ -101,16 +101,20 @@ def _indexed_adr_errors(root: Path) -> list[str]:
 
 
 def _root_protocol_errors(root: Path) -> list[str]:
-    """Return errors when the root protocol lacks its required guidance."""
-    protocol = root / "AGENTS.md"
-    if not protocol.is_file():
-        return []
-    content = protocol.read_text(encoding="utf-8")
-    return [
-        "root protocol missing required guidance: AGENTS.md: " + guidance
-        for guidance in ROOT_PROTOCOL_REQUIRED_GUIDANCE
-        if guidance not in content
-    ]
+    """Return errors when either root protocol lacks required guidance."""
+    errors: list[str] = []
+    for relative_path in ROOT_PROTOCOL_FILES:
+        protocol = root / relative_path
+        if not protocol.is_file():
+            continue
+        content = protocol.read_text(encoding="utf-8")
+        errors.extend(
+            "root protocol missing required guidance: "
+            f"{relative_path}: {guidance}"
+            for guidance in ROOT_PROTOCOL_REQUIRED_GUIDANCE
+            if guidance not in content
+        )
+    return errors
 
 
 def _path_rule_files(root: Path) -> list[Path]:

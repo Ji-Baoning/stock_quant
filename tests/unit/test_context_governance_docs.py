@@ -37,10 +37,9 @@ def create_complete_governance_tree(root: Path) -> None:
     )
     (adr_directory / "001-existing.md").write_text("ADR\n", encoding="utf-8")
 
-    (root / "AGENTS.md").write_text(
-        "用户即时指令 > 安全与平台指令 > 路径规则\n更具体的路径规则优先\n",
-        encoding="utf-8",
-    )
+    root_protocol = "用户即时指令 > 安全与平台指令 > 路径规则\n更具体的路径规则优先\n"
+    for filename in ("AGENTS.md", "CLAUDE.md"):
+        (root / filename).write_text(root_protocol, encoding="utf-8")
     rule_directory = root / ".claude" / "rules"
     rule_directory.mkdir(parents=True)
     for filename in (
@@ -215,6 +214,19 @@ def test_checker_requires_protocol_priority_and_named_path_rules(tmp_path: Path)
         "tests.md",
     ):
         assert f"ERROR: missing required path rule: .claude/rules/{filename}" in result.stdout
+
+
+def test_checker_requires_priority_guidance_in_claude_protocol(tmp_path: Path) -> None:
+    create_complete_governance_tree(tmp_path)
+    (tmp_path / "CLAUDE.md").write_text("governance document\n", encoding="utf-8")
+
+    result = run_checker(tmp_path)
+
+    assert result.returncode == 1
+    assert (
+        "ERROR: root protocol missing required guidance: CLAUDE.md: "
+        "用户即时指令 > 安全与平台指令 > 路径规则"
+    ) in result.stdout
 
 
 def adr_files() -> list[Path]:
