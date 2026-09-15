@@ -9,6 +9,7 @@
 | `project/bootstrap_seed.py` | migration | 从项目配置构造一次性基线数据集 | `python -m stock_quant data bootstrap --root project` |
 | `project/build_csi300_universe.py` | migration | 从已封存指数快照生成成员事实 | `python -m stock_quant data index-membership prepare --root project` |
 | `project/check_data_sources.py` | diagnostic | 探测已启用供应商的连接契约 | 无替代项 |
+| `project/clean_test_data.py` | active | 预览或清理历史派生数据与实验工件 | 无替代项 |
 | `project/collect_csi300_official.py` | migration | 采集并封存 CSI 官方历史公告 | 无替代项 |
 | `project/collect_index_constitution.py` | migration | 导出第三方指数成分包的不可变快照 | 无替代项 |
 | `project/collect_index_weight_membership.py` | migration | 拉取并转换 index_weight 成员证据 | 无替代项 |
