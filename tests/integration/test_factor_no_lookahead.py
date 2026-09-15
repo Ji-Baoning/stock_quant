@@ -369,7 +369,11 @@ def _coverage(sessions: list[date], *, with_events: bool) -> pd.DataFrame:
     action exists, ``VERIFIED`` with event-bearing endpoint outcomes when one
     does, so the published provenance never claims an empty check over facts.
     """
-    endpoints = ("cninfo_corporate_actions", "eastmoney_corporate_actions")
+    endpoints = (
+        "cninfo_corporate_actions",
+        "eastmoney_corporate_actions",
+        "rights_issue_corporate_actions",
+    )
     if with_events:
         record = coverage_record(
             _SYMBOL,

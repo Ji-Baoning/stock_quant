@@ -1,221 +1,5286 @@
-# 固定工程股票池（fixed engineering universe）
+# 追踪宇宙定义（tracked universe）——由 expand_universe_to_membership.py 生成。
 #
-# 30 只人工策划的边界样本股，用于验证工程链路，不是投资推荐（coverage
-# fixtures rather than recommendations）。名单固定后不随当前市场变化自动更换
-# （设计规格 §7）。name_at_selection 取自 selected_as_of 时点的证券简称快照。
-selected_as_of: 2026-09-03
+# 内容 = 已发布数据版本 security_master 的全部标的；与 master 的集合相等是
+# data_pipeline._universe_master_issues 的硬契约，二者必须逐符号一致。
+# 其中 csi300_pit_member 标记的标的有官方 index_weight 月度快照的时点成员证据
+# （custom_csi300_tw）；engineering_sample 标记的 2 只是最初的工程边界样本。
+#
+# 这不是推荐，也不是无偏 CSI300：本阶段只保留仍在市（list_status=L）的标的，
+# 25 只已退市成员不在其中，幸存者偏差保留在池子里。
+selected_as_of: '2026-09-14'
 entries:
-  # ---- 沪市主板 8 只 ----
-  - symbol: 600000.SH
-    name_at_selection: 浦发银行
-    exchange: SH
-    board: sh_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 沪市主板银行股，2020 年前长期上市、持续交易且现金分红稳定；工程覆盖样本，非推荐。
-  - symbol: 600036.SH
-    name_at_selection: 招商银行
-    exchange: SH
-    board: sh_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 沪市主板大盘银行股，覆盖 2020 年前上市与高流动性边界；工程覆盖样本，非推荐。
-  - symbol: 600519.SH
-    name_at_selection: 贵州茅台
-    exchange: SH
-    board: sh_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 沪市主板高价股边界与稳定现金分红样本；工程覆盖样本，非推荐。
-  - symbol: 601318.SH
-    name_at_selection: 中国平安
-    exchange: SH
-    board: sh_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 沪市主板保险大盘股，2020 年前上市，覆盖金融权重股边界；工程覆盖样本，非推荐。
-  - symbol: 601398.SH
-    name_at_selection: 工商银行
-    exchange: SH
-    board: sh_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 沪市主板低价大盘股边界，2020 年前长期上市；工程覆盖样本，非推荐。
-  - symbol: 601857.SH
-    name_at_selection: 中国石油
-    exchange: SH
-    board: sh_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 沪市主板能源大盘股，2020 年前上市，覆盖低价高流动性边界；工程覆盖样本，非推荐。
-  - symbol: 601919.SH
-    name_at_selection: 中远海控
-    exchange: SH
-    board: sh_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 沪市主板航运周期股，历史上曾有证券简称变更，覆盖名称状态变化边界；工程覆盖样本，非推荐。
-  - symbol: 603288.SH
-    name_at_selection: 海天味业
-    exchange: SH
-    board: sh_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 沪市主板消费大盘股，2020 年前上市且持续现金分红；工程覆盖样本，非推荐。
-  # ---- 深市主板 8 只 ----
-  - symbol: 000001.SZ
-    name_at_selection: 平安银行
-    exchange: SZ
-    board: sz_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 深市主板银行股，上市历史极长，覆盖持续交易与现金分红边界；工程覆盖样本，非推荐。
-  - symbol: 000333.SZ
-    name_at_selection: 美的集团
-    exchange: SZ
-    board: sz_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 深市主板家电大盘股，2020 年前上市，覆盖高流动性边界；工程覆盖样本，非推荐。
-  - symbol: 000651.SZ
-    name_at_selection: 格力电器
-    exchange: SZ
-    board: sz_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 深市主板家电大盘股，2020 年前长期上市且高现金分红；工程覆盖样本，非推荐。
-  - symbol: 000858.SZ
-    name_at_selection: 五粮液
-    exchange: SZ
-    board: sz_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 深市主板白酒高价股边界，2020 年前上市；工程覆盖样本，非推荐。
-  - symbol: 002415.SZ
-    name_at_selection: 海康威视
-    exchange: SZ
-    board: sz_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 深市主板（原中小板并入）科技大盘股，2020 年前上市；工程覆盖样本，非推荐。
-  - symbol: 002475.SZ
-    name_at_selection: 立讯精密
-    exchange: SZ
-    board: sz_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 深市主板（原中小板）电子制造大盘股，2020 年前上市；工程覆盖样本，非推荐。
-  - symbol: 002594.SZ
-    name_at_selection: 比亚迪
-    exchange: SZ
-    board: sz_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 深市主板（原中小板）新能源车大盘股，2020 年前上市；工程覆盖样本，非推荐。
-  - symbol: 002714.SZ
-    name_at_selection: 牧原股份
-    exchange: SZ
-    board: sz_main
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 深市主板（原中小板）农业周期股，2020 年前上市；工程覆盖样本，非推荐。
-  # ---- 创业板 7 只 ----
-  - symbol: 300001.SZ
-    name_at_selection: 特锐德
-    exchange: SZ
-    board: chinext
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 创业板首批上市公司，2020 年前上市，覆盖创业板 10%/20% 涨跌幅切换前的持续交易；工程覆盖样本，非推荐。
-  - symbol: 300059.SZ
-    name_at_selection: 东方财富
-    exchange: SZ
-    board: chinext
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 创业板券商互联网大盘股，2020 年前上市且高流动性；工程覆盖样本，非推荐。
-  - symbol: 300122.SZ
-    name_at_selection: 智飞生物
-    exchange: SZ
-    board: chinext
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 创业板疫苗股，2020 年前上市；工程覆盖样本，非推荐。
-  - symbol: 300274.SZ
-    name_at_selection: 阳光电源
-    exchange: SZ
-    board: chinext
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 创业板电力电子大盘股，2020 年前上市；工程覆盖样本，非推荐。
-  - symbol: 300750.SZ
-    name_at_selection: 宁德时代
-    exchange: SZ
-    board: chinext
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 创业板动力电池龙头，2018 年上市，覆盖 2020 年前后持续交易与高流动性边界；工程覆盖样本，非推荐。
-  - symbol: 300760.SZ
-    name_at_selection: 迈瑞医疗
-    exchange: SZ
-    board: chinext
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 创业板医疗器械高价股边界，2018 年上市；工程覆盖样本，非推荐。
-  - symbol: 301269.SZ
-    name_at_selection: 华大九天
-    exchange: SZ
-    board: chinext
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_after_2020, pre_listing_gap_expected]
-    selection_reason: 创业板注册制 EDA 股，2022 年上市，覆盖窗口内新上市导致的前期缺失边界；工程覆盖样本，非推荐。
-  # ---- 科创板 7 只 ----
-  - symbol: 688001.SH
-    name_at_selection: 华兴源创
-    exchange: SH
-    board: star
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 科创板首只上市公司（2019 年），覆盖科创 20% 涨跌幅与首批无涨跌幅前五日制度；工程覆盖样本，非推荐。
-  - symbol: 688008.SH
-    name_at_selection: 澜起科技
-    exchange: SH
-    board: star
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 科创板首批半导体股（2019 年上市）；工程覆盖样本，非推荐。
-  - symbol: 688009.SH
-    name_at_selection: 中国通号
-    exchange: SH
-    board: star
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 科创板首批大盘股（2019 年上市）；工程覆盖样本，非推荐。
-  - symbol: 688036.SH
-    name_at_selection: 传音控股
-    exchange: SH
-    board: star
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 科创板手机出海龙头（2019 年上市）；工程覆盖样本，非推荐。
-  - symbol: 688111.SH
-    name_at_selection: 金山办公
-    exchange: SH
-    board: star
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_before_2020]
-    selection_reason: 科创板软件大盘股（2019 年上市），覆盖 2020-01-01 起即持续交易；工程覆盖样本，非推荐。
-  - symbol: 688506.SH
-    name_at_selection: 百利天恒
-    exchange: SH
-    board: star
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_after_2020, pre_listing_gap_expected]
-    selection_reason: 科创板创新药股，2022 年上市，覆盖窗口内新上市导致的前期缺失边界；工程覆盖样本，非推荐。
-  - symbol: 688981.SH
-    name_at_selection: 中芯国际
-    exchange: SH
-    board: star
-    selected_as_of: 2026-09-03
-    boundary_tags: [listed_after_2020, pre_listing_gap_expected]
-    selection_reason: 科创板晶圆代工龙头，2020-07 上市，覆盖 2020 年内上市导致的前期缺失与上市首五交易日边界；工程覆盖样本，非推荐。
+- symbol: 000001.SZ
+  name_at_selection: 平安银行
+  exchange: SZ
+  board: sz_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 深市主板银行股，上市历史极长，覆盖持续交易与现金分红边界；工程覆盖样本，非推荐。
+- symbol: 000002.SZ
+  name_at_selection: 万科A
+  exchange: SZ
+  board: sz_main
+  selected_as_of: &id001 2026-09-14
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000008.SZ
+  name_at_selection: 神州高铁
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000009.SZ
+  name_at_selection: 中国宝安
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000012.SZ
+  name_at_selection: 南玻A
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000027.SZ
+  name_at_selection: 深圳能源
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000039.SZ
+  name_at_selection: 中集集团
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000060.SZ
+  name_at_selection: 中金岭南
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000061.SZ
+  name_at_selection: 农产品
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000063.SZ
+  name_at_selection: 中兴通讯
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000066.SZ
+  name_at_selection: 中国长城
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000069.SZ
+  name_at_selection: 华侨城A
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000100.SZ
+  name_at_selection: TCL科技
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000156.SZ
+  name_at_selection: 华数传媒
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000157.SZ
+  name_at_selection: 中联重科
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000166.SZ
+  name_at_selection: 申万宏源
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000301.SZ
+  name_at_selection: 东方盛虹
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000333.SZ
+  name_at_selection: 美的集团
+  exchange: SZ
+  board: sz_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 深市主板家电大盘股，2020 年前上市，覆盖高流动性边界；工程覆盖样本，非推荐。
+- symbol: 000338.SZ
+  name_at_selection: 潍柴动力
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000400.SZ
+  name_at_selection: 许继电气
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000401.SZ
+  name_at_selection: 金隅冀东
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000402.SZ
+  name_at_selection: 金融街
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000408.SZ
+  name_at_selection: 藏格矿业
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000415.SZ
+  name_at_selection: 渤海租赁
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000423.SZ
+  name_at_selection: 东阿阿胶
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000425.SZ
+  name_at_selection: 徐工机械
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000503.SZ
+  name_at_selection: 国新健康
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000536.SZ
+  name_at_selection: 华映科技
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000538.SZ
+  name_at_selection: 云南白药
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000539.SZ
+  name_at_selection: 粤电力A
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000553.SZ
+  name_at_selection: 安道麦A
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000555.SZ
+  name_at_selection: 神州信息
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000559.SZ
+  name_at_selection: 万向钱潮
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000568.SZ
+  name_at_selection: 泸州老窖
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000581.SZ
+  name_at_selection: 威孚高科
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000596.SZ
+  name_at_selection: 古井贡酒
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000598.SZ
+  name_at_selection: 兴蓉环境
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000617.SZ
+  name_at_selection: 中油资本
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000623.SZ
+  name_at_selection: 吉林敖东
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000625.SZ
+  name_at_selection: 长安汽车
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000629.SZ
+  name_at_selection: 钒钛股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000630.SZ
+  name_at_selection: 铜陵有色
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000651.SZ
+  name_at_selection: 格力电器
+  exchange: SZ
+  board: sz_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 深市主板家电大盘股，2020 年前长期上市且高现金分红；工程覆盖样本，非推荐。
+- symbol: 000656.SZ
+  name_at_selection: 金科股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000657.SZ
+  name_at_selection: 中钨高新
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000661.SZ
+  name_at_selection: 长春高新
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000686.SZ
+  name_at_selection: 东北证券
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000703.SZ
+  name_at_selection: 恒逸石化
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000708.SZ
+  name_at_selection: 中信特钢
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000709.SZ
+  name_at_selection: 河钢股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000712.SZ
+  name_at_selection: 锦龙股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000718.SZ
+  name_at_selection: 苏宁环球
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000723.SZ
+  name_at_selection: 美锦能源
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000725.SZ
+  name_at_selection: 京东方A
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000728.SZ
+  name_at_selection: 国元证券
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000729.SZ
+  name_at_selection: 燕京啤酒
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000733.SZ
+  name_at_selection: 振华科技
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000738.SZ
+  name_at_selection: 航发控制
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000750.SZ
+  name_at_selection: 国海证券
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000758.SZ
+  name_at_selection: 中色股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000768.SZ
+  name_at_selection: 中航西飞
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000776.SZ
+  name_at_selection: 广发证券
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000778.SZ
+  name_at_selection: 新兴铸管
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000783.SZ
+  name_at_selection: 长江证券
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000786.SZ
+  name_at_selection: 北新建材
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000792.SZ
+  name_at_selection: 盐湖股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000793.SZ
+  name_at_selection: ST华闻
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000800.SZ
+  name_at_selection: 一汽解放
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000807.SZ
+  name_at_selection: 云铝股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000825.SZ
+  name_at_selection: 太钢不锈
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000826.SZ
+  name_at_selection: '*ST启环'
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000831.SZ
+  name_at_selection: 中国稀土
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000839.SZ
+  name_at_selection: 国安股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000858.SZ
+  name_at_selection: 五粮液
+  exchange: SZ
+  board: sz_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 深市主板白酒高价股边界，2020 年前上市；工程覆盖样本，非推荐。
+- symbol: 000860.SZ
+  name_at_selection: 顺鑫农业
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000869.SZ
+  name_at_selection: 张裕A
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000876.SZ
+  name_at_selection: 新希望
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000877.SZ
+  name_at_selection: 天山股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000878.SZ
+  name_at_selection: 云南铜业
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000883.SZ
+  name_at_selection: 湖北能源
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000895.SZ
+  name_at_selection: 双汇发展
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000898.SZ
+  name_at_selection: 鞍钢股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000917.SZ
+  name_at_selection: 电广传媒
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000937.SZ
+  name_at_selection: 冀中能源
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000938.SZ
+  name_at_selection: 紫光股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000959.SZ
+  name_at_selection: 首钢股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000960.SZ
+  name_at_selection: 锡业股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000963.SZ
+  name_at_selection: 华东医药
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000970.SZ
+  name_at_selection: 中科三环
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000975.SZ
+  name_at_selection: 山金国际
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000977.SZ
+  name_at_selection: 浪潮信息
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000983.SZ
+  name_at_selection: 山西焦煤
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000988.SZ
+  name_at_selection: 华工科技
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 000999.SZ
+  name_at_selection: 华润三九
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 001280.SZ
+  name_at_selection: 中国铀业
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 001289.SZ
+  name_at_selection: 龙源电力
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 001391.SZ
+  name_at_selection: 国货航
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 001965.SZ
+  name_at_selection: 招商公路
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 001979.SZ
+  name_at_selection: 招商蛇口
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002001.SZ
+  name_at_selection: 新和成
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002007.SZ
+  name_at_selection: 华兰生物
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002008.SZ
+  name_at_selection: 大族激光
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002010.SZ
+  name_at_selection: 传化智联
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002024.SZ
+  name_at_selection: ST易购
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002027.SZ
+  name_at_selection: 分众传媒
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002028.SZ
+  name_at_selection: 思源电气
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002032.SZ
+  name_at_selection: 苏泊尔
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002038.SZ
+  name_at_selection: 双鹭药业
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002044.SZ
+  name_at_selection: 美年健康
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002049.SZ
+  name_at_selection: 紫光国微
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002050.SZ
+  name_at_selection: 三花智控
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002051.SZ
+  name_at_selection: 中工国际
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002064.SZ
+  name_at_selection: 华峰化学
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002065.SZ
+  name_at_selection: 东华软件
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002074.SZ
+  name_at_selection: 国轩高科
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002081.SZ
+  name_at_selection: 金螳螂
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002085.SZ
+  name_at_selection: 万丰奥威
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002106.SZ
+  name_at_selection: 莱宝高科
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002120.SZ
+  name_at_selection: 韵达股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002129.SZ
+  name_at_selection: TCL中环
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002131.SZ
+  name_at_selection: 利欧股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002142.SZ
+  name_at_selection: 宁波银行
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002146.SZ
+  name_at_selection: 荣盛发展
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002152.SZ
+  name_at_selection: 广电运通
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002153.SZ
+  name_at_selection: 石基信息
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002157.SZ
+  name_at_selection: 正邦科技
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002174.SZ
+  name_at_selection: 游族网络
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002179.SZ
+  name_at_selection: 中航光电
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002180.SZ
+  name_at_selection: 奔图科技
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002183.SZ
+  name_at_selection: 怡亚通
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002195.SZ
+  name_at_selection: 岩山科技
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002202.SZ
+  name_at_selection: 金风科技
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002230.SZ
+  name_at_selection: 科大讯飞
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002236.SZ
+  name_at_selection: 大华股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002241.SZ
+  name_at_selection: 歌尔股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002252.SZ
+  name_at_selection: 上海莱士
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002269.SZ
+  name_at_selection: 美邦服饰
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002271.SZ
+  name_at_selection: 东方雨虹
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002292.SZ
+  name_at_selection: 奥飞娱乐
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002294.SZ
+  name_at_selection: 信立泰
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002299.SZ
+  name_at_selection: 圣农发展
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002304.SZ
+  name_at_selection: 洋河股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002310.SZ
+  name_at_selection: 东方新能
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002311.SZ
+  name_at_selection: 海大集团
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002344.SZ
+  name_at_selection: 海宁皮城
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002352.SZ
+  name_at_selection: 顺丰控股
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002353.SZ
+  name_at_selection: 杰瑞股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002371.SZ
+  name_at_selection: 北方华创
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002375.SZ
+  name_at_selection: 亚厦股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002384.SZ
+  name_at_selection: 东山精密
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002385.SZ
+  name_at_selection: 大北农
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002399.SZ
+  name_at_selection: 海普瑞
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002400.SZ
+  name_at_selection: 省广集团
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002410.SZ
+  name_at_selection: 广联达
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002414.SZ
+  name_at_selection: 高德红外
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002415.SZ
+  name_at_selection: 海康威视
+  exchange: SZ
+  board: sz_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 深市主板（原中小板并入）科技大盘股，2020 年前上市；工程覆盖样本，非推荐。
+- symbol: 002416.SZ
+  name_at_selection: 爱施德
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002422.SZ
+  name_at_selection: 科伦药业
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002424.SZ
+  name_at_selection: ST百灵
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002426.SZ
+  name_at_selection: 胜利精密
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002429.SZ
+  name_at_selection: 兆驰股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002456.SZ
+  name_at_selection: 欧菲光
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002459.SZ
+  name_at_selection: 晶澳科技
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002460.SZ
+  name_at_selection: 赣锋锂业
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002463.SZ
+  name_at_selection: 沪电股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002465.SZ
+  name_at_selection: 海格通信
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002466.SZ
+  name_at_selection: 天齐锂业
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002468.SZ
+  name_at_selection: 申通快递
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002470.SZ
+  name_at_selection: 金正大
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002475.SZ
+  name_at_selection: 立讯精密
+  exchange: SZ
+  board: sz_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 深市主板（原中小板）电子制造大盘股，2020 年前上市；工程覆盖样本，非推荐。
+- symbol: 002493.SZ
+  name_at_selection: 荣盛石化
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002500.SZ
+  name_at_selection: 山西证券
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002508.SZ
+  name_at_selection: 老板电器
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002532.SZ
+  name_at_selection: 天山铝业
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002555.SZ
+  name_at_selection: 三七互娱
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002558.SZ
+  name_at_selection: 巨人网络
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002568.SZ
+  name_at_selection: 百润股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002570.SZ
+  name_at_selection: 贝因美
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002572.SZ
+  name_at_selection: 索菲亚
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002594.SZ
+  name_at_selection: 比亚迪
+  exchange: SZ
+  board: sz_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 深市主板（原中小板）新能源车大盘股，2020 年前上市；工程覆盖样本，非推荐。
+- symbol: 002600.SZ
+  name_at_selection: 领益智造
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002601.SZ
+  name_at_selection: 龙佰集团
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002602.SZ
+  name_at_selection: 世纪华通
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002603.SZ
+  name_at_selection: 以岭药业
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002607.SZ
+  name_at_selection: 中公教育
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002608.SZ
+  name_at_selection: 江苏国信
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002624.SZ
+  name_at_selection: 完美世界
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002625.SZ
+  name_at_selection: 光启技术
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002648.SZ
+  name_at_selection: 卫星化学
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002653.SZ
+  name_at_selection: 海思科
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002673.SZ
+  name_at_selection: 西部证券
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002709.SZ
+  name_at_selection: 天赐材料
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002714.SZ
+  name_at_selection: 牧原股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 深市主板（原中小板）农业周期股，2020 年前上市；工程覆盖样本，非推荐。
+- symbol: 002736.SZ
+  name_at_selection: 国信证券
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002739.SZ
+  name_at_selection: 儒意电影
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002756.SZ
+  name_at_selection: 永兴材料
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002773.SZ
+  name_at_selection: 康弘药业
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002791.SZ
+  name_at_selection: 坚朗五金
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002797.SZ
+  name_at_selection: 第一创业
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002812.SZ
+  name_at_selection: 恩捷股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002821.SZ
+  name_at_selection: 凯莱英
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002831.SZ
+  name_at_selection: 裕同科技
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002837.SZ
+  name_at_selection: 英维克
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002839.SZ
+  name_at_selection: 张家港行
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002841.SZ
+  name_at_selection: 视源股份
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002916.SZ
+  name_at_selection: 深南电路
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002920.SZ
+  name_at_selection: 德赛西威
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002925.SZ
+  name_at_selection: 盈趣科技
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002938.SZ
+  name_at_selection: 鹏鼎控股
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002939.SZ
+  name_at_selection: 长城证券
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002945.SZ
+  name_at_selection: 华林证券
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 002958.SZ
+  name_at_selection: 青农商行
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 003816.SZ
+  name_at_selection: 中国广核
+  exchange: SZ
+  board: sz_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300001.SZ
+  name_at_selection: 特锐德
+  exchange: SZ
+  board: chinext
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 创业板首批上市公司，2020 年前上市，覆盖创业板 10%/20% 涨跌幅切换前的持续交易；工程覆盖样本，非推荐。
+- symbol: 300002.SZ
+  name_at_selection: 神州泰岳
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300003.SZ
+  name_at_selection: 乐普医疗
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300014.SZ
+  name_at_selection: 亿纬锂能
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300015.SZ
+  name_at_selection: 爱尔眼科
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300017.SZ
+  name_at_selection: 网宿科技
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300024.SZ
+  name_at_selection: 机器人
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300027.SZ
+  name_at_selection: ST华谊
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300033.SZ
+  name_at_selection: 同花顺
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300058.SZ
+  name_at_selection: 蓝色光标
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300059.SZ
+  name_at_selection: 东方财富
+  exchange: SZ
+  board: chinext
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 创业板券商互联网大盘股，2020 年前上市且高流动性；工程覆盖样本，非推荐。
+- symbol: 300070.SZ
+  name_at_selection: 碧水源
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300072.SZ
+  name_at_selection: 海新能科
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300085.SZ
+  name_at_selection: 银之杰
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300122.SZ
+  name_at_selection: 智飞生物
+  exchange: SZ
+  board: chinext
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 创业板疫苗股，2020 年前上市；工程覆盖样本，非推荐。
+- symbol: 300124.SZ
+  name_at_selection: 汇川技术
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300133.SZ
+  name_at_selection: 华策影视
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300136.SZ
+  name_at_selection: 信维通信
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300142.SZ
+  name_at_selection: 沃森生物
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300144.SZ
+  name_at_selection: 宋城演艺
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300146.SZ
+  name_at_selection: 汤臣倍健
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300168.SZ
+  name_at_selection: 万达信息
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300182.SZ
+  name_at_selection: 捷成股份
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300207.SZ
+  name_at_selection: 欣旺达
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300223.SZ
+  name_at_selection: 君正股份
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300251.SZ
+  name_at_selection: 光线传媒
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300274.SZ
+  name_at_selection: 阳光电源
+  exchange: SZ
+  board: chinext
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 创业板电力电子大盘股，2020 年前上市；工程覆盖样本，非推荐。
+- symbol: 300296.SZ
+  name_at_selection: 利亚德
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300308.SZ
+  name_at_selection: 中际旭创
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300315.SZ
+  name_at_selection: 掌趣科技
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300316.SZ
+  name_at_selection: 晶盛机电
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300347.SZ
+  name_at_selection: 泰格医药
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300394.SZ
+  name_at_selection: 天孚通信
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300408.SZ
+  name_at_selection: 三环集团
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300413.SZ
+  name_at_selection: 芒果超媒
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300418.SZ
+  name_at_selection: 昆仑万维
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300433.SZ
+  name_at_selection: 蓝思科技
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300442.SZ
+  name_at_selection: 润泽科技
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300450.SZ
+  name_at_selection: 先导智能
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300454.SZ
+  name_at_selection: 深信服
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300476.SZ
+  name_at_selection: 胜宏科技
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300496.SZ
+  name_at_selection: 中科创达
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300498.SZ
+  name_at_selection: 温氏股份
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300502.SZ
+  name_at_selection: 新易盛
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300529.SZ
+  name_at_selection: 健帆生物
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300558.SZ
+  name_at_selection: 贝达药业
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300595.SZ
+  name_at_selection: 欧普康视
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300601.SZ
+  name_at_selection: 康泰生物
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300628.SZ
+  name_at_selection: 亿联网络
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300661.SZ
+  name_at_selection: 圣邦股份
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300676.SZ
+  name_at_selection: 华大基因
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300677.SZ
+  name_at_selection: 英科医疗
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300750.SZ
+  name_at_selection: 宁德时代
+  exchange: SZ
+  board: chinext
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 创业板动力电池龙头，2018 年上市，覆盖 2020 年前后持续交易与高流动性边界；工程覆盖样本，非推荐。
+- symbol: 300751.SZ
+  name_at_selection: 迈为股份
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300759.SZ
+  name_at_selection: 康龙化成
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300760.SZ
+  name_at_selection: 迈瑞医疗
+  exchange: SZ
+  board: chinext
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 创业板医疗器械高价股边界，2018 年上市；工程覆盖样本，非推荐。
+- symbol: 300763.SZ
+  name_at_selection: 锦浪科技
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300769.SZ
+  name_at_selection: 德方纳米
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300782.SZ
+  name_at_selection: 卓胜微
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300803.SZ
+  name_at_selection: 指南针
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300832.SZ
+  name_at_selection: 新产业
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300866.SZ
+  name_at_selection: 安克创新
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300888.SZ
+  name_at_selection: 稳健医疗
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300896.SZ
+  name_at_selection: 爱美客
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300919.SZ
+  name_at_selection: 中伟新材
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300957.SZ
+  name_at_selection: 贝泰妮
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300979.SZ
+  name_at_selection: 华利集团
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 300999.SZ
+  name_at_selection: 金龙鱼
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 301165.SZ
+  name_at_selection: 锐捷网络
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 301236.SZ
+  name_at_selection: 软通动力
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 301269.SZ
+  name_at_selection: 华大九天
+  exchange: SZ
+  board: chinext
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_after_2020
+  - pre_listing_gap_expected
+  selection_reason: 创业板注册制 EDA 股，2022 年上市，覆盖窗口内新上市导致的前期缺失边界；工程覆盖样本，非推荐。
+- symbol: 301308.SZ
+  name_at_selection: 江波龙
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 302132.SZ
+  name_at_selection: 中航成飞
+  exchange: SZ
+  board: chinext
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600000.SH
+  name_at_selection: 浦发银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 沪市主板银行股，2020 年前长期上市、持续交易且现金分红稳定；工程覆盖样本，非推荐。
+- symbol: 600004.SH
+  name_at_selection: 白云机场
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600008.SH
+  name_at_selection: 首创环保
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600009.SH
+  name_at_selection: 上海机场
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600010.SH
+  name_at_selection: 包钢股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600011.SH
+  name_at_selection: 华能国际
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600015.SH
+  name_at_selection: 华夏银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600016.SH
+  name_at_selection: 民生银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600018.SH
+  name_at_selection: 上港集团
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600019.SH
+  name_at_selection: 宝钢股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600021.SH
+  name_at_selection: 上海电力
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600022.SH
+  name_at_selection: 山东钢铁
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600023.SH
+  name_at_selection: 浙能电力
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600025.SH
+  name_at_selection: 华能水电
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600026.SH
+  name_at_selection: 中远海能
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600027.SH
+  name_at_selection: 华电国际
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600028.SH
+  name_at_selection: 中国石化
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600029.SH
+  name_at_selection: 南方航空
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600030.SH
+  name_at_selection: 中信证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600031.SH
+  name_at_selection: 三一重工
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600036.SH
+  name_at_selection: 招商银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 沪市主板大盘银行股，覆盖 2020 年前上市与高流动性边界；工程覆盖样本，非推荐。
+- symbol: 600037.SH
+  name_at_selection: 歌华有线
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600038.SH
+  name_at_selection: 中直股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600039.SH
+  name_at_selection: 四川路桥
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600048.SH
+  name_at_selection: 保利发展
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600050.SH
+  name_at_selection: 中国联通
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600058.SH
+  name_at_selection: 五矿发展
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600060.SH
+  name_at_selection: 海信视像
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600061.SH
+  name_at_selection: 国投资本
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600062.SH
+  name_at_selection: 华润双鹤
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600066.SH
+  name_at_selection: 宇通客车
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600079.SH
+  name_at_selection: ST人福
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600085.SH
+  name_at_selection: 同仁堂
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600089.SH
+  name_at_selection: 特变电工
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600096.SH
+  name_at_selection: 云天化
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600098.SH
+  name_at_selection: 广州发展
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600100.SH
+  name_at_selection: 同方股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600104.SH
+  name_at_selection: 上汽集团
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600108.SH
+  name_at_selection: 亚盛集团
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600109.SH
+  name_at_selection: 国金证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600111.SH
+  name_at_selection: 北方稀土
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600115.SH
+  name_at_selection: 中国东航
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600118.SH
+  name_at_selection: 中国卫星
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600123.SH
+  name_at_selection: 兰花科创
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600132.SH
+  name_at_selection: 重庆啤酒
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600143.SH
+  name_at_selection: 金发科技
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600150.SH
+  name_at_selection: 中国船舶
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600153.SH
+  name_at_selection: 建发股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600157.SH
+  name_at_selection: 永泰能源
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600160.SH
+  name_at_selection: 巨化股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600161.SH
+  name_at_selection: 天坛生物
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600166.SH
+  name_at_selection: 福田汽车
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600170.SH
+  name_at_selection: 上海建工
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600176.SH
+  name_at_selection: 中国巨石
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600177.SH
+  name_at_selection: 雅戈尔
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600183.SH
+  name_at_selection: 生益科技
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600188.SH
+  name_at_selection: 兖矿能源
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600196.SH
+  name_at_selection: 复星医药
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600208.SH
+  name_at_selection: 衢州发展
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600216.SH
+  name_at_selection: 浙江医药
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600219.SH
+  name_at_selection: 南山铝业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600221.SH
+  name_at_selection: 海航控股
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600233.SH
+  name_at_selection: 圆通速递
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600252.SH
+  name_at_selection: 中恒集团
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600256.SH
+  name_at_selection: 广汇能源
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600259.SH
+  name_at_selection: 中稀有色
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600267.SH
+  name_at_selection: 海正药业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600271.SH
+  name_at_selection: 航天信息
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600276.SH
+  name_at_selection: 恒瑞医药
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600299.SH
+  name_at_selection: 安迪苏
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600309.SH
+  name_at_selection: 万华化
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600315.SH
+  name_at_selection: 上海家化
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600316.SH
+  name_at_selection: 洪都航空
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600332.SH
+  name_at_selection: 白云山
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600339.SH
+  name_at_selection: 中油工程
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600340.SH
+  name_at_selection: '*ST华幸'
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600346.SH
+  name_at_selection: 恒力石化
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600348.SH
+  name_at_selection: 华阳股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600350.SH
+  name_at_selection: 山东高速
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600352.SH
+  name_at_selection: 浙江龙盛
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600362.SH
+  name_at_selection: 江西铜业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600369.SH
+  name_at_selection: 西南证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600372.SH
+  name_at_selection: 中航机载
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600373.SH
+  name_at_selection: 中文传媒
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600376.SH
+  name_at_selection: 首开股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600377.SH
+  name_at_selection: 宁沪高速
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600383.SH
+  name_at_selection: 金地集团
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600390.SH
+  name_at_selection: 五矿资本
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600395.SH
+  name_at_selection: 盘江股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600398.SH
+  name_at_selection: 海澜之家
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600403.SH
+  name_at_selection: 大有能源
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600406.SH
+  name_at_selection: 国电南瑞
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600415.SH
+  name_at_selection: 小商品城
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600426.SH
+  name_at_selection: 华鲁恒升
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600436.SH
+  name_at_selection: 片仔癀
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600438.SH
+  name_at_selection: 通威股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600446.SH
+  name_at_selection: 金证股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600460.SH
+  name_at_selection: 士兰微
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600482.SH
+  name_at_selection: 中国动力
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600487.SH
+  name_at_selection: 亨通光电
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600489.SH
+  name_at_selection: 中金黄金
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600497.SH
+  name_at_selection: 驰宏锌锗
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600498.SH
+  name_at_selection: 烽火通信
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600515.SH
+  name_at_selection: 海南机场
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600516.SH
+  name_at_selection: 方大炭素
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600518.SH
+  name_at_selection: 康美药业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600519.SH
+  name_at_selection: 贵州茅台
+  exchange: SH
+  board: sh_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 沪市主板高价股边界与稳定现金分红样本；工程覆盖样本，非推荐。
+- symbol: 600521.SH
+  name_at_selection: 华海药业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600522.SH
+  name_at_selection: 中天科技
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600535.SH
+  name_at_selection: 天士力
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600546.SH
+  name_at_selection: 山煤国际
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600547.SH
+  name_at_selection: 山东黄金
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600549.SH
+  name_at_selection: 厦门钨业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600566.SH
+  name_at_selection: 济川药业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600570.SH
+  name_at_selection: 恒生电子
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600578.SH
+  name_at_selection: 京能电力
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600582.SH
+  name_at_selection: 天地科技
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600583.SH
+  name_at_selection: 海油工程
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600584.SH
+  name_at_selection: 长电科技
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600585.SH
+  name_at_selection: 海螺水泥
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600588.SH
+  name_at_selection: 用友网络
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600597.SH
+  name_at_selection: 光明乳业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600600.SH
+  name_at_selection: 青岛啤酒
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600606.SH
+  name_at_selection: 绿地控股
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600633.SH
+  name_at_selection: 浙数文化
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600637.SH
+  name_at_selection: 东方明珠
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600642.SH
+  name_at_selection: 申能股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600648.SH
+  name_at_selection: 外高桥
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600649.SH
+  name_at_selection: 城投控股
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600654.SH
+  name_at_selection: 中安科
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600655.SH
+  name_at_selection: 豫园股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600660.SH
+  name_at_selection: 福耀玻璃
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600663.SH
+  name_at_selection: 陆家嘴
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600664.SH
+  name_at_selection: 哈药股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600666.SH
+  name_at_selection: 奥瑞德
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600674.SH
+  name_at_selection: 川投能源
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600682.SH
+  name_at_selection: 南京新百
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600685.SH
+  name_at_selection: 中船防务
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600688.SH
+  name_at_selection: 上海石化
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600690.SH
+  name_at_selection: 海尔智家
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600703.SH
+  name_at_selection: 三安光电
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600704.SH
+  name_at_selection: 物产中大
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600717.SH
+  name_at_selection: 天津港
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600718.SH
+  name_at_selection: 东软集团
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600732.SH
+  name_at_selection: 爱旭股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600733.SH
+  name_at_selection: 北汽蓝谷
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600737.SH
+  name_at_selection: 中粮糖业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600739.SH
+  name_at_selection: 辽宁成大
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600741.SH
+  name_at_selection: 华域汽车
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600745.SH
+  name_at_selection: '*ST闻泰'
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600754.SH
+  name_at_selection: 锦江酒店
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600760.SH
+  name_at_selection: 中航沈飞
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600763.SH
+  name_at_selection: 通策医疗
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600783.SH
+  name_at_selection: 鲁信创投
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600795.SH
+  name_at_selection: 国电电力
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600803.SH
+  name_at_selection: 新奥股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600809.SH
+  name_at_selection: 山西汾酒
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600816.SH
+  name_at_selection: 建元信托
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600820.SH
+  name_at_selection: 隧道股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600827.SH
+  name_at_selection: 百联股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600839.SH
+  name_at_selection: 四川长虹
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600845.SH
+  name_at_selection: 宝信软件
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600848.SH
+  name_at_selection: 上海临港
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600863.SH
+  name_at_selection: 华能蒙电
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600867.SH
+  name_at_selection: 通化东宝
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600871.SH
+  name_at_selection: 石化油服
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600872.SH
+  name_at_selection: 中炬高新
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600873.SH
+  name_at_selection: 梅花生物
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600875.SH
+  name_at_selection: 东方电气
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600880.SH
+  name_at_selection: 博瑞传播
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600884.SH
+  name_at_selection: 杉杉股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600886.SH
+  name_at_selection: 国投电力
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600887.SH
+  name_at_selection: 伊利股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600893.SH
+  name_at_selection: 航发动力
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600895.SH
+  name_at_selection: 张江高科
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600900.SH
+  name_at_selection: 长江电力
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600905.SH
+  name_at_selection: 三峡能源
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600909.SH
+  name_at_selection: 华安证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600918.SH
+  name_at_selection: 中泰证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600919.SH
+  name_at_selection: 江苏银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600926.SH
+  name_at_selection: 杭州银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600928.SH
+  name_at_selection: 西安银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600930.SH
+  name_at_selection: 华电新能
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600938.SH
+  name_at_selection: 中国海油
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600941.SH
+  name_at_selection: 中国移动
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600958.SH
+  name_at_selection: 东方证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600959.SH
+  name_at_selection: 江苏有线
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600968.SH
+  name_at_selection: 海油发展
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600977.SH
+  name_at_selection: 中国电影
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600989.SH
+  name_at_selection: 宝丰能源
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600998.SH
+  name_at_selection: 九州通
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 600999.SH
+  name_at_selection: 招商证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601006.SH
+  name_at_selection: 大秦铁路
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601009.SH
+  name_at_selection: 南京银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601012.SH
+  name_at_selection: 隆基绿能
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601016.SH
+  name_at_selection: 节能风
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601018.SH
+  name_at_selection: 宁波港
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601021.SH
+  name_at_selection: 春秋航空
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601058.SH
+  name_at_selection: 赛轮轮
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601059.SH
+  name_at_selection: 信达证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601066.SH
+  name_at_selection: 中信建投
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601077.SH
+  name_at_selection: 渝农商行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601088.SH
+  name_at_selection: 中国神华
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601098.SH
+  name_at_selection: 中南传媒
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601099.SH
+  name_at_selection: 太平洋
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601100.SH
+  name_at_selection: 恒立液压
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601106.SH
+  name_at_selection: 中国一重
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601108.SH
+  name_at_selection: 财通证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601111.SH
+  name_at_selection: 中国国航
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601117.SH
+  name_at_selection: 中国化学
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601118.SH
+  name_at_selection: 海南橡胶
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601127.SH
+  name_at_selection: 赛力斯
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601136.SH
+  name_at_selection: 首创证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601138.SH
+  name_at_selection: 工业富联
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601139.SH
+  name_at_selection: 深圳燃气
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601155.SH
+  name_at_selection: 新城控股
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601158.SH
+  name_at_selection: 重庆水务
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601162.SH
+  name_at_selection: 天风证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601163.SH
+  name_at_selection: 三角轮胎
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601166.SH
+  name_at_selection: 兴业银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601168.SH
+  name_at_selection: 西部矿业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601169.SH
+  name_at_selection: 北京银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601179.SH
+  name_at_selection: 中国西电
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601186.SH
+  name_at_selection: 中国铁建
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601198.SH
+  name_at_selection: 东兴证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601211.SH
+  name_at_selection: 国泰海通
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601212.SH
+  name_at_selection: 白银有色
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601216.SH
+  name_at_selection: 君正集团
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601225.SH
+  name_at_selection: 陕西煤业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601228.SH
+  name_at_selection: 广州港
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601229.SH
+  name_at_selection: 上海银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601231.SH
+  name_at_selection: 环旭电子
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601236.SH
+  name_at_selection: 红塔证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601238.SH
+  name_at_selection: 广汽集团
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601288.SH
+  name_at_selection: 农业银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601298.SH
+  name_at_selection: 青岛港
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601318.SH
+  name_at_selection: 中国平安
+  exchange: SH
+  board: sh_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 沪市主板保险大盘股，2020 年前上市，覆盖金融权重股边界；工程覆盖样本，非推荐。
+- symbol: 601319.SH
+  name_at_selection: 中国人保
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601328.SH
+  name_at_selection: 交通银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601333.SH
+  name_at_selection: 广深铁路
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601336.SH
+  name_at_selection: 新华保险
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601360.SH
+  name_at_selection: 三六零
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601375.SH
+  name_at_selection: 中原证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601377.SH
+  name_at_selection: 兴业证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601390.SH
+  name_at_selection: 中国中铁
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601398.SH
+  name_at_selection: 工商银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 沪市主板低价大盘股边界，2020 年前长期上市；工程覆盖样本，非推荐。
+- symbol: 601456.SH
+  name_at_selection: 国联民生
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601555.SH
+  name_at_selection: 东吴证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601577.SH
+  name_at_selection: 长沙银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601600.SH
+  name_at_selection: 中国铝业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601601.SH
+  name_at_selection: 中国太保
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601607.SH
+  name_at_selection: 上海医药
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601608.SH
+  name_at_selection: 中信重工
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601611.SH
+  name_at_selection: 中国核建
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601615.SH
+  name_at_selection: 明阳智能
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601618.SH
+  name_at_selection: 中国中冶
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601628.SH
+  name_at_selection: 中国人寿
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601633.SH
+  name_at_selection: 长城汽车
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601658.SH
+  name_at_selection: 邮储银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601666.SH
+  name_at_selection: 平煤股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601668.SH
+  name_at_selection: 中国建筑
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601669.SH
+  name_at_selection: 中国电建
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601688.SH
+  name_at_selection: 华泰证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601689.SH
+  name_at_selection: 拓普集团
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601696.SH
+  name_at_selection: 中银证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601698.SH
+  name_at_selection: 中国卫通
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601699.SH
+  name_at_selection: 潞安环能
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601718.SH
+  name_at_selection: ST际华
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601727.SH
+  name_at_selection: 上海电气
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601728.SH
+  name_at_selection: 中国电信
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601766.SH
+  name_at_selection: 中国中车
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601788.SH
+  name_at_selection: 光大证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601799.SH
+  name_at_selection: 星宇股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601800.SH
+  name_at_selection: 中国交建
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601808.SH
+  name_at_selection: 中海油服
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601816.SH
+  name_at_selection: 京沪高铁
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601818.SH
+  name_at_selection: 光大银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601825.SH
+  name_at_selection: 沪农商行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601828.SH
+  name_at_selection: 美凯龙
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601838.SH
+  name_at_selection: 成都银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601857.SH
+  name_at_selection: 中国石油
+  exchange: SH
+  board: sh_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 沪市主板能源大盘股，2020 年前上市，覆盖低价高流动性边界；工程覆盖样本，非推荐。
+- symbol: 601865.SH
+  name_at_selection: 福莱特
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601866.SH
+  name_at_selection: 中远海发
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601868.SH
+  name_at_selection: 中国能建
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601872.SH
+  name_at_selection: 招商轮船
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601877.SH
+  name_at_selection: 正泰电器
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601878.SH
+  name_at_selection: 浙商证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601881.SH
+  name_at_selection: 中国银河
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601888.SH
+  name_at_selection: 中国中免
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601898.SH
+  name_at_selection: 中煤能源
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601899.SH
+  name_at_selection: 紫金矿业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601901.SH
+  name_at_selection: 方正证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601916.SH
+  name_at_selection: 浙商银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601918.SH
+  name_at_selection: 新集能源
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601919.SH
+  name_at_selection: 中远海控
+  exchange: SH
+  board: sh_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 沪市主板航运周期股，历史上曾有证券简称变更，覆盖名称状态变化边界；工程覆盖样本，非推荐。
+- symbol: 601928.SH
+  name_at_selection: 凤凰传媒
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601929.SH
+  name_at_selection: 吉视传媒
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601933.SH
+  name_at_selection: 永辉超市
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601939.SH
+  name_at_selection: 建设银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601958.SH
+  name_at_selection: 金钼股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601966.SH
+  name_at_selection: 玲珑轮胎
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601969.SH
+  name_at_selection: 海南矿业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601985.SH
+  name_at_selection: 中国核电
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601988.SH
+  name_at_selection: 中国银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601990.SH
+  name_at_selection: 南京证券
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601991.SH
+  name_at_selection: 大唐发电
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601992.SH
+  name_at_selection: 金隅集团
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601995.SH
+  name_at_selection: 中金公司
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601997.SH
+  name_at_selection: 贵阳银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 601998.SH
+  name_at_selection: 中信银行
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603000.SH
+  name_at_selection: 人民网
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603019.SH
+  name_at_selection: 中科曙光
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603087.SH
+  name_at_selection: 甘李药业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603156.SH
+  name_at_selection: 养元饮品
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603160.SH
+  name_at_selection: 汇顶科技
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603185.SH
+  name_at_selection: 弘元绿能
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603195.SH
+  name_at_selection: 公牛集团
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603233.SH
+  name_at_selection: 大参林
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603259.SH
+  name_at_selection: 药明康德
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603260.SH
+  name_at_selection: 合盛硅业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603288.SH
+  name_at_selection: 海天味业
+  exchange: SH
+  board: sh_main
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 沪市主板消费大盘股，2020 年前上市且持续现金分红；工程覆盖样本，非推荐。
+- symbol: 603290.SH
+  name_at_selection: 斯达半导
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603296.SH
+  name_at_selection: 华勤技术
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603338.SH
+  name_at_selection: 浙江鼎力
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603369.SH
+  name_at_selection: 今世缘
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603392.SH
+  name_at_selection: 万泰生物
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603486.SH
+  name_at_selection: 科沃斯
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603501.SH
+  name_at_selection: 豪威集团
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603517.SH
+  name_at_selection: ST绝味
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603658.SH
+  name_at_selection: 安图生物
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603659.SH
+  name_at_selection: 璞泰来
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603699.SH
+  name_at_selection: 纽威股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603799.SH
+  name_at_selection: 华友钴业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603806.SH
+  name_at_selection: 福斯特
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603833.SH
+  name_at_selection: 欧派家居
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603858.SH
+  name_at_selection: 步长制药
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603882.SH
+  name_at_selection: 金域医学
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603885.SH
+  name_at_selection: 吉祥航空
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603893.SH
+  name_at_selection: 瑞芯微
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603899.SH
+  name_at_selection: 晨光股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603939.SH
+  name_at_selection: 益丰药房
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603986.SH
+  name_at_selection: 兆易创新
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 603993.SH
+  name_at_selection: 洛阳钼业
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 605117.SH
+  name_at_selection: 德业股份
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 605499.SH
+  name_at_selection: 东鹏饮料
+  exchange: SH
+  board: sh_main
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688001.SH
+  name_at_selection: 华兴源创
+  exchange: SH
+  board: star
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 科创板首只上市公司（2019 年），覆盖科创 20% 涨跌幅与首批无涨跌幅前五日制度；工程覆盖样本，非推荐。
+- symbol: 688005.SH
+  name_at_selection: 容百科技
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688008.SH
+  name_at_selection: 澜起科技
+  exchange: SH
+  board: star
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 科创板首批半导体股（2019 年上市）；工程覆盖样本，非推荐。
+- symbol: 688009.SH
+  name_at_selection: 中国通号
+  exchange: SH
+  board: star
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 科创板首批大盘股（2019 年上市）；工程覆盖样本，非推荐。
+- symbol: 688012.SH
+  name_at_selection: 中微公司
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688036.SH
+  name_at_selection: 传音控股
+  exchange: SH
+  board: star
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 科创板手机出海龙头（2019 年上市）；工程覆盖样本，非推荐。
+- symbol: 688041.SH
+  name_at_selection: 海光信息
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688047.SH
+  name_at_selection: 龙芯中科
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688065.SH
+  name_at_selection: 凯赛生物
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688072.SH
+  name_at_selection: 拓荆科技
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688082.SH
+  name_at_selection: 盛美上海
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688111.SH
+  name_at_selection: 金山办公
+  exchange: SH
+  board: star
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_before_2020
+  selection_reason: 科创板软件大盘股（2019 年上市），覆盖 2020-01-01 起即持续交易；工程覆盖样本，非推荐。
+- symbol: 688126.SH
+  name_at_selection: 沪硅产业
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688169.SH
+  name_at_selection: 石头科技
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688183.SH
+  name_at_selection: 生益电子
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688187.SH
+  name_at_selection: 时代电气
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688223.SH
+  name_at_selection: 晶科能源
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688256.SH
+  name_at_selection: 寒武纪
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688271.SH
+  name_at_selection: 联影医疗
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688303.SH
+  name_at_selection: 大全能源
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688363.SH
+  name_at_selection: 华熙生物
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688396.SH
+  name_at_selection: 华润微
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688472.SH
+  name_at_selection: 阿特斯
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688506.SH
+  name_at_selection: 百利天恒
+  exchange: SH
+  board: star
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_after_2020
+  - pre_listing_gap_expected
+  selection_reason: 科创板创新药股，2022 年上市，覆盖窗口内新上市导致的前期缺失边界；工程覆盖样本，非推荐。
+- symbol: 688521.SH
+  name_at_selection: 芯原股份
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688561.SH
+  name_at_selection: 奇安信
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688599.SH
+  name_at_selection: 天合光能
+  exchange: SH
+  board: star
+  selected_as_of: *id001
+  boundary_tags:
+  - csi300_pit_member
+  selection_reason: CSI300 时点成分（官方 index_weight 月度快照证据链 custom_csi300_tw）；自动生成的追踪条目，非推荐。
+- symbol: 688981.SH
+  name_at_selection: 中芯国际
+  exchange: SH
+  board: star
+  selected_as_of: 2026-09-03
+  boundary_tags:
+  - listed_after_2020
+  - pre_listing_gap_expected
+  selection_reason: 科创板晶圆代工龙头，2020-07 上市，覆盖 2020 年内上市导致的前期缺失与上市首五交易日边界；工程覆盖样本，非推荐。

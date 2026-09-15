@@ -1,5 +1,7 @@
 """Build the frozen csi300 universe from official CSI index announcements.
 
+Status: migration.
+
 This is the evidence chain RUNBOOK 阶段 5 prescribes, end to end:
 
 1. **Collect** (network): query the official CSI announcement search

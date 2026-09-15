@@ -58,12 +58,39 @@ conda run -n py310 python -m pytest -m smoke -v       # 600000.SH 小窗口真�
 **建议先小窗口试一次**（半天拉得动、问题暴露快），确认门禁能过再铺全区间：
 
 ```bash
-cd ~/work/program/stock/project
-python -m stock_quant data update --start 2024-01-01 --end 2024-03-31 --root .
-python -m stock_quant data validate --root .
+cd ~/work/program/stock
+# 发布路径要求显式 TUSHARE_TRANSPORT=relay，而它**不在** .env 里；且 src/ 与
+# project/ 没有任何 load_dotenv —— .env 不会被程序自己读，必须由启动方 export。
+set -a; . ./.env; set +a
+export TUSHARE_TRANSPORT=relay
+python -m stock_quant data update --start 2024-01-01 --end 2024-03-31 --root project
+python -m stock_quant data validate --root project
 # PASS  → data/dataset/<版本哈希>/ 新增不可变版本
-# BLOCK → 数据集不变；看上方 redacted 原因行（ERROR/FATAL 计数、source 状态）
+# BLOCK → 数据集不变；逐行打印阻断项（severity/code/table/symbol/details，
+#         最多 20 行，其余折叠），再是 severity 计数与 source 状态
 ```
+
+长窗口跑建议脱离终端（否则终端断开即中断），例如：
+
+```bash
+setsid nohup python -m stock_quant data update --start 2015-01-05 --root project \
+    > /tmp/update.log 2>&1 < /dev/null &
+```
+
+- **`--start` 必须落在日历的开市日上**：`2015-01-05` 是当前
+  `trading_calendar` 证据里的第一个开市日。写成 `2015-01-01` 不会拉坏数据，但会让
+  验收的 `date_window_completeness` 以 `window_not_calendar_complete` 记一条
+  FAIL —— 声明窗口比日历证据更早。CLI/build **不**对它做硬校验（理由见
+  [ADR-006](docs/adr/006-corporate-action-window-scope.md) 之外的
+  `docs/superpowers/specs/2026-09-15-data-layer-residual-defects-design.md` §3）。
+- `--end` 可省略：`update()` 用已发布日历的最后一个开市日解析
+  （实测 `resolved_end_date=2026-08-28`；`project.yml` 的 `end_date` 不是开市日）。
+- **窗口越界会先失败再拉数**：`configs/universes/` 若是坏的（例如两个文件声明同一
+  `universe_id`），判据在**任何 fetch 之前**读取，几秒内即以 FATAL
+  `universe_definition_invalid` 退出；修好前不要重跑长窗口。
+- **运行期间不要改 `configs/` 与 `src/`**：判据在发布前才用于写 `build_config`，
+  运行途中落进被扫描目录的文件会毒化这一轮的收尾（2026-09-14 实例见
+  [根因报告 D6](docs/operations/2026-09-14-blocking-gap-root-cause.md)）。
 
 - 门禁与策略无关：非正价格/schema 冲突/必需源不可用 → BLOCK；跨源价差、公司行为
   隔离断点只记录不阻断（设计 §13.5）。每次成功更新都会重建 `adjusted_bar`
@@ -72,8 +99,10 @@ python -m stock_quant data validate --root .
 - **`data update` 必须先刷新 tushare `stock_basic` 全市场快照**：该必需步骤刷新
   `security_master` 的上市事实并发布 `security_master_coverage`（每标的一行 = 研究冻结
   的证据）；拉取失败或快照缺某股票池标的 → 阻断发布。
-- 全区间再跑：`--start 2021-01-01 --end 2026-08-30`（= configs 范围；也可不给 --end，
-  由"最新完整交易日 + 发布时间 15:00"规则自动发现）。
+- 全区间再跑：`--start 2021-01-01 --end 2026-08-30`（= `configs/project.yml` 的
+  `start_date`/`end_date`；也可不给 --end，由"最新完整交易日 + 发布时间 15:00"
+  规则自动发现）。这是**数据更新**的范围，与实验规格的 `date_range` 无关：后者
+  逐字冻结自提交的规格文件，`freeze()` 从不改写它。
 
 ## 阶段 5 · 指数成分（csi300）证据导入与定义冻结（正式研究的前置）
 
@@ -118,6 +147,40 @@ python -m stock_quant data validate --root .
 redacted 的 `universe_preflight.json`（仅含状态/失败阶段/错误码），不产出任何
 因子，绝不回退到全量 master 标的；更正必须作为带证据的新事实版本发布，不得原地
 改写。调出指数只禁止之后的新开仓，既有持仓的退出仍由组合/执行层决定。
+
+**已执行记录（2026-09-13）**：`index_weight` 主路径已由 tushare relay 打通
+（无需 2000 积分档 token）。`collect_index_weight_membership.py` 拉取并固化
+2014-12..2026-08 共 141 份官方月度快照（`data/raw/csi/index_weight/`，证据清单
+哈希 `141a8b6d…`），合并为 792 条 / 682 只的时点成员事实
+（`custom_csi300_tw`，`membership_table_sha256 74ecd165…`），并发布携带成员表
+的数据版本、写出冻结定义 `configs/universes/custom_csi300_tw.yml`。因
+`index_membership_evidence` 门禁要求成员事实与 `security_master` 全量可交
+（`UNIVERSE_UNKNOWN_SYMBOL` 无豁免），`trim_universe_membership.py
+--base-universe-id custom_csi300_tw --tradable-universe-id
+custom_csi300_tw_tradable` 裁剪出 30 行 / 28 只的可交易交集
+（`membership_table_sha256 a6eff805…`），数据版本 `b0e36345…` 通过
+`data validate`。工程诊断 `momentum_60d_pit_official.yml` 绑定该定义
+（`universe_version c211b85c…`）已跑通全链（experiment_id `46f8b74e…`，
+debug 区，UNTRUSTED）。正式 `research run` 发布仍需对 `b0e36345…` 重走阶段
+5b 验收（操作者人工项）。全成分行情/公司行为回补是独立战役，见
+PROJECT_MEMORY §8.4。
+
+**增量规模的两次更正（2026-09-14）**：
+
+1. **是 `659` 只，不是「约 654 只」。** 654 从未由任何脚本或报告推导过，只出现
+   在未提交的工作区文本里。实际口径：`security_master` 由 `stock_basic` 的
+   L/D/P 三态合并扩到 **684** 只，`configs/universe.yml` 的 `entries` 取其中
+   **659** 只在市（`list_status=L`）标的 —— 与 master 的集合相等是
+   `_universe_master_issues` 的硬契约。25 只已退市成员不在本轮（幸存者偏差
+   仍在池子里）。
+2. **「`daily`/`adj_factor`/`dividend` 已确认 relay 可得」这半句按现有证据
+   不成立，已删除。** `adj_factor` 只有单样本逐位一致、无 raw 存证，且
+   `TushareSource` 根本没有这个 endpoint；`dividend` 在 relay 上**零证据**，
+   角色分工设计明列不集成 tushare `dividend`。实际回补走的是另一条路：
+   `daily` 走 tushare relay（659/659），公司行为走 akshare 的 cninfo 分红 +
+   eastmoney 分红 + cninfo 配股三条车道（659/659/659；eastmoney 对 5 只
+   科创板标的取数失败，其覆盖窗口判为 UNTRUSTED，不影响发布门禁）。
+   详见 [根因报告](docs/operations/2026-09-14-blocking-gap-root-cause.md)。
 
 ## 阶段 5b · 真实数据验收（正式研究的前置门禁）
 
@@ -169,10 +232,26 @@ python -m stock_quant data acceptance show --version <数据版本哈希> --root
 ```bash
 python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root .
 python -m stock_quant research run --spec configs/experiments/momentum_60d.yml --root .   # 复跑验证可复现
-# 两次 experiment_id 相同 → data/experiments/<id>/
+# 同一提交上两次 experiment_id 相同 → data/experiments/<id>/
+# 换了提交（code_commit 进身份）则必然是新 id，那不是不可复现
 ```
 
-`momentum_60d.yml` 声明 `execution_pipeline: walk_forward_oos_v1`：正式研究走
+**先看清是哪一份规格。** 同名文件有两份，内容不同，别互相套用：
+
+| 文件 | `execution_pipeline` | `portfolio_rule` | `universe_definition` |
+| --- | --- | --- | --- |
+| `project/configs/experiments/momentum_60d.yml`（工作项目副本） | `engineering_single_window`（未声明，取默认） | `top_n_equal_weight` | 无 |
+| `templates/project-config/experiments/momentum_60d.yml`（仓库模板 / 正式研究规格） | `walk_forward_oos_v1` | `buffered_risk_weighted` | `csi300` |
+
+上面命令里的相对路径 `configs/experiments/momentum_60d.yml` 在 `--root .` 下解析为
+**工作项目副本**，它走的是遗留单窗口管线（pin→factor→portfolio→backtest→report）：
+没有 fold schedule、没有 `stability_report.json`、不做时点成分预检，也不会发布
+正式稳定性结论。本阶段下列 walk-forward 语义**只在正式规格（模板那一份）上成立**；
+要把工作项目切到正式管线，得先把模板规格落到 `project/configs/experiments/`，并
+备齐阶段 5 的 `configs/universes/csi300.yml` 定义与 ACCEPTED 验收——那是新的
+实验身份（新的 `experiment_id`），不是同一次运行的延续。
+
+正式规格声明 `execution_pipeline: walk_forward_oos_v1`：正式研究走
 **固定日历 Walk-Forward 样本外稳定性** 管线。`date_range` 是请求的 OOS 评估
 范围（不含预热）：范围被切成完整的 1–12 月非重叠年度 fold，每年 1 月 1 日锚定；
 每个 fold 独立账户、独立持仓、相同的固定初始资金，日历预热**至少三个整年**
@@ -220,8 +299,12 @@ manifest 与 HTML 报告的**真实数据验收**小节；无验收的 run（工
 
 `research run` **没有任何降级绕过开关**（`--help` 里无 `--engineering`）——正式
 结论永远不降低自己的证据标准。遗留的单窗口管线只保留给
-`execution_pipeline: engineering_single_window` 的显式工程政策（`backtest
-momentum_60d` 调试诊断），它不能发布正式稳定性结论。
+`execution_pipeline: engineering_single_window` 的显式工程政策，它不能发布正式
+稳定性结论。走这一政策的只有两条路，且都不会「降级」信任档：`backtest
+momentum_60d --engineering`（UNTRUSTED 工程诊断，落 `data/runs/debug`，不发
+ACCEPTED）与 `research run --spec` 指向一份**未声明** `walk_forward_oos_v1` 的
+规格（如本工作项目副本）——后者仍以 RESEARCH 档运行并发布 ACCEPTED 实验，只是
+产出的是单窗口结果而非 fold 稳定性结论。
 
 核验覆盖证据（人工抽查）：
 - 证据表 = 数据集内的 `corporate_action_coverage` 表，位于
@@ -250,9 +333,14 @@ python -m stock_quant report build --root .        # 最新实验 HTML + 当前�
 
 ## 阶段 7b · 缓冲式风险加权组合的运行与审计（buffered_risk_weighted）
 
-`configs/experiments/momentum_60d.yml` 的 `portfolio_rule` 已选择
-`buffered_risk_weighted`（首期唯一一组预注册参数）。它只改变组合构建与账户
-对账：`momentum_60d` 因子与周频调仓不变。本节是操作者核对已发布产物的程序。
+`portfolio_rule` 选择 `buffered_risk_weighted`（首期唯一一组预注册参数）的是
+**仓库模板** `templates/project-config/experiments/momentum_60d.yml`；工作项目
+副本 `project/configs/experiments/momentum_60d.yml` 目前仍是等权
+`top_n_equal_weight`（见阶段 6 的两份规格对照表）。该规则只改变组合构建与账户
+对账：`momentum_60d` 因子与周频调仓不变。本节是操作者核对已发布产物的程序：
+先看 `data/experiments/<id>/experiment_spec.yml` 里冻结的 `portfolio_rule`
+是不是 `buffered_risk_weighted`——等权实验没有本节所说的权重、带宽与波动率目标
+字段，按本节核对会全部对不上。
 
 ### 1. 识别 portfolio_rule_version
 
@@ -450,6 +538,14 @@ python -c "import pandas as pd; print(pd.read_parquet('data/strategy_challenges/
    改为点明数据 UNTRUSTED 与原因。stdout 的 `trust=` 反映**数据**可信度——可信数据在
    工程模式下仍打印 `trust=TRUSTED`，但该 run 仍非正式结论。仅限排障，永不构成可信
    绩效；正式研究没有该开关。
+   **离线工程诊断今后只走这条路**：要在真实数据上做诊断性复跑，用
+   `backtest momentum_60d --engineering`；不要用 `research run` 提交「工程意图」的
+   规格——它没有降级开关，必然以 RESEARCH 档运行并发布 ACCEPTED 实验，规格注释里
+   写的 engineering 意图在产物里不留任何痕迹。2026-09-13 之前经 `research run`
+   提交 `momentum_60d_offline_real.yml` 得到的两个 ACCEPTED 实验（`6c838267…`、
+   `eb1f944f…`）**保留不动**：它们确实以 RESEARCH + ACCEPTED 运行过，不事后追认
+   为 UNTRUSTED（该规格头注已如实说明：经 `research run` 提交时冻结出来的档位就是
+   research + 具体验收 id，头注声明的 engineering 只是诊断意图）。
 4. **复权口径（momentum_60d v2）**：动量只消费不可变 `adjusted_bar` 表
    （`adjustment=internal_total_return_v1`，由未复权收盘与已核验现金分红/送股/转增
    事件导出）；订单、成交、涨跌停判断与账户估值继续用未复权 `daily_bar` 价格。

@@ -1,5 +1,7 @@
 """Evaluate the two hard gates a real update must clear before acceptance.
 
+Status: diagnostic.
+
 Gate one: no unexplained missing bars over the window -- the check the
 current dataset fails by 5,327 rows.  Gate two: trusted corporate-action
 coverage tiling the window.  The script also previews the eight automated

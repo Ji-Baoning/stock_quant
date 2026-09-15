@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """Read-only connectivity check for the configured market-data suppliers.
 
+Status: diagnostic.
+
 Run with an explicit project root (default: the current directory):
     python project/check_data_sources.py --root .
 

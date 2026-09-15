@@ -43,6 +43,7 @@ from stock_quant.research.acceptance.models import (
     EvidenceReference,
     ManualCheckStatus,
 )
+from stock_quant.safe_yaml import load_yaml, read_yaml
 
 __all__ = [
     "CONFIRMATION_STRENGTHS",
@@ -213,7 +214,7 @@ def program_payload(program_text: str) -> dict[str, object]:
     if lines[-1].strip() != "```":
         raise WorksheetError("program_unreadable")
     try:
-        payload = yaml.safe_load("\n".join(lines[1:-1]))
+        payload = load_yaml("\n".join(lines[1:-1]), source="program block")
     except yaml.YAMLError as error:
         raise WorksheetError("program_unreadable") from error
     if not isinstance(payload, dict):
@@ -244,7 +245,7 @@ def signature_blocks(human: str) -> tuple[dict[str, object], ...]:
             if index >= len(lines):
                 raise WorksheetError("marker_invalid")
             try:
-                payload = yaml.safe_load("\n".join(body))
+                payload = load_yaml("\n".join(body), source="signature block")
             except yaml.YAMLError as error:
                 raise WorksheetError("marker_invalid") from error
             if not isinstance(payload, dict):
@@ -618,9 +619,7 @@ def confirm(
     # Step 1: read the checklist, then re-verify every binding and every other
     # manual row.  A malformed checklist raises the model's own error: the CLI
     # turns that into one stable ``invalid_checklist`` reason.
-    checklist = AcceptanceChecklist.model_validate(
-        yaml.safe_load(Path(checklist_path).read_text(encoding="utf-8"))
-    )
+    checklist = AcceptanceChecklist.model_validate(read_yaml(checklist_path))
     version = checklist.dataset_version
     fresh = build_checklist(
         root, version, checklist.operator_id, prepared_at=checklist.prepared_at

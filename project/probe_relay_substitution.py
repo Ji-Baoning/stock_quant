@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """Silent-substitution probe: does the relay answer where tushare answers nothing?
 
+Status: diagnostic.
+
 Design spec §3 ③, minimal version (stage 0).  A relay that carries
 ``fallback_on_empty`` semantics replaces "no data" with "data from somewhere
 else" without saying so, which is how the promax transport was caught (the

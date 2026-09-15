@@ -1,0 +1,52 @@
+# 时点成分过滤的 ENGINEERING 验收规格（官方 index_weight 证据链）。
+#
+# 与 momentum_60d_pit_tradable.yml 相同的信任语义，但 universe_definition 换成
+# custom_csi300_tw_tradable：由 collect_index_weight_membership.py 从 tushare
+# index_weight 官方月度成分权重快照（141 份逐月快照，存证
+# data/raw/csi/index_weight/，证据清单哈希 141a8b6d…）端到端产出的时点
+# 成员事实（792 条 / 682 只，membership_table_sha256 74ecd165…），再由
+# trim_universe_membership.py 裁剪到数据集 security_master 可交易交集
+# （30 行 / 28 只，membership_table_sha256 a6eff805…）。
+#
+# 数据版本 b0e36345 携带该成员表并通过 data validate；runner 在算实验身份
+# 之前先做 index_membership_evidence 预检，把每个信号日的候选收窄到
+# 「当时确实是 CSI300 成分」的标的上。月末快照约定：月中调仓有至多约 1 个月
+# 的滞后（已文档化），custom_ 前缀豁免每日恰 300 只的基数校验。
+#
+# 股票池的可交易交集仍受限于数据集 security_master（本规格绑定数据版本
+# b0e36345… 时为 30 只工程样本）。全成分回补已于 2026-09-14 执行：增量是
+# **659** 只在市成员（原文「~654 只」从未由任何脚本推导过，已作废），且**未**
+# 放开 universe_master_mismatch 契约——走的是把 configs/universe.yml 扩到与
+# security_master 集合相等的内部一致解。相关阻断缺陷定位见
+# docs/operations/2026-09-14-blocking-gap-root-cause.md。本规格只证明官方证据链
+# 的时点过滤生效并可复现。非投资建议，非可信绩效声明。
+hypothesis: >-
+  把选股候选限制在信号日当时确属 CSI300 成分（官方月度权重快照证据）的标的上，
+  会在同一批真实行情上改变组合构成与绩效路径；本规格用于验证官方证据链的
+  时点过滤确实生效并可复现。
+factor_versions:
+  momentum_60d: 2.0.0
+dataset_version: CURRENT
+universe_version: CURRENT
+universe_definition: custom_csi300_tw_tradable
+trust_mode: engineering
+data_acceptance_id: null
+date_range:
+  start_date: 2015-01-01
+  end_date: 2026-08-21
+train_validation_holdout_policy: not_applicable_engineering_mvp
+preprocessing:
+  winsorization: none
+  standardization: none
+portfolio_rule:
+  name: top_n_equal_weight
+  top_n: 10
+  lot_size: 100
+cost_scenarios:
+  - zero_cost
+  - commission_tax
+  - full_cost
+random_seed: 42
+code_commit: unversioned
+parent_experiment_ids: []
+agent_id: null

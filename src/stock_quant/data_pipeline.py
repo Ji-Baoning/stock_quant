@@ -45,6 +45,7 @@ import time as _sleep_module
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
@@ -84,10 +85,13 @@ from stock_quant.data_model.corporate_actions import (
     REASON_CROSS_SOURCE_CONFLICT,
     REASON_UNSUPPORTED_CORPORATE_ACTION,
     RECONCILED_COLUMNS,
+    RIGHTS_SOURCE,
     CorporateActionResult,
     apply_corporate_action_reviews,
     filter_corporate_actions_to_window,
     normalize_corporate_actions,
+    normalize_rights_issue_actions,
+    prepare_allotment_rights_frame,
     prepare_cninfo_dividend_frame,
     prepare_eastmoney_dividend_frame,
     quarantine_row_out_of_window_reason,
@@ -115,7 +119,10 @@ from stock_quant.data_model.security_master import (
     master_coverage_frame,
     master_coverage_record,
 )
-from stock_quant.data_model.suspensions import suspension_rows
+from stock_quant.data_model.suspensions import (
+    canonicalize_supplier_suspensions,
+    suspension_rows,
+)
 from stock_quant.data_model.trade_calendar_facts import (
     EXCHANGES as CALENDAR_EXCHANGES,
 )
@@ -194,6 +201,24 @@ DATASET_BUILD_CONTRACT_VERSION = 1
 
 _CONFIGURED_SOURCES = ("tushare", "akshare", "baostock")
 _REQUIRED_ROLE = {"tushare": True, "akshare": True, "baostock": False}
+
+#: Corporate-action interfaces requested per symbol, as ``(endpoint, bucket)``.
+#: Every one of them must answer before a window may read ``VERIFIED``, so the
+#: list is the single place that decides how many ways a window can fail.
+CORPORATE_ACTION_ENDPOINTS = (
+    ("cninfo_corporate_actions", "cninfo"),
+    ("eastmoney_corporate_actions", "eastmoney"),
+    ("rights_issue_corporate_actions", RIGHTS_SOURCE),
+)
+
+#: Adapter that turns each endpoint's supplier layout into the reconciliation
+#: layout.  A mapping rather than an if/else chain: an interface added later
+#: must name its own adapter instead of silently inheriting another's.
+CORPORATE_ACTION_PREPARERS = {
+    "cninfo_corporate_actions": prepare_cninfo_dividend_frame,
+    "eastmoney_corporate_actions": prepare_eastmoney_dividend_frame,
+    "rights_issue_corporate_actions": prepare_allotment_rights_frame,
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -565,6 +590,24 @@ class DataPipeline:
         ) = baseline
         issues.extend(self._universe_master_issues(master))
 
+        # ---- universe definitions: a config fault, read before any fetch -- #
+        # The criterion is computed from ``configs/universes`` and is only *used*
+        # at publish time, but it is read here so a broken definition directory
+        # fails in seconds instead of after the whole fetch-and-ingest window.
+        try:
+            criterion = load_universe_coverage_criterion(
+                self._project_root / "configs" / "universes"
+            )
+        except UniverseCoverageError as error:
+            issues.append(
+                _issue(
+                    Severity.FATAL,
+                    CODE_UNIVERSE_DEFINITION_INVALID,
+                    details={"message": str(error)},
+                )
+            )
+            return self._result(issues, None, run_id, None, statuses, raw_snapshots)
+
         # ---- required-source availability gate -------------------------- #
         required_blocked = self._require_available(enabled, issues, statuses)
         if required_blocked:
@@ -816,19 +859,6 @@ class DataPipeline:
             )
 
         # ---- publish ---------------------------------------------------- #
-        try:
-            criterion = load_universe_coverage_criterion(
-                self._project_root / "configs" / "universes"
-            )
-        except UniverseCoverageError as error:
-            issues.append(
-                _issue(
-                    Severity.FATAL,
-                    CODE_UNIVERSE_DEFINITION_INVALID,
-                    details={"message": str(error)},
-                )
-            )
-            return self._result(issues, None, run_id, end, statuses, raw_snapshots)
         tables = {
             "daily_bar": new_daily,
             "adjusted_bar": adjusted,
@@ -1186,11 +1216,22 @@ class DataPipeline:
             clean = normalize_daily(
                 result.frame, "tushare", _ingest_time(result.metadata)
             )
-            primary_rows.append(clean.valid)
+            # The supplier sometimes returns a suspended session as a row with
+            # zero open/high/low, zero volume and a carried close.  Canonicalize
+            # it to the suspension bar it is, before the value checks see it as
+            # a zero-priced bar; the raw response keeps the original evidence.
+            valid, suspension_issues = canonicalize_supplier_suspensions(
+                symbol,
+                clean.valid,
+                result.frame,
+                ingested_at=_ingest_time(result.metadata),
+            )
+            issues.extend(suspension_issues)
+            primary_rows.append(valid)
             # (symbol, date) pairs: _missing_issues tests tuple membership, so
             # bare dates here would warn on every open day of every symbol.
             primary_dates.update(
-                zip(clean.valid["symbol"], clean.valid["trade_date"].dt.date)
+                zip(valid["symbol"], valid["trade_date"].dt.date)
             )
         statuses["tushare"] = SourceStatus(
             "tushare", True, True, reason_code="ok"
@@ -1658,7 +1699,12 @@ class DataPipeline:
         current_ca,
         current_quarantine,
     ):
-        """Reconcile cninfo/eastmoney per held security, best-effort.
+        """Reconcile the corporate-action interfaces per held security.
+
+        Three interfaces are requested: CNINFO and Eastmoney for
+        distributions, and CNINFO's allotment interface for subscriptions,
+        which neither dividend interface reports at all (see
+        ``CORPORATE_ACTION_ENDPOINTS``).
 
         Returns ``(facts, coverage, quarantine)``: the merged canonical
         corporate-action facts, one evidence row per symbol/window recording
@@ -1675,12 +1721,13 @@ class DataPipeline:
         frames_by_symbol: dict[str, dict[str, list[pd.DataFrame]]] = {}
         outcomes_by_symbol: dict[str, dict[str, dict[str, object]]] = {}
         for symbol in symbols:
-            frames_by_symbol[symbol] = {"cninfo": [], "eastmoney": []}
+            frames_by_symbol[symbol] = {
+                "cninfo": [],
+                "eastmoney": [],
+                RIGHTS_SOURCE: [],
+            }
             symbol_outcomes: dict[str, dict[str, object]] = {}
-            for endpoint, source_name in (
-                ("cninfo_corporate_actions", "cninfo"),
-                ("eastmoney_corporate_actions", "eastmoney"),
-            ):
+            for endpoint, source_name in CORPORATE_ACTION_ENDPOINTS:
                 try:
                     result = self._fetch_one(
                         source,
@@ -1690,10 +1737,7 @@ class DataPipeline:
                     raw_snapshots.append(snapshot)
                     frame = result.frame
                     if not frame.empty:
-                        if endpoint == "cninfo_corporate_actions":
-                            frame = prepare_cninfo_dividend_frame(frame, symbol)
-                        else:
-                            frame = prepare_eastmoney_dividend_frame(frame, symbol)
+                        frame = CORPORATE_ACTION_PREPARERS[endpoint](frame, symbol)
                         frame = filter_corporate_actions_to_window(frame, start, end)
                         frames_by_symbol[symbol][source_name].append(frame)
                     symbol_outcomes[endpoint] = {
@@ -1730,6 +1774,7 @@ class DataPipeline:
             accepted, quarantined = self._reconcile_action_frames(
                 frames_by_symbol[symbol]["cninfo"],
                 frames_by_symbol[symbol]["eastmoney"],
+                frames_by_symbol[symbol][RIGHTS_SOURCE],
                 issues,
             )
             accepted_frames.append(accepted)
@@ -1781,25 +1826,56 @@ class DataPipeline:
             merged_quarantine,
         )
 
-    def _reconcile_action_frames(self, cninfo_frames, eastmoney_frames, issues):
-        """Reconcile collected supplier frames; empty defaults on failure."""
+    def _reconcile_action_frames(
+        self, cninfo_frames, eastmoney_frames, allotment_frames, issues
+    ):
+        """Reconcile collected supplier frames; empty defaults on failure.
+
+        The two dividend lanes are reconciled against each other; the allotment
+        lane is normalized on its own because a subscription is reported by one
+        source only, so there is nothing to cross-confirm it against.  The two
+        lanes fail independently: a malformed dividend frame must not also
+        discard the symbol's subscriptions, and vice versa.
+        """
         try:
             reconciled = normalize_corporate_actions(
                 _concat(cninfo_frames), _concat(eastmoney_frames)
             )
-            return reconciled.accepted, reconciled.quarantined
         except Exception as error:  # noqa: BLE001
-            issues.append(
-                _issue(
-                    Severity.WARNING,
-                    CODE_OPTIONAL_SOURCE_FAILURE,
-                    details={
-                        "source": "akshare",
-                        "message": f"corporate-action reconciliation: {error}",
-                    },
-                )
+            self._warn_action_lane_failure(issues, "dividend", error)
+            reconciled = CorporateActionResult(
+                accepted=pd.DataFrame(), quarantined=pd.DataFrame()
             )
-            return pd.DataFrame(), pd.DataFrame()
+        try:
+            rights = normalize_rights_issue_actions(_concat(allotment_frames))
+        except Exception as error:  # noqa: BLE001
+            self._warn_action_lane_failure(issues, "rights-issue", error)
+            rights = CorporateActionResult(
+                accepted=pd.DataFrame(), quarantined=pd.DataFrame()
+            )
+        return (
+            self._stack_action_frames([reconciled.accepted, rights.accepted]),
+            self._stack_action_frames([reconciled.quarantined, rights.quarantined]),
+        )
+
+    @staticmethod
+    def _warn_action_lane_failure(issues, lane, error) -> None:
+        """Record one corporate-action lane's failure as an optional-source warning."""
+        issues.append(
+            _issue(
+                Severity.WARNING,
+                CODE_OPTIONAL_SOURCE_FAILURE,
+                details={
+                    "source": "akshare",
+                    "message": f"{lane} corporate-action reconciliation: {error}",
+                },
+            )
+        )
+
+    @staticmethod
+    def _stack_action_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+        stacked = _concat(frames)
+        return pd.DataFrame() if stacked is None else stacked
 
     def _build_lazy(self, name):
         try:

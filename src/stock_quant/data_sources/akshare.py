@@ -30,6 +30,7 @@ _UPSTREAM_VENDOR = {
     "akshare.stock_dividend_cninfo": "cninfo",
     "akshare.stock_fhps_detail_em": "eastmoney",
     "akshare.stock_fhps_detail_ths": "ths",
+    "akshare.stock_allotment_cninfo": "cninfo",
 }
 
 
@@ -103,6 +104,12 @@ class AkShareSource:
                 False,
                 False,
             ),
+            "rights_issue_corporate_actions": (
+                self._rights_issue_corporate_actions,
+                "akshare.stock_allotment_cninfo",
+                False,
+                False,
+            ),
         }
         if request.endpoint not in handlers:
             raise ValueError(f"unsupported AKShare endpoint: {request.endpoint}")
@@ -136,7 +143,11 @@ class AkShareSource:
             require_date=date_required,
             require_symbol=require_symbol,
             allow_empty=request.endpoint
-            in {"cninfo_corporate_actions", "eastmoney_corporate_actions"},
+            in {
+                "cninfo_corporate_actions",
+                "eastmoney_corporate_actions",
+                "rights_issue_corporate_actions",
+            },
         )
         return FetchResult(
             source=self.name,
@@ -249,6 +260,20 @@ class AkShareSource:
             frame = self._client.stock_fhps_detail_ths(symbol=symbol)
             frame.attrs["supplier_endpoint"] = "akshare.stock_fhps_detail_ths"
             return frame
+
+    def _rights_issue_corporate_actions(self, request: DataRequest) -> pd.DataFrame:
+        """CNINFO's allotment frame: the only source of subscription facts.
+
+        A symbol with no subscription answers an empty frame rather than
+        raising, so no benign-error translation is needed here as it is for the
+        two dividend interfaces.
+        """
+        symbol = request.symbols[0].split(".", maxsplit=1)[0]
+        return self._client.stock_allotment_cninfo(
+            symbol=symbol,
+            start_date=request.start_date.strftime("%Y%m%d"),
+            end_date=request.end_date.strftime("%Y%m%d"),
+        )
 
 
 def _eastmoney_index_symbol(symbol: str) -> str:

@@ -1,5 +1,7 @@
 """Rebuild a full canonical dataset from the stored real tables (no network).
 
+Status: migration.
+
 The operator ``data update`` path is currently blocked by external-source
 outages (EastMoney IP block / baostock down / tushare 1-per-minute rate limit)
 and by the corporate-action review gate, which needs both cninfo and eastmoney
@@ -29,7 +31,6 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
-import yaml
 
 from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.adjusted_bar import build_adjusted_bars
@@ -38,10 +39,11 @@ from stock_quant.data_model.schemas import CORPORATE_ACTION_QUARANTINE_COLUMNS
 from stock_quant.data_model.universe_membership import membership_frame
 from stock_quant.data_quality.models import QualityReport
 from stock_quant.project_root import resolve_project_root
+from stock_quant.safe_yaml import read_yaml
 
 
 def run(root: Path, config: ProjectConfig) -> int:
-    universe = yaml.safe_load((root / "configs" / "universe.yml").read_text())
+    universe = read_yaml(root / "configs" / "universe.yml")
     symbols = [entry["symbol"] for entry in universe["entries"]]
     print(f"universe symbols={len(symbols)}")
 

@@ -5,10 +5,10 @@ from datetime import time as dt_time
 from pathlib import Path
 from typing import Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from stock_quant.project_root import resolve_project_root
+from stock_quant.safe_yaml import read_yaml
 
 
 class SourceConfig(BaseModel):
@@ -91,13 +91,13 @@ def load_project_config(root: str | Path) -> ProjectConfig:
     root = resolve_project_root(root)
 
     def read(name: str) -> dict[str, object]:
-        return yaml.safe_load((root / "configs" / name).read_text()) or {}
+        return read_yaml(root / "configs" / name) or {}
 
     project = read("project.yml")
     project["sources"] = read("sources.yml")
     project["costs"] = read("costs.yml")
     review_path = root / "configs" / "corporate_action_reviews.yml"
     project["corporate_action_reviews"] = (
-        yaml.safe_load(review_path.read_text()) or [] if review_path.exists() else []
+        read_yaml(review_path) or [] if review_path.exists() else []
     )
     return ProjectConfig.model_validate(project)

@@ -54,6 +54,7 @@ from stock_quant.research.acceptance.worksheet_prepare import (
     precheck_signed,
     prepare_worksheets,
 )
+from stock_quant.safe_yaml import read_yaml
 
 
 class AcceptanceRejected(Exception):
@@ -228,9 +229,7 @@ def publish_checklist(
     it to the caller.
     """
     root = Path(project_root).resolve()
-    checklist = AcceptanceChecklist.model_validate(
-        yaml.safe_load(Path(checklist_path).read_text(encoding="utf-8"))
-    )
+    checklist = AcceptanceChecklist.model_validate(read_yaml(checklist_path))
     fresh = build_checklist(
         root,
         checklist.dataset_version,

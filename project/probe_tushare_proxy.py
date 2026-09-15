@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """Read-only probe of the shared Tushare-compatible aggregation front.
 
+Status: diagnostic.
+
 Prints what the proxy can do *right now*: the interface catalog by category,
 the upstream chain it *reports* for each interface this repository has an open
 problem for, and those interfaces' declared shape.

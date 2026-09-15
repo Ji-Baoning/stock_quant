@@ -1,5 +1,7 @@
 """Convert an official index-membership snapshot into immutable facts.
 
+Status: migration.
+
 This is an offline operator tool: it reads one already-downloaded membership
 list (CSV or Parquet), normalizes every row into ``MembershipFact`` records
 bound to the operator-supplied snapshot/document evidence, and emits the

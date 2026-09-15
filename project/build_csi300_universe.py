@@ -1,5 +1,7 @@
 """Build the frozen csi300 universe from a sealed index-constitution snapshot.
 
+Status: migration.
+
 Offline and evidence-bound: the snapshot's recorded hashes are verified before
 a single fact is built, the raw CSVs are never rewritten, and every deviation
 from the adjudication is expressed in the snapshot's ``repairs.csv``.

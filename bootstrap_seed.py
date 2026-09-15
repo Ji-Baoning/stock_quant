@@ -35,16 +35,15 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import yaml
-
 from stock_quant.bootstrap import bootstrap_dataset
 from stock_quant.data_model.universe import Universe
+from stock_quant.safe_yaml import read_yaml
 
 
 def _warn_equity_benchmarks(root: Path, universe: Universe) -> None:
     """Flag benchmark_symbols that look like investable samples, not indices."""
     config_path = root / "configs" / "project.yml"
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    raw = read_yaml(config_path) or {}
     benchmarks = raw.get("benchmark_symbols") or []
     universe_symbols = set(universe.symbols)
     misplaced = [b for b in benchmarks if b in universe_symbols]

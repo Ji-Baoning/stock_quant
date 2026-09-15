@@ -1,5 +1,7 @@
 """Explanatory diagnostics for the PIT momentum engineering run.
 
+Status: diagnostic.
+
 Answers "why did the strategy make/lose money" on top of the existing
 "how much" report, over one frozen debug/research run directory:
 

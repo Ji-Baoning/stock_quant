@@ -1,11 +1,13 @@
 """Preflight the full-window data update before spending the network budget.
 
-The 2015-2026 update walks 30 equity names plus two benchmarks through two
-required suppliers and only publishes when every required fetch answered.  A
-stale baseline (plan one not yet published), a missing token or a dead
-endpoint would otherwise surface halfway through that run.  This script is
-read-only: it never writes the raw store, never publishes and never advances
-CURRENT.
+Status: diagnostic.
+
+The 2015-2026 update walks every name of the tracked `universe.yml` plus two
+benchmarks through two required suppliers and only publishes when every
+required fetch answered.  A stale baseline (the trim not yet published), a
+missing token or a dead endpoint would otherwise surface halfway through that
+run.  This script is read-only: it never writes the raw store, never publishes
+and never advances CURRENT.
 """
 
 from __future__ import annotations
@@ -31,8 +33,8 @@ from stock_quant.project_root import resolve_project_root
 
 UPDATE_START = date(2015, 1, 1)
 UPDATE_END = date(2026, 8, 28)
-TRADABLE_UNIVERSE_ID = "custom_csi300_ic_tradable"
-EXPECTED_TRADABLE_SYMBOLS = 28
+TRADABLE_UNIVERSE_ID = "custom_csi300_tw_tradable"
+EXPECTED_TRADABLE_SYMBOLS = 657
 PROBE_SYMBOL = "600519.SH"
 
 
@@ -50,11 +52,11 @@ def baseline_issues(
     universe_id: str = TRADABLE_UNIVERSE_ID,
     expected_symbols: int = EXPECTED_TRADABLE_SYMBOLS,
 ) -> list[ReadinessIssue]:
-    """Require plan one's trimmed membership to already be CURRENT.
+    """Require the trimmed membership to already be CURRENT.
 
     ``data update`` carries ``universe_membership`` verbatim, so updating
-    before the trim is published would freeze the untrimmed 1221-row table
-    into the new dataset.
+    before the trim is published would freeze the untrimmed base table into
+    the new dataset.
     """
     if membership is None or membership.empty:
         return [

@@ -1,5 +1,7 @@
 """Extend the published real dataset with 2015-2020 history (offline artifact).
 
+Status: migration.
+
 The operator ``data update`` path is still blocked by the corporate-action
 review gate (EastMoney unreachable), so this script follows the documented
 offline-rebuild pattern of ``rebuild_offline_real_dataset.py``.  It pulls the
@@ -27,7 +29,6 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-import yaml
 
 from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.adjusted_bar import build_adjusted_bars
@@ -42,6 +43,7 @@ from stock_quant.data_sources.akshare import AkShareSource
 from stock_quant.data_sources.base import ContractError, DataRequest
 from stock_quant.data_sources.tushare import TushareSource
 from stock_quant.project_root import resolve_project_root
+from stock_quant.safe_yaml import read_yaml
 
 BACKFILL_START = date(2015, 1, 1)
 BACKFILL_END = date(2020, 12, 31)
@@ -123,7 +125,7 @@ def _canonical_index_frame(
 
 
 def run(root: Path, config: ProjectConfig) -> int:
-    universe = yaml.safe_load((root / "configs" / "universe.yml").read_text())
+    universe = read_yaml(root / "configs" / "universe.yml")
     symbols = [entry["symbol"] for entry in universe["entries"]]
     benchmarks = list(config.benchmark_symbols)
     print(f"universe symbols={len(symbols)} benchmarks={benchmarks}")

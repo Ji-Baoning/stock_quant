@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """Cross-check the pinned trading calendar against an independent relay.
 
+Status: diagnostic.
+
 The design spec (§14) verifies the open-day set against benchmarks rather than
 trusting a single supplier, and this repository has already seen one transport
 falsified on exactly this interface (a relay that dropped ``is_open=0`` rows,

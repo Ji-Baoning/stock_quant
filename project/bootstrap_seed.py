@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """One-time seed: publish the carried baseline dataset for THIS project.
 
+Status: migration.
+
 Phase one has no ``data bootstrap`` CLI: ``data update`` can only *extend* an
 already-published dataset that carries ``security_master`` and
 ``trading_calendar`` (see docs/operations/phase-one-validation.md section 1).

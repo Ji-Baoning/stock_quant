@@ -1,5 +1,7 @@
 """Collect tushare ``index_weight`` snapshots into frozen universe membership.
 
+Status: migration.
+
 This is the missing evidence link for the point-in-time universe: tushare's
 ``index_weight`` interface returns official index constituent weight snapshots
 (one row per constituent per snapshot date), which are exactly the
@@ -25,8 +27,14 @@ Pipeline (one command, network only in step 1):
 5. Emit the frozen universe definition YAML with the real hashes so the
    walk-forward specs can pin it.
 
-Permission note: ``index_weight`` requires a tushare token with sufficient
-points (2000-point tier); the committed low-point token cannot call it.
+Permission note (2026-09-13): both the tushare relay and the shared GET proxy
+pass ``index_weight`` through, so the low-point token is no longer a blocker;
+the pull goes through ``TushareSource`` auto transport (relay first).
+
+The republished dataset carries the baseline manifest's ``build_config``
+(calendar evidence) forward and the frozen definition pins the dataset's
+actual ``daily_bar`` coverage window, so ``data validate`` passes on the
+published version.
 
 Default ``--universe-id`` is a ``custom_`` pool because the canonical
 ``csi300`` cardinality check demands exactly 300 members on every trading day,
@@ -42,7 +50,7 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
 
@@ -196,7 +204,7 @@ def run(
             if open_ended:
                 effective_to_text = ""
             else:
-                boundary = next_date[last] - pd.Timedelta(days=1)
+                boundary = pd.Timestamp(next_date[last]) - pd.Timedelta(days=1)
                 effective_to_text = boundary.date().isoformat()
             consolidated.append(
                 {
@@ -244,8 +252,19 @@ def run(
     version = publisher.current().version
     with DatasetReader(root).open(version) as dataset:
         tables = {name: dataset.read(name) for name in dataset.tables}
+        # The calendar evidence in the baseline manifest describes the carried
+        # trading_calendar/daily_bar tables, which this republish carries
+        # unchanged; dropping it would make the new version fail validation
+        # with calendar_coverage_missing.
+        build_config = (
+            dataset.manifest.get("build_config")
+            if isinstance(dataset.manifest, Mapping)
+            else None
+        )
     tables["universe_membership"] = result.frame
-    published = publisher.publish(tables, QualityReport())
+    published = publisher.publish(
+        tables, QualityReport(), build_config=build_config
+    )
     print(f"dataset_version={published.version}")
 
     # ---- step 6: emit the frozen universe definition ----------------------

@@ -179,6 +179,7 @@ class StubAdapter:
         if request.endpoint in (
             "cninfo_corporate_actions",
             "eastmoney_corporate_actions",
+            "rights_issue_corporate_actions",
         ):
             overrides = self.action_frames.get(symbol)
             if overrides and request.endpoint in overrides:
@@ -308,6 +309,7 @@ def _all_action_endpoints_failing() -> dict[str, DataSource]:
         failing_endpoints=(
             "cninfo_corporate_actions",
             "eastmoney_corporate_actions",
+            "rights_issue_corporate_actions",
         ),
     )
     return _all_stubs(akshare=failing)

@@ -723,7 +723,11 @@ def _coverage_table(universe: Universe, *, trusted: bool) -> pd.DataFrame:
     status = CoverageStatus.VERIFIED_EMPTY if trusted else CoverageStatus.UNTRUSTED
     outcome = "success_empty" if trusted else "failed"
     reason = None if trusted else CoverageReason.SOURCE_FETCH_FAILED
-    endpoints = ("cninfo_corporate_actions", "eastmoney_corporate_actions")
+    endpoints = (
+        "cninfo_corporate_actions",
+        "eastmoney_corporate_actions",
+        "rights_issue_corporate_actions",
+    )
     window_start = BARS_START if trusted else _BROKEN_COVERAGE_START
     window_end = BARS_END if trusted else _BROKEN_COVERAGE_END
     records = [

@@ -1,18 +1,24 @@
 """Derive a tradable-universe dataset from the frozen csi300 membership facts.
 
-The frozen ``custom_csi300_ic`` universe (1221 facts, 948 symbols) cannot
-drive any experiment: the acceptance gate rejects every symbol absent from
-``security_master`` (30 rows) as a FATAL ``UNIVERSE_UNKNOWN_SYMBOL`` and has
-no bypass.  This script narrows the membership table to the intersection with
-the published master and republishes the dataset, so the point-in-time filter
-can actually run.
+Status: migration.
 
-**This does not remove survivorship bias.**  The 30-name pool is hand-picked
-and still listed; trimming it to 28 changes which symbols the filter can
-*choose from*, not how the pool was chosen.  An unbiased CSI300 universe needs
-daily bars for roughly 918 more symbols since 2015, which is external data
-acquisition and out of scope here.  The derived universe is therefore named
-``custom_csi300_ic_tradable`` and must never be presented as CSI300.
+A frozen membership universe can list symbols the published ``security_master``
+does not carry, and the acceptance gate rejects every such symbol as a FATAL
+``UNIVERSE_UNKNOWN_SYMBOL`` with no bypass.  This script narrows the membership
+table to the intersection with the master and republishes the dataset, so the
+point-in-time filter can actually run.  The default pairing takes
+``custom_csi300_tw`` (792 facts, 682 symbols) down to
+``custom_csi300_tw_tradable`` against a 659-row master, leaving 766 rows over
+657 symbols; both ids are overridable with ``--base-universe-id`` and
+``--tradable-universe-id``.
+
+**This does not remove survivorship bias.**  The tracked pool keeps only
+symbols still listed (``list_status=L``); index members that have since
+delisted are absent from it, so trimming changes which symbols the filter can
+*choose from*, not how the pool was chosen.  An unbiased CSI300 needs daily
+bars for every historical member, which is external data acquisition and out
+of scope here.  The derived universe therefore carries the ``+tradable``
+suffix and must never be presented as CSI300.
 
 The membership facts keep every evidence field (``snapshot_sha256``,
 ``source_document_sha256``, ``source_url`` ...) across the filter, so the
@@ -43,8 +49,8 @@ from stock_quant.research.universe import (
     load_universe_definition,
 )
 
-BASE_UNIVERSE_ID = "custom_csi300_ic"
-TRADABLE_UNIVERSE_ID = "custom_csi300_ic_tradable"
+BASE_UNIVERSE_ID = "custom_csi300_tw"
+TRADABLE_UNIVERSE_ID = "custom_csi300_tw_tradable"
 TRADABLE_SUFFIX = "+tradable"
 _DATE_COLUMNS = ("raw_effective_from", "raw_effective_to", "announcement_date")
 
@@ -98,6 +104,7 @@ def build_tradable_definition(
     facts: list[MembershipFact],
     coverage_start: date,
     coverage_end: date,
+    tradable_universe_id: str = TRADABLE_UNIVERSE_ID,
 ) -> dict:
     """Render the definition document for the trimmed facts.
 
@@ -107,7 +114,7 @@ def build_tradable_definition(
     """
     return {
         "schema_version": base.schema_version,
-        "universe_id": TRADABLE_UNIVERSE_ID,
+        "universe_id": tradable_universe_id,
         "rules_version": base.rules_version + TRADABLE_SUFFIX,
         "membership_table_sha256": membership_content_hash(facts),
         "evidence_summary_sha256": base.evidence_summary_sha256,
@@ -116,18 +123,25 @@ def build_tradable_definition(
     }
 
 
-def run(root: Path, config: ProjectConfig) -> int:
+def run(
+    root: Path,
+    config: ProjectConfig,
+    *,
+    base_universe_id: str = BASE_UNIVERSE_ID,
+    tradable_universe_id: str = TRADABLE_UNIVERSE_ID,
+) -> int:
     """Publish the trimmed dataset and write the matching definition."""
     publisher = DatasetPublisher(root)
     version = publisher.current().version
     print(f"base dataset_version={version}")
 
-    definition_path = root / "configs" / "universes" / f"{BASE_UNIVERSE_ID}.yml"
+    definition_path = root / "configs" / "universes" / f"{base_universe_id}.yml"
     base = load_universe_definition(definition_path)
 
     reader = DatasetReader(root)
     with reader.open(version) as dataset:
         tables = {name: dataset.read(name) for name in dataset.tables}
+        build_config = dataset.manifest.get("build_config")
 
     master = tables["security_master"]
     membership = tables["universe_membership"]
@@ -139,7 +153,7 @@ def run(root: Path, config: ProjectConfig) -> int:
 
     trimmed = retarget_universe_id(
         trim_membership_rows(membership, set(master["symbol"])),
-        TRADABLE_UNIVERSE_ID,
+        tradable_universe_id,
     )
     facts = facts_from_rows(trimmed)
     print(
@@ -156,18 +170,21 @@ def run(root: Path, config: ProjectConfig) -> int:
         facts=facts,
         coverage_start=coverage_start,
         coverage_end=coverage_end,
+        tradable_universe_id=tradable_universe_id,
     )
 
     tables["universe_membership"] = membership_frame(facts)
-    published = publisher.publish(tables, QualityReport())
+    published = publisher.publish(
+        tables, QualityReport(), build_config=build_config
+    )
     print(f"dataset_version={published.version}")
     print(f"membership_table_sha256={definition['membership_table_sha256']}")
 
-    out_path = root / "configs" / "universes" / f"{TRADABLE_UNIVERSE_ID}.yml"
+    out_path = root / "configs" / "universes" / f"{tradable_universe_id}.yml"
     header = (
         "# Frozen universe definition generated by "
         "trim_universe_membership.py.\n"
-        f"# Derived from {BASE_UNIVERSE_ID} by keeping only the symbols\n"
+        f"# Derived from {base_universe_id} by keeping only the symbols\n"
         "# present in the dataset's security_master.  NOT an unbiased\n"
         "# CSI300 universe: the underlying pool is hand-picked and still\n"
         "# listed, so survivorship bias remains.\n"
@@ -183,10 +200,25 @@ def run(root: Path, config: ProjectConfig) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument(
+        "--base-universe-id",
+        default=BASE_UNIVERSE_ID,
+        help="Frozen base universe definition the facts are trimmed from.",
+    )
+    parser.add_argument(
+        "--tradable-universe-id",
+        default=TRADABLE_UNIVERSE_ID,
+        help="Derived universe id for the master-trimmed facts.",
+    )
     args = parser.parse_args(argv)
     root = resolve_project_root(args.root)
     config = load_project_config(root)
-    return run(root, config)
+    return run(
+        root,
+        config,
+        base_universe_id=args.base_universe_id,
+        tradable_universe_id=args.tradable_universe_id,
+    )
 
 
 if __name__ == "__main__":

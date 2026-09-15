@@ -1,4 +1,7 @@
-"""Rebuild the published calendar from benchmark sessions (no network access)."""
+"""Rebuild the published calendar from benchmark sessions (no network access).
+
+Status: retired.
+"""
 
 # This one-off script rebuilds the calendar from benchmark sessions and drops
 # every build-evidence field, so the republished dataset can no longer explain

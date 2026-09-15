@@ -1,3 +1,8 @@
+"""Historical direct-SDK experiment retained only for traceability.
+
+Status: retired.
+"""
+
 import tushare as ts
 
 # 初始化pro接口，它会自动从环境变量中读取你的Token

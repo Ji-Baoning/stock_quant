@@ -1,5 +1,7 @@
 """Refresh only corporate-action evidence and publish a new dataset version.
 
+Status: migration.
+
 Usage:
     PYTHONPATH=../src conda run -n py310 python refresh_corporate_action_coverage.py
 """

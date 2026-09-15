@@ -56,3 +56,33 @@ print(load_universe_definition('project/configs/universes/custom_csi300_tw_trada
 
 The swap is reversible: two files on the top level is the one state the loader
 rejects.
+
+## Retired — do **not** swap in
+
+`custom_csi300_ic.yml` and `custom_csi300_ic_tradable.yml` sit here for a
+different reason from the file above: they are **retired**, not parked. Do not
+move them back to the top level.
+
+They were built from the `index_constitution` (ic) evidence chain, which the
+`index_weight` (tw) chain superseded. Their pinned
+`membership_table_sha256` values match **no** published dataset under
+`data/standardized/` — `a7ee5431…` and `756db257…` respectively — so every run
+bound to them fails at the universe preflight before computing anything. The
+live lineage is `custom_csi300_tw` / `custom_csi300_tw_tradable`.
+
+The underlying evidence was **not** deleted; it survives outside this
+directory:
+
+- `data/raw/csi/custom_csi300_ic_membership_snapshot.csv`
+- `data/raw/csi/index_constitution/`
+- `data/membership/custom_csi300_ic.parquet`
+
+Reviving the lineage is therefore possible but is a full re-import plus
+dataset republication, not a swap: the dataset that
+`docs/operations/2026-09-11-pit-tradable-filter.md` recorded
+(`38c52358…`, bound to `custom_csi300_ic_tradable`) is no longer present under
+`data/standardized/`, so nothing on disk currently carries these definitions'
+pinned hashes.
+
+The three experiment specs that bound `custom_csi300_ic_tradable` moved with
+them to `configs/experiments/archive/`.

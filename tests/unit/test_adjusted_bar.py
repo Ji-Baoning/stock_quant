@@ -75,6 +75,7 @@ def _action_row(
     bonus: float = 0.0,
     capitalization: float = 0.0,
     rights: float = 0.0,
+    rights_price: float = 0.0,
     status: str = "implemented",
     symbol: str = _SYMBOL,
 ) -> dict:
@@ -87,7 +88,7 @@ def _action_row(
         "bonus_share_ratio": bonus,
         "capitalization_ratio": capitalization,
         "rights_issue_ratio": rights,
-        "rights_issue_price": 0.0,
+        "rights_issue_price": rights_price,
         "source": _SOURCE,
         "status": status,
     }
@@ -247,6 +248,50 @@ def test_same_day_cash_bonus_and_capitalization_are_applied_once(
     )
     expected_multiplier = (9.0 * (1.0 + 0.05 + 0.05) + 0.10) / 10.0
     assert result.iloc[1]["adjusted_close"] == pytest.approx(10.0 * expected_multiplier)
+
+
+def test_subscription_at_the_theoretical_ex_price_preserves_flat_total_return(
+    daily_10_then_9, verified_coverage
+):
+    """A 1-for-1 subscription at 8.00 on a 10.00 close goes ex at 9.00.
+
+    The holder pays 8.00 for a second share and holds two of them, so the
+    position is worth 10.00 either side of the ex-date and the series must not
+    book the drop -- nor the subscription -- as a return.
+    """
+    actions = pd.DataFrame(
+        [_action_row(days[1], rights=1.0, rights_price=8.0)],
+        columns=CORPORATE_ACTION_COLUMNS,
+    )
+    result = build_adjusted_bars(
+        daily_10_then_9, actions, empty_quarantine(), verified_coverage,
+        symbols=("600000.SH",),
+    )
+    assert result["adjusted_close"].tolist() == pytest.approx([10.0, 10.0])
+    assert set(result["quality_severity"]) == {"INFO"}
+
+
+def test_subscription_without_a_price_breaks_instead_of_booking_a_loss(
+    daily_10_then_9, verified_coverage
+):
+    """Both subscription terms are needed to separate dilution from return.
+
+    With the ratio known but the price missing the recursion cannot tell the
+    ex-rights drop from a real loss, so the day re-anchors as an ERROR rather
+    than applying a half-known action.
+    """
+    actions = pd.DataFrame(
+        [_action_row(days[1], rights=1.0, rights_price=float("nan"))],
+        columns=CORPORATE_ACTION_COLUMNS,
+    )
+    result = build_adjusted_bars(
+        daily_10_then_9, actions, empty_quarantine(), verified_coverage,
+        symbols=("600000.SH",),
+    )
+    broken = result.iloc[1]
+    assert broken["quality_severity"] == "ERROR"
+    assert broken["invalid_reason"] == "corporate_action_missing_rights_price"
+    assert broken["adjusted_close"] == broken["raw_close"]
 
 
 @pytest.mark.parametrize(

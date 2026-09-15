@@ -43,12 +43,16 @@ def parse_trade_date(value: object) -> date | None:
     """Parse a timezone-free trade date, or return ``None`` when invalid."""
     if value is None:
         return None
+    # ``pd.NaT`` is a ``datetime`` instance and ``NaT.date()`` is still ``NaT``,
+    # so the missing-value guard must run *before* the date branches -- behind
+    # them it never sees a ``NaT`` and the helper leaks one where its callers
+    # were promised ``None``.
+    if pd.isna(value):
+        return None
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
-    if pd.isna(value):
-        return None
     text = str(value).strip()
     if not text:
         return None

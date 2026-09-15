@@ -138,6 +138,7 @@ class StubAdapter:
         if request.endpoint in (
             "cninfo_corporate_actions",
             "eastmoney_corporate_actions",
+            "rights_issue_corporate_actions",
             "stock_metadata",
         ):
             return pd.DataFrame()

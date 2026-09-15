@@ -537,7 +537,11 @@ def _coverage(
     so a dataset carrying corporate-action facts never claims an
     empty-verified provenance for them.
     """
-    endpoints = ("cninfo_corporate_actions", "eastmoney_corporate_actions")
+    endpoints = (
+        "cninfo_corporate_actions",
+        "eastmoney_corporate_actions",
+        "rights_issue_corporate_actions",
+    )
     records = []
     for symbol in sorted(symbols):
         if symbol in event_symbols:

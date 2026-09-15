@@ -9,11 +9,17 @@ import pandas as pd
 
 from stock_quant.bootstrap import bootstrap_dataset
 from stock_quant.data_model.dataset import DatasetReader
-from stock_quant.data_model.suspensions import suspension_rows
+from stock_quant.data_model.normalize import normalize_daily
+from stock_quant.data_model.suspensions import (
+    canonicalize_supplier_suspensions,
+    suspension_rows,
+)
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_pipeline import DataPipeline, DataUpdateRequest
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import (
+    CODE_INVALID_OHLC,
+    CODE_NONPOSITIVE_PRICE,
     CODE_SUSPENSION_ROW,
     CODE_SUSPENSION_RUN_UNVERIFIED,
     CODE_UNEXPLAINED_PRIMARY_GAP,
@@ -21,7 +27,10 @@ from stock_quant.data_quality.models import (
     QualityReport,
     Severity,
 )
-from stock_quant.data_quality.raw_checks import check_provenance
+from stock_quant.data_quality.raw_checks import (
+    check_daily_values,
+    check_provenance,
+)
 from stock_quant.data_sources.base import DataRequest, FetchResult, request_key
 from stock_quant.research.acceptance.checks import (
     _missing_row_failures,
@@ -159,6 +168,33 @@ def test_run_spanning_an_accepted_action_carries_both_references():
     assert issues[0].details["action_ex_dates"] == ["2021-11-03"]
 
 
+def test_action_ex_date_on_the_resumption_day_explains_the_gap():
+    """A subscription halts through payment and goes ex on the resumption day.
+
+    The run is 11-02..11-04 and the resumption day is 11-05; the action that
+    moves that day's reference price carries 11-05 as its ex-date, one day past
+    the last absent day.  Range-checking the ex-date against the absent run
+    alone would call this break a data loss.
+    """
+    chain = _chain(
+        [
+            ("20211101", 10.0, 9.9),
+            ("20211105", 9.3, 9.3),
+        ]
+        + _SECOND_WEEK
+    )
+    actions = _actions([("20211105", 0.0, 0.0)])
+    rows, issues = _run("000333.SZ", chain, actions=actions)
+
+    carried = dict(zip(rows["trade_date"].dt.date, rows["close"], strict=True))
+    assert len(carried) == 3
+    for day in (date(2021, 11, 2), date(2021, 11, 3), date(2021, 11, 4)):
+        assert carried[day] == 10.0
+    assert not [i for i in issues if i.code == CODE_UNEXPLAINED_PRIMARY_GAP]
+    assert [i.code for i in issues] == [CODE_SUSPENSION_ROW]
+    assert issues[0].details["action_ex_dates"] == ["2021-11-05"]
+
+
 def test_chain_tolerance_is_half_a_cent():
     chain = _chain(
         [
@@ -269,6 +305,115 @@ def test_missing_pre_close_column_disables_the_proof():
 
 
 # --------------------------------------------------------------------------- #
+# Supplier-emitted no-trade rows: the supplier returns the suspended session as
+# a row (zero open/high/low, zero volume, close carried at pre_close) instead of
+# omitting it.  It is the same object the chain proof materializes, so it is
+# canonicalized in place rather than rejected as a zero-priced bar -- and only
+# under a signature narrow enough that a row carrying any real trade still
+# reaches the value checks.
+# --------------------------------------------------------------------------- #
+
+
+def _raw_daily(rows: list[tuple[str, float, float, float, float, float, float, float]]):
+    """One supplier daily frame: date, open, high, low, close, vol, amount, pre."""
+    return pd.DataFrame(
+        [
+            {
+                "code": "000333.SZ",
+                "date": day,
+                "open": open_,
+                "high": high,
+                "low": low,
+                "close": close,
+                "vol": volume,
+                "amount": amount,
+                "pre_close": pre_close,
+            }
+            for day, open_, high, low, close, volume, amount, pre_close in rows
+        ]
+    )
+
+
+_TRADED_DAY = ("20211104", 10.0, 10.2, 9.9, 10.0, 1000.0, 10000.0, 9.9)
+
+
+def _canonicalize(raw: pd.DataFrame):
+    valid = normalize_daily(raw, "tushare", INGESTED).valid
+    return canonicalize_supplier_suspensions(
+        "000333.SZ", valid, raw, ingested_at=INGESTED
+    )
+
+
+def test_supplier_no_trade_row_becomes_a_carried_suspension_bar():
+    raw = _raw_daily(
+        [
+            _TRADED_DAY,
+            ("20211105", 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 10.0),
+            ("20211108", 10.5, 10.6, 10.4, 10.5, 1200.0, 12600.0, 10.0),
+        ]
+    )
+    frame, issues = _canonicalize(raw)
+
+    assert list(frame["trade_date"]) == [
+        pd.Timestamp(day) for day in ("20211104", "20211105", "20211108")
+    ]
+    assert list(frame["source"]) == ["tushare", "tushare_suspend", "tushare"]
+    held = frame.iloc[1]
+    assert held["open"] == held["high"] == held["low"] == held["close"] == 10.0
+    assert held["volume"] == 0
+    assert held["amount"] == 0.0
+    assert held["adjustment"] == "unadjusted"
+    # The repaired frame is exactly what the value and provenance checks accept.
+    assert check_daily_values(frame, table="daily_bar") == []
+    assert check_provenance(frame, table="daily_bar") == []
+    assert [i.code for i in issues] == [CODE_SUSPENSION_ROW]
+    assert issues[0].severity is Severity.INFO
+    assert issues[0].details["kind"] == "supplier_no_trade"
+    assert issues[0].details["days"] == 1
+    assert issues[0].trade_date == date(2021, 11, 5)
+
+
+def test_supplier_row_carrying_a_trade_is_left_to_the_value_checks():
+    """Zero prices with real volume are a supplier defect, never a suspension."""
+    raw = _raw_daily(
+        [
+            _TRADED_DAY,
+            ("20211105", 0.0, 0.0, 0.0, 10.0, 500.0, 5000.0, 10.0),
+        ]
+    )
+    frame, issues = _canonicalize(raw)
+
+    assert issues == []
+    assert list(frame["source"]) == ["tushare", "tushare"]
+    codes = {issue.code for issue in check_daily_values(frame, table="daily_bar")}
+    assert codes == {CODE_NONPOSITIVE_PRICE, CODE_INVALID_OHLC}
+
+
+def test_supplier_row_whose_close_breaks_its_own_reference_is_left_alone():
+    """A carried close that disagrees with pre_close is not a held reference."""
+    raw = _raw_daily(
+        [
+            _TRADED_DAY,
+            ("20211105", 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 9.5),
+        ]
+    )
+    frame, issues = _canonicalize(raw)
+
+    assert issues == []
+    assert list(frame["source"]) == ["tushare", "tushare"]
+    assert check_daily_values(frame, table="daily_bar") != []
+
+
+def test_signature_columns_absent_leaves_the_frame_untouched():
+    """Offline stubs carry no pre_close, so nothing is inferred from them."""
+    raw = _raw_daily([_TRADED_DAY]).drop(columns=["pre_close"])
+    frame, issues = _canonicalize(raw)
+
+    assert issues == []
+    assert list(frame["source"]) == ["tushare"]
+
+
+# --------------------------------------------------------------------------- #
 # End to end: the update materializes proven suspension bars and passes the
 # acceptance completeness recount without any policy change.
 # --------------------------------------------------------------------------- #
@@ -280,6 +425,9 @@ _UNIVERSE_SYMBOLS = tuple(
 )
 _GAPPY_SYMBOL = "000001.SZ"
 _GAP_DAYS = {date(2021, 11, 2), date(2021, 11, 3), date(2021, 11, 4)}
+#: The supplier's second suspension shape: the session is present but untraded.
+_NO_TRADE_SYMBOL = "000651.SZ"
+_NO_TRADE_DAYS = {date(2021, 11, 5)}
 
 #: A name whose suspension run opens the window: absent from the window's first
 #: open day onwards, so the run has no ``before`` bar inside the requested range.
@@ -365,6 +513,7 @@ class _SuspendStub:
         if request.endpoint in (
             "cninfo_corporate_actions",
             "eastmoney_corporate_actions",
+            "rights_issue_corporate_actions",
         ):
             return pd.DataFrame()
         if request.endpoint == "trade_cal":
@@ -394,22 +543,26 @@ class _SuspendStub:
         ]
         if symbol in self.bare_before_window:
             days = [day for day in days if day >= _WINDOW_START]
-        return pd.DataFrame(
-            [
+        rows = []
+        for day in days:
+            # The supplier's other suspension shape: the session is present as a
+            # row with zero open/high/low and zero volume, close carried flat.
+            untraded = symbol == _NO_TRADE_SYMBOL and day in _NO_TRADE_DAYS
+            price = 0.0 if untraded else 55.0
+            rows.append(
                 {
                     "code": symbol,
                     "date": day.strftime("%Y%m%d"),
-                    "open": 55.0,
-                    "high": 55.0,
-                    "low": 55.0,
+                    "open": price,
+                    "high": price,
+                    "low": price,
                     "close": 55.0,
-                    "vol": 1000.0,
-                    "amount": 55000.0,
+                    "vol": 0.0 if untraded else 1000.0,
+                    "amount": 0.0 if untraded else 55000.0,
                     "pre_close": 55.0,
                 }
-                for day in days
-            ]
-        )
+            )
+        return pd.DataFrame(rows)
 
 
 def test_update_materializes_proven_suspension_bars(tmp_path):
@@ -461,6 +614,59 @@ def test_update_materializes_proven_suspension_bars(tmp_path):
         if _WINDOW_START <= day <= _WINDOW_END
     ]
     assert _missing_row_failures(daily, master, grid) == []
+
+
+def test_update_canonicalizes_supplier_reported_no_trade_rows(tmp_path):
+    """A session the supplier reported as a zero-priced row publishes as a
+    carried suspension bar instead of blocking the update."""
+    root = tmp_path / "project"
+    root.mkdir()
+    configs = root / "configs"
+    configs.mkdir()
+    for name in (
+        "project.yml",
+        "sources.yml",
+        "costs.yml",
+        "trading_rules.yml",
+        "universe.yml",
+    ):
+        shutil.copy(_REPO_ROOT / "templates" / "project-config" / name, configs / name)
+    bootstrap_dataset(root)
+
+    stubs = {
+        name: _SuspendStub(name)
+        for name in ("tushare", "akshare", "baostock")
+    }
+    result = DataPipeline(root, sources=stubs).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
+    )
+
+    # The zero-priced rows would otherwise fail invalid_ohlc/nonpositive_price,
+    # both of which block publication.
+    assert result.dataset_ref is not None, result.quality_report
+    codes = {issue.code for issue in result.quality_report.issues}
+    assert CODE_NONPOSITIVE_PRICE not in codes
+    assert CODE_INVALID_OHLC not in codes
+
+    with DatasetReader(root).open(result.dataset_ref.version) as dataset:
+        daily = dataset.read("daily_bar")
+    # All the days but the untraded one are ordinary rows, so the repair
+    # replaced exactly one bar rather than reshaping the symbol's series.
+    traded = daily[
+        (daily["symbol"] == _NO_TRADE_SYMBOL)
+        & (daily["trade_date"] == pd.Timestamp("2021-11-08"))
+    ].iloc[0]
+    assert traded["source"] == "tushare"
+    assert traded["volume"] == 100000
+    untraded = daily[
+        (daily["symbol"] == _NO_TRADE_SYMBOL)
+        & (daily["trade_date"] == pd.Timestamp("2021-11-05"))
+    ]
+    assert len(untraded) == 1
+    bar = untraded.iloc[0]
+    assert bar["source"] == "tushare_suspend"
+    assert bar["open"] == bar["high"] == bar["low"] == bar["close"] == 55.0
+    assert bar["volume"] == 0
 
 
 def _fixture_root(tmp_path) -> Path:

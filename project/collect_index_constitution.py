@@ -1,5 +1,7 @@
 """Export the index-constitution csi300 frames into a dated immutable snapshot.
 
+Status: migration.
+
 Runs in an **isolated interpreter** (Python >= 3.11 with pandas >= 3): the
 package's bundled pickles are serialized with pandas 3's ``StringDtype`` and
 raise ``NotImplementedError`` when read by pandas 2.x, which this project pins.

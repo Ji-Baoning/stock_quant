@@ -7,6 +7,6 @@ akshare:
   timeout_seconds: 30
   max_retries: 3
 baostock:
-  enabled: true
+  enabled: false
   timeout_seconds: 30
   max_retries: 3

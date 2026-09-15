@@ -1,4 +1,4 @@
-# 60 日动量的 ENGINEERING 示例规格（一期工程链路验证，非投资建议）。
+# 60 日动量的研究示例规格（一期工程链路验证，非投资建议）。
 #
 # 该文件是 research run（任务 11）消费的配置示例，需与本仓已实现因子
 # momentum_60d / 2.0.0 保持一致，日期范围落在 2020-01-01 至最近完整交易日内。
@@ -9,13 +9,17 @@
 # 本规格不声明 execution_pipeline、也不绑定 universe_definition，因此走遗留
 # 单窗口管线（pin→factor→portfolio→backtest→report）且不做时点成分预检。
 #
-# 下面两行写的是正式路径的实际语义：`research run` 没有降级开关，它永远以
-# RESEARCH 信任档运行（research_run 不透传 --engineering），并把
-# CURRENT_ACCEPTED 解析成本数据集版本最新的 ACCEPTED 记录、重新校验其全部
-# 绑定；因此冻结进实验目录的规格总是显式的 trust_mode: research 加具体
-# acceptance_id，与这里声明的一致。写成 engineering 既不生效也不会被读——
-# 该字段只对调试路径 `backtest --engineering` 有效，而调试运行只落
-# data/runs/debug、永不发布 ACCEPTED。
+# 下面两行写的是正式路径的实际语义，且各只声明一次：`research run` 没有降级
+# 开关（research_run 不透传 --engineering），它把 CURRENT_ACCEPTED 解析成本
+# 数据集版本最新的 ACCEPTED 记录、重新校验其全部绑定，再把 trust_mode 盖成
+# RESEARCH 写进冻结规格——所以只有这里声明 research，冻结进实验目录的规格
+# 才会是显式的 trust_mode: research 加具体 acceptance_id。声明值本身只影响
+# ExperimentSpec.is_frozen 与 freeze() 未显式传 trust_mode 时的校验：两条 CLI
+# 路径都显式传 trust_mode（`backtest --engineering` 的档位由开关而非本字段
+# 决定），因此这里写 engineering 既不生效、也会与冻结规格不符。
+#
+# 重复键在加载期直接失败：load_experiment_spec 拒绝同一映射内出现两次的键，
+# 而 YAML 本会静默保留最后一个，让声明与实际生效值不一致。
 trust_mode: research
 data_acceptance_id: CURRENT_ACCEPTED
 hypothesis: >-
@@ -25,8 +29,11 @@ factor_versions:
   momentum_60d: 2.0.0
 dataset_version: CURRENT
 universe_version: CURRENT
-trust_mode: engineering
-data_acceptance_id: null
+# date_range 不被冻结改写（freeze 只解析版本/验收/提交与信任档），冻结规格里的
+# 日期逐字来自本文件：2020-01-01..2026-08-27 即本规格两次发布（experiment_id
+# 4c54d08a… 与 5b1400f4…，报告窗口 2020-01-03..2026-08-28）。看到别的日期
+# 只可能是提交了别的规格文件，例如 2021-01-01..2026-08-21 的
+# momentum_60d_offline_real.yml。
 date_range:
   start_date: 2020-01-01
   end_date: 2026-08-27

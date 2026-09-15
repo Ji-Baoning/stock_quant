@@ -12,7 +12,9 @@ profitability claim, or a live-trading system.
   data flow, and the invariants that must not be broken.
 - `docs/adr/DECISIONS_INDEX.md` — adopted architecture decisions, their
   consequences and what was rejected.
-- `RUNBOOK.md` — the procedure for each operational command.
+- [RUNBOOK.md](RUNBOOK.md) — the procedure for each operational command.
+- `project/SCRIPTS.md` — status and boundaries for project-local helper scripts.
+- `docs/operations/asset-retention.md` — retention rules for data, evidence, and local tooling assets.
 - `PROJECT_MEMORY.md` — long-lived business context and current status.
 - `AGENTS.md` / `CLAUDE.md` — how an agent should load context for a change.
 

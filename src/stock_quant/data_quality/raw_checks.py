@@ -54,8 +54,10 @@ from stock_quant.data_quality.models import (
     Severity,
 )
 
-# ``tushare_suspend`` marks suspension bars materialized from tushare's own
-# pre_close chain (never raw response rows); see data_model/suspensions.py.
+# ``tushare_suspend`` marks suspension bars carried at tushare's own reference
+# price: either materialized from its pre_close chain over an absent day, or
+# canonicalized from a raw response row that reported the session with zero
+# open/high/low and zero volume; see data_model/suspensions.py.
 KNOWN_SUPPLIERS = frozenset({"tushare", "akshare", "baostock", "tushare_suspend"})
 DOCUMENTED_ADJUSTMENTS = frozenset({"unadjusted"})
 

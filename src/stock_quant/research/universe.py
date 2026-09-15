@@ -35,7 +35,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
-import yaml
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -49,6 +48,7 @@ from stock_quant.data_model.universe_membership import (
     ResolvedMembership,
     membership_content_hash,
 )
+from stock_quant.safe_yaml import read_yaml
 
 #: Mirrors the global plan constraint for first-class and custom universe ids.
 _CANONICAL_UNIVERSE_ID = re.compile(
@@ -323,7 +323,7 @@ def load_universe_coverage_criterion(
     starts: list[date] = []
     skipped: list[str] = []
     for path in sorted(directory.glob("*.yml")):
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        document = read_yaml(path)
         if not isinstance(document, dict):
             raise UniverseCoverageError(
                 f"universe definition {path.name} must be a YAML mapping"
@@ -361,7 +361,7 @@ def load_universe_definition(path: str | Path) -> UniverseDefinition:
     definition pinned to real hashes and the dataset's actual coverage.
     """
     path = Path(path)
-    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document = read_yaml(path)
     if not isinstance(document, dict):
         raise ValueError(f"universe definition {path} must be a YAML mapping")
     return UniverseDefinition.model_validate(document)

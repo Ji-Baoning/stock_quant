@@ -1,5 +1,7 @@
 """Build auditable per-scenario order-level execution-divergence diagnostics.
 
+Status: diagnostic.
+
 Goal #3 schema (spec section 8): for each cost scenario of the latest
 experiment, writes ``execution_diagnostics.json`` — a flat per-scenario object
 with order-level counts (read from the reconciled ``order_diffs.parquet``) plus

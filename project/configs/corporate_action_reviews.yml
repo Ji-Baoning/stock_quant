@@ -20,4 +20,21 @@
     Owner confirmed CNINFO as the authoritative source for this event
     (2017 annual cash dividend). CNINFO reports 1.2 yuan per share; the
     eastmoney record of 1.0 conflicts and stays quarantined.
+- symbol: 601088.SH
+  ex_date: 2017-07-10
+  selected_source: cninfo
+  record_date: 2017-07-07
+  cash_dividend_per_share: 2.97
+  bonus_share_ratio: 0.0
+  capitalization_ratio: 0.0
+  rationale: >-
+    Same shape as 300750.SZ above. CNINFO reports both the 2016 annual
+    dividend (4.6 yuan per 10 shares) and the special dividend (25.1 yuan per
+    10 shares) on one ex-date, which reconciles to 2.97 yuan per share;
+    eastmoney reports only the annual component (0.46). The conflict left the
+    event quarantined, so nothing explained the price break across this
+    symbol's 2017-06-05..2017-08-31 suspension. The blocked update's own
+    evidence corroborates the CNINFO figure independently: the last close
+    before the halt (22.29) minus the resumption reference (19.32) is exactly
+    2.97, so the accepted record is the one the price series agrees with.
 

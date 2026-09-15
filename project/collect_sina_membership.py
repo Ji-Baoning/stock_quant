@@ -1,5 +1,7 @@
 """Collect Sina's CSI-300 historical constituent table into frozen membership.
 
+Status: migration.
+
 Sina Finance publishes the index's full inclusion/exclusion history (品种代码 /
 品种名称 / 纳入日期 / 剔除日期, back to the 2005-04-08 base date) as a paginated
 HTML table.  Event-level dates are exactly what the point-in-time universe

@@ -118,6 +118,24 @@ class EastmoneyDividendClient:
         return pd.DataFrame({"最新公告日期": ["2024-05-20"]})
 
 
+class AllotmentClient:
+    """Capture the symbol and date window passed to CNINFO's allotment endpoint."""
+
+    def __init__(self, frame: pd.DataFrame | None = None) -> None:
+        self.frame = pd.DataFrame() if frame is None else frame
+        self.symbol: str | None = None
+        self.start_date: str | None = None
+        self.end_date: str | None = None
+
+    def stock_allotment_cninfo(
+        self, *, symbol: str, start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        self.symbol = symbol
+        self.start_date = start_date
+        self.end_date = end_date
+        return self.frame
+
+
 class BaoResponse:
     def __init__(self, frame: pd.DataFrame) -> None:
         self.error_code = "0"
@@ -359,6 +377,31 @@ def test_akshare_uses_bare_symbol_for_eastmoney_corporate_actions():
     )
 
     assert client.symbol == "000333"
+
+
+def test_akshare_queries_allotments_with_a_bare_symbol_and_the_window():
+    """CNINFO's allotment endpoint is scoped by symbol plus a date range."""
+    frame = pd.DataFrame({"证券代码": ["002202"], "配股价格": [7.02]})
+    client = AllotmentClient(frame)
+
+    result = AkShareSource(SourceConfig(), client).fetch(
+        _request("rights_issue_corporate_actions", "002202.SZ")
+    )
+
+    assert client.symbol == "002202"
+    assert (client.start_date, client.end_date) == ("20200101", "20200102")
+    assert result.frame.equals(frame)
+    assert result.metadata["supplier_endpoint"] == "akshare.stock_allotment_cninfo"
+    assert result.metadata["transport_id"] == "cninfo.stock-allotment-cninfo"
+
+
+def test_akshare_treats_no_allotment_as_empty_data():
+    """Most symbols have never run a subscription; that is not a failure."""
+    result = AkShareSource(SourceConfig(), AllotmentClient()).fetch(
+        _request("rights_issue_corporate_actions", "000333.SZ")
+    )
+
+    assert result.frame.empty
 
 
 def _source_for(

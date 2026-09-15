@@ -17,8 +17,9 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from stock_quant.safe_yaml import read_yaml
 
 Exchange = Literal["SH", "SZ", "BJ"]
 Board = Literal["sh_main", "sz_main", "chinext", "star", "bj"]
@@ -70,7 +71,7 @@ class Universe:
     def from_yaml(cls, path: Path) -> "Universe":
         """Load a universe from a ``configs/universe.yml``-shaped file."""
         path = Path(path)
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        document = read_yaml(path)
         if not isinstance(document, dict) or "entries" not in document:
             raise ValueError(f"universe yaml {path} must contain an 'entries' list")
         default_as_of = document.get("selected_as_of")

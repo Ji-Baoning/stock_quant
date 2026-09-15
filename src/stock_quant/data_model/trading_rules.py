@@ -22,7 +22,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Iterable
 
-import yaml
+from stock_quant.safe_yaml import read_yaml
 
 REASON_BUY_AT_UPPER_LIMIT = "buy_at_upper_limit"
 REASON_SELL_AT_LOWER_LIMIT = "sell_at_lower_limit"
@@ -106,7 +106,7 @@ class TradingRuleBook:
     def from_yaml(cls, path: Path | str) -> "TradingRuleBook":
         """Parse a ``configs/trading_rules.yml`` document into a rule book."""
         path = Path(path)
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        document = read_yaml(path)
         if not isinstance(document, dict):
             raise ValueError(f"trading-rules yaml {path} must be a mapping")
         try:
@@ -212,7 +212,8 @@ def board_of_symbol(symbol: str) -> str:
     elif exchange == "SZ":
         if code.startswith(("000", "001", "002", "003")):
             return "sz_main"
-        if code.startswith(("300", "301")):
+        # 302xxx is the newer ChiNext series (e.g. 302132.SZ, listed 2025).
+        if code.startswith(("300", "301", "302")):
             return "chinext"
     raise UncoveredRuleError(f"unrecognized symbol {symbol!r}")
 

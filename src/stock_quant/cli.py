@@ -146,6 +146,44 @@ def _echo_failure(message: str) -> None:
     typer.echo(f"FAILED: {message}")
 
 
+#: Severities that refuse publication.  A refused gate must name these itself:
+#: ``_report_summary`` prints severity counts alone, so without them an operator
+#: cannot tell which row, symbol or endpoint blocked the run without re-running
+#: the whole update -- which costs a fresh fetch of every requested window.
+_BLOCKING_SEVERITIES = frozenset({Severity.FATAL.value, Severity.ERROR.value})
+
+#: How many blocking issues to render before summarising the rest.  A
+#: pathological update can produce hundreds of same-shaped rows; the operator
+#: needs the shape of the failure, not the whole log.
+_MAX_RENDERED_BLOCKING_ISSUES = 20
+
+
+def _echo_blocking_issues(report: QualityReport) -> None:
+    """Print the blocking issues behind a refused publication gate.
+
+    Reads the report's own deterministic serialisation (already ordered by
+    severity, then code/table/symbol/date) rather than re-deriving a rendering,
+    so the printed rows match the persisted ``quality_report.json`` exactly.
+    """
+    blocking = [
+        row
+        for row in report.to_dict()["issues"]
+        if row["severity"] in _BLOCKING_SEVERITIES
+    ]
+    if not blocking:
+        return
+    for row in blocking[:_MAX_RENDERED_BLOCKING_ISSUES]:
+        details = json.dumps(row["details"], sort_keys=True, ensure_ascii=False)
+        typer.echo(
+            f"blocking issue: severity={row['severity']} code={row['code']} "
+            f"table={row['table']} symbol={row['symbol'] or '-'} "
+            f"trade_date={row['trade_date'] or '-'} details={details}"
+        )
+    remaining = len(blocking) - _MAX_RENDERED_BLOCKING_ISSUES
+    if remaining > 0:
+        typer.echo(f"blocking issue: ... {remaining} more suppressed")
+
+
 def _resolved_project_root(root: Path) -> Path:
     """Validate ``root`` once, before any service object is constructed.
 
@@ -303,6 +341,7 @@ def data_update(
         typer.echo(f"dataset_version={result.dataset_ref.version}")
         typer.echo("PASS")
         return
+    _echo_blocking_issues(result.quality_report)
     _echo_failure("publication gate did not pass; dataset unchanged")
     raise typer.Exit(code=1)
 
@@ -332,8 +371,10 @@ def data_validate(
         typer.echo("PASS")
         return
     if fatal:
+        _echo_blocking_issues(report)
         _echo_failure("quality report contains a FATAL issue")
         raise typer.Exit(code=1)
+    _echo_blocking_issues(report)
     _echo_failure("quality gate did not pass")
     raise typer.Exit(code=1)
 

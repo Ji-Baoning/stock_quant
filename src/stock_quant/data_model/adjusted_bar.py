@@ -3,14 +3,22 @@
 ``build_adjusted_bars`` derives the research-only ``adjusted_bar`` table from
 the canonical unadjusted ``daily_bar`` closes plus the canonical corporate
 action, quarantine and coverage frames.  Only *implemented*, complete and
-point-in-time cash-dividend / bonus / capitalization events enter the
-recursion; every untrusted transition becomes an ERROR break that re-anchors
-the series instead of silently falling back to the unadjusted close.
+point-in-time cash-dividend / bonus / capitalization / subscription events
+enter the recursion; every untrusted transition becomes an ERROR break that
+re-anchors the series instead of silently falling back to the unadjusted close.
 
 Recursion per symbol, with ``P`` the unadjusted close, ``d`` the ex-date cash
-dividend per share, ``b`` the bonus ratio and ``c`` the capitalization ratio::
+dividend per share, ``b`` the bonus ratio, ``c`` the capitalization ratio,
+``r`` the subscription ratio and ``s`` the subscription price per share::
 
-    TR_t = TR_{t-1} * (P_t * (1 + b_t + c_t) + d_t) / P_{t-1}
+    TR_t = TR_{t-1} * (P_t * (1 + b_t + c_t + r_t) + d_t - r_t * s_t) / P_{t-1}
+
+The subscription terms are what keep a rights issue from being booked as a
+loss.  A shareholder who subscribes pays ``r_t * s_t`` per held share and ends
+up with ``1 + r_t`` shares, so equity is conserved exactly when ``P_t`` equals
+the theoretical ex-rights price ``(P_{t-1} + r_t * s_t) / (1 + r_t)`` -- the
+same identity the dividend terms satisfy.  Without the two terms the ex-rights
+drop would enter the series as a genuine return.
 
 Events act for the first time on their ``ex_date``, so a newly discovered
 future action can never change any row before that date.
@@ -93,8 +101,14 @@ def _accepted_actions_and_breaks(
         elif ex_date is None or announcement is None or announcement > ex_date:
             if ex_date is not None:
                 breaks[ex_date] = "corporate_action_not_point_in_time"
-        elif _zero(item.get("rights_issue_ratio")) > 0:
-            breaks[ex_date] = "unsupported_corporate_action"
+        elif _zero(item.get("rights_issue_ratio")) > 0 and not _has_rights_price(
+            item
+        ):
+            # The recursion needs both subscription terms to stay
+            # equity-conserving; with the ratio known but the price missing the
+            # ex-rights drop cannot be separated from a genuine return, so this
+            # is a break rather than a partial application.
+            breaks[ex_date] = "corporate_action_missing_rights_price"
         else:
             accepted.append(item)
     _merge_quarantine_breaks(breaks, quarantined, symbol)
@@ -171,6 +185,15 @@ def _zero(value: object) -> float:
     return 0.0 if pd.isna(number) else number
 
 
+def _has_rights_price(item: dict) -> bool:
+    """Whether a subscription row also carries a usable subscription price.
+
+    A subscription price is a positive amount per share; ``None``/``NaN`` and a
+    supplier's ``0`` placeholder both mean "not reported".
+    """
+    return _zero(item.get("rights_issue_price")) > 0
+
+
 def _build_symbol(
     bars: pd.DataFrame, actions: pd.DataFrame, breaks: dict[date, str]
 ) -> list[dict[str, object]]:
@@ -192,7 +215,22 @@ def _build_symbol(
                 _zero(item["bonus_share_ratio"]) + _zero(item["capitalization_ratio"])
                 for item in day_actions
             )
-            total_return *= (raw_close * (1.0 + share_ratio) + cash) / previous_close
+            # A subscription is not free: it adds ``r`` shares per held share
+            # against ``r * s`` of cash paid in, so it enters both the share
+            # count and the cash leg.
+            subscription_ratio = sum(
+                _zero(item.get("rights_issue_ratio")) for item in day_actions
+            )
+            subscription_cost = sum(
+                _zero(item.get("rights_issue_ratio"))
+                * _zero(item.get("rights_issue_price"))
+                for item in day_actions
+            )
+            total_return *= (
+                raw_close * (1.0 + share_ratio + subscription_ratio)
+                + cash
+                - subscription_cost
+            ) / previous_close
             ids = sorted(
                 {action_id_of(str(item["symbol"]), day) for item in day_actions}
             )

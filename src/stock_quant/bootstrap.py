@@ -7,7 +7,6 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
-import yaml
 
 from stock_quant.data_model.calendar_coverage import coverage_payload, seed_span
 from stock_quant.data_model.dataset import DatasetPublisher
@@ -24,6 +23,7 @@ from stock_quant.data_model.universe import Universe
 from stock_quant.data_model.universe_membership import membership_frame
 from stock_quant.data_pipeline import DATASET_BUILD_CONTRACT_VERSION
 from stock_quant.data_quality.models import QualityReport
+from stock_quant.safe_yaml import read_yaml
 
 
 @dataclass(frozen=True)
@@ -44,9 +44,7 @@ def bootstrap_dataset(
     for name in ("project.yml", "universe.yml"):
         if not (config_dir / name).is_file():
             raise FileNotFoundError(f"missing {config_dir / name}")
-    project = yaml.safe_load(
-        (config_dir / "project.yml").read_text(encoding="utf-8")
-    ) or {}
+    project = read_yaml(config_dir / "project.yml") or {}
     start, end = _as_date(project["start_date"]), _as_date(project["end_date"])
     if end < start:
         raise ValueError(f"project.yml end_date {end} precedes start_date {start}")

@@ -1,16 +1,21 @@
 # 真实行情离线 ENGINEERING 复跑规格(非投资建议,非可信绩效声明)。
 #
-# 该规格在「离线重建数据集」版本上以 ENGINEERING 信任模式运行 momentum_60d
-# 2.0.0:数据集由当前已存真实表(daily_bar 2021-01-04..2026-08-28 + 已复核
-# corporate_action)离线重建 adjusted_bar 而来,未绑定任何 raw 拉取证据,
-# 因此不携带 data_acceptance_id,评估为 UNTRUSTED 诊断。
+# 该规格在「离线重建数据集」版本上复跑 momentum_60d 2.0.0:数据集由当前已存
+# 真实表(daily_bar 2021-01-04..2026-08-28 + 已复核 corporate_action)离线重建
+# adjusted_bar 而来,未绑定任何 raw 拉取证据。
 #
 # dataset_version / universe_version 用 CURRENT 占位:运行期由 runner 读取
 # CURRENT 指针一次、解析为显式版本后冻结(ExperimentSpec.freeze),冻结后的
 # 规格只引用显式版本,永不保留 CURRENT。
 #
-# trust_mode: engineering —— 没有正式验收记录也允许跑通全链路,但 metrics
-# 与报告只能呈现为 UNTRUSTED,永不产生可发布的 ACCEPTED 实验。
+# trust_mode: engineering —— 只描述本文件的离线诊断意图:`backtest
+# --engineering` 的档位由命令行开关决定,不由本字段决定。`research run` 没有
+# 降级开关,它必然以 RESEARCH 档运行并解析 CURRENT_ACCEPTED(本文件未写
+# data_acceptance_id,取模型默认值即 CURRENT_ACCEPTED),因此经 `research run`
+# 提交时冻结规格是 trust_mode: research 加具体验收 id,而不是这里声明的
+# engineering(2026-09-13 实测:experiment_id eb1f944f…,报告窗口
+# 2021-01-08..2026-08-24,真实数据验收 = ACCEPTED)。UNTRUSTED 工程诊断只走
+# `backtest --engineering`,它落在 data/runs/debug、永不发布 ACCEPTED。
 hypothesis: >-
   过去 60 个交易日的复权收益在 A 股样本内对随后短期收益存在一定持续性;
   本规格在真实行情(2021-01 至 2026-08)上复跑工程链路,验证离线重建数据

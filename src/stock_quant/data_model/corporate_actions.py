@@ -55,8 +55,19 @@ QUARANTINE_COLUMNS = [*RECONCILED_COLUMNS, "reason"]
 
 _PER_SHARE_SCALE = Decimal("10")
 _UNSUPPORTED_KEYWORDS = ("配股", "配售", "吸收合并", "换股")
+#: Keywords that name an action the *rights-issue* lane exists to support.  A
+#: dividend frame that merely mentions one in its plan text still cannot express
+#: the subscription facts, so it stays unsupported there; only the allotment
+#: lane, which carries ``配股比例``/``配股价格``, may claim them.
+_RIGHTS_KEYWORDS = ("配股", "配售")
 _IMPLEMENTED_MARKER = "实施"
 _BOTH_SOURCES = "cninfo+eastmoney"
+
+#: The one source of rights-issue facts: CNINFO's allotment endpoint, reached
+#: through ``stock_allotment_cninfo``.  There is no second source to
+#: cross-confirm against, so its rows are accepted on their own and labelled
+#: with this name -- never with ``_BOTH_SOURCES``.
+RIGHTS_SOURCE = "cninfo_allotment"
 
 # AKShare 1.18.23 exposes CNINFO's historical dividend endpoint as
 # ``stock_dividend_cninfo``.  Its supplier-native labels differ from the older
@@ -70,8 +81,25 @@ _CNINFO_DIVIDEND_COLUMNS = {
     "实施方案分红说明": "方案",
 }
 
+# AKShare 1.18.23 exposes CNINFO's allotment endpoint as
+# ``stock_allotment_cninfo``: the only interface that reports a rights issue.
+# Its frame carries a per-ten-share subscription *ratio* and a per-*share*
+# subscription *price*, so the two must not share a converter.  It also omits a
+# progress column and never states a cash/bonus/capitalization component, and
+# the request identifies the security.
+_ALLOTMENT_COLUMNS = {
+    "证券代码": "证券代码",
+    "公告日期": "公告日期",
+    "股权登记日": "股权登记日",
+    "除权基准日": "除权除息日",
+    "配股比例": "配股(股/10股)",
+    "配股价格": "配股价格(元/股)",
+}
+
 # Ordered native column candidates per canonical input field. The first present
-# column is used; ``plan`` is optional and only needed for unsupported tagging.
+# column is used; ``plan``, ``rights`` and ``rights_price`` are optional (only
+# the allotment lane carries the last two; ``plan`` is only needed for
+# unsupported tagging).
 _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "symbol": ("证券代码", "代码"),
     "announcement_date": ("公告日期", "最新公告日期"),
@@ -82,17 +110,20 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "capitalization": ("转增(股/10股)", "送转股份-转股比例"),
     "progress": ("进度", "方案进度"),
     "plan": ("方案", "方案说明"),
+    "rights": ("配股(股/10股)",),
+    "rights_price": ("配股价格(元/股)",),
 }
-_REQUIRED_FIELDS = (
-    "symbol",
-    "announcement_date",
-    "record_date",
-    "ex_date",
-    "cash_dividend",
-    "bonus",
-    "capitalization",
-    "progress",
-)
+#: Fields a frame may legitimately omit, per lane; each resolves to ``""`` and
+#: their readers must treat ``""`` as "column absent".  The dividend lanes
+#: cannot express a subscription, and the allotment lane reports nothing but a
+#: subscription, so each lane is excused from the other's facts -- while any
+#: *other* missing column stays a hard frame-level error.
+_LANE_OPTIONAL_FIELDS: dict[str, tuple[str, ...]] = {
+    "distribution": ("plan", "rights", "rights_price"),
+    "rights": ("plan", "cash_dividend", "bonus", "capitalization"),
+}
+_LANE_DISTRIBUTION = "distribution"
+_LANE_RIGHTS = "rights"
 
 _SUFFIXED_SYMBOL = re.compile(r"^(\d{6})\.(SH|SZ|BJ)$", re.IGNORECASE)
 _BARE_SYMBOL = re.compile(r"^\d{6}$")
@@ -182,6 +213,37 @@ def _ths_plan_ratio(plan: pd.Series, marker: str) -> pd.Series:
         plan.str.extract(rf"{marker}([0-9]+(?:\\.[0-9]+)?)", expand=False),
         errors="coerce",
     )
+
+
+def prepare_allotment_rights_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Adapt AKShare's ``stock_allotment_cninfo`` response for reconciliation.
+
+    The raw supplier frame is persisted before this conversion.  Rows without a
+    ``除权基准日`` describe an announced plan rather than a settled event: they
+    carry no ex-date, so they can never explain a historical window and are
+    dropped here instead of being quarantined as an incomplete *event* -- a
+    quarantine for the symbol would make its coverage read as untrusted for the
+    whole window on the strength of a plan that never happened.  The remaining
+    rows are settled, so they are marked implemented; the request supplies the
+    security code.
+    """
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("cninfo allotment response must be a DataFrame")
+    if frame.empty:
+        return frame.copy()
+    if {"证券代码", "配股(股/10股)"}.issubset(frame.columns):
+        return frame.copy()
+    missing = sorted(set(_ALLOTMENT_COLUMNS) - set(frame.columns))
+    if missing:
+        raise ValueError(
+            "cninfo allotment response is missing required columns: "
+            + ", ".join(missing)
+        )
+    prepared = frame.rename(columns=_ALLOTMENT_COLUMNS).copy()
+    prepared["证券代码"] = symbol.split(".", maxsplit=1)[0]
+    prepared["进度"] = "实施"
+    settled = pd.to_datetime(prepared["除权除息日"], errors="coerce").notna()
+    return prepared.loc[settled].reset_index(drop=True)
 
 
 def filter_corporate_actions_to_window(
@@ -338,6 +400,28 @@ def normalize_corporate_actions(
     )
 
 
+def normalize_rights_issue_actions(
+    frame: pd.DataFrame | None,
+) -> CorporateActionResult:
+    """Normalize the single-source rights-issue lane into canonical rows.
+
+    A subscription is reported by CNINFO's allotment interface alone, so unlike
+    a distribution there is no second source to cross-confirm against and no
+    cross-source conflict to resolve: every candidate is accepted on its own and
+    labelled with the lane's own source, never with ``_BOTH_SOURCES``.
+    """
+    candidates, quarantine = _standardize_source(
+        frame, RIGHTS_SOURCE, rights_supported=True
+    )
+    accepted = [
+        _row(candidates[key], confirmed_by=RIGHTS_SOURCE) for key in sorted(candidates)
+    ]
+    return CorporateActionResult(
+        accepted=_finalize(accepted, RECONCILED_COLUMNS),
+        quarantined=_finalize(quarantine, QUARANTINE_COLUMNS),
+    )
+
+
 def apply_corporate_action_reviews(
     result: CorporateActionResult, reviews: list[dict[str, object]]
 ) -> CorporateActionResult:
@@ -402,7 +486,10 @@ def _review_value_matches(actual: object, expected: object) -> bool:
 
 
 def _standardize_source(
-    frame: pd.DataFrame | None, source: str
+    frame: pd.DataFrame | None,
+    source: str,
+    *,
+    rights_supported: bool = False,
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]]]:
     """Parse one supplier frame into candidates and quarantined rows."""
     if frame is None:
@@ -412,12 +499,13 @@ def _standardize_source(
     if frame.empty:
         return {}, []
 
-    columns = _resolve_columns(frame, source)
+    lane = _LANE_RIGHTS if rights_supported else _LANE_DISTRIBUTION
+    columns = _resolve_columns(frame, source, lane=lane)
     candidates: dict[tuple[str, str], dict[str, Any]] = {}
     quarantine: list[dict[str, Any]] = []
 
     for _, row in frame.iterrows():
-        event = _parse_event(row, columns, source)
+        event = _parse_event(row, columns, source, rights_supported=rights_supported)
         reason = _reject_reason(event)
         if reason is not None:
             quarantine.append(_row(event, confirmed_by=source, reason=reason))
@@ -430,9 +518,12 @@ def _standardize_source(
     return candidates, quarantine
 
 
-def _resolve_columns(frame: pd.DataFrame, source: str) -> dict[str, str]:
+def _resolve_columns(
+    frame: pd.DataFrame, source: str, *, lane: str = _LANE_DISTRIBUTION
+) -> dict[str, str]:
     """Map each canonical input field onto a present native column."""
     present = set(frame.columns)
+    optional = _LANE_OPTIONAL_FIELDS[lane]
     resolved: dict[str, str] = {}
     missing: list[str] = []
     for field, aliases in _FIELD_ALIASES.items():
@@ -440,7 +531,7 @@ def _resolve_columns(frame: pd.DataFrame, source: str) -> dict[str, str]:
             (candidate for candidate in aliases if candidate in present), None
         )
         if column is None:
-            if field == "plan":
+            if field in optional:
                 resolved[field] = ""  # optional
                 continue
             missing.append(field)
@@ -451,16 +542,25 @@ def _resolve_columns(frame: pd.DataFrame, source: str) -> dict[str, str]:
         raise ValueError(
             f"{source} corporate-action frame is missing required columns: {names}"
         )
-    for required in _REQUIRED_FIELDS:
+    for required in _FIELD_ALIASES:
         if required not in resolved:  # pragma: no cover - defensive invariant
             raise AssertionError(f"internal layout bug: {required} not resolved")
     return resolved
 
 
 def _parse_event(
-    row: pd.Series, columns: dict[str, str], source: str
+    row: pd.Series,
+    columns: dict[str, str],
+    source: str,
+    *,
+    rights_supported: bool = False,
 ) -> dict[str, Any]:
-    """Parse one native row into an internal event (ratios are Decimals)."""
+    """Parse one native row into an internal event (ratios are Decimals).
+
+    ``rights_supported`` marks the lane that carries subscription facts: there
+    the ``配股`` wording is a claim the lane can honour, so it is not read as an
+    unsupported action.
+    """
     progress = _text(row, columns["progress"])
     implemented = progress is not None and _IMPLEMENTED_MARKER in progress
     event: dict[str, Any] = {
@@ -468,9 +568,26 @@ def _parse_event(
         "announcement_date": parse_trade_date(row[columns["announcement_date"]]),
         "record_date": parse_trade_date(row[columns["record_date"]]),
         "ex_date": parse_trade_date(row[columns["ex_date"]]),
-        "cash": _per_share(row[columns["cash_dividend"]]),
-        "bonus": _per_share(row[columns["bonus"]]),
-        "capitalization": _per_share(row[columns["capitalization"]]),
+        # A lane that omits a distribution column resolves it to "" (see
+        # _resolve_columns) and must not be read -- ``row[""]`` raises.
+        "cash": (
+            _per_share(row[columns["cash_dividend"]])
+            if columns["cash_dividend"]
+            else None
+        ),
+        "bonus": _per_share(row[columns["bonus"]]) if columns["bonus"] else None,
+        "capitalization": (
+            _per_share(row[columns["capitalization"]])
+            if columns["capitalization"]
+            else None
+        ),
+        # ``rights`` is a per-ten-share ratio like the distributions above, but
+        # ``rights_price`` is the subscription price *per share* and must not be
+        # scaled down with it.
+        "rights": _per_share(row[columns["rights"]]) if columns["rights"] else None,
+        "rights_price": (
+            _price(row[columns["rights_price"]]) if columns["rights_price"] else None
+        ),
         "status": STATUS_IMPLEMENTED if implemented else STATUS_NOT_IMPLEMENTED,
         "source": source,
     }
@@ -479,7 +596,9 @@ def _parse_event(
     # documented default (absent -> no text) for unsupported tagging.
     plan = _text(row, columns["plan"]) if columns["plan"] else None
     progress_text = _text(row, columns["progress"])
-    event["unsupported"] = _mentions_unsupported(plan, progress_text)
+    event["unsupported"] = _mentions_unsupported(
+        plan, progress_text, rights_supported=rights_supported
+    )
     return event
 
 
@@ -495,19 +614,26 @@ def _reject_reason(event: dict[str, Any]) -> str | None:
         or event["ex_date"] is None
     ):
         return REASON_INCOMPLETE
-    ratio_keys = ("cash", "bonus", "capitalization")
+    ratio_keys = ("cash", "bonus", "capitalization", "rights")
     if not any(event[key] for key in ratio_keys):
+        return REASON_INCOMPLETE
+    # A subscription is an exchange of cash for shares: without the price the
+    # ex-date ratio cannot be formed, so the event is incomplete rather than
+    # bookable with a zero-cost assumption.
+    if event["rights"] and event["rights_price"] is None:
         return REASON_INCOMPLETE
     return None
 
 
 def _same_facts(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    """Economic facts equal: record date and the three distribution ratios."""
+    """Economic facts equal: record date, distribution and subscription terms."""
     return (
         left["record_date"] == right["record_date"]
         and _zeroed(left["cash"]) == _zeroed(right["cash"])
         and _zeroed(left["bonus"]) == _zeroed(right["bonus"])
         and _zeroed(left["capitalization"]) == _zeroed(right["capitalization"])
+        and _zeroed(left["rights"]) == _zeroed(right["rights"])
+        and _zeroed(left["rights_price"]) == _zeroed(right["rights_price"])
     )
 
 
@@ -519,16 +645,32 @@ def _combine_same_day_events(
     Multiple implemented distributions on one ex date (for example an annual
     and a special dividend) have the same account effect as one summed event.
     Different record dates remain ambiguous and are rejected rather than
-    silently selecting one.
+    silently selecting one, and so does a second subscription at a different
+    price -- two rights issues cannot share an ex date, so the pair is a
+    supplier defect rather than a summable event.
     """
     if existing["record_date"] != incoming["record_date"]:
         raise ValueError(
             f"{source} reports more than one implemented supported action for "
             f"{incoming['symbol']} on {incoming['ex_date'].isoformat()}"
         )
+    existing_price = existing["rights_price"]
+    incoming_price = incoming["rights_price"]
+    if (
+        existing_price is not None
+        and incoming_price is not None
+        and existing_price != incoming_price
+    ):
+        raise ValueError(
+            f"{source} reports two subscription prices for "
+            f"{incoming['symbol']} on {incoming['ex_date'].isoformat()}"
+        )
     combined = dict(existing)
-    for field in ("cash", "bonus", "capitalization"):
+    for field in ("cash", "bonus", "capitalization", "rights"):
         combined[field] = _zeroed(existing[field]) + _zeroed(incoming[field])
+    combined["rights_price"] = (
+        existing_price if existing_price is not None else incoming_price
+    )
     combined["announcement_date"] = min(
         existing["announcement_date"], incoming["announcement_date"]
     )
@@ -554,8 +696,8 @@ def _row(
         "cash_dividend_per_share": _to_float(event["cash"]),
         "bonus_share_ratio": _to_float(event["bonus"]),
         "capitalization_ratio": _to_float(event["capitalization"]),
-        "rights_issue_ratio": None,
-        "rights_issue_price": None,
+        "rights_issue_ratio": _to_float(event.get("rights")),
+        "rights_issue_price": _to_float(event.get("rights_price")),
         "status": event["status"],
         "confirmed_by": confirmed_by,
     }
@@ -584,16 +726,26 @@ def _finalize(records: list[dict[str, Any]], columns: list[str]) -> pd.DataFrame
 
 def _per_share(value: object) -> Decimal | None:
     """Parse a native per-ten-share amount into a per-share Decimal."""
+    parsed = _decimal(value)
+    return None if parsed is None else parsed / _PER_SHARE_SCALE
+
+
+def _price(value: object) -> Decimal | None:
+    """Parse a native per-*share* amount (a subscription price) unchanged."""
+    return _decimal(value)
+
+
+def _decimal(value: object) -> Decimal | None:
+    """Parse a native decimal cell, or ``None`` when it carries no number."""
     if value is None or pd.isna(value):
         return None
     text = str(value).strip()
     if not text:
         return None
     try:
-        parsed = Decimal(text)
+        return Decimal(text)
     except InvalidOperation:
         return None
-    return parsed / _PER_SHARE_SCALE
 
 
 def _text(row: pd.Series, column: str) -> str | None:
@@ -604,9 +756,18 @@ def _text(row: pd.Series, column: str) -> str | None:
     return text or None
 
 
-def _mentions_unsupported(*fields: str | None) -> bool:
+def _mentions_unsupported(*fields: str | None, rights_supported: bool = False) -> bool:
     text = " ".join(field for field in fields if field)
-    return any(keyword in text for keyword in _UNSUPPORTED_KEYWORDS)
+    keywords = (
+        tuple(
+            keyword
+            for keyword in _UNSUPPORTED_KEYWORDS
+            if keyword not in _RIGHTS_KEYWORDS
+        )
+        if rights_supported
+        else _UNSUPPORTED_KEYWORDS
+    )
+    return any(keyword in text for keyword in keywords)
 
 
 def _to_float(value: Decimal | None) -> float | None:

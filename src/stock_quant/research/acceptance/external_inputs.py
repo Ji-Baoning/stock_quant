@@ -37,6 +37,7 @@ from stock_quant.research.acceptance.worksheet import (
     WorksheetError,
     external_inputs_root,
 )
+from stock_quant.safe_yaml import read_yaml
 
 __all__ = [
     "EXCERPT_CODES",
@@ -263,7 +264,7 @@ def _rate(value: str) -> Decimal:
 def rule_rows(config_path: Path) -> tuple[RuleRow, ...]:
     """Every declared ``price_limits`` row, one per (board, status) pair."""
     try:
-        payload = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+        payload = read_yaml(config_path)
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
         raise WorksheetError("external_input_invalid") from error
     limits = payload.get("price_limits") if isinstance(payload, dict) else None

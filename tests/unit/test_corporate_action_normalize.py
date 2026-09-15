@@ -22,6 +22,8 @@ from stock_quant.data_model.corporate_actions import (
     apply_corporate_action_reviews,
     filter_corporate_actions_to_window,
     normalize_corporate_actions,
+    normalize_rights_issue_actions,
+    prepare_allotment_rights_frame,
     prepare_cninfo_dividend_frame,
     prepare_eastmoney_dividend_frame,
     quarantine_row_out_of_window_reason,
@@ -184,6 +186,39 @@ def test_normalize_combines_same_day_implemented_cninfo_distributions():
 def _per10(per_share: float) -> float:
     """Convert a per-share fraction to the native per-10-share value exactly."""
     return float(per_share) * 10
+
+
+def allotment(
+    *,
+    symbol: str = "002202",
+    announcement: str = "2019-03-18",
+    record: str = "2019-03-20",
+    ex: str | None = "2019-03-29",
+    ratio_per_10: float = 1.9,
+    price: float | None = 7.02,
+) -> pd.DataFrame:
+    """One CNINFO allotment row in the ``stock_allotment_cninfo`` layout.
+
+    ``ratio_per_10`` is the native per-ten-share _subscription_ ratio while
+    ``price`` is the subscription price per _share_ -- the unit asymmetry the
+    adapter exists to keep straight.  ``ex`` of ``None`` models an announced but
+    unsettled plan.
+    """
+    return pd.DataFrame(
+        [
+            {
+                "证券代码": symbol,
+                "证券简称": "placeholder",
+                "公告日期": announcement,
+                "股权登记日": record,
+                "除权基准日": ex,
+                "配股比例": ratio_per_10,
+                "配股价格": price,
+                "停牌起始日": "2019-03-21",
+                "停牌截止日": "2019-03-28",
+            }
+        ]
+    )
 
 
 def cninfo_cash(
@@ -385,6 +420,46 @@ def test_implemented_action_without_distribution_components_is_incomplete():
     assert result.quarantined.iloc[0]["reason"] == REASON_INCOMPLETE
 
 
+def _cninfo_nat_row_plus_valid():
+    """One row whose ex-date is ``NaT``, one fully valid row, same symbol.
+
+    AKShare dividend frames carry ``NaT`` ex-dates for announced-but-unscheduled
+    distributions.  A ``NaT`` is not ``None``, so it slips past the
+    missing-value quarantine and reaches the reconciliation key set.
+    """
+    frame = _cninfo_plan(cash_per_10=10.0)
+    nat = frame.iloc[[0]].copy()
+    nat["股权登记日"] = "2021-06-10"
+    nat["公告日期"] = "2021-05-20"
+    merged = pd.concat([nat, frame], ignore_index=True)
+    # ``concat`` downcasts a bare ``pd.NaT`` to float ``nan``, which the parser
+    # already reads as missing -- assign into the object cell afterwards so the
+    # fixture carries the real ``NaT`` the supplier delivers.
+    merged.at[0, "除权除息日"] = pd.NaT
+    return merged
+
+
+def test_nat_ex_date_is_quarantined_as_incomplete():
+    """A ``NaT`` ex-date is a missing fact, not a bookable event."""
+    result = normalize_corporate_actions(_cninfo_nat_row_plus_valid(), None)
+    quarantined = result.quarantined
+    assert len(quarantined) == 1
+    assert quarantined.iloc[0]["reason"] == REASON_INCOMPLETE
+
+
+def test_nat_row_does_not_discard_the_symbols_other_actions():
+    """The sibling must survive: production books per symbol, not per frame.
+
+    Before the fix this case raised ``TypeError: Cannot compare NaT with
+    datetime.date object`` while sorting the key set, and the caller treated
+    the whole symbol as having no corporate actions at all.
+    """
+    result = normalize_corporate_actions(_cninfo_nat_row_plus_valid(), None)
+    assert len(result.accepted) == 1
+    assert result.accepted.iloc[0]["ex_date"] == datetime.date(2020, 6, 11)
+    assert result.accepted.iloc[0]["cash_dividend_per_share"] == pytest.approx(1.0)
+
+
 def test_mixed_cash_bonus_and_capitalization_fields_are_preserved():
     frame = _cninfo_plan(cash_per_10=10.0, bonus_per_10=2.0, cap_per_10=3.0)
     result = normalize_corporate_actions(frame, None)
@@ -461,6 +536,81 @@ def test_plan_column_absent_second_supplier_never_reads_empty_plan():
     assert result.quarantined.empty
     assert not result.accepted.empty
     assert result.accepted.iloc[0]["confirmed_by"] == "cninfo+eastmoney"
+
+
+# --------------------------------------------------------------------------- #
+# The subscription (rights-issue) lane
+# --------------------------------------------------------------------------- #
+#
+# A subscription is reported by CNINFO's allotment interface alone; neither
+# dividend interface reports one at all.  The lane therefore has no sibling to
+# cross-confirm against and parses its own native layout.
+
+
+def test_allotment_row_becomes_an_accepted_subscription():
+    """The native per-ten ratio becomes a per-share ratio; the price does not."""
+    prepared = prepare_allotment_rights_frame(allotment(), "002202.SZ")
+    result = normalize_rights_issue_actions(prepared)
+
+    row = result.accepted.iloc[0]
+    assert row["symbol"] == "002202.SZ"
+    assert row["record_date"] == datetime.date(2019, 3, 20)
+    assert row["ex_date"] == datetime.date(2019, 3, 29)
+    assert row["rights_issue_ratio"] == pytest.approx(0.19)
+    assert row["rights_issue_price"] == pytest.approx(7.02)
+    assert row["status"] == "implemented"
+    # One source only: never the cross-confirmed label.
+    assert row["confirmed_by"] == "cninfo_allotment"
+    assert result.quarantined.empty
+
+
+def test_subscription_stays_supported_when_the_lane_can_honour_it():
+    """``配股`` is a claim the allotment lane can satisfy, so it is not refused.
+
+    The same word in a *dividend* frame still quarantines, because that lane
+    carries no subscription facts -- see the unsupported-plan tests above.
+    """
+    frame = prepare_allotment_rights_frame(allotment(), "002202.SZ")
+    frame["方案"] = "10配1.9股，配股价7.02元"
+
+    result = normalize_rights_issue_actions(frame)
+    assert len(result.accepted) == 1
+    assert result.quarantined.empty
+
+
+def test_a_subscription_without_a_price_is_incomplete():
+    """A ratio with no price cannot be turned into an ex-date adjustment."""
+    prepared = prepare_allotment_rights_frame(
+        allotment(price=None), "002202.SZ"
+    )
+    result = normalize_rights_issue_actions(prepared)
+
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == REASON_INCOMPLETE
+
+
+def test_an_unsettled_plan_never_quarantines_the_symbol():
+    """No ex-date means no event: the row is dropped, not flagged.
+
+    Quarantining it would make the symbol's coverage read UNTRUSTED for the
+    whole window on the strength of a plan that may never settle.
+    """
+    prepared = prepare_allotment_rights_frame(
+        allotment(ex=None), "002202.SZ"
+    )
+    assert prepared.empty
+
+    result = normalize_rights_issue_actions(prepared)
+    assert result.accepted.empty
+    assert result.quarantined.empty
+
+
+def test_allotment_frame_is_dropped_when_a_required_column_is_absent():
+    """A layout change must fail loudly rather than parse as a no-event frame."""
+    frame = allotment().drop(columns=["配股价格"])
+
+    with pytest.raises(ValueError, match="missing required columns"):
+        prepare_allotment_rights_frame(frame, "002202.SZ")
 
 
 # --------------------------------------------------------------------------- #

@@ -45,13 +45,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from stock_quant.portfolio.buffered_models import BufferedRiskWeightedPolicy
 from stock_quant.research.acceptance.models import CURRENT_ACCEPTED
 from stock_quant.research.trust import DataTrustMode
 from stock_quant.research.walk_forward.snapshots import SnapshotBundle
+from stock_quant.safe_yaml import read_yaml
 
 #: Reserved dataset/universe version placeholder; resolved to an explicit
 #: version by :meth:`ExperimentSpec.freeze` before an identity may be computed.
@@ -304,12 +304,15 @@ class ExperimentSpec(BaseModel):
 def load_experiment_spec(path: str | Path) -> ExperimentSpec:
     """Strictly parse one experiment-spec YAML file into an ``ExperimentSpec``.
 
-    Extra top-level keys are rejected by the model.  The returned spec may
-    still request ``CURRENT``; call :meth:`ExperimentSpec.freeze` with the
-    versions the runner pinned before computing an identity.
+    Extra top-level keys are rejected by the model; a mapping key repeated
+    anywhere in the document is rejected by the shared fail-closed YAML reader
+    (:mod:`stock_quant.safe_yaml`), which YAML itself would otherwise let
+    silently keep the last value.  The returned spec may still request
+    ``CURRENT``; call :meth:`ExperimentSpec.freeze` with the versions the
+    runner pinned before computing an identity.
     """
     spec_path = Path(path)
-    raw = yaml.safe_load(spec_path.read_text(encoding="utf-8")) or {}
+    raw = read_yaml(spec_path) or {}
     if not isinstance(raw, dict):
         raise ValueError(
             f"{spec_path} must contain a YAML mapping, got {type(raw).__name__}"

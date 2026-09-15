@@ -7,6 +7,9 @@
 data/
 reports/
 
+# Local third-party market data tooling
+stockdb/
+
 # Python
 __pycache__/
 *.py[cod]

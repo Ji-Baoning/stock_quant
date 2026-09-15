@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """One-off audit of what the existing raw snapshots say about their own origin.
 
+Status: diagnostic.
+
 Design spec §5.  This report is deliberately **not** an answer to "which
 provider produced each snapshot": the historical manifests carry no
 discriminating evidence, and the design refuses to pretend otherwise.  What it

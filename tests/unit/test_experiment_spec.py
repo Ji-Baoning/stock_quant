@@ -32,6 +32,10 @@ from stock_quant.research.walk_forward.snapshots import build_snapshot_bundle
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _EXAMPLE_SPEC = _REPO_ROOT / "templates" / "project-config" / "experiments" / "momentum_60d.yml"
+#: The working project's own spec.  The runner freezes ``date_range`` verbatim
+#: and stamps its own ``trust_mode``, so the frozen experiment can only be
+#: matched back to this file while the file declares the same trust semantics.
+_PROJECT_SPEC = _REPO_ROOT / "project" / "configs" / "experiments" / "momentum_60d.yml"
 
 #: Static pinned-dataset table hashes for identity tests.  Identity is
 #: spec + snapshot bundle, so every identity call needs a bundle built from
@@ -332,6 +336,44 @@ def test_load_experiment_spec_rejects_unknown_top_level_keys(tmp_path):
         load_experiment_spec(path)
 
 
+def test_load_experiment_spec_rejects_a_duplicated_top_level_key(tmp_path):
+    """A repeated mapping key must fail closed, never silently last-wins.
+
+    ``yaml.safe_load`` keeps only the *last* of two identical mapping keys, so
+    a spec declaring an execution-affecting input twice (two ``trust_mode``
+    lines, say) would load, hash and run under a value no reader of the file
+    expects.  The committed ``momentum_60d.yml`` carried exactly that defect.
+    """
+    data = spec_kwargs(trust_mode="research")
+    path = tmp_path / "duplicated.yml"
+    path.write_text(
+        yaml.safe_dump(data, sort_keys=False) + "trust_mode: engineering\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate key 'trust_mode'"):
+        load_experiment_spec(path)
+
+
+def test_load_experiment_spec_rejects_a_duplicated_nested_key(tmp_path):
+    """The check reaches inside a nested mapping, not only the top level.
+
+    Repeating a whole top-level section (two ``date_range:`` blocks) is the
+    easy case: the loader compares top-level keys.  A repeat *within* one
+    nested mapping -- two ``start_date`` lines under a single ``date_range`` --
+    is the case a reader cannot see and a shallow check would miss, and here
+    the silently-winning value is an execution input (the evaluation window).
+    """
+    text = yaml.safe_dump(spec_kwargs(), sort_keys=False)
+    assert "date_range:\n" in text  # the injection below must actually land
+    path = tmp_path / "nested.yml"
+    path.write_text(
+        text.replace("date_range:\n", "date_range:\n  start_date: 2019-01-01\n", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate key 'start_date'"):
+        load_experiment_spec(path)
+
+
 def test_spec_rejects_non_mvp_train_validation_holdout_policy():
     with pytest.raises(ValidationError):
         spec_factory(train_validation_holdout_policy="kfold_time_split")
@@ -366,6 +408,21 @@ def test_spec_rejects_blank_hypothesis_or_cost_scenarios():
         spec_factory(hypothesis="   ")
     with pytest.raises(ValidationError):
         spec_factory(cost_scenarios=[])
+
+
+def test_committed_project_spec_declares_research_and_the_current_acceptance():
+    """The working spec must declare the trust semantics the runner freezes.
+
+    ``research run`` never lowers its own bar: it stamps ``trust_mode`` and
+    resolves ``CURRENT_ACCEPTED`` before freezing.  A project spec whose
+    declared fields disagree with that (or that declares them twice, so YAML
+    silently keeps the last) puts the submitted, frozen and reported identities
+    out of correspondence.
+    """
+    loaded = load_experiment_spec(_PROJECT_SPEC)
+    assert loaded.trust_mode is DataTrustMode.RESEARCH
+    assert loaded.data_acceptance_id == "CURRENT_ACCEPTED"
+    assert not loaded.is_frozen
 
 
 def test_committed_example_spec_is_coherent_and_loadable():
