@@ -1481,6 +1481,7 @@ class DataPipeline:
         policy = RetryPolicy(
             max_attempts=min(config.max_retries + 1, 3),
             maximum_wait_seconds=min(config.timeout_seconds, 30),
+            call_timeout_seconds=config.timeout_seconds,
         )
         facts: dict[str, ExchangeCalendarFacts] = {}
         hashes: dict[str, list[str]] = {
@@ -1626,6 +1627,7 @@ class DataPipeline:
         policy = RetryPolicy(
             max_attempts=min(config.max_retries + 1, 3),
             maximum_wait_seconds=min(config.timeout_seconds, 30),
+            call_timeout_seconds=config.timeout_seconds,
         )
         try:
             result = fetch_with_retry(
@@ -1973,6 +1975,7 @@ class DataPipeline:
         policy = RetryPolicy(
             max_attempts=min(config.max_retries + 1, 3),
             maximum_wait_seconds=min(config.timeout_seconds, 30),
+            call_timeout_seconds=config.timeout_seconds,
         )
         request = DataRequest(endpoint, (symbol,), start, end, params)
         try:
@@ -2017,6 +2020,7 @@ class DataPipeline:
         policy = RetryPolicy(
             max_attempts=min(config.max_retries + 1, 3),
             maximum_wait_seconds=min(config.timeout_seconds, 30),
+            call_timeout_seconds=config.timeout_seconds,
         )
         return fetch_with_retry(source, request, policy, sleeper=self._sleeper)
 

@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Callable, Protocol
+from typing import Callable, Iterator, Protocol
 
 import pandas as pd
 
@@ -64,12 +65,15 @@ class ContractError(RuntimeError):
 class RetryPolicy:
     max_attempts: int = 3
     maximum_wait_seconds: int = 30
+    call_timeout_seconds: int = 30
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_attempts <= 3:
             raise ValueError("max_attempts must be between 1 and 3")
         if not 0 <= self.maximum_wait_seconds <= 30:
             raise ValueError("maximum_wait_seconds must be between 0 and 30")
+        if not 1 <= self.call_timeout_seconds <= 120:
+            raise ValueError("call_timeout_seconds must be between 1 and 120")
 
 
 def request_key(request: DataRequest) -> str:
@@ -119,6 +123,51 @@ def request_metadata(
     }
 
 
+@contextmanager
+def default_request_timeout(seconds: int) -> Iterator[None]:
+    """Give supplier HTTP calls made in this block a default timeout.
+
+    The SDKs these adapters drive do not pass one: akshare 1.18.23's
+    ``stock_zh_index_daily_em`` is a bare module-level ``requests.get``, and a
+    peer that completes the handshake and then goes silent therefore blocks the
+    run with no bound at all.  One such call cost the 2026-09-17 rebuild seven
+    hours, and ``config.timeout_seconds`` could not have helped, because nothing
+    passed it down to the SDK.
+
+    Two other mechanisms were measured against a silent loopback peer on
+    2026-09-17 and rejected.  A process socket default
+    (``socket.setdefaulttimeout``) bounds ``urllib.request`` but not
+    ``requests``, whose adapter re-sets the socket timeout explicitly.  Patching
+    ``HTTPAdapter.send`` never applies, because ``requests`` always passes
+    ``timeout`` to it as an explicit keyword -- present, so a default cannot
+    fill it.  Filling the absent keyword one level up, at ``Session.request``,
+    bounds both GET and POST (measured 3.00s against a 3s bound).  It is a
+    default, not an override: a transport that passes its own ``timeout`` keeps
+    its own, which is how the tushare proxy keeps its longer read timeout.
+
+    This reaches ``requests``-based SDKs only.  A transport that speaks raw TCP
+    does not go through it -- ``baostock`` is the one such adapter here, and it
+    stays as unbounded as it was; a socket default would be the mechanism for
+    it, which is a separate change.
+
+    Process-wide for the duration of the block, and restored on exit; fetches
+    are sequential, so it is not used concurrently.
+    """
+    import requests
+
+    original = requests.sessions.Session.request
+
+    def with_default_timeout(self, *args, **kwargs):
+        kwargs.setdefault("timeout", seconds)
+        return original(self, *args, **kwargs)
+
+    requests.sessions.Session.request = with_default_timeout
+    try:
+        yield
+    finally:
+        requests.sessions.Session.request = original
+
+
 def fetch_with_retry(
     source: DataSource,
     request: DataRequest,
@@ -128,24 +177,30 @@ def fetch_with_retry(
 ) -> FetchResult:
     """Fetch once for permanent failures and retry only transient supplier errors.
 
-    TODO(follow-up): the SDK calls inside ``source.fetch`` have no I/O timeout,
-    so a peer that silently drops packets (observed 2026-09-05: baostock on
-    :10030) blocks here for the socket default instead of failing fast into the
-    transient-error/retry path. ``config.timeout_seconds`` only bounds the retry
-    sleep, never the call itself. Give ``source.fetch`` a wall-clock bound (a
-    socket default timeout or a bounded-thread wrapper) and translate expiry
-    into a ``TransientSourceError`` so adapters surface ``ServerError`` and the
-    optional-source WARNING path still holds.
+    Each attempt runs under :func:`default_request_timeout`, so a supplier that
+    accepts the connection and then answers nothing cannot hold the run: expiry
+    surfaces as a ``ServerError`` and takes the transient-error/retry path,
+    which is also what keeps the optional-source WARNING path reachable.
+    ``policy.maximum_wait_seconds`` bounds the wait *between* attempts;
+    ``policy.call_timeout_seconds`` bounds each attempt's I/O.
     """
     for attempt in range(1, policy.max_attempts + 1):
+        failure: Exception
         try:
-            return source.fetch(request)
-        except TransientSourceError:
-            if attempt == policy.max_attempts:
-                raise
-            wait_seconds = min(attempt, policy.maximum_wait_seconds)
-            if wait_seconds:
-                sleeper(wait_seconds)
+            with default_request_timeout(policy.call_timeout_seconds):
+                return source.fetch(request)
+        except TimeoutError as expiry:
+            failure = ServerError(
+                f"supplier call exceeded the {policy.call_timeout_seconds}s timeout"
+            )
+            failure.__cause__ = expiry
+        except TransientSourceError as error:
+            failure = error
+        if attempt == policy.max_attempts:
+            raise failure
+        wait_seconds = min(attempt, policy.maximum_wait_seconds)
+        if wait_seconds:
+            sleeper(wait_seconds)
     raise AssertionError("retry loop must return or raise")
 
 

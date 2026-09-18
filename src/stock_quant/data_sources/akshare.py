@@ -11,6 +11,7 @@ from stock_quant.data_sources.base import (
     DataRequest,
     FetchResult,
     _utc_timestamp,
+    default_request_timeout,
     request_key,
     request_metadata,
     translate_supplier_error,
@@ -122,13 +123,22 @@ class AkShareSource:
             require_symbol = not self._uses_current_index_history_api()
         request_timestamp = _utc_timestamp()
         try:
-            if request.endpoint == "index_history":
-                frame, supplier_endpoint = self._index_history(request)
-            else:
-                frame = handler(request)
-                supplier_endpoint = frame.attrs.get(
-                    "supplier_endpoint", supplier_endpoint
-                )
+            # AKShare passes no ``timeout`` to ``requests`` at all -- its
+            # ``stock_zh_index_daily_em`` is a bare module-level call -- so
+            # without this an unanswered upstream holds the caller forever.
+            # That is not hypothetical: it cost the 2026-09-17 rebuild seven
+            # hours.  Bounding here rather than only in ``fetch_with_retry``
+            # matters because this adapter is also driven directly (the
+            # ``project/`` probes), and ``config`` is what the caller
+            # configured for exactly this.
+            with default_request_timeout(self.config.timeout_seconds):
+                if request.endpoint == "index_history":
+                    frame, supplier_endpoint = self._index_history(request)
+                else:
+                    frame = handler(request)
+                    supplier_endpoint = frame.attrs.get(
+                        "supplier_endpoint", supplier_endpoint
+                    )
         except Exception as error:
             translated = translate_supplier_error(error)
             if translated is error:
