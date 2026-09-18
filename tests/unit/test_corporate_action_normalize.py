@@ -17,6 +17,7 @@ from stock_quant.data_model.corporate_actions import (
     EXCLUSION_RECORD_DATE_OUT_OF_WINDOW,
     REASON_CROSS_SOURCE_CONFLICT,
     REASON_INCOMPLETE,
+    REASON_NON_DISTRIBUTIVE_RESTRUCTURING,
     REASON_NOT_IMPLEMENTED,
     REASON_UNSUPPORTED_CORPORATE_ACTION,
     apply_corporate_action_reviews,
@@ -536,6 +537,127 @@ def test_plan_column_absent_second_supplier_never_reads_empty_plan():
     assert result.quarantined.empty
     assert not result.accepted.empty
     assert result.accepted.iloc[0]["confirmed_by"] == "cninfo+eastmoney"
+
+
+# --------------------------------------------------------------------------- #
+# Non-distributive events (ADR-008)
+# --------------------------------------------------------------------------- #
+#
+# CNINFO types every 分红 row with 分红类型.  Three of those types describe a
+# share transfer that never reaches a pre-event holder: 重整转增 moves shares
+# to bankruptcy-reorganisation creditors (深交所自律监管指引第14号 §39: 重整
+# 转增不向原股东分配), while 承诺补偿 and 股改分红 shift shares between existing
+# holders without changing total share capital.  None of them is a price event,
+# so booking one invents an ex-date adjustment and -- because the supplier
+# reports no 除权日 for them -- an absent ex-date that only looks like a data
+# gap.  Only 重整转增 is refused here: 股改分红 can carry a real, exchange-
+# published ex-date (600733's 10转25) and must keep being booked.
+
+
+def _cninfo_typed(
+    distribution_type: str | None,
+    *,
+    cap_per_10: float = 19.24,
+    ex: str | None = None,
+    record: str | None = "2021-12-21",
+    plan: str = "重整计划转增股票",
+) -> pd.DataFrame:
+    """A CNINFO frame in the akshare-native layout, typed via 分红类型."""
+    frame = pd.DataFrame(
+        [
+            {
+                # 600515.SH's real 重整转增: ann 2021-12-16, record 2021-12-21,
+                # ex 2021-12-22, 转增 19.2387 per 10 shares.
+                "实施方案公告日期": "2021-12-16",
+                "股权登记日": record,
+                "除权日": ex,
+                "派息比例": 0.0,
+                "送股比例": 0.0,
+                "转增比例": cap_per_10,
+                "方案进度": "实施",
+                "实施方案分红说明": plan,
+                "分红类型": distribution_type,
+            }
+        ]
+    )
+    return prepare_cninfo_dividend_frame(frame, "600515.SH")
+
+
+def test_restructuring_capitalization_is_quarantined_not_booked():
+    """600515's 2021 重整转增 carried an ex-date yet moved no price.
+
+    Booking it produced a phantom +88% in ``adjusted_bar``: the supplier
+    publishes a 除权日 for the row, but the shares go to creditors, so no
+    exchange ex-date adjustment exists.  The row must be refused on its
+    declared type rather than booked.
+    """
+    result = normalize_corporate_actions(
+        _cninfo_typed("重整转增", ex="2021-12-22"), None
+    )
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == REASON_NON_DISTRIBUTIVE_RESTRUCTURING
+
+
+def test_restructuring_capitalization_without_ex_date_is_not_incomplete():
+    """Its missing ex-date is a property of the event, not a data gap.
+
+    Reading it as ``incomplete`` made the whole symbol/window UNTRUSTED and
+    blocked every unrelated holding of that symbol.  The refused event is
+    evidence about a real, correctly-reported event, so it gets its own reason.
+    """
+    result = normalize_corporate_actions(_cninfo_typed("重整转增"), None)
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == REASON_NON_DISTRIBUTIVE_RESTRUCTURING
+
+
+def test_share_reform_capitalization_is_still_booked():
+    """600733's 股改分红 10转25 (ex 2018-09-19) is a real ex-date event.
+
+    股改分红's share transfer is a genuine distribution to holders, so the
+    refusal must key on 重整转增 alone and leave this type bookable.
+    """
+    frame = pd.DataFrame(
+        [
+            {
+                "实施方案公告日期": "2018-08-20",
+                "股权登记日": "2018-09-18",
+                "除权日": "2018-09-19",
+                "派息比例": 0.0,
+                "送股比例": 0.0,
+                "转增比例": 25.0,
+                "方案进度": "实施",
+                "实施方案分红说明": "股权分置改革方案",
+                "分红类型": "股改分红",
+            }
+        ]
+    )
+    prepared = prepare_cninfo_dividend_frame(frame, "600733.SH")
+    result = normalize_corporate_actions(prepared, None)
+    assert result.quarantined.empty
+    assert result.accepted.iloc[0]["capitalization_ratio"] == pytest.approx(2.5)
+
+
+def test_ordinary_distribution_is_unaffected_by_its_declared_type():
+    """A typed ordinary distribution with an ex-date books exactly as before."""
+    result = normalize_corporate_actions(
+        _cninfo_typed(
+            "年度分红", cap_per_10=10.0, ex="2021-12-22", plan="10转10"
+        ),
+        None,
+    )
+    assert result.quarantined.empty
+    assert result.accepted.iloc[0]["capitalization_ratio"] == pytest.approx(1.0)
+
+
+def test_absent_type_column_is_treated_as_an_ordinary_distribution():
+    """Only CNINFO publishes 分红类型; the legacy and Eastmoney layouts omit it.
+
+    An absent column must stay a documented default (ordinary distribution),
+    never a frame-level error, or every Eastmoney row would fail to parse.
+    """
+    result = normalize_corporate_actions(_cninfo_plan(cash_per_10=1.0), None)
+    assert result.quarantined.empty
+    assert len(result.accepted) == 1
 
 
 # --------------------------------------------------------------------------- #

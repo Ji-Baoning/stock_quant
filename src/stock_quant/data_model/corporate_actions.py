@@ -33,6 +33,15 @@ REASON_CROSS_SOURCE_CONFLICT = "cross_source_conflict"
 REASON_UNSUPPORTED_CORPORATE_ACTION = "unsupported_corporate_action"
 REASON_NOT_IMPLEMENTED = "not_implemented"
 REASON_INCOMPLETE = "incomplete"
+#: A bankruptcy-reorganisation share transfer (重整转增) that holders never
+#: receive and that carries no exchange ex-date adjustment.
+REASON_NON_DISTRIBUTIVE_RESTRUCTURING = "non_distributive_restructuring"
+
+#: CNINFO's 分红类型 value naming a reorganisation share transfer.  It is the
+#: only type of a bookable event that is refused as a matter of its nature
+#: (see ``_reject_reason``); 承诺补偿 and 股改分红 are deliberately *not* listed
+#: here, because 股改分红 can carry a real ex-date.
+_CNINFO_TYPE_RESTRUCTURING = "重整转增"
 
 STATUS_IMPLEMENTED = "implemented"
 STATUS_NOT_IMPLEMENTED = "not_implemented"
@@ -119,6 +128,9 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "plan": ("方案", "方案说明"),
     "rights": ("配股(股/10股)",),
     "rights_price": ("配股价格(元/股)",),
+    # Only CNINFO's dividend interface declares what kind of distribution a row
+    # is; its own legacy layout and the Eastmoney fallback have no such column.
+    "distribution_type": ("分红类型",),
 }
 #: Fields a frame may legitimately omit, per lane; each resolves to ``""`` and
 #: their readers must treat ``""`` as "column absent".  The dividend lanes
@@ -126,8 +138,16 @@ _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
 #: subscription, so each lane is excused from the other's facts -- while any
 #: *other* missing column stays a hard frame-level error.
 _LANE_OPTIONAL_FIELDS: dict[str, tuple[str, ...]] = {
-    "distribution": ("plan", "rights", "rights_price"),
-    "rights": ("plan", "cash_dividend", "bonus", "capitalization"),
+    "distribution": ("plan", "rights", "rights_price", "distribution_type"),
+    # The allotment endpoint reports a subscription and nothing else, so it has
+    # no distribution type either.
+    "rights": (
+        "plan",
+        "cash_dividend",
+        "bonus",
+        "capitalization",
+        "distribution_type",
+    ),
 }
 _LANE_DISTRIBUTION = "distribution"
 _LANE_RIGHTS = "rights"
@@ -690,6 +710,14 @@ def _parse_event(
     event["unsupported"] = _mentions_unsupported(
         plan, progress_text, rights_supported=rights_supported
     )
+    # Also optional: an absent type column means the frame cannot classify its
+    # rows, which must read as an ordinary distribution rather than withhold
+    # every row of the frame.
+    event["distribution_type"] = (
+        _text(row, columns["distribution_type"])
+        if columns["distribution_type"]
+        else None
+    )
     return event
 
 
@@ -699,6 +727,13 @@ def _reject_reason(event: dict[str, Any]) -> str | None:
         return REASON_UNSUPPORTED_CORPORATE_ACTION
     if event["status"] != STATUS_IMPLEMENTED:
         return REASON_NOT_IMPLEMENTED
+    # Checked before the date-completeness gate below, because a 重整转增 is
+    # *never* a price event: its supplier-reported ex-date is spurious and its
+    # absent one is expected.  Letting it fall through would book a share
+    # increase no holder received, or -- with no ex-date -- report a whole
+    # symbol/window as an incomplete record.
+    if event["distribution_type"] == _CNINFO_TYPE_RESTRUCTURING:
+        return REASON_NON_DISTRIBUTIVE_RESTRUCTURING
     if (
         event["announcement_date"] is None
         or event["record_date"] is None

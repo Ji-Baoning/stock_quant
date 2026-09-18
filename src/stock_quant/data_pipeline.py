@@ -83,6 +83,7 @@ from stock_quant.data_model.corporate_action_coverage import (
 )
 from stock_quant.data_model.corporate_actions import (
     REASON_CROSS_SOURCE_CONFLICT,
+    REASON_NON_DISTRIBUTIVE_RESTRUCTURING,
     REASON_UNSUPPORTED_CORPORATE_ACTION,
     RECONCILED_COLUMNS,
     RIGHTS_SOURCE,
@@ -2430,6 +2431,15 @@ def _coverage_record_for(
     )
 
 
+#: Quarantine reasons that are *evidence about a correctly reported event*
+#: rather than an unaccounted gap.  A refused 重整转增 (ADR-008) says the
+#: supplier described a real, complete event that is not a price event, so it
+#: leaves the window as accounted-for as if no event had been reported at all.
+#: Every other reason -- and any reason not named here -- still withholds trust,
+#: so a reason added later fails closed.
+_NON_BLOCKING_QUARANTINE_REASONS = frozenset({REASON_NON_DISTRIBUTIVE_RESTRUCTURING})
+
+
 def _coverage_verdict(
     outcomes: dict[str, dict[str, object]],
     *,
@@ -2440,23 +2450,28 @@ def _coverage_verdict(
 
     ``VERIFIED`` requires a fully accounted window: every requested endpoint
     answered, at least one returned events, and the symbol holds an accepted
-    reconciled fact with *no relevant* quarantine.  A quarantined event *that
+    reconciled fact with no *blocking* quarantine.  A quarantined event *that
     can affect this window* (cross-source conflict / unsupported action /
     incomplete record) makes the window ``UNTRUSTED`` even when a sibling event
     for the same symbol/window was accepted, so a conflicting or unbooked event
     can never be masked by an accepted row while the coverage reads
-    ``VERIFIED``.  A row whose every known date lies outside the window is
-    excluded by ``_window_relevant_quarantine`` before this decision
-    (ADR-006).
+    ``VERIFIED``.  The reasons listed in ``_NON_BLOCKING_QUARANTINE_REASONS``
+    are excluded from that rule and are the only ones.  A row whose every known
+    date lies outside the window is excluded by ``_window_relevant_quarantine``
+    before this decision (ADR-006).
     """
     if any(not outcome["ok"] for outcome in outcomes.values()):
         return CoverageStatus.UNTRUSTED, CoverageReason.SOURCE_FETCH_FAILED
     if not any(not outcome["empty"] for outcome in outcomes.values()):
         return CoverageStatus.VERIFIED_EMPTY, None
     if quarantine_reasons:
+        blocking = quarantine_reasons - _NON_BLOCKING_QUARANTINE_REASONS
+    else:
+        blocking = set()
+    if blocking:
         return (
             CoverageStatus.UNTRUSTED,
-            _coverage_reason_for_quarantine(quarantine_reasons),
+            _coverage_reason_for_quarantine(blocking),
         )
     if has_accepted:
         return CoverageStatus.VERIFIED, None
