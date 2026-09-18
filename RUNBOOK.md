@@ -225,6 +225,10 @@ python -m stock_quant data acceptance show --version <数据版本哈希> --root
 > 注意：验收**机制已实现并离线测试覆盖**，但截至本文档更新尚无操作者在真实
 > 数据上执行过完整验收流程。人工核验的逐条要点见
 > `docs/operations/phase-one-validation.md` §4/§7。
+>
+> `corporate_action_evidence` 报 FAIL 时，逐条 `reason=` 的归属（哪几只已有
+> 决策依据、哪几只待签字、哪几只待裁决）见
+> `docs/operations/2026-09-16-corporate-action-residual-attribution.md`。
 
 
 ## 阶段 6 · 正式研究（唯一发布者）

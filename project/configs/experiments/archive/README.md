@@ -32,7 +32,7 @@ different rules.
 | --- | --- | --- |
 | `momentum_60d_pit_tradable.yml` | `custom_csi300_ic_tradable` | `momentum_60d_pit_official.yml` |
 | `momentum_60d_wf_real_baseline.yml` | `custom_csi300_ic_tradable` | `momentum_60d_wf_tw_baseline.yml` |
-| `momentum_60d_wf_real_challenger.yml` | `custom_csi300_ic_tradable` | **none** |
+| `momentum_60d_wf_real_challenger.yml` | `custom_csi300_ic_tradable` | `momentum_60d_wf_tw_challenger.yml` |
 
 Each successor records the substitution in its own header comment:
 `momentum_60d_pit_official.yml:3` ("与 momentum_60d_pit_tradable.yml 相同的信任
@@ -40,13 +40,27 @@ Each successor records the substitution in its own header comment:
 ("派生自 momentum_60d_wf_real_baseline.yml：原规格绑定的
 custom_csi300_ic_tradable … 已无任何已发布数据集").
 
-## Known gap
+## Challenger gap — closed 2026-09-15
 
 `momentum_60d_wf_real_challenger.yml` is the **challenger** half of the
 pre-registered one-time strategy challenge (`PROJECT_MEMORY.md` §8.3). Its
-baseline half was rebound to the live universe, but no challenger spec was:
-after this retirement the challenge has no runnable challenger spec.
+baseline half was rebound to the live universe first; the challenger half was
+left unbound at retirement, so for a time the challenge had no runnable
+challenger spec.
 
-Closing that gap is a separate decision — it requires choosing which dataset
-and definition to bind, and the challenger snapshot hash has to be frozen
-before its own run. It is recorded here rather than filled in.
+That binding decision has now been made:
+`configs/experiments/momentum_60d_wf_tw_challenger.yml` mirrors the live
+baseline, binds `custom_csi300_tw_tradable`, and — verified by loading both
+specs and diffing every field — differs from it in nothing but
+`portfolio_rule` and `hypothesis`, which is the pairing the challenge service
+requires.
+
+The pinned hash was checked against the published dataset rather than assumed:
+`custom_csi300_tw_tradable.yml` pins `membership_table_sha256` `5f5bf476…`,
+which equals the `membership_content_hash` of the 766-row
+`universe_membership` table of the dataset CURRENT pointed at on 2026-09-15
+(`1d6e43b4…`). The definition's own `version` `1d6a8c8f…` is what that
+dataset's manifest records under `universe_coverage_definition_hashes`.
+
+Authoring a spec consumes nothing: the holdout registry is untouched, and the
+challenger snapshot hash is still frozen at the challenge's own run, not here.

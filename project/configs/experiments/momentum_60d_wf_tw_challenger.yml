@@ -1,0 +1,61 @@
+# 真实行情 Walk-Forward ENGINEERING 挑战者规格（缓冲式风险加权；非投资建议）。
+#
+# 派生自 momentum_60d_wf_real_challenger.yml：原规格绑定的
+# custom_csi300_ic_tradable（index_constitution 证据链）已无任何已发布数据集
+# 携带其钉住的成员表哈希（756db257…），无法再运行；本规格改绑现行冻结定义
+# custom_csi300_tw_tradable（tushare index_weight 月度快照证据链）。
+#
+# 绑定实测（2026-09-15 复算）：该定义钉住的 membership_table_sha256 =
+# 5f5bf476…，与现行 CURRENT 数据集 1d6e43b4… 的 universe_membership 表
+# （766 行，单一 universe_id）内容哈希逐位一致，故 universe 预检可过；定义
+# 自身版本 1d6a8c8f… 与该数据集 manifest 的 universe_coverage_definition_hashes
+# 记录一致。
+#
+# 与 momentum_60d_wf_tw_baseline.yml 构成一次性策略挑战的两侧：除
+# portfolio_rule（top_n_equal_weight vs buffered_risk_weighted）与 hypothesis
+# 外，数据集/宇宙/fold 日历/初始资金/因子信号/调仓频率/成本情景顺序完全一致。
+#
+# buffered_risk_weighted 使用全部冻结默认参数（target_count=10 / entry_rank=10 /
+# hold_rank=15 / risk_lookback_days=60 / min_risk_observations=40 /
+# volatility_floor_annualized=0.10 / max_single_weight=0.15 /
+# rebalance_band_absolute=0.02 / gross_exposure=1.00 / weight_quantum=1e-12、
+# 仅多头、无杠杆）。任何显式参数修改都是新的策略身份。
+#
+# execution_pipeline: walk_forward_oos_v1 —— 正式 Walk-Forward 管线在工程信任
+# 模式下的诊断运行：请求范围 2020-01-01..2026-08-28 产生 2020..2025 六个完整
+# 年度 fold（2026 年部分年度记录为 not_evaluated_boundary）；每个 fold 预热
+# 至少三个整年且 ≥756 个确认交易日（2016 年起），独立账户、相同初始资金。
+# 已知边界（2026-09-12 实测，本次运行前复核代码未变）：fold 预检无条件要求
+# 绑定当前数据集的 ACCEPTED 验收审计（ACCEPTANCE_MISSING，engineering 无豁免
+# 分支）。当前数据集尚无 ACCEPTED 验收记录时，本规格预期在 folds 预检阶段
+# 失败并留下完整审计——失败本身按约定作为阶段结果记录。
+hypothesis: >-
+  在等权 Top-10 之上，以 60 日风险倒数加权、二阶段排名缓冲成员与 2% 再平衡
+  带宽能否在真实行情的年度样本外 fold 上改善风险调整后收益并控制换手与
+  拒单率。本规格仅作 ENGINEERING 诊断，不声称统计有效性，也不构成投资建议。
+execution_pipeline: walk_forward_oos_v1
+factor_versions:
+  momentum_60d: 2.0.0
+dataset_version: CURRENT
+universe_version: CURRENT
+universe_definition: custom_csi300_tw_tradable
+trust_mode: engineering
+# 工程诊断不绑定真实数据验收记录（缺省 CURRENT_ACCEPTED 会触发验收门禁）。
+data_acceptance_id: null
+date_range:
+  start_date: 2020-01-01
+  end_date: 2026-08-28
+train_validation_holdout_policy: not_applicable_engineering_mvp
+preprocessing:
+  winsorization: none
+  standardization: none
+portfolio_rule:
+  name: buffered_risk_weighted
+cost_scenarios:
+  - zero_cost
+  - commission_tax
+  - full_cost
+random_seed: 42
+code_commit: unversioned
+parent_experiment_ids: []
+agent_id: null
