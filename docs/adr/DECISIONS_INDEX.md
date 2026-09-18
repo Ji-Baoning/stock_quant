@@ -15,6 +15,7 @@ were already in place before they were written up as ADRs.
 | [004 Pre-frozen walk-forward OOS](004-walk-forward-oos.md) | accepted | 2026-09-14 | `src/stock_quant/research/walk_forward/**` | walk-forward, fold schedule, stability-v1, OOS | You change fold scheduling, fold metrics, or the stability verdict. |
 | [005 Explicit project root](005-explicit-project-root.md) | accepted | 2026-09-14 | `src/stock_quant/project_root.py`, `src/stock_quant/cli.py`, `project/**` | --root, no fallback, config validation | You change how a command finds its configuration or data. |
 | [006 Corporate-action window scope](006-corporate-action-window-scope.md) | accepted | 2026-09-15 | `src/stock_quant/data_model/corporate_actions.py`, `src/stock_quant/data_pipeline.py`, `src/stock_quant/data_quality/models.py` | quarantine, coverage, window scope, ADR-006, supersedes a filter policy | You change how a quarantined corporate action counts against a symbol/window, or the coverage verdict. |
+| [007 Corporate-action third-party arbitration](007-corporate-action-third-party-arbitration.md) | accepted | 2026-09-16 | `src/stock_quant/data_model/corporate_actions.py`, `src/stock_quant/data_sources/tdx.py`, `src/stock_quant/data_pipeline.py`, `project/configs/sources.yml` | TDX, pytdxdata, arbitration, cross-source conflict, third vote, float32 | You change how a cross-source corporate-action conflict is resolved, or add a third-party corroboration channel. |
 
 ## Not yet recorded
 

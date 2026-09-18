@@ -10,3 +10,8 @@ baostock:
   enabled: false
   timeout_seconds: 30
   max_retries: 3
+# Corporate-action conflict arbiter, not a source (ADR-007).  Off by default;
+# needs the optional pytdxdata package.  See project/configs/sources.yml.
+tdx:
+  enabled: false
+  timeout_seconds: 30

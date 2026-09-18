@@ -21,3 +21,22 @@ baostock:
   enabled: false
   timeout_seconds: 30
   max_retries: 3
+# TDX (通达信) is the corporate-action *conflict arbiter* of ADR-007 - not a
+# source.  It adds no name to `_CONFIGURED_SOURCES`, is never added to
+# `CORPORATE_ACTION_ENDPOINTS`, and never supplies a booked row: it is asked
+# only where CNINFO and Eastmoney disagree on the same (symbol, ex_date), to
+# name which official filing to adopt.
+#
+# Default off.  Enabling it changes published corporate-action facts and so
+# requires a rebuild, and that rebuild must keep the xdxr responses as raw
+# snapshots (written under raw/tdx/tdx_xdxr/**) so the arbitration is
+# reproducible from stored bytes.  It needs the optional pytdxdata package
+# (pip install pytdxdata; no runtime dependencies, but Requires-Python >= 3.11
+# -- one minor above this project's >=3.10 floor, so a 3.10 interpreter cannot
+# install it from PyPI); absent or unreachable, every conflict stays quarantined
+# and the update records a WARNING.  No retry policy is applied here - one
+# failed xdxr read leaves the whole conflict set unarbitrated, which is the
+# fail-closed direction.
+tdx:
+  enabled: false
+  timeout_seconds: 30

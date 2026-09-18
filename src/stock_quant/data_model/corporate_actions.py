@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 import pandas as pd
 
@@ -62,6 +62,13 @@ _UNSUPPORTED_KEYWORDS = ("配股", "配售", "吸收合并", "换股")
 _RIGHTS_KEYWORDS = ("配股", "配售")
 _IMPLEMENTED_MARKER = "实施"
 _BOTH_SOURCES = "cninfo+eastmoney"
+
+#: The two sides a cross-source conflict is between.  A third-party arbiter
+#: (ADR-007) names one of them, and the booked value becomes
+#: ``<side>+<arbiter>`` -- the same ``<origin>+<authority>`` form
+#: ``apply_corporate_action_reviews`` already writes as ``<side>+reviewed``.
+CONFLICT_SIDE_CNINFO = "cninfo"
+CONFLICT_SIDE_EASTMONEY = "eastmoney"
 
 #: The one source of rights-issue facts: CNINFO's allotment endpoint, reached
 #: through ``stock_allotment_cninfo``.  There is no second source to
@@ -127,6 +134,42 @@ _LANE_RIGHTS = "rights"
 
 _SUFFIXED_SYMBOL = re.compile(r"^(\d{6})\.(SH|SZ|BJ)$", re.IGNORECASE)
 _BARE_SYMBOL = re.compile(r"^\d{6}$")
+
+
+@dataclass(frozen=True)
+class ConflictTerms:
+    """One side's terms for a conflicted ``(symbol, ex_date)``.
+
+    The four ratios are the supplier's **per-ten-share** figures, recovered
+    exactly from the internal event's per-share Decimals by multiplying by
+    ``_PER_SHARE_SCALE`` -- exact in ``Decimal``, so an arbiter compares the
+    supplier's own number rather than one this project rounded to.
+    """
+
+    symbol: str
+    ex_date: date
+    cash_per_ten: Decimal
+    bonus_per_ten: Decimal
+    capitalization_per_ten: Decimal
+    rights_per_ten: Decimal
+    #: The subscription price is quoted per *share* by every supplier and is
+    #: never scaled, unlike the four ratios above.
+    rights_price_per_share: Decimal
+
+
+class CorporateActionArbiter(Protocol):
+    """A third party that may name the side a conflict should be booked from.
+
+    An arbiter decides; it never supplies a row.  Returning ``None`` -- because
+    it has no record, or because its record does not separate the two sides --
+    leaves the conflict quarantined exactly as it was.
+    """
+
+    name: str
+
+    def arbitrate(
+        self, cninfo: ConflictTerms, eastmoney: ConflictTerms
+    ) -> str | None: ...
 
 
 @dataclass(frozen=True)
@@ -360,8 +403,17 @@ def _row_date(value: object) -> date | None:
 def normalize_corporate_actions(
     cninfo: pd.DataFrame | None,
     eastmoney: pd.DataFrame | None,
+    *,
+    arbiter: CorporateActionArbiter | None = None,
 ) -> CorporateActionResult:
-    """Reconcile the CNINFO and Eastmoney corporate-action frames."""
+    """Reconcile the CNINFO and Eastmoney corporate-action frames.
+
+    ``arbiter`` (ADR-007) is consulted **only** where the two sources disagree
+    on the same ``(symbol, ex_date)``.  Without one -- the default, and what a
+    rebuild with ``sources.yml`` ``tdx.enabled: false`` produces -- every
+    disagreement is quarantined exactly as before, and the booked value names
+    the side that was corroborated plus the arbiter that corroborated it.
+    """
     cn_candidates, cn_quarantine = _standardize_source(cninfo, "cninfo")
     em_candidates, em_quarantine = _standardize_source(eastmoney, "eastmoney")
 
@@ -375,28 +427,67 @@ def normalize_corporate_actions(
             if _same_facts(cn_event, em_event):
                 accepted.append(_row(cn_event, confirmed_by=_BOTH_SOURCES))
             else:
-                quarantined.append(
-                    _row(
-                        cn_event,
-                        confirmed_by="cninfo",
-                        reason=REASON_CROSS_SOURCE_CONFLICT,
+                booked = _arbitrated_event(cn_event, em_event, arbiter)
+                if booked is None:
+                    quarantined.append(
+                        _row(
+                            cn_event,
+                            confirmed_by=CONFLICT_SIDE_CNINFO,
+                            reason=REASON_CROSS_SOURCE_CONFLICT,
+                        )
                     )
-                )
-                quarantined.append(
-                    _row(
-                        em_event,
-                        confirmed_by="eastmoney",
-                        reason=REASON_CROSS_SOURCE_CONFLICT,
+                    quarantined.append(
+                        _row(
+                            em_event,
+                            confirmed_by=CONFLICT_SIDE_EASTMONEY,
+                            reason=REASON_CROSS_SOURCE_CONFLICT,
+                        )
                     )
-                )
+                else:
+                    event, confirmed_by = booked
+                    accepted.append(_row(event, confirmed_by=confirmed_by))
         elif cn_event is not None:
-            accepted.append(_row(cn_event, confirmed_by="cninfo"))
+            accepted.append(_row(cn_event, confirmed_by=CONFLICT_SIDE_CNINFO))
         elif em_event is not None:
-            accepted.append(_row(em_event, confirmed_by="eastmoney"))
+            accepted.append(_row(em_event, confirmed_by=CONFLICT_SIDE_EASTMONEY))
 
     return CorporateActionResult(
         accepted=_finalize(accepted, RECONCILED_COLUMNS),
         quarantined=_finalize(quarantined, QUARANTINE_COLUMNS),
+    )
+
+
+def _arbitrated_event(
+    cn_event: dict[str, Any],
+    em_event: dict[str, Any],
+    arbiter: CorporateActionArbiter | None,
+) -> tuple[dict[str, Any], str] | None:
+    """The event an arbiter books, with its ``<side>+<arbiter>`` label.
+
+    ``None`` when no arbiter is configured or it does not name a side; the
+    caller then quarantines both sides, which is the fail-closed outcome.
+    """
+    if arbiter is None:
+        return None
+    side = arbiter.arbitrate(_conflict_terms(cn_event), _conflict_terms(em_event))
+    if side is None:
+        return None
+    event = cn_event if side == CONFLICT_SIDE_CNINFO else em_event
+    return event, f"{side}+{arbiter.name}"
+
+
+def _conflict_terms(event: dict[str, Any]) -> ConflictTerms:
+    """One side's terms at the per-ten-share scale the supplier stated them."""
+    return ConflictTerms(
+        symbol=event["symbol"],
+        ex_date=event["ex_date"],
+        cash_per_ten=_zeroed(event["cash"]) * _PER_SHARE_SCALE,
+        bonus_per_ten=_zeroed(event["bonus"]) * _PER_SHARE_SCALE,
+        capitalization_per_ten=(
+            _zeroed(event["capitalization"]) * _PER_SHARE_SCALE
+        ),
+        rights_per_ten=_zeroed(event["rights"]) * _PER_SHARE_SCALE,
+        rights_price_per_share=_zeroed(event["rights_price"]),
     )
 
 

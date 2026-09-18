@@ -160,14 +160,22 @@ from stock_quant.data_sources.base import (
     AuthenticationError,
     DataRequest,
     DataSource,
+    FetchResult,
     RetryPolicy,
     fetch_with_retry,
+    request_key,
     translate_supplier_error,
 )
 from stock_quant.data_sources.raw_store import (
     RawSnapshot,
     RawSnapshotEvidence,
     RawStore,
+)
+from stock_quant.data_sources.tdx import (
+    ARBITER_NAME,
+    XDXR_ENDPOINT,
+    TdxXdxrArbiter,
+    fetch_xdxr_frames,
 )
 from stock_quant.project_root import resolve_project_root
 from stock_quant.research.universe import (
@@ -1770,6 +1778,9 @@ class DataPipeline:
             outcomes_by_symbol[symbol] = symbol_outcomes
             if "akshare" not in self._overrides:
                 self._sleeper(1)
+        arbiter = self._build_action_arbiter(
+            symbols, start, end, issues, raw_snapshots
+        )
         accepted_frames: list[pd.DataFrame] = []
         quarantined_frames: list[pd.DataFrame] = []
         for symbol in symbols:
@@ -1778,6 +1789,7 @@ class DataPipeline:
                 frames_by_symbol[symbol]["eastmoney"],
                 frames_by_symbol[symbol][RIGHTS_SOURCE],
                 issues,
+                arbiter,
             )
             accepted_frames.append(accepted)
             quarantined_frames.append(quarantined)
@@ -1828,8 +1840,60 @@ class DataPipeline:
             merged_quarantine,
         )
 
+    def _build_action_arbiter(self, symbols, start, end, issues, raw_snapshots):
+        """Build the ADR-007 conflict arbiter, or ``None`` when it is off.
+
+        The arbiter is off unless ``sources.yml`` enables ``tdx``.  It is a
+        third opinion, never a source: it is not in
+        ``CORPORATE_ACTION_ENDPOINTS``, it adds no name to
+        ``_CONFIGURED_SOURCES``, it is never consulted where the two official
+        sources already agree, and it yields to any conflict an owner has
+        signed off on (see ``_GuardedArbiter``).
+
+        Its responses are written as raw snapshots through the same
+        content-addressed store as every supplier, so what arbitrated a rebuild
+        is reproducible from bytes rather than from a later answer.  Failing to
+        obtain them leaves every conflict quarantined -- the state a disabled
+        arbiter produces -- and is recorded as a warning.
+        """
+        config = self._project_config.sources.get(ARBITER_NAME)
+        if config is None or not config.enabled:
+            return None
+        reviewed = {
+            (review.symbol, review.ex_date)
+            for review in self._project_config.corporate_action_reviews
+            if start <= review.ex_date <= end
+        }
+        try:
+            frames = fetch_xdxr_frames(
+                list(symbols), timeout=float(config.timeout_seconds)
+            )
+        except Exception as error:  # noqa: BLE001 - best-effort third opinion
+            _warn_arbiter_failure(issues, None, error)
+            return None
+        for symbol, frame in sorted(frames.items()):
+            raw_snapshots.append(
+                self._record_raw(
+                    FetchResult(
+                        source=ARBITER_NAME,
+                        endpoint=XDXR_ENDPOINT,
+                        request_key=request_key(
+                            DataRequest(XDXR_ENDPOINT, (symbol,), start, end)
+                        ),
+                        frame=frame,
+                        metadata={"transport_id": ARBITER_NAME},
+                    )
+                )
+            )
+        return _GuardedArbiter(TdxXdxrArbiter.from_frames(frames), issues, reviewed)
+
     def _reconcile_action_frames(
-        self, cninfo_frames, eastmoney_frames, allotment_frames, issues
+        self,
+        cninfo_frames,
+        eastmoney_frames,
+        allotment_frames,
+        issues,
+        arbiter=None,
     ):
         """Reconcile collected supplier frames; empty defaults on failure.
 
@@ -1838,10 +1902,13 @@ class DataPipeline:
         source only, so there is nothing to cross-confirm it against.  The two
         lanes fail independently: a malformed dividend frame must not also
         discard the symbol's subscriptions, and vice versa.
+
+        ``arbiter`` (ADR-007) is consulted only on a cross-source disagreement.
+        It is passed already guarded: see ``_GuardedArbiter``.
         """
         try:
             reconciled = normalize_corporate_actions(
-                _concat(cninfo_frames), _concat(eastmoney_frames)
+                _concat(cninfo_frames), _concat(eastmoney_frames), arbiter=arbiter
             )
         except Exception as error:  # noqa: BLE001
             self._warn_action_lane_failure(issues, "dividend", error)
@@ -2696,6 +2763,59 @@ def _has_bar_on(raw: pd.DataFrame, day: date) -> bool:
     column = "trade_date" if "trade_date" in raw.columns else "date"
     days = pd.to_datetime(raw[column].astype(str), errors="coerce").dt.date
     return bool((days == day).any())
+
+
+def _warn_arbiter_failure(issues, symbol, error) -> None:
+    """Record the conflict arbiter's failure as an optional-source warning.
+
+    Shaped like the endpoint-failure warnings this sits beside: the symbol
+    travels in ``details`` so both arrive under one code with one layout.
+    """
+    issues.append(
+        _issue(
+            Severity.WARNING,
+            CODE_OPTIONAL_SOURCE_FAILURE,
+            details={
+                "source": ARBITER_NAME,
+                "endpoint": XDXR_ENDPOINT,
+                "symbol": symbol,
+                "message": str(error),
+            },
+        )
+    )
+
+
+class _GuardedArbiter:
+    """An arbiter that yields to a signed review and cannot lose a lane.
+
+    Both rules keep an automated third opinion strictly weaker than the paths
+    it sits beside:
+
+    * A ``(symbol, ex_date)`` an owner has explicitly reviewed is never
+      arbitrated.  ``apply_corporate_action_reviews`` resolves a conflict by
+      requiring exactly one quarantined row for the reviewed source and
+      *raises* when it finds none -- and ``_reconcile_action_frames`` turns that
+      raise into an empty dividend lane for the symbol.  A conflict arbitrated
+      first would be booked, leave the review nothing to match, and cost the
+      symbol every fact it had.
+    * Anything the arbiter raises degrades to "no arbitration" for that key --
+      the same outcome a disabled arbiter produces -- and records why.
+    """
+
+    def __init__(self, arbiter, issues, reviewed=frozenset()) -> None:
+        self._arbiter = arbiter
+        self._issues = issues
+        self._reviewed = reviewed
+        self.name = arbiter.name
+
+    def arbitrate(self, cninfo, eastmoney):
+        if (cninfo.symbol, cninfo.ex_date) in self._reviewed:
+            return None
+        try:
+            return self._arbiter.arbitrate(cninfo, eastmoney)
+        except Exception as error:  # noqa: BLE001 - best-effort third opinion
+            _warn_arbiter_failure(self._issues, cninfo.symbol, error)
+            return None
 
 
 def _issue(
