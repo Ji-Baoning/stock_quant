@@ -62,6 +62,7 @@ from stock_quant.backtest.engine import BacktestEngine, BacktestRequest, OrderDa
 from stock_quant.backtest.models import BUY, SELL, Fill, Order
 from stock_quant.backtest.rebalancer import AccountAwareWeeklyRebalancer
 from stock_quant.config import load_project_config
+from stock_quant.data_contracts import TIER_ANCHORED, TIER_RESEARCH_ONLY
 from stock_quant.data_model.adjusted_bar import ADJUSTMENT_NAME
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.corporate_action_coverage import CoverageReason
@@ -78,6 +79,7 @@ from stock_quant.data_model.universe_membership import (
     SecurityMasterBoundary,
     resolve_memberships,
 )
+from stock_quant.data_quality.models import CODE_COVERAGE_DOWNGRADED
 from stock_quant.factors.base import Factor, FactorContext
 from stock_quant.factors.models import FactorResult
 from stock_quant.logging import StructuredLogger, redact_text
@@ -188,6 +190,10 @@ _WF_LABEL_TO_DATASTAGE = {
 #: before any factor work, so its failures never reach a pipeline stage.
 _STAGE_UNIVERSE_ACCEPTANCE = "universe_acceptance"
 
+#: The fine pre-factor stage label a table-tier preflight failure is recorded
+#: under (spec A2): tier routing happens before identity and factor work.
+_STAGE_TABLE_TIERS = "table_tiers"
+
 #: Steady-state member counts of the first-class indices.  The preflight
 #: cardinality check enforces the count on every trading day of the pinned
 #: calendar unless an immutable official exception record applies; custom
@@ -271,6 +277,73 @@ class UniversePreflightFailed(RuntimeError):
         super().__init__(message)
         self.error_codes = tuple(sorted(set(error_codes)))
         self.universe_id = universe_id
+
+
+class TableTierPreflightFailed(RuntimeError):
+    """The pinned dataset/current tier policy rejected the run's input tables.
+
+    Carries only stable error codes so the redacted preflight manifest can
+    name the rejection without leaking data (mirrors
+    :class:`UniversePreflightFailed`).
+    """
+
+    def __init__(self, message: str, *, error_codes: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.error_codes = tuple(sorted(set(error_codes)))
+
+
+def factor_input_tables(factors: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
+    """Map factor name to its declared ``inputs``; missing declarations fail.
+
+    Fail-closed (spec A2): every factor must name the canonical tables it
+    reads -- a factor without an ``inputs`` declaration is a contract bug
+    that rejects the run instead of silently skipping the tier gate.
+    """
+    resolved: dict[str, tuple[str, ...]] = {}
+    for name, factor in sorted(factors.items()):
+        inputs = getattr(factor, "inputs", None)
+        if inputs is None:
+            raise ValueError(
+                f"factor {name!r} declares no inputs (spec A2): every factor "
+                "must name the canonical tables it reads"
+            )
+        resolved[name] = tuple(inputs)
+    return resolved
+
+
+def table_tier_violations(
+    contracts: Mapping[str, object],
+    input_tables: Sequence[str],
+    downgrade_records: Sequence[Mapping[str, object]],
+    mode: str,
+) -> list[str]:
+    """Tier violations for one run's input tables (spec A2 consumer gate).
+
+    ``downgrade_records`` are the pinned version's ``coverage_downgraded``
+    quality-report details.  RESEARCH mode fails on research_only inputs and
+    untrusted anchored inputs; ENGINEERING (diagnostic-only) is exempt and
+    must label the report RESEARCH-ONLY (the preflight manifest carries the
+    label).  Undeclared tables fail closed.  Tier is runtime policy read
+    from the current sources.yml, never from the frozen spec.
+    """
+    engineering = mode in ("engineering", "ENGINEERING")
+    untrusted_tables = {
+        str(record["table"])
+        for record in downgrade_records
+        if record.get("status") == "UNTRUSTED"
+    }
+    codes: list[str] = []
+    for table in sorted(set(input_tables)):
+        contract = contracts.get(table)
+        if contract is None:
+            codes.append("table_tier_undeclared")
+            continue
+        tier = getattr(contract, "tier", None)
+        if tier == TIER_RESEARCH_ONLY and not engineering:
+            codes.append("table_tier_research_only")
+        elif tier == TIER_ANCHORED and table in untrusted_tables and not engineering:
+            codes.append("table_tier_untrusted")
+    return codes
 
 
 @dataclass(frozen=True)
@@ -614,6 +687,14 @@ class ResearchRunner:
         self._context: DatasetContext | None = None
         self._digest: str = ""
         self._universe_preflight: UniversePreflight | None = None
+        # The table-tier preflight summary (spec A2 consumer gate), computed
+        # before identity and persisted with the run workspace on ``_begin``;
+        # ``None`` when the preflight rejected the run.
+        self._table_tier_preflight: dict[str, object] | None = None
+        # Factors constructed for the preflight input lookup, reused by the
+        # factor stage so one run touches the provider exactly once; ``None``
+        # on resume (the provider is never touched).
+        self._prefetched_factors: Mapping[str, Factor] | None = None
         # The frozen snapshot bundle (identity scheme v2), built once per run
         # after the spec freezes and before any identity is computed.
         self._bundle = None
@@ -717,6 +798,36 @@ class ResearchRunner:
                 failed_stage="snapshot_bundle",
                 retriable=False,
             ) from error
+        # The table-tier preflight runs after the acceptance gate and after
+        # the identity inputs are frozen, but before any run workspace is
+        # created (spec A2 / D1 consumer gate): RESEARCH runs referencing
+        # research_only or untrusted-anchored tables fail here with a
+        # redacted preflight manifest; ENGINEERING runs are exempt and
+        # labeled RESEARCH-ONLY.  A resumed run whose factor stage is intact
+        # skips the preflight: the frozen experiment was judged under the
+        # policy of its first run and is not re-judged retroactively (spec
+        # A2), and the factor provider is never touched on resume.
+        resume_run_dir = (
+            self._project_root
+            / "data"
+            / "runs"
+            / f"run_{ExperimentIdentity.of(frozen, self._bundle).experiment_id}"
+        )
+        if not self._factor_stage_will_resume(
+            resume_run_dir, self._run_digest(frozen)
+        ):
+            try:
+                self._table_tier_preflight = self._preflight_table_tiers(
+                    frozen, dataset_version, mode
+                )
+            except TableTierPreflightFailed as error:
+                raise ResearchRunFailed(
+                    f"research run failed at stage {_STAGE_TABLE_TIERS}: "
+                    f"{redact_text(error, self._secrets)}",
+                    run_id=self._run_id,
+                    failed_stage=_STAGE_TABLE_TIERS,
+                    retriable=False,
+                ) from error
         state = self._begin(frozen)
         try:
             self._active_stage = None
@@ -1015,6 +1126,234 @@ class ResearchRunner:
             event="universe_preflight_failed",
         )
 
+    def _factor_stage_will_resume(self, run_dir: Path, digest: str) -> bool:
+        """Whether a prior run at ``run_dir`` would resume-skip its factor stage.
+
+        Mirrors the ``_run_stage`` resume test for the ``"factor"`` label: the
+        stage record exists, its ``input_hash`` matches ``digest`` and every
+        recorded output is intact.  The table-tier preflight uses this to stay
+        off a resumed run: the frozen experiment was judged under the tier
+        policy of its first run (spec A2: no retroactive re-judgement) and the
+        factor provider is never touched on resume.
+        """
+        path = run_dir / _STAGES_FILE
+        if not path.is_file():
+            return False
+        records = json.loads(path.read_text(encoding="utf-8"))
+        record = records.get("factor")
+        if not record or record.get("input_hash") != digest:
+            return False
+        for relative, expected in dict(record.get("outputs", {})).items():
+            output = run_dir / relative
+            if not output.is_file() or _sha256_file(output) != expected:
+                return False
+        return True
+
+    def _preflight_table_tiers(
+        self,
+        spec: ExperimentSpec,
+        dataset_version: str,
+        mode: DataTrustMode,
+    ) -> dict[str, object]:
+        """Route the run's factor input tables through the current tier policy.
+
+        Returns the preflight summary (persisted with the run workspace on
+        ``_begin``): declared inputs, research-only usage and the engineering
+        exemption label.  Raises :class:`TableTierPreflightFailed` in RESEARCH
+        mode when any input table is research_only or untrusted-anchored, and
+        in either mode when a table has no declaration (spec A2 / D1).
+        """
+        contracts = self._project_config.data_contracts
+        provider = self._factor_provider()
+        # The factor stage reuses this construction (``_resolve_factors``) so
+        # one run touches the provider exactly once: the preflight's input
+        # lookup is not separate factor work.
+        self._prefetched_factors = provider
+        inputs = factor_input_tables(
+            {
+                name: provider[name]
+                for name in spec.factor_versions
+                if name in provider
+            }
+        )
+        input_tables = sorted(
+            {table for tables in inputs.values() for table in tables}
+        )
+        # The pinned quality report carries the coverage_downgraded records
+        # (D1 publish side); each record is the issue's details plus the
+        # issue's table name (the details payload itself is table-blind).
+        # Only those records are parsed, never the report prose.
+        quality_path = (
+            self._project_root
+            / "data"
+            / "standardized"
+            / dataset_version
+            / "quality_report.json"
+        )
+        downgrade_records: list[dict[str, object]] = []
+        if quality_path.is_file():
+            report = json.loads(quality_path.read_text(encoding="utf-8"))
+            downgrade_records = [
+                {**item.get("details", {}), "table": item.get("table")}
+                for item in report.get("issues", [])
+                if item.get("code") == CODE_COVERAGE_DOWNGRADED
+            ]
+        violations = table_tier_violations(
+            contracts, input_tables, downgrade_records, mode.value
+        )
+        # ENGINEERING exempts research_only/untrusted-anchored inputs, so the
+        # exemption label is judged against RESEARCH semantics: exempt exactly
+        # when the same inputs would have been rejected under RESEARCH.
+        engineering = mode is DataTrustMode.ENGINEERING
+        research_codes = (
+            table_tier_violations(
+                contracts,
+                input_tables,
+                downgrade_records,
+                DataTrustMode.RESEARCH.value,
+            )
+            if engineering
+            else violations
+        )
+        engineering_exempt = engineering and any(
+            code in research_codes
+            for code in ("table_tier_research_only", "table_tier_untrusted")
+        )
+        summary: dict[str, object] = {
+            "dataset_version": dataset_version,
+            "mode": mode.value,
+            "input_tables": input_tables,
+            "research_only_used": any(
+                getattr(contracts.get(table), "tier", None) == TIER_RESEARCH_ONLY
+                for table in input_tables
+            ),
+            "engineering_exempt": engineering_exempt,
+            "label": "RESEARCH-ONLY" if engineering_exempt else None,
+            "violations": violations,
+        }
+        if violations:
+            self._write_table_tier_preflight(summary, failed=True, spec=spec)
+            raise TableTierPreflightFailed(
+                "table-tier preflight rejected input tables: "
+                + ", ".join(violations),
+                error_codes=violations,
+            )
+        return summary
+
+    def _write_table_tier_preflight_record(self) -> None:
+        """Persist the PASS tier-preflight summary in the run workspace."""
+        summary = self._table_tier_preflight
+        if summary is None:
+            return
+        self._write_table_tier_preflight(summary, failed=False)
+
+    def _write_table_tier_preflight(
+        self,
+        summary: Mapping[str, object],
+        *,
+        failed: bool,
+        spec: ExperimentSpec | None = None,
+    ) -> None:
+        """Persist the (redacted) tier-preflight manifest for audit.
+
+        A PASS record lands in the run workspace (written on ``_begin``); a
+        FAIL record lands under a deterministic preflight run id together
+        with a FAILED run manifest, mirroring :meth:`_fail_universe_preflight`
+        -- only stable error codes and the mode summary are recorded, never
+        data or evidence payloads.
+        """
+        payload = dict(summary)
+        payload["failed"] = failed
+        if not failed:
+            path = self._run_dir / "table_tier_preflight.json"
+            if (
+                path.exists()
+                and json.loads(path.read_text(encoding="utf-8")) != payload
+            ):
+                raise ValueError(
+                    "table_tier_preflight.json already exists with different "
+                    f"content: {path}"
+                )
+            path.write_text(
+                json.dumps(
+                    payload, ensure_ascii=False, indent=2, sort_keys=True
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return
+        self._active_stage = _STAGE_TABLE_TIERS
+        self._close_context()
+        digest_payload = json.dumps(
+            {
+                "spec": spec.model_dump(mode="json") if spec is not None else None,
+                "dataset_version": payload.get("dataset_version"),
+                "trust_mode": payload.get("mode"),
+                "stage": _STAGE_TABLE_TIERS,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        run_id = (
+            "run_preflight_"
+            + hashlib.sha256(digest_payload.encode("utf-8")).hexdigest()[:16]
+        )
+        run_dir = self._project_root / "data" / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        self._run_id = run_id
+        self._run_dir = run_dir
+        self._logger = StructuredLogger(
+            run_dir / ".run.log.jsonl",
+            terminal=False,
+            secrets=self._secrets,
+        )
+        message = (
+            "table-tier preflight rejected input tables: "
+            + ", ".join(str(code) for code in payload.get("violations", ()))
+        )
+        state = RunState(
+            run_id=run_id,
+            experiment_id="",
+            status=RunStatus.FAILED,
+            stage=DataStage.FAILED,
+            dataset_version=payload.get("dataset_version"),
+            universe_version=spec.universe_version if spec is not None else None,
+            code_commit=spec.code_commit if spec is not None else None,
+            factor_versions=(
+                dict(spec.factor_versions) if spec is not None else {}
+            ),
+            cost_scenarios=(
+                list(spec.cost_scenarios) if spec is not None else []
+            ),
+            random_seed=spec.random_seed if spec is not None else None,
+            parent_experiment_ids=(
+                list(spec.parent_experiment_ids) if spec is not None else []
+            ),
+            agent_id=spec.agent_id if spec is not None else None,
+            trust_mode=payload.get("mode"),
+            failed_stage=_STAGE_TABLE_TIERS,
+            error={
+                "stage": _STAGE_TABLE_TIERS,
+                "exception_class": "TableTierPreflightFailed",
+                "message": message,
+                "retriable": False,
+            },
+        )
+        write_run_manifest(run_dir, state)
+        payload["status"] = "FAIL"
+        payload["failed_stage"] = _STAGE_TABLE_TIERS
+        (run_dir / "table_tier_preflight.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        self._logger.error(
+            f"table-tier preflight failed: {message}",
+            run_id=run_id,
+            stage=_STAGE_TABLE_TIERS,
+            event="table_tier_preflight_failed",
+        )
+
     def _resolve_acceptance(
         self,
         dataset_version: str,
@@ -1202,6 +1541,7 @@ class ResearchRunner:
         )
         write_run_manifest(run_dir, state)
         self._write_universe_preflight_record(frozen)
+        self._write_table_tier_preflight_record()
         self._digest = self._run_digest(frozen)
         return state
 
@@ -2407,7 +2747,11 @@ class ResearchRunner:
         }
 
     def _resolve_factors(self, frozen: ExperimentSpec) -> list[Factor]:
-        available = dict(self._factor_provider())
+        available = dict(
+            self._prefetched_factors
+            if self._prefetched_factors is not None
+            else self._factor_provider()
+        )
         resolved: list[Factor] = []
         for name, version in frozen.factor_versions.items():
             factor = available.get(name)
