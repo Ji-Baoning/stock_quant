@@ -360,12 +360,13 @@ def data_validate(
 
             version = DatasetPublisher(project_root).current().version
         report = pipeline.validate(version)
+        table_tiers = _table_tiers(project_root)
     except Exception as error:  # noqa: BLE001 - surface cleanly to the operator
         _echo_failure(str(error))
         raise typer.Exit(code=1) from None
     typer.echo(f"version={version}")
     typer.echo(_report_summary(report))
-    decision = evaluate_publication(report)
+    decision = evaluate_publication(report, table_tiers=table_tiers)
     fatal = any(item.severity is Severity.FATAL for item in report.issues)
     if decision.passed and not fatal:
         typer.echo("PASS")
@@ -1066,6 +1067,21 @@ def _performance_from_dict(mapping: dict) -> PerformanceMetrics:
     return PerformanceMetrics(**values)
 
 
+def _table_tiers(project_root: Path) -> dict[str, str]:
+    """The declared ``(table, tier)`` pairs of the project's D2 contracts.
+
+    The publication gate is tier-aware (ADR-010), so every re-derivation of a
+    publish/validate decision must evaluate against the same declarations the
+    publisher used, not the fail-closed no-tiers default.
+    """
+    return {
+        name: contract.tier
+        for name, contract in load_project_config(
+            project_root
+        ).data_contracts.items()
+    }
+
+
 def _quality_report_input(
     project_root: Path, dataset_version: str
 ) -> QualityReportInput:
@@ -1086,7 +1102,7 @@ def _quality_report_input(
     payload = json.loads(quality_file.read_text(encoding="utf-8"))
     issues = tuple(_issue_from_dict(item) for item in payload.get("issues", ()))
     report = QualityReport(issues=issues)
-    decision = evaluate_publication(report)
+    decision = evaluate_publication(report, table_tiers=_table_tiers(project_root))
     return QualityReportInput(
         report=report,
         dataset_version=dataset_version,

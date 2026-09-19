@@ -51,6 +51,7 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 
 from stock_quant.config import SourceConfig, load_project_config
+from stock_quant.data_contracts import TIER_BLOCKS_PUBLICATION
 from stock_quant.data_model.adjusted_bar import (
     ADJUSTMENT_NAME,
     action_id_of,
@@ -136,12 +137,16 @@ from stock_quant.data_model.trade_calendar_facts import (
     parse_trade_cal_frame,
 )
 from stock_quant.data_model.universe import Universe
-from stock_quant.data_quality.gates import evaluate_publication
+from stock_quant.data_quality.gates import (
+    TABLE_LEVEL_BLOCKING_CODES,
+    evaluate_publication,
+)
 from stock_quant.data_quality.models import (
     CODE_ADJUSTED_BAR_MISSING_RAW,
     CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH,
     CODE_ADJUSTED_BAR_UNKNOWN_ACTION,
     CODE_ADJUSTED_BAR_WRONG_BASIS,
+    CODE_COVERAGE_DOWNGRADED,
     CODE_QUARANTINE_OUT_OF_WINDOW,
     CODE_UNREGISTERED_TABLE,
     TABLE_CORPORATE_ACTION,
@@ -888,7 +893,13 @@ class DataPipeline:
         )
 
         report = QualityReport(issues=tuple(issues))
-        decision = evaluate_publication(report)
+        # Declared tiers are computed once and reused by the gate, the
+        # downgrade pass and the publish call (spec D1 / ADR-010).
+        table_tiers = {
+            name: contract.tier
+            for name, contract in self._project_config.data_contracts.items()
+        }
+        decision = evaluate_publication(report, table_tiers=table_tiers)
         fatal_present = any(
             item.severity is Severity.FATAL for item in report.issues
         )
@@ -901,6 +912,17 @@ class DataPipeline:
                 statuses,
                 raw_snapshots,
             )
+
+        # Downgrade evidence (spec D1): a declared non-core table's table-level
+        # blocking issues publish as WARNING coverage_downgraded records
+        # instead of blocking; the gate above already blocked core and
+        # undeclared tables, so this only extends the passing report.
+        downgrades = _downgrade_issues(
+            report.issues, self._project_config.data_contracts
+        )
+        if downgrades:
+            issues.extend(downgrades)
+            report = QualityReport(issues=tuple(issues))
 
         try:
             dataset_ref = DatasetPublisher(self._project_root).publish(
@@ -918,6 +940,7 @@ class DataPipeline:
                     definition_hashes=criterion.definition_hashes,
                     skipped_definitions=criterion.skipped,
                 ),
+                table_tiers=table_tiers,
             )
         except PublicationBlocked as error:
             issues.append(
@@ -2853,6 +2876,65 @@ def _contract_issues(
                 _issue(Severity.FATAL, CODE_UNREGISTERED_TABLE, table=name)
             )
     return issues
+
+
+def _tier_of(contract: object) -> str | None:
+    """The declared tier of one contract entry.
+
+    Accepts either a D2 ``DataContract`` (the config-loaded shape the pipeline
+    holds) or a plain tier string (the mapping shape the publish gate takes),
+    so one helper serves both callers.
+    """
+    if isinstance(contract, str):
+        return contract
+    tier = getattr(contract, "tier", None)
+    return tier if isinstance(tier, str) else None
+
+
+def _downgrade_issues(
+    issues: Sequence[QualityIssue], contracts: Mapping[str, object]
+) -> list[QualityIssue]:
+    """UNTRUSTED coverage records for non-core tables with blocking codes.
+
+    Per spec D1 the record follows the corporate_action_coverage shape:
+    per-symbol-window coverage evidence.  A table-level issue without a
+    symbol covers the whole table (``symbols=None``, window ``None``);
+    symbol-scoped issues carry the same scoping the source issue has.  Only
+    ``TABLE_LEVEL_BLOCKING_CODES`` downgrade: global process codes always
+    block, a missing declaration blocks fail-closed, and a core table blocks
+    instead of downgrading.
+    """
+    records: list[QualityIssue] = []
+    for item in issues:
+        if item.code not in TABLE_LEVEL_BLOCKING_CODES:
+            continue
+        tier = _tier_of(contracts.get(item.table))
+        if tier is None or TIER_BLOCKS_PUBLICATION.get(tier, True):
+            continue
+        records.append(
+            _issue(
+                Severity.WARNING,
+                CODE_COVERAGE_DOWNGRADED,
+                table=item.table,
+                symbol=item.symbol,
+                details={
+                    "status": "UNTRUSTED",
+                    "reason_codes": [item.code],
+                    "symbols": None if item.symbol is None else [item.symbol],
+                    "window_start": (
+                        None
+                        if item.trade_date is None
+                        else item.trade_date.isoformat()
+                    ),
+                    "window_end": (
+                        None
+                        if item.trade_date is None
+                        else item.trade_date.isoformat()
+                    ),
+                },
+            )
+        )
+    return records
 
 
 def _issue(

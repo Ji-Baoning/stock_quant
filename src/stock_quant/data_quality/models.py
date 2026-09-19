@@ -78,6 +78,11 @@ CODE_QUARANTINE_OUT_OF_WINDOW = "quarantine_out_of_window"
 # names a dataset that must never reach the immutable store.
 CODE_UNREGISTERED_TABLE = "unregistered_table"
 
+# Downgrade evidence (spec D1): a non-core table carrying a table-level
+# blocking code publishes with this WARNING record instead of blocking.
+# It is deliberately NOT in PUBLICATION_BLOCKING_CODES.
+CODE_COVERAGE_DOWNGRADED = "coverage_downgraded"
+
 # Missing-row classification labels, in classification precedence order.
 MISSING_NOT_LISTED = "not_listed"
 MISSING_DELISTED = "delisted"

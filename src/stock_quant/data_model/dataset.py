@@ -104,9 +104,10 @@ class DatasetPublisher:
         report: QualityReport,
         *,
         build_config: Mapping[str, Any] | None = None,
+        table_tiers: Mapping[str, str] | None = None,
     ) -> DatasetRef:
         """Gate, stage and atomically publish one immutable dataset version."""
-        decision = evaluate_publication(report)
+        decision = evaluate_publication(report, table_tiers=table_tiers)
         if not decision.passed:
             raise PublicationBlocked(
                 "publication blocked: " + "; ".join(decision.reasons)
