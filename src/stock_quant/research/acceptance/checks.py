@@ -251,7 +251,11 @@ def _check_quality_report(value: AcceptanceCheckInput) -> CheckResult:
     """Re-run ``DataPipeline.validate`` and the neutral publication gate."""
     dataset_evidence(value)
     report = DataPipeline(value.project_root).validate(value.dataset_version)
-    decision = evaluate_publication(report)
+    config = load_project_config(value.project_root)
+    tiers = {
+        name: contract.tier for name, contract in config.data_contracts.items()
+    }
+    decision = evaluate_publication(report, table_tiers=tiers)
     failures: list[list[str]] = [
         ["gate_blocked", reason] for reason in decision.reasons
     ]
