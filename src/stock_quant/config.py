@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from stock_quant.data_contracts import DataContract, parse_data_contracts
 from stock_quant.project_root import resolve_project_root
 from stock_quant.safe_yaml import read_yaml
 
@@ -61,6 +62,7 @@ class ProjectConfig(BaseModel):
     initial_cash: float = Field(gt=0)
     benchmark_symbols: list[str]
     sources: dict[str, SourceConfig] = Field(default_factory=dict)
+    data_contracts: dict[str, DataContract] = Field(default_factory=dict)
     costs: CostConfig = Field(default_factory=CostConfig)
     corporate_action_reviews: list[CorporateActionReviewConfig] = Field(
         default_factory=list
@@ -94,7 +96,11 @@ def load_project_config(root: str | Path) -> ProjectConfig:
         return read_yaml(root / "configs" / name) or {}
 
     project = read("project.yml")
-    project["sources"] = read("sources.yml")
+    sources = read("sources.yml")
+    project["sources"] = {
+        name: entry for name, entry in sources.items() if name != "data_contracts"
+    }
+    project["data_contracts"] = parse_data_contracts(sources.get("data_contracts"))
     project["costs"] = read("costs.yml")
     review_path = root / "configs" / "corporate_action_reviews.yml"
     project["corporate_action_reviews"] = (
