@@ -94,3 +94,26 @@ def test_project_config_carries_contracts():
         }
     )
     assert config.data_contracts["income"].tier == "anchored"
+
+
+_LAYOUTS = (
+    Path(__file__).resolve().parents[2]
+    / "project"
+    / "configs"
+    / "sources.yml",
+    Path(__file__).resolve().parents[2]
+    / "templates"
+    / "project-config"
+    / "sources.yml",
+)
+
+
+@pytest.mark.parametrize("layout", _LAYOUTS, ids=str)
+def test_backfill_covers_every_registered_table(layout: Path):
+    from stock_quant.data_model.dataset import STANDARDIZED_SCHEMAS
+    from stock_quant.safe_yaml import read_yaml
+
+    document = read_yaml(layout)
+    declared = set(parse_data_contracts(document.get("data_contracts")))
+    missing = sorted(set(STANDARDIZED_SCHEMAS) - declared)
+    assert not missing, f"registered tables without a contract: {missing}"

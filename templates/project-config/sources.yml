@@ -15,3 +15,86 @@ baostock:
 tdx:
   enabled: false
   timeout_seconds: 30
+# ---- Table-level data contracts (spec D2 / ADR-010) ----------------------- #
+# One declaration per published table.  The data_update publish path rejects
+# any published table without a declaration (unregistered_table FATAL).
+# tier: core / anchored / research_only (D1).  Tier changes happen ONLY via
+# this file + an ADR, never in code.
+# primary_transport: "<source>:<kind>" where kind is a transport token
+# (relay / official / proxy) - a transport reference, not a source name.
+# incremental: the per-table fetch-window strategy (D5/A3).
+data_contracts:
+  - table: daily_bar
+    tier: core
+    primary_transport: tushare:relay
+    anchors: []
+    conflict: downgrade
+    pit: null
+    coverage_shape: none
+    incremental: last_covered_plus_1
+  - table: adjusted_bar
+    tier: core
+    # Derived each update from daily_bar + corporate_action, full rebuild.
+    primary_transport: tushare:relay
+    anchors: []
+    conflict: block
+    pit: null
+    coverage_shape: none
+    incremental: change_driven_full
+  - table: security_master
+    tier: core
+    primary_transport: tushare:relay
+    anchors: []
+    conflict: block
+    pit: null
+    coverage_shape: none
+    incremental: last_covered_plus_1
+  - table: security_master_coverage
+    tier: core
+    primary_transport: tushare:relay
+    anchors: []
+    conflict: block
+    pit: null
+    coverage_shape: none
+    incremental: last_covered_plus_1
+  - table: corporate_action
+    tier: core
+    primary_transport: akshare:official
+    anchors: []
+    conflict: arbitrate
+    pit: null
+    coverage_shape: per_symbol_window
+    incremental: disclosure_calendar
+  - table: corporate_action_quarantine
+    tier: core
+    primary_transport: akshare:official
+    anchors: []
+    conflict: block
+    pit: null
+    coverage_shape: none
+    incremental: disclosure_calendar
+  - table: corporate_action_coverage
+    tier: core
+    primary_transport: akshare:official
+    anchors: []
+    conflict: block
+    pit: null
+    coverage_shape: none
+    incremental: disclosure_calendar
+  - table: trading_calendar
+    tier: core
+    primary_transport: tushare:relay
+    anchors: []
+    conflict: block
+    pit: null
+    coverage_shape: none
+    incremental: last_covered_plus_1
+  - table: universe_membership
+    tier: core
+    # Imported offline from sealed CSI snapshots; carried verbatim by updates.
+    primary_transport: csi:official
+    anchors: []
+    conflict: block
+    pit: null
+    coverage_shape: none
+    incremental: change_driven_full
