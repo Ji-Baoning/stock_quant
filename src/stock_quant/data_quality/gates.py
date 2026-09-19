@@ -27,6 +27,7 @@ from stock_quant.data_quality.models import (
     CODE_UNEXPLAINED_PRIMARY_GAP,
     CODE_UNKNOWN_ADJUSTMENT,
     CODE_UNKNOWN_SOURCE,
+    CODE_UNREGISTERED_TABLE,
     QualityReport,
 )
 
@@ -46,6 +47,10 @@ PUBLICATION_BLOCKING_CODES = frozenset(
         CODE_NEGATIVE_AMOUNT,
         CODE_UNKNOWN_SOURCE,
         CODE_UNKNOWN_ADJUSTMENT,
+        # Publish-path contract validation (spec D2): a table with no
+        # data_contracts declaration blocks unconditionally — from B1 on it
+        # joins the global process-code set.
+        CODE_UNREGISTERED_TABLE,
         CODE_QUARANTINE_MISSING_REASON,
         CODE_REPORT_GENERATION_FAILED,
         CODE_ADJUSTED_BAR_MISSING_RAW,

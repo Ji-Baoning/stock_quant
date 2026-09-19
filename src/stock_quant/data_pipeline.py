@@ -143,6 +143,7 @@ from stock_quant.data_quality.models import (
     CODE_ADJUSTED_BAR_UNKNOWN_ACTION,
     CODE_ADJUSTED_BAR_WRONG_BASIS,
     CODE_QUARANTINE_OUT_OF_WINDOW,
+    CODE_UNREGISTERED_TABLE,
     TABLE_CORPORATE_ACTION,
     QualityIssue,
     QualityReport,
@@ -852,21 +853,6 @@ class DataPipeline:
             check_primary_key_conflicts(adjusted, table="adjusted_bar")
         )
 
-        report = QualityReport(issues=tuple(issues))
-        decision = evaluate_publication(report)
-        fatal_present = any(
-            item.severity is Severity.FATAL for item in report.issues
-        )
-        if not decision.passed or fatal_present:
-            return self._result(
-                issues,
-                None,
-                run_id,
-                end,
-                statuses,
-                raw_snapshots,
-            )
-
         # ---- publish ---------------------------------------------------- #
         tables = {
             "daily_bar": new_daily,
@@ -893,6 +879,29 @@ class DataPipeline:
             tables[TABLE_UNIVERSE_MEMBERSHIP] = membership[
                 list(UNIVERSE_MEMBERSHIP_COLUMNS)
             ]
+
+        # Publish-path contract gate (spec D2): scoped to data_update by
+        # construction — bootstrap publishes through DatasetPublisher
+        # directly and never reaches update().
+        issues.extend(
+            _contract_issues(tables, self._project_config.data_contracts)
+        )
+
+        report = QualityReport(issues=tuple(issues))
+        decision = evaluate_publication(report)
+        fatal_present = any(
+            item.severity is Severity.FATAL for item in report.issues
+        )
+        if not decision.passed or fatal_present:
+            return self._result(
+                issues,
+                None,
+                run_id,
+                end,
+                statuses,
+                raw_snapshots,
+            )
+
         try:
             dataset_ref = DatasetPublisher(self._project_root).publish(
                 tables,
@@ -2831,6 +2840,19 @@ class _GuardedArbiter:
         except Exception as error:  # noqa: BLE001 - best-effort third opinion
             _warn_arbiter_failure(self._issues, cninfo.symbol, error)
             return None
+
+
+def _contract_issues(
+    tables: Mapping[str, object], contracts: Mapping[str, object]
+) -> list[QualityIssue]:
+    """FATAL ``unregistered_table`` for every table missing a D2 declaration."""
+    issues: list[QualityIssue] = []
+    for name in sorted(tables):
+        if name not in contracts:
+            issues.append(
+                _issue(Severity.FATAL, CODE_UNREGISTERED_TABLE, table=name)
+            )
+    return issues
 
 
 def _issue(

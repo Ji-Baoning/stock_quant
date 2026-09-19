@@ -73,6 +73,11 @@ CODE_UNEXPLAINED_PRIMARY_GAP = "unexplained_primary_gap"
 # the rule that excluded it (ADR-006).
 CODE_QUARANTINE_OUT_OF_WINDOW = "quarantine_out_of_window"
 
+# A published table without a data_contracts declaration (spec D2): the
+# publish path rejects it before staging, so any report carrying this code
+# names a dataset that must never reach the immutable store.
+CODE_UNREGISTERED_TABLE = "unregistered_table"
+
 # Missing-row classification labels, in classification precedence order.
 MISSING_NOT_LISTED = "not_listed"
 MISSING_DELISTED = "delisted"
