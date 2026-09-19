@@ -83,6 +83,10 @@ class Factor(Protocol):
     lookback: int
     required_fields: frozenset[str]
     frequency: str
+    #: Canonical table names this factor reads (spec A2).  Every factor must
+    #: declare its inputs; the research preflight rejects factors without a
+    #: declaration at spec load (fail-closed).
+    inputs: tuple[str, ...]
 
     def compute(self, context: FactorContext) -> FactorResult:
         """Compute the factor over ``context`` and return a validated result."""

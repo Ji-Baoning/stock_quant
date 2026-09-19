@@ -81,6 +81,7 @@ class Momentum60:
     required_fields = frozenset(
         {"adjusted_close", "quality_severity", "listed_trading_days"}
     )
+    inputs = ("adjusted_bar",)
 
     _STRUCTURAL_FIELDS = frozenset({"trade_date", "symbol", "source", "adjustment"})
 
