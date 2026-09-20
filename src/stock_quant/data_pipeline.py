@@ -73,6 +73,10 @@ from stock_quant.data_model.calendar_coverage import (
     supplier_span,
     validate_build_calendar_evidence,
 )
+from stock_quant.data_model.call_ledger import (
+    render_call_ledger,
+    write_call_ledger,
+)
 from stock_quant.data_model.corporate_action_coverage import (
     OUTCOME_FAILED,
     OUTCOME_SUCCESS_EMPTY,
@@ -540,6 +544,10 @@ class DataPipeline:
         self._sleeper = sleeper
         self._project_config = load_project_config(self._project_root)
         self._raw_store = RawStore(self._project_root)
+        # Source instances actually used by the running update (name ->
+        # instance), reset at the start of each ``update()``; the call ledger
+        # renders its per-source accounting from this at the end of the run.
+        self._sources_used: dict[str, DataSource] = {}
 
     # -- public surface --------------------------------------------------- #
 
@@ -641,6 +649,7 @@ class DataPipeline:
     def update(self, request: DataUpdateRequest) -> DataUpdateResult:
         """Run one gated, raw-preserving data update."""
         run_id = f"data_update_{uuid.uuid4().hex[:12]}"
+        self._sources_used = {}
         statuses: dict[str, SourceStatus] = {}
         issues: list[QualityIssue] = []
         raw_snapshots: list[RawSnapshot] = []
@@ -1165,6 +1174,13 @@ class DataPipeline:
                 statuses,
                 raw_snapshots,
             )
+        # Call ledger (spec D5.5): after a successful publish, persist the
+        # per-source endpoint x count accounting for this update run under
+        # ``data/runs/<run_id>/call_ledger.json``.  Only parameter shapes and
+        # endpoint names are ever recorded -- never credentials.
+        write_call_ledger(
+            self._project_root, run_id, render_call_ledger(self._active_sources())
+        )
         return self._result(
             issues,
             dataset_ref,
@@ -1325,10 +1341,11 @@ class DataPipeline:
     def _source(self, name: str) -> DataSource:
         override = self._overrides.get(name)
         if override is not None:
+            self._sources_used[name] = override
             return override
         config = self._project_config.sources[name]
         try:
-            return _build_source(name, config)
+            source = _build_source(name, config)
         except KeyError as error:
             raise AuthenticationError(
                 f"source {name!r} requires {error.args[0]} to be configured"
@@ -1337,6 +1354,17 @@ class DataPipeline:
             raise AuthenticationError(
                 f"cannot initialise source {name!r}: {translate_supplier_error(error)}"
             ) from None
+        self._sources_used[name] = source
+        return source
+
+    def _active_sources(self) -> dict[str, DataSource]:
+        """The source instances this update actually constructed or used.
+
+        Every access funnels through :meth:`_source` (overrides included), so
+        this is exactly the set the fetch stage touched; the call ledger is
+        rendered from it after a successful publish (spec D5.5).
+        """
+        return dict(self._sources_used)
 
     def _read_baseline(self, issues: list[QualityIssue]):
         """The carried master/calendar/daily/action/membership/quarantine state.

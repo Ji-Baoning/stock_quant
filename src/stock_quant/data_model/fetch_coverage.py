@@ -74,6 +74,29 @@ def to_build_config_payload(
     }
 
 
+def not_fetched_input_tables(
+    build_config: Mapping[str, object], input_tables: Sequence[str]
+) -> list[str]:
+    """Input tables whose pinned version carries NOT_FETCHED segments.
+
+    A version with skipped fetches is not a complete-fetch version; research
+    runs referencing such tables fail preflight and should pin a full-update
+    version instead (spec D5.3, sixth-round ruling).
+    """
+    coverage = build_config.get("table_fetch_coverage", {})
+    if not isinstance(coverage, dict):
+        return []
+    skipped: list[str] = []
+    for table in input_tables:
+        segments = coverage.get(table, [])
+        if isinstance(segments, list) and any(
+            isinstance(segment, Mapping) and segment.get("kind") == KIND_NOT_FETCHED
+            for segment in segments
+        ):
+            skipped.append(table)
+    return skipped
+
+
 def validate_table_fetch_coverage(
     payload: object,
     *,

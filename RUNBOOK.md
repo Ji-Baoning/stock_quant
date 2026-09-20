@@ -97,10 +97,12 @@ setsid nohup python -m stock_quant data update --start 2015-01-05 --root project
 - **`data update` 必须先刷新 tushare `stock_basic` 全市场快照**：该必需步骤刷新
   `security_master` 的上市事实并发布 `security_master_coverage`（每标的一行 = 研究冻结
   的证据）；拉取失败或快照缺某股票池标的 → 阻断发布。
-- 全区间再跑：`--start 2021-01-01 --end 2026-08-30`（= `configs/project.yml` 的
-  `start_date`/`end_date`；也可不给 --end，由"最新完整交易日 + 发布时间 15:00"
-  规则自动发现）。这是**数据更新**的范围，与实验规格的 `date_range` 无关：后者
-  逐字冻结自提交的规格文件，`freeze()` 从不改写它。
+- 全区间重取不再是例行命令：默认更新即按表契约增量取数（`incremental:`
+  字段决定每表取数窗）。需要全窗口重取时用季度漂移审计
+  （`python project/drift_audit.py --root .`）或离线战役
+  （`extend_history_offline.py` 先例）。不要再跑 `--start 2021-01-01
+  --end 2026-08-30`——显式窗口偏离契约取数窗时所有表跳过取数，只留下
+  NOT_FETCHED 记录（spec D5.2/F1）。
 
 ## 阶段 5 · 指数成分（csi300）证据导入与定义冻结（正式研究的前置）
 

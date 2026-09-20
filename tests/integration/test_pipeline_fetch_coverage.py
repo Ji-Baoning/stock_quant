@@ -240,3 +240,26 @@ def test_incremental_update_records_carried_and_fetched(tmp_path):
     carried = [s for s in segments if s["kind"] == "carried"][0]
     assert carried["window_start"] == BARS_START.isoformat()
     assert carried["window_end"] == _GEN1_END.isoformat()
+
+
+def test_update_writes_call_ledger(tmp_path):
+    """A published update persists the per-source call ledger (spec D5.5).
+
+    The ledger lands under ``data/runs/<run_id>/call_ledger.json`` only after
+    a successful publish, one row per source the update actually used.  The
+    stub suppliers expose no ``calls`` counter, so every row renders the
+    zero-call contract shape; endpoint names and parameter shapes are the
+    only things a real ledger records -- never credentials.
+    """
+    project = build_fixture_project(tmp_path / "project")
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(start_date=BARS_START, end_date=_GEN1_END)
+    )
+    assert result.dataset_ref is not None
+    path = project.root / "data" / "runs" / result.run_id / "call_ledger.json"
+    assert path.is_file()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload == {
+        name: {"calls": 0, "endpoints": {}}
+        for name in ("tushare", "akshare", "baostock")
+    }

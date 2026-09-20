@@ -19,9 +19,10 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import build_fixture_project
+from conftest import build_fixture_project, publish_fixture_acceptance
 
-from stock_quant.data_model.dataset import DatasetPublisher
+from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+from stock_quant.data_quality.models import QualityReport
 from stock_quant.factors.momentum import Momentum60
 from stock_quant.research.models import ResearchRunFailed
 from stock_quant.research.runner import ResearchRunner
@@ -191,3 +192,101 @@ def test_engineering_run_accepts_research_only_with_label(tmp_path):
         "industry_classify",
     ]
     assert published.manifest.dataset_version == project.version
+
+
+def _republish_with_not_fetched_adjusted_bar(project) -> str:
+    """Publish a successor version whose pinned fetch coverage skips the input.
+
+    The trusted fixture is re-published through the real publisher over the
+    same tables and provenance; only ``build_config.table_fetch_coverage``
+    changes: ``adjusted_bar`` (the momentum factor's declared input) carries
+    a single NOT_FETCHED segment with the operator-window reason, exactly the
+    shape an explicit-window update records (spec D5.2).  A fresh ACCEPTED
+    record is published over the successor so a RESEARCH run passes the
+    acceptance gate and reaches the table-tier preflight.
+    """
+    manifest = json.loads(
+        (project.root / "data" / "standardized" / project.version
+         / "dataset_manifest.json").read_text(encoding="utf-8")
+    )
+    build = dict(manifest["build_config"])
+    build["table_fetch_coverage"] = {
+        "adjusted_bar": [
+            {
+                "table": "adjusted_bar",
+                "kind": "not_fetched",
+                "window_start": (
+                    build.get("full_history_acceptance_start")
+                    or build["effective_start_date"]
+                ),
+                "window_end": build["resolved_end_date"],
+                "reason": "operator_explicit_window",
+            }
+        ]
+    }
+    reader = DatasetReader(project.root)
+    with reader.open(project.version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+    version = DatasetPublisher(project.root).publish(
+        tables, QualityReport(), build_config=build
+    ).version
+    publish_fixture_acceptance(project.root, version)
+    return version
+
+
+def test_research_run_rejects_not_fetched_input(tmp_path):
+    """A pinned version that skipped an input table fails RESEARCH preflight.
+
+    Sixth-round ruling (spec D5.3): a version with skipped fetches is not a
+    complete-fetch version, so a RESEARCH run whose factor input carries a
+    NOT_FETCHED segment is rejected at ``table_tiers`` with the stable
+    ``table_not_fetched`` code, exactly like a research_only input.
+    """
+    project = build_fixture_project(tmp_path / "project")
+    _republish_with_not_fetched_adjusted_bar(project)
+    runner = ResearchRunner(project.root)
+    with pytest.raises(ResearchRunFailed, match="table_tiers"):
+        runner.run("configs/experiments/momentum_60d.yml", trust_mode="research")
+    manifests = sorted(
+        (project.root / "data" / "runs").glob(
+            "run_preflight_*/table_tier_preflight.json"
+        )
+    )
+    assert len(manifests) == 1
+    payload = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert payload["failed"] is True
+    assert payload["mode"] == "research"
+    assert payload["violations"] == ["table_not_fetched"]
+    assert payload["not_fetched_tables"] == ["adjusted_bar"]
+    assert payload["label"] is None
+    state = runner.latest_run_manifest()
+    assert state.status == "FAILED"
+    assert state.failed_stage == "table_tiers"
+    assert DatasetPublisher(project.root).current().version != project.version
+    assert not runner.partial_experiment_exists()
+
+
+def test_engineering_run_labels_not_fetched_inputs(tmp_path):
+    """ENGINEERING is exempt from the NOT_FETCHED rejection but labeled.
+
+    The diagnostic replays the full pipeline over the skipped-fetch version
+    and its PASS preflight record labels it RESEARCH-ONLY with the skipped
+    input tables named (same exemption family as research_only usage).
+    """
+    project = build_fixture_project(tmp_path / "project")
+    version = _republish_with_not_fetched_adjusted_bar(project)
+    runner = ResearchRunner(project.root)
+    published = runner.run(
+        "configs/experiments/momentum_60d.yml", trust_mode="engineering"
+    )
+    record = json.loads(
+        (project.root / "data" / "runs" / runner.run_id
+         / "table_tier_preflight.json").read_text(encoding="utf-8")
+    )
+    assert record["failed"] is False
+    assert record["mode"] == "engineering"
+    assert record["violations"] == []
+    assert record["not_fetched_tables"] == ["adjusted_bar"]
+    assert record["engineering_exempt"] is True
+    assert record["label"] == "RESEARCH-ONLY"
+    assert published.manifest.dataset_version == version

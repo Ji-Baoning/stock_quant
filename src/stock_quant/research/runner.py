@@ -71,6 +71,7 @@ from stock_quant.data_model.dataset import (
     DatasetPublisher,
     DatasetReader,
 )
+from stock_quant.data_model.fetch_coverage import not_fetched_input_tables
 from stock_quant.data_model.security_master import missing_master_coverage_symbols
 from stock_quant.data_model.trading_rules import TradingRuleBook
 from stock_quant.data_model.universe import Universe
@@ -1158,10 +1159,13 @@ class ResearchRunner:
         """Route the run's factor input tables through the current tier policy.
 
         Returns the preflight summary (persisted with the run workspace on
-        ``_begin``): declared inputs, research-only usage and the engineering
-        exemption label.  Raises :class:`TableTierPreflightFailed` in RESEARCH
-        mode when any input table is research_only or untrusted-anchored, and
-        in either mode when a table has no declaration (spec A2 / D1).
+        ``_begin``): declared inputs, research-only usage, NOT_FETCHED input
+        tables and the engineering exemption label.  Raises
+        :class:`TableTierPreflightFailed` in RESEARCH mode when any input
+        table is research_only, untrusted-anchored or carries a NOT_FETCHED
+        segment in the pinned version's ``build_config.table_fetch_coverage``
+        (spec D5.3, sixth-round ruling), and in either mode when a table has
+        no declaration (spec A2 / D1).
         """
         contracts = self._project_config.data_contracts
         provider = self._factor_provider()
@@ -1198,13 +1202,37 @@ class ResearchRunner:
                 for item in report.get("issues", [])
                 if item.get("code") == CODE_COVERAGE_DOWNGRADED
             ]
+        # The pinned build_config carries the per-table fetch coverage (spec
+        # D5.2); a legacy manifest without the key simply has no NOT_FETCHED
+        # segments to route on.
+        manifest_path = (
+            self._project_root
+            / "data"
+            / "standardized"
+            / dataset_version
+            / "dataset_manifest.json"
+        )
+        manifest: Mapping[str, object] = {}
+        if manifest_path.is_file():
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, Mapping):
+                manifest = loaded
+        not_fetched = not_fetched_input_tables(
+            manifest.get("build_config", {}), input_tables
+        )
         violations = table_tier_violations(
             contracts, input_tables, downgrade_records, mode.value
         )
+        # NOT_FETCHED awareness (spec D5.3, sixth-round ruling): a pinned
+        # version that skipped fetching an input table is not a
+        # complete-fetch version -- RESEARCH runs fail closed on it;
+        # ENGINEERING is exempt and labeled with the research_only family.
+        engineering = mode is DataTrustMode.ENGINEERING
+        if not_fetched and not engineering:
+            violations.append("table_not_fetched")
         # ENGINEERING exempts research_only/untrusted-anchored inputs, so the
         # exemption label is judged against RESEARCH semantics: exempt exactly
         # when the same inputs would have been rejected under RESEARCH.
-        engineering = mode is DataTrustMode.ENGINEERING
         research_codes = (
             table_tier_violations(
                 contracts,
@@ -1215,9 +1243,15 @@ class ResearchRunner:
             if engineering
             else violations
         )
+        if engineering and not_fetched:
+            research_codes = [*research_codes, "table_not_fetched"]
         engineering_exempt = engineering and any(
             code in research_codes
-            for code in ("table_tier_research_only", "table_tier_untrusted")
+            for code in (
+                "table_tier_research_only",
+                "table_tier_untrusted",
+                "table_not_fetched",
+            )
         )
         summary: dict[str, object] = {
             "dataset_version": dataset_version,
@@ -1227,6 +1261,7 @@ class ResearchRunner:
                 getattr(contracts.get(table), "tier", None) == TIER_RESEARCH_ONLY
                 for table in input_tables
             ),
+            "not_fetched_tables": list(not_fetched),
             "engineering_exempt": engineering_exempt,
             "label": "RESEARCH-ONLY" if engineering_exempt else None,
             "violations": violations,

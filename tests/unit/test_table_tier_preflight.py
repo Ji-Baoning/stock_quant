@@ -124,3 +124,23 @@ def test_undeclared_input_table_fails_closed():
 
 def test_clean_anchored_passes_in_research_mode():
     assert table_tier_violations(CONTRACTS, ("income",), (), "research") == []
+
+
+def test_not_fetched_input_tables_detected():
+    from stock_quant.data_model.fetch_coverage import not_fetched_input_tables
+
+    build_config = {
+        "table_fetch_coverage": {
+            "daily_bar": [
+                {"table": "daily_bar", "kind": "not_fetched",
+                 "window_start": "2021-01-04", "window_end": "2026-08-28",
+                 "reason": "operator_explicit_window"},
+            ],
+            "income": [
+                {"table": "income", "kind": "fetched",
+                 "window_start": "2026-08-01", "window_end": "2026-08-28"},
+            ],
+        }
+    }
+    assert not_fetched_input_tables(build_config, ("income",)) == []
+    assert not_fetched_input_tables(build_config, ("daily_bar",)) == ["daily_bar"]
