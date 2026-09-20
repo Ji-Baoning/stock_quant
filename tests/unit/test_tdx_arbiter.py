@@ -443,9 +443,123 @@ def test_a_missing_package_is_an_unavailable_arbiter(monkeypatch):
         fetch_xdxr_frames(["600519.SH"])
 
 
-def test_the_shipped_config_keeps_the_arbiter_off():
-    """Enabling it changes published facts, so it must be an explicit act."""
-    root = Path(__file__).resolve().parents[2]
-    sources = yaml.safe_load((root / "project/configs/sources.yml").read_text())
+def test_the_shipped_config_ships_the_arbiter_on():
+    """Owner decision 2026-09-20: the arbiter ships enabled.
 
-    assert sources["tdx"]["enabled"] is False
+    It stays a third opinion, never a source: the channel is consulted
+    lazily, only where the two official sources disagree, and an absent or
+    unreachable channel degrades to the quarantined state (see the lazy
+    wrapper tests).
+    """
+    root = Path(__file__).resolve().parents[2]
+    for relative in (
+        "project/configs/sources.yml",
+        "templates/project-config/sources.yml",
+    ):
+        sources = yaml.safe_load((root / relative).read_text())
+        assert sources["tdx"]["enabled"] is True, relative
+
+
+# --------------------------------------------------------------------------- #
+# The lazy wrapper: the channel is touched only on an actual disagreement
+# --------------------------------------------------------------------------- #
+
+
+class _StubConfig:
+    timeout_seconds = 30
+
+
+def _lazy_arbiter(monkeypatch, outcome, calls, raw_snapshots, issues=None):
+    """A ``_LazyActionArbiter`` over a scripted ``fetch_xdxr_frames``."""
+    from stock_quant import data_pipeline
+
+    def fake_fetch(symbols, *, timeout=30.0, servers=None):
+        calls.extend(symbols)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return dict(outcome)
+
+    monkeypatch.setattr(data_pipeline, "fetch_xdxr_frames", fake_fetch)
+    return data_pipeline._LazyActionArbiter(
+        _StubConfig(),
+        date(2020, 1, 1),
+        date(2020, 12, 31),
+        issues=issues if issues is not None else [],
+        raw_snapshots=raw_snapshots,
+        record_raw=lambda result: result,
+    )
+
+
+def test_a_clean_round_never_touches_the_channel(monkeypatch):
+    """Agreeing sources mean zero TDX calls, whatever the shipped default."""
+    calls: list[str] = []
+    lazy = _lazy_arbiter(monkeypatch, {"600519.SH": _xdxr()}, calls, [])
+
+    result = normalize_corporate_actions(
+        _cninfo(cash_per_10=1.0),
+        _eastmoney(cash_per_10=1.0),
+        arbiter=_GuardedArbiter(lazy, []),
+    )
+
+    assert calls == []
+    assert not result.accepted.empty
+
+
+def test_a_conflict_fetches_its_symbol_once_and_records_the_frame(monkeypatch):
+    """One disputed symbol costs exactly one fetch, cached for later keys."""
+    calls: list[str] = []
+    raw: list = []
+    lazy = _lazy_arbiter(
+        monkeypatch,
+        {"600519.SH": _xdxr(fenhong=_tdx_sends(14.0))},
+        calls,
+        raw,
+    )
+    guarded = _GuardedArbiter(lazy, [])
+
+    first = normalize_corporate_actions(
+        _cninfo(cash_per_10=14.0),
+        _eastmoney(cash_per_10=15.0),
+        arbiter=guarded,
+    )
+    second = normalize_corporate_actions(
+        _cninfo(cash_per_10=14.0),
+        _eastmoney(cash_per_10=15.0),
+        arbiter=guarded,
+    )
+
+    assert calls == ["600519.SH"]
+    assert len(raw) == 1
+    assert first.accepted.iloc[0]["confirmed_by"] == "cninfo+tdx"
+    assert second.accepted.iloc[0]["confirmed_by"] == "cninfo+tdx"
+
+
+def test_an_unreachable_channel_degrades_once_per_symbol(monkeypatch):
+    """The fail-closed direction: unreachable TDX leaves conflicts quarantined."""
+    calls: list[str] = []
+    issues: list = []
+    lazy = _lazy_arbiter(
+        monkeypatch,
+        TdxUnavailableError("channel down"),
+        calls,
+        [],
+        issues=issues,
+    )
+    guarded = _GuardedArbiter(lazy, issues)
+
+    first = normalize_corporate_actions(
+        _cninfo(cash_per_10=1.0),
+        _eastmoney(cash_per_10=2.0),
+        arbiter=guarded,
+    )
+    second = normalize_corporate_actions(
+        _cninfo(cash_per_10=1.0),
+        _eastmoney(cash_per_10=2.0),
+        arbiter=guarded,
+    )
+
+    assert calls == ["600519.SH"]
+    assert first.accepted.empty and len(first.quarantined) == 2
+    assert second.accepted.empty and len(second.quarantined) == 2
+    assert len(issues) == 1
+    assert issues[0].details["symbol"] == "600519.SH"

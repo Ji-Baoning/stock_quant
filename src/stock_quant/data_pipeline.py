@@ -2215,18 +2215,21 @@ class DataPipeline:
     def _build_action_arbiter(self, symbols, start, end, issues, raw_snapshots):
         """Build the ADR-007 conflict arbiter, or ``None`` when it is off.
 
-        The arbiter is off unless ``sources.yml`` enables ``tdx``.  It is a
-        third opinion, never a source: it is not in
+        The arbiter is off unless ``sources.yml`` enables ``tdx`` (the shipped
+        default).  It is a third opinion, never a source: it is not in
         ``CORPORATE_ACTION_ENDPOINTS``, it adds no name to
         ``_CONFIGURED_SOURCES``, it is never consulted where the two official
         sources already agree, and it yields to any conflict an owner has
         signed off on (see ``_GuardedArbiter``).
 
-        Its responses are written as raw snapshots through the same
-        content-addressed store as every supplier, so what arbitrated a rebuild
-        is reproducible from bytes rather than from a later answer.  Failing to
-        obtain them leaves every conflict quarantined -- the state a disabled
-        arbiter produces -- and is recorded as a warning.
+        The TDX channel is touched lazily: only a symbol with an actual
+        cross-source disagreement costs a fetch, so a clean round makes no
+        arbiter call at all.  Its responses are written as raw snapshots
+        through the same content-addressed store as every supplier, so what
+        arbitrated a rebuild is reproducible from bytes rather than from a
+        later answer.  Failing to obtain them leaves that symbol's conflicts
+        quarantined -- the state a disabled arbiter produces -- and is
+        recorded as a warning.
         """
         config = self._project_config.sources.get(ARBITER_NAME)
         if config is None or not config.enabled:
@@ -2236,28 +2239,15 @@ class DataPipeline:
             for review in self._project_config.corporate_action_reviews
             if start <= review.ex_date <= end
         }
-        try:
-            frames = fetch_xdxr_frames(
-                list(symbols), timeout=float(config.timeout_seconds)
-            )
-        except Exception as error:  # noqa: BLE001 - best-effort third opinion
-            _warn_arbiter_failure(issues, None, error)
-            return None
-        for symbol, frame in sorted(frames.items()):
-            raw_snapshots.append(
-                self._record_raw(
-                    FetchResult(
-                        source=ARBITER_NAME,
-                        endpoint=XDXR_ENDPOINT,
-                        request_key=request_key(
-                            DataRequest(XDXR_ENDPOINT, (symbol,), start, end)
-                        ),
-                        frame=frame,
-                        metadata={"transport_id": ARBITER_NAME},
-                    )
-                )
-            )
-        return _GuardedArbiter(TdxXdxrArbiter.from_frames(frames), issues, reviewed)
+        lazy = _LazyActionArbiter(
+            config,
+            start,
+            end,
+            issues=issues,
+            raw_snapshots=raw_snapshots,
+            record_raw=self._record_raw,
+        )
+        return _GuardedArbiter(lazy, issues, reviewed)
 
     def _reconcile_action_frames(
         self,
@@ -3169,6 +3159,76 @@ def _warn_arbiter_failure(issues, symbol, error) -> None:
             },
         )
     )
+
+
+class _LazyActionArbiter:
+    """Fetch the TDX opinion for a disputed symbol on first need.
+
+    The arbiter is consulted only on a cross-source disagreement, so a clean
+    round never touches the TDX channel at all.  A symbol's xdxr frame is
+    fetched the first time one of its conflicts needs arbitration, recorded
+    as a raw snapshot through the same content-addressed store as every
+    supplier, and cached for the symbol's later keys.  Anything the channel
+    raises degrades to "no arbitration" for that symbol -- the same outcome a
+    disabled arbiter produces -- is recorded as a warning, and is not retried
+    within the run.
+    """
+
+    def __init__(
+        self,
+        config: SourceConfig,
+        start: date,
+        end: date,
+        *,
+        issues: list[QualityIssue],
+        raw_snapshots: list[RawSnapshot],
+        record_raw: Any,
+    ) -> None:
+        self._config = config
+        self._start = start
+        self._end = end
+        self._issues = issues
+        self._raw_snapshots = raw_snapshots
+        self._record_raw = record_raw
+        self._frames: dict[str, pd.DataFrame] = {}
+        self._failed: set[str] = set()
+        self.name = ARBITER_NAME
+
+    def arbitrate(self, cninfo: Any, eastmoney: Any) -> str | None:
+        symbol = str(cninfo.symbol)
+        if symbol not in self._frames:
+            if symbol in self._failed:
+                return None
+            try:
+                frames = fetch_xdxr_frames(
+                    [symbol], timeout=float(self._config.timeout_seconds)
+                )
+            except Exception as error:  # noqa: BLE001 - best-effort third opinion
+                _warn_arbiter_failure(self._issues, symbol, error)
+                self._failed.add(symbol)
+                return None
+            frame = frames.get(symbol)
+            if frame is None or frame.empty:
+                self._frames[symbol] = frame if frame is not None else pd.DataFrame()
+            else:
+                self._frames[symbol] = frame
+                self._raw_snapshots.append(
+                    self._record_raw(
+                        FetchResult(
+                            source=ARBITER_NAME,
+                            endpoint=XDXR_ENDPOINT,
+                            request_key=request_key(
+                                DataRequest(
+                                    XDXR_ENDPOINT, (symbol,), self._start, self._end
+                                )
+                            ),
+                            frame=frame,
+                            metadata={"transport_id": ARBITER_NAME},
+                        )
+                    )
+                )
+        arbiter = TdxXdxrArbiter.from_frames({symbol: self._frames[symbol]})
+        return arbiter.arbitrate(cninfo, eastmoney)
 
 
 class _GuardedArbiter:

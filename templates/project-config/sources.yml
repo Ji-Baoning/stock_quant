@@ -10,10 +10,13 @@ baostock:
   enabled: false
   timeout_seconds: 30
   max_retries: 3
-# Corporate-action conflict arbiter, not a source (ADR-007).  Off by default;
-# needs the optional pytdxdata package.  See project/configs/sources.yml.
+# Corporate-action conflict arbiter, not a source (ADR-007).  Shipped on
+# (owner decision 2026-09-20): it is consulted lazily, only where the two
+# official sources disagree, and a clean round makes no TDX call; absent
+# pytdxdata or an unreachable channel leaves conflicts quarantined with a
+# WARNING.  See project/configs/sources.yml.
 tdx:
-  enabled: false
+  enabled: true
   timeout_seconds: 30
 # ---- Table-level data contracts (spec D2 / ADR-010) ----------------------- #
 # One declaration per published table.  The data_update publish path rejects
