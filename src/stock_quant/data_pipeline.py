@@ -335,6 +335,7 @@ def dataset_build_config(
     acceptance_start: date | None,
     definition_hashes: Mapping[str, str],
     skipped_definitions: Sequence[str],
+    table_fetch_coverage: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """The exact sanitized payload hashed into a published dataset version.
 
@@ -344,9 +345,11 @@ def dataset_build_config(
     evidence keys (``calendar_coverage`` and siblings) are the shape marker
     for the build-config contract: ``DATASET_BUILD_CONTRACT_VERSION`` stays
     ``1`` on purpose, so a manifest without ``calendar_coverage`` is a legacy
-    payload read compatibly but never accepted as fully evidenced.
+    payload read compatibly but never accepted as fully evidenced.  When
+    supplied, ``table_fetch_coverage`` records which history segments this
+    build re-fetched, carried from the baseline, or skipped (spec D5.3).
     """
-    return {
+    config = {
         "origin": "data_update",
         "pipeline_contract_version": DATASET_BUILD_CONTRACT_VERSION,
         "run_id": run_id,
@@ -367,6 +370,9 @@ def dataset_build_config(
         DEFINITION_HASHES_KEY: dict(definition_hashes),
         SKIPPED_DEFINITIONS_KEY: list(skipped_definitions),
     }
+    if table_fetch_coverage:
+        config["table_fetch_coverage"] = dict(table_fetch_coverage)
+    return config
 
 
 def _calendar_open_days(calendar_frame: pd.DataFrame) -> tuple[date, ...]:
