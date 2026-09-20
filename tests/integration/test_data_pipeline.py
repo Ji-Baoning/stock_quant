@@ -1274,9 +1274,13 @@ def test_rerun_merges_adjacent_relay_spans_and_keeps_every_snapshot_hash(project
         for exchange, hashes in before[0]["snapshot_sha256s"].items()
     }
     extended_end = CAL_END + timedelta(days=20)
+    # B2 F1: the fetch contract plans each table from the recorded lineage's
+    # end + 1; an explicit start past that plan is an operator narrowing and
+    # records not_fetched instead of fetching.  The adjacent extension
+    # therefore requests exactly the planned start.
     second = DataPipeline(project.root, sources=_all_stubs()).update(
         DataUpdateRequest(
-            start_date=CAL_END + timedelta(days=1), end_date=extended_end
+            start_date=_WINDOW_END + timedelta(days=1), end_date=extended_end
         )
     )
     assert second.dataset_ref is not None
