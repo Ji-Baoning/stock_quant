@@ -104,6 +104,17 @@ from stock_quant.data_model.dataset import (
     DatasetReader,
     PublicationBlocked,
 )
+from stock_quant.data_model.fetch_coverage import (
+    KIND_CARRIED,
+    KIND_FETCHED,
+    KIND_NOT_FETCHED,
+    FetchSegment,
+    to_build_config_payload,
+)
+from stock_quant.data_model.fetch_windows import (
+    FetchWindowPlan,
+    plan_table_fetch_windows,
+)
 from stock_quant.data_model.normalize import normalize_daily
 from stock_quant.data_model.schemas import (
     ADJUSTED_BAR_SCHEMA,
@@ -209,6 +220,9 @@ CODE_ADJUSTED_BAR_MISSING_FROM_DATASET = "adjusted_bar_missing_from_dataset"
 
 #: Canonical standardized table holding untrusted corporate-action rows.
 TABLE_CORPORATE_ACTION_QUARANTINE = "corporate_action_quarantine"
+
+#: Canonical standardized table holding corporate-action evidence rows.
+TABLE_CORPORATE_ACTION_COVERAGE = "corporate_action_coverage"
 
 #: Contract version of the sanitized ``build_config`` this pipeline writes into
 #: every published dataset manifest (and which is hashed into the version id).
@@ -321,6 +335,54 @@ def _raw_snapshot_evidence_rows(
         )
         unique[key] = row
     return [unique[key] for key in sorted(unique)]
+
+
+def _recorded_fetch_spans(payload: object) -> dict[str, tuple[date, date]]:
+    """The per-table span the baseline's fetch coverage recorded.
+
+    Each table's span is the union of its ``fetched``/``carried`` segments;
+    ``not_fetched`` segments cover nothing by design.  A baseline that
+    predates the coverage record (or a table it skipped) yields no span, so
+    ``last_covered_plus_1`` planning continues from the window anchor and an
+    explicit full-window update re-fetches its window exactly as before the
+    record existed.
+    """
+    if not isinstance(payload, Mapping):
+        return {}
+    spans: dict[str, tuple[date, date]] = {}
+    for table, segments in payload.items():
+        if not isinstance(segments, list):
+            continue
+        low = high = None
+        for segment in segments:
+            if not isinstance(segment, Mapping):
+                continue
+            if segment.get("kind") == KIND_NOT_FETCHED:
+                continue
+            try:
+                start = date.fromisoformat(str(segment["window_start"]))
+                end = date.fromisoformat(str(segment["window_end"]))
+            except (KeyError, ValueError, TypeError):
+                continue
+            low = start if low is None else min(low, start)
+            high = end if high is None else max(high, end)
+        if low is not None and high is not None and low <= high:
+            spans[str(table)] = (low, high)
+    return spans
+
+
+def _plan_skips_fetch(plan: object, end: date) -> bool:
+    """True when one table's plan leaves nothing to fetch this round.
+
+    Either the contract window was skipped by the operator's explicit window
+    (``not_fetched``, F1), or the plan starts past the resolved end because
+    the baseline already covers the whole request (nothing left to fetch).
+    """
+    if not isinstance(plan, FetchWindowPlan):
+        return False
+    if plan.kind == KIND_NOT_FETCHED or plan.window_start is None:
+        return True
+    return plan.window_start > end
 
 
 def dataset_build_config(
@@ -608,7 +670,11 @@ class DataPipeline:
             membership,
             current_quarantine,
             baseline_spans,
+            fetch_coverage,
         ) = baseline
+        recorded_spans, carried_master_coverage, carried_ca_coverage = (
+            fetch_coverage
+        )
         issues.extend(self._universe_master_issues(master))
 
         # ---- universe definitions: a config fault, read before any fetch -- #
@@ -677,128 +743,192 @@ class DataPipeline:
                 issues, None, run_id, end, statuses, raw_snapshots
             )
 
+        # ---- per-table fetch windows (spec A3 / D5.2) ------------------- #
+        # The validation/merge window above stays exactly as computed -- the
+        # fetch calls below follow each table's contract strategy instead.
+        # ``last_covered_plus_1`` continues from the span the baseline
+        # recorded in its own fetch coverage; a baseline that predates the
+        # record continues from the window anchor, so an explicit full-window
+        # update re-fetches its window as before the record existed.
+        plans = plan_table_fetch_windows(
+            self._project_config.data_contracts,
+            baseline_covered=recorded_spans,
+            request_start=request.start_date,
+            request_end=request.end_date,
+            anchor_start=start,
+            latest_open_day=end,
+        )
+
         # ---- required trading-calendar refresh --------------------------- #
         # Runs before every other fetch so a calendar failure blocks the run
         # before any window data is pulled, and so the whole update publishes
-        # as one atomic unit with its calendar evidence.
-        refreshed = self._refresh_calendar(
-            start,
-            end,
-            published_open_days,
-            issues,
-            statuses,
-            raw_snapshots,
-            baseline_spans,
-        )
-        if refreshed is None:
-            return self._result(
-                issues, None, run_id, end, statuses, raw_snapshots
+        # as one atomic unit with its calendar evidence.  A skipped contract
+        # window carries the published calendar and its spans unchanged.
+        calendar_plan = plans.get("trading_calendar")
+        if _plan_skips_fetch(calendar_plan, end):
+            calendar_open, calendar_spans = published_open_days, baseline_spans
+        else:
+            refreshed = self._refresh_calendar(
+                (
+                    calendar_plan.window_start
+                    if calendar_plan is not None
+                    else start
+                ),
+                end,
+                published_open_days,
+                issues,
+                statuses,
+                raw_snapshots,
+                baseline_spans,
             )
-        calendar_open, calendar_spans = refreshed
+            if refreshed is None:
+                return self._result(
+                    issues, None, run_id, end, statuses, raw_snapshots
+                )
+            calendar_open, calendar_spans = refreshed
 
         # ---- required security-master reference (tushare stock_basic) ----- #
-        master, master_coverage = self._refresh_security_master(
-            start, end, issues, statuses, raw_snapshots, master,
-        )
-        if master is None:
-            return self._result(
-                issues, None, run_id, end, statuses, raw_snapshots,
+        master_plan = plans.get("security_master")
+        if _plan_skips_fetch(master_plan, end):
+            master_coverage = carried_master_coverage
+        else:
+            master, master_coverage = self._refresh_security_master(
+                (
+                    master_plan.window_start
+                    if master_plan is not None
+                    else start
+                ),
+                end,
+                issues,
+                statuses,
+                raw_snapshots,
+                master,
             )
+            if master is None:
+                return self._result(
+                    issues, None, run_id, end, statuses, raw_snapshots,
+                )
 
         # ---- required primary stock daily ------------------------------- #
         equity_symbols = _equity_symbols(master)
         primary_rows: list[pd.DataFrame] = []
         primary_dates: set[tuple[str, date]] = set()
         raw_daily_frames: dict[str, pd.DataFrame] = {}
-        fatal = self._fetch_primary_stock(
-            enabled,
-            equity_symbols,
-            start,
-            end,
-            issues,
-            statuses,
-            raw_snapshots,
-            primary_rows,
-            primary_dates,
-            raw_daily_frames,
+        daily_plan = plans.get("daily_bar")
+        daily_skipped = _plan_skips_fetch(daily_plan, end)
+        daily_start = (
+            daily_plan.window_start
+            if daily_plan is not None and daily_plan.window_start is not None
+            else start
         )
-        if fatal:
-            return self._result(
-                issues,
-                None,
-                run_id,
+        if not daily_skipped:
+            fatal = self._fetch_primary_stock(
+                enabled,
+                equity_symbols,
+                daily_start,
                 end,
+                issues,
                 statuses,
                 raw_snapshots,
+                primary_rows,
+                primary_dates,
+                raw_daily_frames,
             )
+            if fatal:
+                return self._result(
+                    issues,
+                    None,
+                    run_id,
+                    end,
+                    statuses,
+                    raw_snapshots,
+                )
 
-        # ---- proof-only pre-window anchors ------------------------------ #
-        # Runs before _materialize_suspensions reads the raw frames, and after
-        # the primary fetch whose responses it deepens.
-        self._deepen_head_anchors(
-            enabled,
-            equity_symbols,
-            master,
-            calendar_open,
-            start,
-            end,
-            issues,
-            statuses,
-            raw_snapshots,
-            raw_daily_frames,
-        )
-
-        # ---- required benchmark history --------------------------------- #
-        benchmark_symbols = tuple(self._project_config.benchmark_symbols)
-        benchmark_rows: list[pd.DataFrame] = []
-        benchmark_dates: set[date] = set()
-        fatal = self._fetch_benchmarks(
-            enabled,
-            benchmark_symbols,
-            start,
-            end,
-            issues,
-            statuses,
-            raw_snapshots,
-            benchmark_rows,
-            benchmark_dates,
-        )
-        if fatal:
-            return self._result(
-                issues,
-                None,
-                run_id,
+            # ---- proof-only pre-window anchors -------------------------- #
+            # Runs before _materialize_suspensions reads the raw frames, and
+            # after the primary fetch whose responses it deepens.
+            self._deepen_head_anchors(
+                enabled,
+                equity_symbols,
+                master,
+                calendar_open,
+                daily_start,
                 end,
+                issues,
                 statuses,
                 raw_snapshots,
+                raw_daily_frames,
             )
+
+            # ---- required benchmark history ----------------------------- #
+            benchmark_symbols = tuple(self._project_config.benchmark_symbols)
+            benchmark_rows: list[pd.DataFrame] = []
+            benchmark_dates: set[date] = set()
+            fatal = self._fetch_benchmarks(
+                enabled,
+                benchmark_symbols,
+                daily_start,
+                end,
+                issues,
+                statuses,
+                raw_snapshots,
+                benchmark_rows,
+                benchmark_dates,
+            )
+            if fatal:
+                return self._result(
+                    issues,
+                    None,
+                    run_id,
+                    end,
+                    statuses,
+                    raw_snapshots,
+                )
+        else:
+            # Nothing to fetch: the baseline daily table is carried untouched
+            # and no benchmark lane runs, so ``_missing_issues`` sees an empty
+            # grid and never re-judges carried history (spec D5.2).
+            benchmark_symbols = tuple(self._project_config.benchmark_symbols)
+            benchmark_rows: list[pd.DataFrame] = []
+            benchmark_dates: set[date] = set()
 
         # ---- best-effort corporate actions ------------------------------ #
         corporate_action = current_ca
         corporate_action_quarantine = current_quarantine
         coverage = coverage_frame([])
         if "akshare" in enabled:
-            corporate_action, coverage, corporate_action_quarantine = (
-                self._refresh_corporate_actions(
-                    enabled,
-                    equity_symbols,
-                    start,
-                    end,
-                    issues,
-                    statuses,
-                    raw_snapshots,
-                    current_ca,
-                    current_quarantine,
+            ca_plan = plans.get("corporate_action")
+            if _plan_skips_fetch(ca_plan, end):
+                # The disclosure-calendar contract window was skipped: the
+                # baseline's coverage evidence stands in for the skipped
+                # refresh so the publish never loses it (spec D5.2).
+                coverage = carried_ca_coverage
+            else:
+                corporate_action, coverage, corporate_action_quarantine = (
+                    self._refresh_corporate_actions(
+                        enabled,
+                        equity_symbols,
+                        (
+                            ca_plan.window_start
+                            if ca_plan is not None
+                            else start
+                        ),
+                        end,
+                        issues,
+                        statuses,
+                        raw_snapshots,
+                        current_ca,
+                        current_quarantine,
+                    )
                 )
-            )
 
         # ---- optional validation daily ---------------------------------- #
         validation_rows: list[pd.DataFrame] = []
-        if "baostock" in enabled:
+        if "baostock" in enabled and not daily_skipped:
             self._fetch_validation_daily(
                 enabled,
                 equity_symbols,
-                start,
+                daily_start,
                 end,
                 issues,
                 statuses,
@@ -821,16 +951,21 @@ class DataPipeline:
             issues,
             ingested,
         )
-        new_daily = self._merge_daily(
-            current_daily,
-            primary_rows,
-            benchmark_rows,
-            equity_symbols,
-            benchmark_symbols,
-            start,
-            end,
-            ingested,
-        )
+        if daily_skipped:
+            # Carried forward untouched: the fetch window was empty, so no
+            # baseline row inside the request window is replaced.
+            new_daily = current_daily
+        else:
+            new_daily = self._merge_daily(
+                current_daily,
+                primary_rows,
+                benchmark_rows,
+                equity_symbols,
+                benchmark_symbols,
+                daily_start,
+                end,
+                ingested,
+            )
         issues.extend(check_schema(new_daily, DAILY_SCHEMA, table="daily_bar"))
         issues.extend(check_primary_key_conflicts(new_daily, table="daily_bar"))
         issues.extend(check_daily_values(new_daily, table="daily_bar"))
@@ -898,6 +1033,69 @@ class DataPipeline:
             _contract_issues(tables, self._project_config.data_contracts)
         )
 
+        # Per-table fetch-coverage evidence (spec D5.3): ``fetched`` segments
+        # are the contract windows actually requested this round, ``carried``
+        # segments chain the span the baseline recorded, and a table whose
+        # contract window the operator's explicit window skipped records the
+        # skip with its reason.  Segments are scoped to the review window's
+        # acceptance anchor, matching the offline check's window (ADR-011).
+        acceptance_anchor = criterion.acceptance_start
+        fetch_segments: dict[str, list[FetchSegment]] = {}
+        for table, plan in sorted(plans.items()):
+            if plan.kind == KIND_NOT_FETCHED:
+                low = (
+                    max(start, acceptance_anchor)
+                    if acceptance_anchor is not None
+                    else start
+                )
+                fetch_segments[table] = [
+                    FetchSegment(
+                        table,
+                        KIND_NOT_FETCHED,
+                        min(low, end),
+                        end,
+                        reason=plan.reason,
+                    )
+                ]
+                continue
+            covered = recorded_spans.get(table)
+            if _plan_skips_fetch(plan, end):
+                if covered is not None:
+                    low = (
+                        max(covered[0], acceptance_anchor)
+                        if acceptance_anchor is not None
+                        else covered[0]
+                    )
+                    high = min(covered[1], end)
+                    if low <= high:
+                        fetch_segments[table] = [
+                            FetchSegment(table, KIND_CARRIED, low, high)
+                        ]
+                continue
+            segments: list[FetchSegment] = []
+            if covered is not None and covered[0] < plan.window_start:
+                low = (
+                    max(covered[0], acceptance_anchor)
+                    if acceptance_anchor is not None
+                    else covered[0]
+                )
+                high = min(
+                    covered[1], plan.window_start - timedelta(days=1)
+                )
+                if low <= high:
+                    segments.append(
+                        FetchSegment(table, KIND_CARRIED, low, high)
+                    )
+            fetched_start = plan.window_start
+            if acceptance_anchor is not None:
+                fetched_start = max(fetched_start, acceptance_anchor)
+            if fetched_start <= end:
+                segments.append(
+                    FetchSegment(table, KIND_FETCHED, fetched_start, end)
+                )
+            if segments:
+                fetch_segments[table] = segments
+
         report = QualityReport(issues=tuple(issues))
         # Declared tiers are computed once and reused by the gate, the
         # downgrade pass and the publish call (spec D1 / ADR-010).
@@ -945,6 +1143,9 @@ class DataPipeline:
                     acceptance_start=criterion.acceptance_start,
                     definition_hashes=criterion.definition_hashes,
                     skipped_definitions=criterion.skipped,
+                    table_fetch_coverage=to_build_config_payload(
+                        fetch_segments
+                    ),
                 ),
                 table_tiers=table_tiers,
             )
@@ -1141,15 +1342,20 @@ class DataPipeline:
         """The carried master/calendar/daily/action/membership/quarantine state.
 
         Returns ``(master, open_days, daily, ca, membership, quarantine,
-        baseline_spans)``, or ``None`` after a FATAL issue when no dataset
-        exists yet.  The immutable ``universe_membership`` raw table is
-        carried too when the baseline dataset already has one (older datasets
-        simply update without it), and a pre-migration dataset without a
+        baseline_spans, fetch_coverage)`` where ``fetch_coverage`` is the
+        pair of (recorded per-table spans, carried evidence frames), or
+        ``None`` after a FATAL issue when no dataset exists yet.  The
+        immutable ``universe_membership`` raw table is carried too when the
+        baseline dataset already has one (older datasets simply update
+        without it), and a pre-migration dataset without a
         ``corporate_action_quarantine`` table yields an empty canonical frame
-        so it stays updatable.  ``baseline_spans`` parses the manifest's
-        ``calendar_coverage`` evidence; a legacy manifest without the key
-        yields no spans and the publish-time span gate then requires this
-        window to cover the whole published calendar range.
+        so it stays updatable.  The carried ``security_master_coverage`` /
+        ``corporate_action_coverage`` frames stand in for a skipped refresh
+        so a carried-forward publish never loses its evidence (spec D5.2).
+        ``baseline_spans`` parses the manifest's ``calendar_coverage``
+        evidence; a legacy manifest without the key yields no spans and the
+        publish-time span gate then requires this window to cover the whole
+        published calendar range.
         """
         try:
             ref = DatasetPublisher(self._project_root).current()
@@ -1188,15 +1394,46 @@ class DataPipeline:
                 quarantine = pd.DataFrame(
                     columns=CORPORATE_ACTION_QUARANTINE_COLUMNS
                 )
+            master_coverage = (
+                context.read("security_master_coverage")
+                if "security_master_coverage" in context.tables
+                else None
+            )
+            ca_coverage = (
+                context.read(TABLE_CORPORATE_ACTION_COVERAGE)
+                if TABLE_CORPORATE_ACTION_COVERAGE in context.tables
+                else None
+            )
         open_days = _calendar_open_days(calendar_frame)
         build = manifest.get("build_config") if isinstance(manifest, Mapping) else None
         raw_spans = build.get(COVERAGE_KEY, []) if isinstance(build, Mapping) else []
+        recorded_fetch = (
+            build.get("table_fetch_coverage")
+            if isinstance(build, Mapping)
+            else None
+        )
         try:
             spans = coverage_from_payload(raw_spans)
         except CalendarCoverageError as error:
             issues.extend(_calendar_issues(error.violations))
             return None
-        return master, open_days, daily, ca, membership, quarantine, spans
+        fetch_coverage = (
+            _recorded_fetch_spans(recorded_fetch),
+            master_coverage
+            if master_coverage is not None
+            else master_coverage_frame([]),
+            ca_coverage if ca_coverage is not None else coverage_frame([]),
+        )
+        return (
+            master,
+            open_days,
+            daily,
+            ca,
+            membership,
+            quarantine,
+            spans,
+            fetch_coverage,
+        )
 
     def _require_available(
         self,

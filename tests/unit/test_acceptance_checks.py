@@ -22,6 +22,7 @@ import pytest
 
 from stock_quant.research.acceptance.checks import (
     AcceptanceCheckInput,
+    _check_table_fetch_coverage,
     _open_days,
     dataset_evidence,
     run_automated_checks,
@@ -205,3 +206,103 @@ def test_dataset_evidence_rejects_escaping_table_path(tmp_path):
     (dataset / "quality_report.json").write_text("{}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="escapes the dataset directory"):
         dataset_evidence(_input(tmp_path))
+
+
+# --------------------------------------------------------------------------- #
+# table_fetch_coverage_evidence (B2/T13)
+# --------------------------------------------------------------------------- #
+
+
+def _write_build_manifest(tmp_path: Path, build: dict) -> None:
+    dataset = _write_dataset(
+        tmp_path,
+        {
+            "dataset_version": "a" * 64,
+            "tables": {},
+            "build_config": build,
+        },
+    )
+    (dataset / "quality_report.json").write_text("{}\n", encoding="utf-8")
+
+
+# The check is exercised directly: ``run_automated_checks`` over a bare
+# evidence tree escapes through ``_check_quality_report``'s project-config
+# load (a config fault is a programming error by policy), so the runner-level
+# path belongs to the integration suite over real fixture projects.
+
+
+def test_table_fetch_coverage_evidence_passes_contiguous_payload(tmp_path):
+    _write_build_manifest(
+        tmp_path,
+        {
+            "origin": "data_update",
+            "full_history_acceptance_start": "2021-11-01",
+            "resolved_end_date": "2021-11-30",
+            "table_fetch_coverage": {
+                "daily_bar": [
+                    {
+                        "table": "daily_bar",
+                        "kind": "carried",
+                        "window_start": "2021-11-01",
+                        "window_end": "2021-11-29",
+                    },
+                    {
+                        "table": "daily_bar",
+                        "kind": "fetched",
+                        "window_start": "2021-11-30",
+                        "window_end": "2021-11-30",
+                    },
+                ]
+            },
+        },
+    )
+    check = _check_table_fetch_coverage(_input(tmp_path))
+    assert check.status is CheckStatus.PASS
+
+
+def test_table_fetch_coverage_evidence_fails_without_payload(tmp_path):
+    _write_build_manifest(
+        tmp_path,
+        {
+            "origin": "data_update",
+            "full_history_acceptance_start": "2021-11-01",
+            "resolved_end_date": "2021-11-30",
+        },
+    )
+    check = _check_table_fetch_coverage(_input(tmp_path))
+    assert check.status is CheckStatus.FAIL
+    assert check.details["code"] == "table_fetch_coverage_missing"
+
+
+def test_table_fetch_coverage_evidence_fails_on_window_gap(tmp_path):
+    _write_build_manifest(
+        tmp_path,
+        {
+            "origin": "data_update",
+            "full_history_acceptance_start": "2021-11-01",
+            "resolved_end_date": "2021-11-30",
+            "table_fetch_coverage": {
+                "daily_bar": [
+                    {
+                        "table": "daily_bar",
+                        "kind": "fetched",
+                        "window_start": "2021-11-15",
+                        "window_end": "2021-11-30",
+                    }
+                ]
+            },
+        },
+    )
+    check = _check_table_fetch_coverage(_input(tmp_path))
+    assert check.status is CheckStatus.FAIL
+    assert check.details["code"] == "fetch_coverage_gap"
+
+
+def test_table_fetch_coverage_evidence_requires_build_config(tmp_path):
+    dataset = _write_dataset(tmp_path, _minimal_manifest())
+    (dataset / "quality_report.json").write_text("{}\n", encoding="utf-8")
+    check = _check_table_fetch_coverage(_input(tmp_path))
+    assert check.status is CheckStatus.FAIL
+    assert ["dataset_build_evidence_missing", "build_config"] in (
+        check.details["failures"]
+    )

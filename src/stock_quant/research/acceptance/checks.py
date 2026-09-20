@@ -68,6 +68,9 @@ from stock_quant.data_model.calendar_coverage import (
     validate_build_calendar_evidence,
 )
 from stock_quant.data_model.dataset import STANDARDIZED_SCHEMAS, DatasetReader
+from stock_quant.data_model.fetch_coverage import (
+    validate_table_fetch_coverage,
+)
 from stock_quant.data_model.security_master import (
     missing_master_coverage_symbols,
 )
@@ -200,6 +203,7 @@ def run_automated_checks(value: AcceptanceCheckInput) -> tuple[CheckResult, ...]
         "corporate_action_evidence": _check_corporate_actions,
         "raw_snapshot_traceability": _check_raw_snapshots,
         "calendar_coverage_evidence": _check_calendar_coverage,
+        "table_fetch_coverage_evidence": _check_table_fetch_coverage,
         "source_role_health": _check_source_roles,
     }
     results = []
@@ -431,6 +435,35 @@ def _calendar_subject(details: Mapping[str, Any]) -> str:
         if isinstance(value, str)
     ]
     return " ".join(parts) if parts else "trading_calendar"
+
+
+def _check_table_fetch_coverage(value: AcceptanceCheckInput) -> CheckResult:
+    """Require per-table fetch coverage: contiguous fetched+carried segments
+    over the review window, NOT_FETCHED only for the operator-explicit
+    window (spec D5.3).
+
+    The recorded payload is validated against the same re-anchored review
+    window every other check uses (``full_history_acceptance_start`` through
+    ``resolved_end_date``, ADR-011), so a build whose incremental windows do
+    not tile the acceptance obligation fails closed here.
+    """
+    evidence = dataset_evidence(value)
+    build = _build_config(evidence.manifest)
+    if build is None:
+        return _result(
+            "table_fetch_coverage_evidence",
+            [["dataset_build_evidence_missing", "build_config"]],
+        )
+    start, end = _window(build)
+    violations = validate_table_fetch_coverage(
+        build.get("table_fetch_coverage", {}),
+        anchor_start=start,
+        published_end=end,
+    )
+    failures = [
+        [code, json.dumps(details, sort_keys=True)] for code, details in violations
+    ]
+    return _result("table_fetch_coverage_evidence", failures)
 
 
 def _check_source_roles(value: AcceptanceCheckInput) -> CheckResult:

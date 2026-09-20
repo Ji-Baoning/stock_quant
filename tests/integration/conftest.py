@@ -42,6 +42,11 @@ from stock_quant.data_model.corporate_action_coverage import (
     coverage_record,
 )
 from stock_quant.data_model.dataset import DatasetPublisher
+from stock_quant.data_model.fetch_coverage import (
+    KIND_FETCHED,
+    FetchSegment,
+    to_build_config_payload,
+)
 from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COLUMNS,
     CORPORATE_ACTION_QUARANTINE_COLUMNS,
@@ -487,6 +492,22 @@ def fixture_build_config(
     criterion = load_universe_coverage_criterion(
         project_root / "configs" / "universes"
     )
+    # Minimal legal fetch-coverage evidence (plan Task 13 Step 6): one
+    # ``fetched`` segment tiling the review window (acceptance anchor through
+    # the resolved end).  It sits on the lane-less derived ``adjusted_bar``
+    # table on purpose: a fetched segment on a fetch-lane table would make
+    # ``last_covered_plus_1`` planning treat this hand-published baseline as
+    # covering through the review end, flipping every explicit-window update
+    # into a full carry with no raw evidence.
+    review_start = criterion.acceptance_start or _UPDATE_WINDOW_START
+    table_fetch_coverage = to_build_config_payload(
+        {
+            "adjusted_bar": [
+                FetchSegment("adjusted_bar", KIND_FETCHED, review_start,
+                             _UPDATE_WINDOW_END)
+            ]
+        }
+    )
     return dataset_build_config(
         run_id=_UPDATE_RUN_ID,
         request=DataUpdateRequest(
@@ -507,6 +528,7 @@ def fixture_build_config(
         acceptance_start=criterion.acceptance_start,
         definition_hashes=criterion.definition_hashes,
         skipped_definitions=criterion.skipped,
+        table_fetch_coverage=table_fetch_coverage,
     )
 
 
