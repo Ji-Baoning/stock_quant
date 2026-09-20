@@ -375,6 +375,57 @@ def _recorded_fetch_spans(payload: object) -> dict[str, tuple[date, date]]:
     return spans
 
 
+def _baseline_covered_window(
+    build: Mapping[str, Any] | None,
+) -> tuple[date, date] | None:
+    """The evidence window a baseline without recorded spans itself covers.
+
+    A baseline published before per-table fetch coverage was recorded (spec
+    D5.3) carries no ``recorded_spans``, yet its own review window --
+    ``full_history_acceptance_start`` through ``resolved_end_date`` -- is
+    real carried evidence for every table.  Recording it as the fallback
+    ``covered`` span keeps the next update's segments chained from the
+    acceptance anchor; without it the segments start at the fetch window and
+    the offline check reads a coverage gap where the data is in fact
+    complete.
+    """
+    if not isinstance(build, Mapping):
+        return None
+    start_value = build.get("full_history_acceptance_start")
+    end_value = build.get("resolved_end_date")
+    if not isinstance(start_value, str) or not isinstance(end_value, str):
+        return None
+    try:
+        start = date.fromisoformat(start_value)
+        end = date.fromisoformat(end_value)
+    except ValueError:
+        return None
+    return (start, end) if start <= end else None
+
+
+def _merge_carried_coverage(
+    carried: pd.DataFrame | None, refreshed: pd.DataFrame, *, fetch_start: date
+) -> pd.DataFrame:
+    """Carry baseline coverage rows that predate a refreshed sub-window.
+
+    A fetched refresh rebuilds the coverage verdict for its own contract
+    window only; the baseline's rows for the history before it remain valid
+    evidence and must publish beside it, clipped to end just before the
+    fetched window so the two eras tile without overlapping verdicts (spec
+    D5.2).  Rows the baseline recorded inside the fetched window are
+    superseded by the fresh verdict and dropped.
+    """
+    if carried is None or carried.empty or "window_end" not in carried.columns:
+        return refreshed
+    carried_end = pd.to_datetime(carried["window_end"])
+    boundary = pd.Timestamp(fetch_start)
+    before = carried[carried_end < boundary]
+    overlap = carried[carried_end >= boundary].copy()
+    if not overlap.empty:
+        overlap["window_end"] = boundary - pd.Timedelta(days=1)
+    return pd.concat([before, overlap, refreshed], ignore_index=True)
+
+
 def _plan_skips_fetch(plan: object, end: date) -> bool:
     """True when one table's plan leaves nothing to fetch this round.
 
@@ -681,9 +732,9 @@ class DataPipeline:
             baseline_spans,
             fetch_coverage,
         ) = baseline
-        recorded_spans, carried_master_coverage, carried_ca_coverage = (
-            fetch_coverage
-        )
+        recorded_spans, carried_master_coverage, carried_ca_coverage, (
+            baseline_covered
+        ) = fetch_coverage
         issues.extend(self._universe_master_issues(master))
 
         # ---- universe definitions: a config fault, read before any fetch -- #
@@ -930,6 +981,17 @@ class DataPipeline:
                         current_quarantine,
                     )
                 )
+                # The refresh re-judges only its own contract window; the
+                # baseline's coverage rows for the history before it stay
+                # valid evidence and publish beside it, clipped to the day
+                # before the fetched window (spec D5.2).
+                coverage = _merge_carried_coverage(
+                    carried_ca_coverage,
+                    coverage,
+                    fetch_start=(
+                        ca_plan.window_start if ca_plan is not None else start
+                    ),
+                )
 
         # ---- optional validation daily ---------------------------------- #
         validation_rows: list[pd.DataFrame] = []
@@ -1068,6 +1130,11 @@ class DataPipeline:
                 ]
                 continue
             covered = recorded_spans.get(table)
+            if covered is None:
+                # A baseline that predates recorded spans still covers its own
+                # review window; chain from it so the segments tile the
+                # acceptance obligation (spec D5.3).
+                covered = baseline_covered
             if _plan_skips_fetch(plan, end):
                 if covered is not None:
                     low = (
@@ -1451,6 +1518,7 @@ class DataPipeline:
             if master_coverage is not None
             else master_coverage_frame([]),
             ca_coverage if ca_coverage is not None else coverage_frame([]),
+            _baseline_covered_window(build),
         )
         return (
             master,

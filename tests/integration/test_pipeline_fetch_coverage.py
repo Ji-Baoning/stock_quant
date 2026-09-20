@@ -22,6 +22,7 @@ from pathlib import Path
 import pandas as pd
 from conftest import BARS_END, BARS_START, build_fixture_project  # noqa: E402
 
+from stock_quant.data_model.fetch_coverage import validate_table_fetch_coverage
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_pipeline import DataPipeline, DataUpdateRequest
 from stock_quant.data_sources.base import (
@@ -240,6 +241,72 @@ def test_incremental_update_records_carried_and_fetched(tmp_path):
     carried = [s for s in segments if s["kind"] == "carried"][0]
     assert carried["window_start"] == BARS_START.isoformat()
     assert carried["window_end"] == _GEN1_END.isoformat()
+
+
+def test_pre_record_baseline_tiles_the_acceptance_window(tmp_path):
+    """A baseline without recorded spans still chains carried segments.
+
+    A baseline published before fetch coverage was recorded (no per-table
+    spans) is itself the evidence for its own review window: the next
+    update's segments must chain from ``full_history_acceptance_start`` --
+    carried history plus the fetched contract window, contiguous to the
+    published end -- or the offline check reads a coverage gap where the
+    data is in fact complete (spec D5.3, the real ``01c74bee…`` failure).
+    """
+    project = build_fixture_project(tmp_path / "project")
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(end_date=_GEN2_END)
+    )
+    assert result.dataset_ref is not None
+    build = _manifest_build(project.root, result.dataset_ref.version)
+    coverage = build["table_fetch_coverage"]
+    violations = validate_table_fetch_coverage(
+        coverage, anchor_start=BARS_START, published_end=_GEN2_END
+    )
+    gaps = [v for v in violations if v[0] == "fetch_coverage_gap"]
+    assert gaps == [], f"coverage gap on a pre-record baseline: {gaps}"
+    segments = coverage["daily_bar"]
+    kinds = [segment["kind"] for segment in segments]
+    assert kinds == ["carried", "fetched"]
+    carried, fetched = segments
+    assert carried["window_start"] == BARS_START.isoformat()
+    assert (
+        date.fromisoformat(carried["window_end"])
+        == date.fromisoformat(fetched["window_start"]) - timedelta(days=1)
+    )
+    assert fetched["window_end"] == _GEN2_END.isoformat()
+
+
+def test_fetched_ca_lane_merges_baseline_coverage_rows(tmp_path):
+    """A fetched disclosure window keeps the baseline's earlier coverage.
+
+    The refreshed coverage verdict covers only its own contract window; the
+    baseline's per-symbol rows for the history before it stay valid evidence,
+    clipped to end just before the fetched window, so every symbol's
+    published coverage still tiles the whole review window and the
+    corporate-action trust gate reads one continuous trusted span (spec D5.2).
+    """
+    project = build_fixture_project(tmp_path / "project")
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(end_date=_GEN2_END)
+    )
+    assert result.dataset_ref is not None
+    version = result.dataset_ref.version
+    published = pd.read_parquet(
+        project.root / "data" / "standardized" / version
+        / "corporate_action_coverage.parquet"
+    )
+    assert published["symbol"].nunique() == len(_FIXTURE_UNIVERSE_SYMBOLS)
+    for symbol, rows in published.groupby("symbol"):
+        starts = sorted(pd.Timestamp(value).date() for value in rows["window_start"])
+        ends = sorted(pd.Timestamp(value).date() for value in rows["window_end"])
+        assert starts[0] == BARS_START, symbol
+        assert ends[-1] == _GEN2_END, symbol
+        ordered = sorted(zip(starts, ends))
+        for (_, prev_end), (next_start, _) in zip(ordered, ordered[1:]):
+            assert next_start == prev_end + timedelta(days=1), (
+                f"{symbol}: coverage gap {prev_end} .. {next_start}"
+            )
 
 
 def test_update_writes_call_ledger(tmp_path):
