@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -28,7 +29,10 @@ from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_sources.akshare import AkShareSource
 from stock_quant.data_sources.base import AuthenticationError, DataRequest
 from stock_quant.data_sources.tushare import TushareSource
-from stock_quant.data_sources.tushare_transport import resolve_transport
+from stock_quant.data_sources.tushare_transport import (
+    build_transport,
+    resolve_transport,
+)
 from stock_quant.project_root import resolve_project_root
 
 UPDATE_START = date(2015, 1, 1)
@@ -36,6 +40,10 @@ UPDATE_END = date(2026, 8, 28)
 TRADABLE_UNIVERSE_ID = "custom_csi300_tw_tradable"
 EXPECTED_TRADABLE_SYMBOLS = 657
 PROBE_SYMBOL = "600519.SH"
+#: Fixed official-channel probe surface (spec D6): which endpoints answer
+#: without the relay.  The list changes only by editing this constant — the
+#: canary never auto-switches or auto-degrades anything.
+OFFICIAL_CANARY_ENDPOINTS = ("daily",)
 
 
 @dataclass(frozen=True)
@@ -152,6 +160,83 @@ def _fetch(source: object, endpoint: str, symbol: str, start: date, end: date):
     return source.fetch(DataRequest(endpoint, (symbol,), start, end, {})).frame
 
 
+def official_canary_probes(
+    environ: Mapping[str, str] | None = None,
+    *,
+    config: SourceConfig | None = None,
+) -> dict[str, dict]:
+    """Probe api.waditu.com official transport directly, once per endpoint.
+
+    Forced ``official`` transport — the canary exists to answer "which
+    endpoints still work without the relay", so a relay/proxy fallback here
+    would be a silent downgrade and is forbidden (spec D6).  Returns one row
+    per endpoint: status + row count or an exception class name only.
+    """
+    source = os.environ if environ is None else environ
+    probes: dict[str, dict] = {}
+    try:
+        transport = build_transport(
+            "official",
+            config if config is not None else SourceConfig(),
+            environ=source,
+        )
+        tushare = TushareSource(
+            config if config is not None else SourceConfig(),
+            transport=transport,
+        )
+    except Exception as error:  # noqa: BLE001 - reported, never raised
+        note = f"{type(error).__name__}"
+        return {
+            endpoint: {"status": "unusable", "note": note}
+            for endpoint in OFFICIAL_CANARY_ENDPOINTS
+        }
+    for endpoint in OFFICIAL_CANARY_ENDPOINTS:
+        try:
+            frame = tushare.fetch(
+                DataRequest(endpoint, (PROBE_SYMBOL,), UPDATE_START, UPDATE_END, {})
+            ).frame
+            probes[endpoint] = {"status": "reachable", "rows": len(frame)}
+        except Exception as error:  # noqa: BLE001 - class name only, redacted
+            probes[endpoint] = {
+                "status": "unreachable",
+                "note": type(error).__name__,
+            }
+    return probes
+
+
+def _note_head(note: str) -> str:
+    """Keep only the leading exception class name of a probe note.
+
+    The rendered record is the credential boundary for a persisted ops
+    file: a note body may embed a token in its message, so nothing past
+    the first ``:``, ``=`` or blank ever reaches the record.  (This is
+    stricter than the pipeline log redaction, which masks values but keeps
+    key names; the ops record keeps neither.)
+    """
+    return re.split(r"[:=\s]", note, maxsplit=1)[0]
+
+
+def render_canary_record(probe_date: str, probes: dict[str, dict]) -> str:
+    """Ops-record body: endpoint names, status and counts — no credentials."""
+    lines = [
+        f"# 官方通道金丝雀 {probe_date}",
+        "",
+        "月度对 api.waditu.com 官方直连实测「无 relay 时哪些端点仍可得」（spec D6）。",
+        "本记录只含端点名、状态与行数；不含 token/key/凭证 URL 段。",
+        "本探测只读、不落任何切换：降级永远是操作者显式决定。",
+        "",
+    ]
+    for endpoint in OFFICIAL_CANARY_ENDPOINTS:
+        row = probes.get(endpoint, {"status": "not_probed"})
+        note = row.get("note")
+        lines.append(
+            f"- {endpoint}: status={row.get('status')} "
+            f"rows={row.get('rows', '-')}"
+            + (f" note={_note_head(str(note))}" if note else "")
+        )
+    return "\n".join(lines) + "\n"
+
+
 def run(root: Path, config: ProjectConfig) -> int:
     publisher = DatasetPublisher(root)
     version = publisher.current().version
@@ -200,9 +285,26 @@ def run(root: Path, config: ProjectConfig) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument(
+        "--official-canary",
+        action="store_true",
+        help="probe official-channel endpoints and write the dated ops record",
+    )
     args = parser.parse_args(argv)
     root = resolve_project_root(args.root)
     config = load_project_config(root)
+    if args.official_canary:
+        probes = official_canary_probes(config=config.sources["tushare"])
+        record = render_canary_record(date.today().isoformat(), probes)
+        destination = (
+            root / "docs" / "operations"
+            / f"{date.today().isoformat()}-official-channel-canary.md"
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(record, encoding="utf-8")
+        print(record)
+        print(f"canary record -> {destination}")
+        return 0
     return run(root, config)
 
 
