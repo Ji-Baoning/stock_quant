@@ -27,8 +27,9 @@ sorted ``details["failures"]`` rows of ``[reason_code, subject]``.  The
 membership gate's failure details are the four deterministic
 :class:`AcceptanceResult` detail keys only.
 
-Automated date-window semantics: the window spans
-``build_config.requested_start_date`` through ``build_config.resolved_end_date``;
+Automated date-window semantics: the window spans the acceptance anchor
+(``build_config.full_history_acceptance_start``, ADR-011; legacy fallback
+``requested_start_date``) through ``build_config.resolved_end_date``;
 it must sit inside the ``trading_calendar`` open-day span and end on an open
 day, both configured benchmark symbols must have a bar on every open day of
 the window, and every missing listed-security bar must be explained by the
@@ -281,12 +282,14 @@ def _check_required_tables(value: AcceptanceCheckInput) -> CheckResult:
 def _check_date_window(value: AcceptanceCheckInput) -> CheckResult:
     """Require the resolved window fully covered by calendar and bars.
 
-    The window spans ``requested_start_date`` through ``resolved_end_date``
-    and must sit inside the ``trading_calendar`` open-day span and end on an
-    open day; both configured benchmarks need a bar on every open day; and
-    every missing listed-security bar must be explained by the security
-    master's listing facts (before ``list_date``, after ``delist_date``) --
-    suspensions and unexplained gaps are flagged, never accepted.
+    The window spans the acceptance anchor (``full_history_acceptance_start``,
+    ADR-011; legacy fallback ``requested_start_date``) through
+    ``resolved_end_date`` and must sit inside the ``trading_calendar``
+    open-day span and end on an open day; both configured benchmarks need a
+    bar on every open day; and every missing listed-security bar must be
+    explained by the security master's listing facts (before ``list_date``,
+    after ``delist_date``) -- suspensions and unexplained gaps are flagged,
+    never accepted.
     """
     evidence = dataset_evidence(value)
     build = _build_config(evidence.manifest)
@@ -670,11 +673,37 @@ def _build_config(manifest: Mapping[str, Any]) -> dict[str, Any] | None:
     return build if isinstance(build, dict) else None
 
 
+class FullHistoryAcceptanceStartMissing(ValueError):
+    """The build names neither acceptance anchor nor legacy requested start.
+
+    A ``ValueError`` subclass on purpose: ``run_automated_checks`` catches
+    it into a FAIL result (never a crash), while its dedicated type lets
+    ``evidence_window`` distinguish it from a malformed window (spec §0-12).
+    """
+
+
 def _window(build: Mapping[str, Any]) -> tuple[date, date]:
-    """The requested-start through resolved-end window of one build."""
-    start = build.get("requested_start_date")
+    """The review window: acceptance obligation through resolved end (ADR-011).
+
+    Anchored to ``full_history_acceptance_start`` alone (never min'd with the
+    requested start -- a min'd window before the first open day fails by
+    construction).  Falls back to ``requested_start_date`` for legacy and
+    non-data_update origins; a build with neither is un-reviewable by design
+    (bootstrap) and raises :class:`FullHistoryAcceptanceStartMissing`.  The
+    anchor check precedes the end check: a bootstrap manifest carries neither
+    window start *nor* ``resolved_end_date``, and the dedicated reason must
+    win (spec §0-12).
+    """
+    start = build.get("full_history_acceptance_start")
+    if not isinstance(start, str) or not start:
+        start = build.get("requested_start_date")
+    if not isinstance(start, str) or not start:
+        raise FullHistoryAcceptanceStartMissing(
+            "build_config carries neither full_history_acceptance_start nor "
+            "requested_start_date"
+        )
     end = build.get("resolved_end_date")
-    if not isinstance(start, str) or not isinstance(end, str):
+    if not isinstance(end, str):
         raise ValueError("dataset build window is missing")
     return date.fromisoformat(start), date.fromisoformat(end)
 

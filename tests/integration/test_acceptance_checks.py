@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from conftest import build_fixture_project  # noqa: E402
+from conftest import BARS_START, build_fixture_project  # noqa: E402
 
 from stock_quant.config import load_project_config
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
@@ -51,9 +51,13 @@ from stock_quant.research.acceptance.service import prepare_checklist
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: The update window every fixture dataset is built over (inside the fixture
-#: calendar and bars span, so the resolved window is fully covered).
-_WINDOW_START = date(2021, 11, 1)
+#: The update window every fixture dataset is built over.  It opens at the
+#: fixture's full-history acceptance start (the first bar-covered open day,
+#: ``conftest.BARS_START``) so the published corporate-action coverage
+#: evidence tiles the re-anchored review window (ADR-011) exactly the way a
+#: full-window operator update does, and the resolved window stays fully
+#: covered by calendar and bars.
+_WINDOW_START = BARS_START
 _WINDOW_END = date(2021, 11, 30)
 
 #: The repository fixture universe the stub ``stock_basic`` answer must cover.

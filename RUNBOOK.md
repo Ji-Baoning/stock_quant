@@ -77,12 +77,10 @@ setsid nohup python -m stock_quant data update --start 2015-01-05 --root project
     > /tmp/update.log 2>&1 < /dev/null &
 ```
 
-- **`--start` 必须落在日历的开市日上**：`2015-01-05` 是当前
-  `trading_calendar` 证据里的第一个开市日。写成 `2015-01-01` 不会拉坏数据，但会让
-  验收的 `date_window_completeness` 以 `window_not_calendar_complete` 记一条
-  FAIL —— 声明窗口比日历证据更早。CLI/build **不**对它做硬校验（理由见
-  [ADR-006](docs/adr/006-corporate-action-window-scope.md) 之外的
-  `docs/superpowers/specs/2026-09-15-data-layer-residual-defects-design.md` §3）。
+- `--start` 只影响取数窗口，不再影响验收窗口：验收窗口锚定
+  `full_history_acceptance_start`（ADR-011），早于首个开市日（如
+  `--start 2015-01-01`）发布的版本可被验收。B2 起，显式 `--start` 偏离
+  某表契约取数窗时该表跳过取数并记 NOT_FETCHED（见阶段 4）。
 - `--end` 可省略：`update()` 用已发布日历的最后一个开市日解析
   （实测 `resolved_end_date=2026-08-28`；`project.yml` 的 `end_date` 不是开市日）。
 - **窗口越界会先失败再拉数**：`configs/universes/` 若是坏的（例如两个文件声明同一

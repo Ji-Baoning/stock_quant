@@ -384,6 +384,11 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
     universe = Universe.from_yaml(config_dir / "universe.yml")
     (config_dir / "universes").mkdir(parents=True, exist_ok=True)
     facts = _wf_membership_facts(universe)
+    # ``coverage_start`` doubles as the build's ``full_history_acceptance_start``
+    # (ADR-011), and the acceptance window is anchored there: it must sit
+    # inside the bar evidence this fixture carries (bars start at BARS_START,
+    # not at the calendar's CAL_START), or ``date_window_completeness``
+    # correctly fails its own fixture.
     (config_dir / "universes" / f"{_WF_UNIVERSE_ID}.yml").write_text(
         yaml.safe_dump(
             {
@@ -391,7 +396,7 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
                 "universe_id": _WF_UNIVERSE_ID,
                 "rules_version": _WF_RULES_VERSION,
                 "membership_table_sha256": membership_content_hash(facts),
-                "coverage_start": CAL_START.isoformat(),
+                "coverage_start": BARS_START.isoformat(),
                 "coverage_end": CAL_END.isoformat(),
                 "evidence_summary_sha256": _WF_EVIDENCE_SUMMARY,
             },

@@ -35,6 +35,7 @@ from stock_quant.data_model.dataset import DatasetReader
 from stock_quant.data_quality.raw_checks import classify_missing_row
 from stock_quant.research.acceptance.checks import (
     _ACCEPTED_MISSING_CODES,
+    FullHistoryAcceptanceStartMissing,
     _open_days,
     _window,
 )
@@ -85,6 +86,7 @@ EVIDENCE_FILENAMES = {
 #: The stable failure categories a checklist row may summarise.
 EVIDENCE_FAILURE_CATEGORIES = (
     "window_missing",
+    "full_history_acceptance_start_missing",
     "dataset_unreadable",
     "evidence_write_failed",
 )
@@ -117,17 +119,27 @@ def evidence_window(manifest: Mapping[str, object]) -> tuple[date, date]:
     """The window every mechanisable evidence file is computed over.
 
     Deliberately the *same* window the automated ``date_window_completeness``
-    check uses -- requested start through resolved end (``checks._window``).
-    It is not ``build_config.effective_start_date``: the evidence a human
-    signs off on and the automated verdict must describe one window, and a
-    request that started before the data does has to show up as absent bars
-    rather than silently shrink what was reviewed.
+    check uses -- the acceptance anchor (``full_history_acceptance_start``,
+    ADR-011; legacy fallback ``requested_start_date``) through resolved end
+    (``checks._window``).  It is not ``build_config.effective_start_date``:
+    the evidence a human signs off on and the automated verdict must describe
+    one window, and a request that started before the data does has to show
+    up as absent bars rather than silently shrink what was reviewed.
+
+    A build naming neither window start fails with the dedicated
+    ``full_history_acceptance_start_missing`` category (spec §0-12), so a
+    checklist row can say the anchor is missing instead of mistaking it for
+    a malformed window.
     """
     build = manifest.get("build_config")
     if not isinstance(build, dict):
         raise EvidenceBuildError("window_missing")
     try:
         return _window(build)
+    except FullHistoryAcceptanceStartMissing as error:
+        raise EvidenceBuildError(
+            "full_history_acceptance_start_missing"
+        ) from error
     except (TypeError, ValueError) as error:
         raise EvidenceBuildError("window_missing") from error
 

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import build_fixture_project  # noqa: E402
+from conftest import BARS_START, build_fixture_project  # noqa: E402
 from test_acceptance_checks import _all_stubs  # noqa: E402
 
 from stock_quant.cli import app  # noqa: E402
@@ -31,7 +31,10 @@ from stock_quant.research.acceptance.registry import (  # noqa: E402
     AcceptanceRegistry,
 )
 
-_WINDOW_START = date(2021, 11, 1)
+#: The update opens at the fixture's full-history acceptance start (the first
+#: bar-covered open day) so the corporate-action coverage evidence tiles the
+#: re-anchored review window (ADR-011), like a full-window operator update.
+_WINDOW_START = BARS_START
 _WINDOW_END = date(2021, 11, 30)
 
 

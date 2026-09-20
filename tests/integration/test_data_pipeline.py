@@ -17,7 +17,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import yaml
-from conftest import CAL_END, CAL_START, build_fixture_project  # noqa: E402
+from conftest import (  # noqa: E402
+    BARS_START,
+    CAL_END,
+    CAL_START,
+    build_fixture_project,
+)
 
 from stock_quant.data_model.calendar_coverage import CODE_CALENDAR_COVERAGE_GAP
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
@@ -1181,7 +1186,7 @@ def test_update_records_two_trade_cal_snapshots_and_binds_a_relay_span(project):
     fresh = set(result.raw_snapshots)
     for hashes in relay[0]["snapshot_sha256s"].values():
         assert set(hashes) & fresh, "this round's snapshot hash must be bound"
-    assert build["full_history_acceptance_start"] == CAL_START.isoformat()
+    assert build["full_history_acceptance_start"] == BARS_START.isoformat()
     assert build["universe_coverage_definition_hashes"]
     assert build["universe_coverage_skipped"] == []
     assert "resolved_end_is_fallback" not in build

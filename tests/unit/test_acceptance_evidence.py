@@ -175,10 +175,21 @@ def test_evidence_window_uses_the_requested_start_the_checks_use() -> None:
 
 
 def test_evidence_window_is_missing_without_a_build_window() -> None:
-    for manifest in ({}, {"build_config": {}}, {"build_config": "broken"}):
+    for manifest in ({}, {"build_config": "broken"}):
         with pytest.raises(EvidenceBuildError) as captured:
             evidence_window(manifest)
         assert captured.value.category == "window_missing"
+
+
+def test_evidence_window_names_a_missing_acceptance_anchor() -> None:
+    """An empty build names neither window start: the dedicated category.
+
+    The anchor-missing path (spec §0-12) must be distinguishable from a
+    malformed window, so a checklist row can say exactly what is absent.
+    """
+    with pytest.raises(EvidenceBuildError) as captured:
+        evidence_window({"build_config": {}})
+    assert captured.value.category == "full_history_acceptance_start_missing"
 
 
 def test_build_mechanisable_evidence_fails_loudly_on_a_missing_version(
