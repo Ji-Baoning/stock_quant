@@ -83,6 +83,11 @@ CODE_UNREGISTERED_TABLE = "unregistered_table"
 # It is deliberately NOT in PUBLICATION_BLOCKING_CODES.
 CODE_COVERAGE_DOWNGRADED = "coverage_downgraded"
 
+# ADR-009 evidence: a newly quarantined row with an absent ex-date carries
+# its two-axis classification in the quality report.  Informational only --
+# no rule reads it to move a verdict; that is a separate decision.
+CODE_ABSENT_EX_DATE_CLASSIFIED = "absent_ex_date_classified"
+
 # Missing-row classification labels, in classification precedence order.
 MISSING_NOT_LISTED = "not_listed"
 MISSING_DELISTED = "delisted"

@@ -563,3 +563,124 @@ def test_an_unreachable_channel_degrades_once_per_symbol(monkeypatch):
     assert second.accepted.empty and len(second.quarantined) == 2
     assert len(issues) == 1
     assert issues[0].details["symbol"] == "600519.SH"
+
+
+def test_classification_records_for_newly_quarantined_absent_ex_dates(monkeypatch):
+    """ADR-009 decision 1: new incomplete rows carry their classification.
+
+    Only this round's newly quarantined rows are classified -- rows with a
+    stated ex-date, rows outside the round's window, and carried history are
+    not re-classified -- and the TDX channel answers from the same lazily
+    fetched frame arbitration would use.
+    """
+    from stock_quant import data_pipeline
+    from stock_quant.data_quality.models import CODE_ABSENT_EX_DATE_CLASSIFIED
+
+    probe = date(2026, 7, 1)
+    calls: list[str] = []
+    lazy = _lazy_arbiter(
+        monkeypatch,
+        {"600519.SH": _xdxr(fenhong=_tdx_sends(14.0), ex_date=probe.isoformat())},
+        calls,
+        [],
+    )
+    issues: list = []
+    quarantine = pd.DataFrame(
+        [
+            {  # classified: absent ex-date, announced in-window
+                "symbol": "600519.SH",
+                "announcement_date": date(2026, 7, 1),
+                "ex_date": None,
+                "reason": "incomplete",
+            },
+            {  # stated ex-date: nothing for ADR-009's absent row to classify
+                "symbol": "000001.SZ",
+                "announcement_date": date(2026, 7, 2),
+                "ex_date": date(2026, 7, 20),
+                "reason": "incomplete",
+            },
+            {  # announced outside the round's window: carried history
+                "symbol": "000002.SZ",
+                "announcement_date": date(1996, 5, 16),
+                "ex_date": None,
+                "reason": "incomplete",
+            },
+        ]
+    )
+
+    data_pipeline._record_absent_ex_date_classifications(
+        quarantine,
+        _GuardedArbiter(lazy, issues),
+        date(2026, 6, 20),
+        date(2026, 9, 18),
+        issues,
+    )
+
+    assert calls == ["600519.SH"]
+    assert [issue.code for issue in issues] == [CODE_ABSENT_EX_DATE_CLASSIFIED]
+    assert issues[0].details["classification"] == "absent+adjustment_observed"
+    assert issues[0].details["probe_date"] == "2026-07-01"
+
+
+def test_classification_with_an_unavailable_channel_reads_unknown(monkeypatch):
+    """A dead channel asserts nothing: the row still records, as unknown."""
+    from stock_quant import data_pipeline
+
+    calls: list[str] = []
+    issues: list = []
+    lazy = _lazy_arbiter(
+        monkeypatch,
+        TdxUnavailableError("channel down"),
+        calls,
+        [],
+        issues=issues,
+    )
+    quarantine = pd.DataFrame(
+        [
+            {
+                "symbol": "600519.SH",
+                "announcement_date": date(2026, 7, 1),
+                "ex_date": None,
+                "reason": "incomplete",
+            }
+        ]
+    )
+
+    data_pipeline._record_absent_ex_date_classifications(
+        quarantine,
+        _GuardedArbiter(lazy, issues),
+        date(2026, 6, 20),
+        date(2026, 9, 18),
+        issues,
+    )
+
+    classified = [
+        issue
+        for issue in issues
+        if issue.code == "absent_ex_date_classified"
+    ]
+    assert len(classified) == 1
+    assert classified[0].details["classification"] == "absent+unknown"
+
+
+def test_classification_without_an_arbiter_records_nothing():
+    """No arbiter, no channel, no record: the report stays as it was."""
+    from stock_quant import data_pipeline
+
+    issues: list = []
+    quarantine = pd.DataFrame(
+        [
+            {
+                "symbol": "600519.SH",
+                "announcement_date": date(2026, 7, 1),
+                "ex_date": None,
+                "reason": "incomplete",
+            }
+        ]
+    )
+
+    data_pipeline._record_absent_ex_date_classifications(
+        quarantine, None, date(2026, 6, 20), date(2026, 9, 18), issues
+    )
+
+    assert issues == []

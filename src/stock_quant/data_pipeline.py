@@ -88,6 +88,7 @@ from stock_quant.data_model.corporate_action_coverage import (
 )
 from stock_quant.data_model.corporate_actions import (
     REASON_CROSS_SOURCE_CONFLICT,
+    REASON_INCOMPLETE,
     REASON_NON_DISTRIBUTIVE_RESTRUCTURING,
     REASON_UNSUPPORTED_CORPORATE_ACTION,
     RECONCILED_COLUMNS,
@@ -108,6 +109,7 @@ from stock_quant.data_model.dataset import (
     DatasetReader,
     PublicationBlocked,
 )
+from stock_quant.data_model.ex_date_classification import classify_ex_date
 from stock_quant.data_model.fetch_coverage import (
     KIND_CARRIED,
     KIND_FETCHED,
@@ -157,6 +159,7 @@ from stock_quant.data_quality.gates import (
     evaluate_publication,
 )
 from stock_quant.data_quality.models import (
+    CODE_ABSENT_EX_DATE_CLASSIFIED,
     CODE_ADJUSTED_BAR_MISSING_RAW,
     CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH,
     CODE_ADJUSTED_BAR_UNKNOWN_ACTION,
@@ -195,6 +198,7 @@ from stock_quant.data_sources.raw_store import (
 )
 from stock_quant.data_sources.tdx import (
     ARBITER_NAME,
+    XDXR_CATEGORY_DISTRIBUTION,
     XDXR_ENDPOINT,
     TdxXdxrArbiter,
     fetch_xdxr_frames,
@@ -2184,6 +2188,14 @@ class DataPipeline:
         merged_quarantine = _merge_corporate_action_quarantine(
             current_quarantine, quarantined
         )
+        # ADR-009 decision 1: an ex-date-less row is classified before any
+        # rule acts on it.  Recording the classification in the quality
+        # report makes it auditable without moving a verdict (ADR-009
+        # consequences) -- only this round's newly quarantined rows are
+        # classified; carried history predates the record.
+        _record_absent_ex_date_classifications(
+            quarantined, arbiter, start, end, issues
+        )
         # Narrow only the coverage input, once: the exclusion records an INFO
         # trace, so it must not re-run inside the per-symbol comprehension or
         # each symbol would append a duplicate audit row for the same exclusion.
@@ -3161,6 +3173,73 @@ def _warn_arbiter_failure(issues, symbol, error) -> None:
     )
 
 
+def _record_absent_ex_date_classifications(
+    quarantined: pd.DataFrame,
+    arbiter: object | None,
+    start: date,
+    end: date,
+    issues: list[QualityIssue],
+) -> None:
+    """Record the ADR-009 classification of newly quarantined ex-date-less rows.
+
+    Decision 1 requires the classification to exist before the date-
+    completeness rule acts; recording it in the quality report makes it
+    auditable without moving any verdict (ADR-009 consequences: no behaviour
+    changes).  Only rows this round newly quarantined are classified --
+    carried history predates the record -- and the probe date is the row's
+    announcement date, the best-known anchor when the supplier states no
+    ex-date.  The admissible channels: TDX category-1 records via the lazy
+    arbiter's frames, and baostock's adjustment-factor series, which is not
+    wired in this repo yet -- an absent channel asserts nothing, so an
+    unbracketed row reads ``unknown`` and stays blocking (decision 2).
+    """
+    if arbiter is None or quarantined is None or quarantined.empty:
+        return
+    frame_for = getattr(arbiter, "frame_for", None)
+    if frame_for is None:
+        return
+    for record in quarantined.to_dict("records"):
+        if record.get("reason") != REASON_INCOMPLETE:
+            continue
+        if record.get("ex_date") is not None:
+            continue
+        raw_announcement = record.get("announcement_date")
+        try:
+            announcement = pd.Timestamp(raw_announcement).date()
+        except (TypeError, ValueError):
+            continue
+        if not (start <= announcement <= end):
+            continue
+        symbol = str(record["symbol"])
+        frame = frame_for(symbol)
+        tdx_dates: list[date] = []
+        if frame is not None and not frame.empty and "category" in frame.columns:
+            distribution = frame[frame["category"] == XDXR_CATEGORY_DISTRIBUTION]
+            tdx_dates = [
+                day
+                for day in (_as_date(value) for value in distribution["date"])
+                if day is not None
+            ]
+        classification = classify_ex_date(
+            supplier_ex_date=None,
+            probe_date=announcement,
+            channels=(("tdx", tdx_dates), ("baostock", None)),
+        )
+        issues.append(
+            _issue(
+                Severity.INFO,
+                CODE_ABSENT_EX_DATE_CLASSIFIED,
+                table=TABLE_CORPORATE_ACTION_QUARANTINE,
+                symbol=symbol,
+                details={
+                    "classification": classification.code,
+                    "probe_date": announcement.isoformat(),
+                    "channels": ["tdx", "baostock_unwired"],
+                },
+            )
+        )
+
+
 class _LazyActionArbiter:
     """Fetch the TDX opinion for a disputed symbol on first need.
 
@@ -3194,40 +3273,57 @@ class _LazyActionArbiter:
         self._failed: set[str] = set()
         self.name = ARBITER_NAME
 
-    def arbitrate(self, cninfo: Any, eastmoney: Any) -> str | None:
-        symbol = str(cninfo.symbol)
-        if symbol not in self._frames:
-            if symbol in self._failed:
-                return None
-            try:
-                frames = fetch_xdxr_frames(
-                    [symbol], timeout=float(self._config.timeout_seconds)
-                )
-            except Exception as error:  # noqa: BLE001 - best-effort third opinion
-                _warn_arbiter_failure(self._issues, symbol, error)
-                self._failed.add(symbol)
-                return None
-            frame = frames.get(symbol)
+    def frame_for(self, symbol: str) -> pd.DataFrame | None:
+        """The symbol's cached xdxr frame, fetching it on first need.
+
+        Shares the fetch/fail cache with :meth:`arbitrate`: a symbol whose
+        channel read already failed is not retried, and ``None`` means no
+        frame is available (an absent channel asserts nothing, ADR-009).
+        """
+        if symbol in self._frames:
+            frame = self._frames[symbol]
             if frame is None or frame.empty:
-                self._frames[symbol] = frame if frame is not None else pd.DataFrame()
-            else:
-                self._frames[symbol] = frame
-                self._raw_snapshots.append(
-                    self._record_raw(
-                        FetchResult(
-                            source=ARBITER_NAME,
-                            endpoint=XDXR_ENDPOINT,
-                            request_key=request_key(
-                                DataRequest(
-                                    XDXR_ENDPOINT, (symbol,), self._start, self._end
-                                )
-                            ),
-                            frame=frame,
-                            metadata={"transport_id": ARBITER_NAME},
-                        )
+                return None
+            return frame
+        if symbol in self._failed:
+            return None
+        try:
+            frames = fetch_xdxr_frames(
+                [symbol], timeout=float(self._config.timeout_seconds)
+            )
+        except Exception as error:  # noqa: BLE001 - best-effort third opinion
+            _warn_arbiter_failure(self._issues, symbol, error)
+            self._failed.add(symbol)
+            return None
+        frame = frames.get(symbol)
+        self._frames[symbol] = frame if frame is not None else pd.DataFrame()
+        if frame is not None and not frame.empty:
+            self._raw_snapshots.append(
+                self._record_raw(
+                    FetchResult(
+                        source=ARBITER_NAME,
+                        endpoint=XDXR_ENDPOINT,
+                        request_key=request_key(
+                            DataRequest(
+                                XDXR_ENDPOINT, (symbol,), self._start, self._end
+                            )
+                        ),
+                        frame=frame,
+                        metadata={"transport_id": ARBITER_NAME},
                     )
                 )
-        arbiter = TdxXdxrArbiter.from_frames({symbol: self._frames[symbol]})
+            )
+        frame = self._frames[symbol]
+        if frame is None or frame.empty:
+            return None
+        return frame
+
+    def arbitrate(self, cninfo: Any, eastmoney: Any) -> str | None:
+        symbol = str(cninfo.symbol)
+        frame = self.frame_for(symbol)
+        if frame is None:
+            return None
+        arbiter = TdxXdxrArbiter.from_frames({symbol: frame})
         return arbiter.arbitrate(cninfo, eastmoney)
 
 
@@ -3253,6 +3349,18 @@ class _GuardedArbiter:
         self._issues = issues
         self._reviewed = reviewed
         self.name = arbiter.name
+
+    def frame_for(self, symbol: str):
+        """The inner arbiter's raw frame for ``symbol``, when it has one.
+
+        ADR-009's classification records consult the same lazily fetched
+        frames the arbitration uses; an inner arbiter without frame access
+        (a test double, a plain ``TdxXdxrArbiter``) asserts nothing.
+        """
+        frame_for = getattr(self._arbiter, "frame_for", None)
+        if frame_for is None:
+            return None
+        return frame_for(symbol)
 
     def arbitrate(self, cninfo, eastmoney):
         if (cninfo.symbol, cninfo.ex_date) in self._reviewed:
