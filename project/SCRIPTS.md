@@ -15,6 +15,7 @@
 | `project/collect_index_weight_membership.py` | migration | 拉取并转换 index_weight 成员证据 | 无替代项 |
 | `project/collect_sina_membership.py` | migration | 采集 Sina 历史成分作交叉证据 | 无替代项 |
 | `project/crosscheck_calendar_relay.py` | diagnostic | 以 relay 交叉核对已发布交易日历 | 无替代项 |
+| `project/drift_audit.py` | diagnostic | 季度全窗口漂移审计已发布原始快照 | 无替代项 |
 | `project/execution_diagnostics.py` | diagnostic | 从实验工件生成执行偏差诊断 | 无替代项 |
 | `project/expand_universe_to_membership.py` | migration | 将工程主数据扩展到冻结成员集合 | 无替代项 |
 | `project/explanatory_diagnostics.py` | diagnostic | 从单个研究运行生成解释性诊断 | 无替代项 |
