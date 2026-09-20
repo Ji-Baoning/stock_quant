@@ -63,7 +63,6 @@ import pytest
 import yaml
 from conftest import (
     _UPDATE_WINDOW_END,
-    _UPDATE_WINDOW_START,
     fixture_build_config,
     publish_fixture_acceptance,
 )
@@ -207,6 +206,10 @@ def _ensure_fixture_configs(project_root: Path, master: pd.DataFrame) -> None:
     # The full-history criterion must be non-empty: an enabled universe
     # definition is what binds ``full_history_acceptance_start`` into the
     # build config, and the acceptance chain fails a manifest without one.
+    # The anchor is the definition's coverage_start (ADR-011) and the review
+    # window starts there, so it must sit inside the bar evidence this fixture
+    # carries: the traded names' bars begin at _BARS_START, not at the
+    # calendar's _CAL_START.
     (config_dir / "universes").mkdir(parents=True, exist_ok=True)
     (config_dir / "universes" / "csi300.yml").write_text(
         yaml.safe_dump(
@@ -217,7 +220,7 @@ def _ensure_fixture_configs(project_root: Path, master: pd.DataFrame) -> None:
                 "membership_table_sha256": membership_content_hash(
                     _fact_payloads()
                 ),
-                "coverage_start": _CAL_START.isoformat(),
+                "coverage_start": _BARS_START.isoformat(),
                 "coverage_end": _BARS_END.isoformat(),
                 "evidence_summary_sha256": "cd" * 32,
             },
@@ -365,16 +368,21 @@ def _bars(
 
 
 def _window_filler_bars(symbols: tuple[str, ...] | list[str]) -> pd.DataFrame:
-    """Flat bars for the non-traded master symbols over the data-update window.
+    """Flat bars for the non-traded master symbols across the review span.
 
     The acceptance checker's ``date_window_completeness`` treats a *listed*
-    symbol without a bar inside the bound update window as an unexplained
-    suspension, so the csi300 filler constituents (which the membership
-    cardinality requires in the security master) carry real bars over exactly
-    that window.  Their flat closes never produce a valid momentum row (61
-    observations are required), so the tradable candidate pool is unchanged.
+    symbol without a bar on a review-window open day as an unexplained
+    suspension, and the review window is anchored to the acceptance
+    obligation (``full_history_acceptance_start`` = the fixture's
+    ``_BARS_START``, ADR-011) rather than to the fetch request, so the csi300
+    filler constituents (which the membership cardinality requires in the
+    security master) carry flat bars from ``_BARS_START`` through the bound
+    update window.  Their constant closes rank them below every growing
+    traded equity (the top-10 portfolio stays the ten largest-growth names),
+    so the tradable candidate pool and every scenario assertion are
+    unchanged.
     """
-    sessions = _weekdays(_UPDATE_WINDOW_START, _UPDATE_WINDOW_END)
+    sessions = _weekdays(_BARS_START, _UPDATE_WINDOW_END)
     frames = [
         _instrument_frame(sessions, symbol, [_BASE_PRICE] * len(sessions),
                           source="tushare")
@@ -1430,12 +1438,13 @@ def test_run_report_shows_factor_price_basis(env):
     assert "调整方法 internal_total_return_v1" in html
     assert "因子版本 momentum_60d: 2.0.0" in html
     # Pinned values: every adjusted-bar row of the master symbols over the
-    # published session range (traded equities) plus the data-update window
-    # (the filler constituents), and zero trusted-evidence breaks.
+    # published session range (traded equities) plus the acceptance span the
+    # filler constituents cover (the anchored review window through the bound
+    # update window, ADR-011), and zero trusted-evidence breaks.
     full_sessions = len(_weekdays(_BARS_START, _BARS_END))
-    window_sessions = len(_weekdays(_UPDATE_WINDOW_START, _UPDATE_WINDOW_END))
+    filler_sessions = len(_weekdays(_BARS_START, _UPDATE_WINDOW_END))
     fillers = len(_master_symbols()) - len(EQUITY_GROWTH)
-    expected_rows = len(EQUITY_GROWTH) * full_sessions + fillers * window_sessions
+    expected_rows = len(EQUITY_GROWTH) * full_sessions + fillers * filler_sessions
     assert f"输入行数 {expected_rows}" in html
     assert "不可信断点 0" in html
 
