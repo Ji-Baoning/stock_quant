@@ -64,6 +64,11 @@ _PER_TEN = 10.0
 #: One key's price evidence, as the channel produces it.
 Observe = Callable[[str, date], "PriceObservation | None"]
 
+#: How a settlement is reported to the run, when it wants to be told.
+Record = Callable[
+    [ConflictTerms, ConflictTerms, "Settlement", "PriceObservation"], None
+]
+
 
 @dataclass(frozen=True)
 class PriceObservation:
@@ -204,19 +209,29 @@ class PriceObservedArbiter:
     ``observe`` is the channel that produces the price evidence; ``None`` from
     it means the channel has no observation for that key and the conflict stays
     quarantined -- the fail-closed direction every absent channel takes.
+
+    ``record``, when given, receives every settlement with the values that
+    produced it, so the run can leave the arithmetic and the source snapshot in
+    its evidence (spec D3).  A non-settling key reports nothing: the absence is
+    the evidence.
     """
 
     name = ARBITER_NAME
 
-    def __init__(self, observe: Observe) -> None:
+    def __init__(self, observe: Observe, record: Record | None = None) -> None:
         self._observe = observe
+        self._record = record
 
     def arbitrate(self, cninfo: ConflictTerms, eastmoney: ConflictTerms) -> str | None:
         observation = self._observe(cninfo.symbol, cninfo.ex_date)
         if observation is None:
             return None
         settlement = settle(cninfo, eastmoney, observation)
-        return None if settlement is None else settlement.side
+        if settlement is None:
+            return None
+        if self._record is not None:
+            self._record(cninfo, eastmoney, settlement, observation)
+        return settlement.side
 
 
 #: The window asked of the daily lane: wide enough for a normal week's

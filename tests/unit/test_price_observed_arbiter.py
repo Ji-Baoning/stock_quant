@@ -326,3 +326,81 @@ def test_a_frame_without_the_ex_date_settles_nothing():
     )
 
     assert channel.observe("600188.SH", date(2023, 7, 17)) is None
+
+
+def settled_channel():
+    """A channel whose frame makes cninfo the corroborated side.
+
+    The previous close is 10.0 and the reference price 9.80, so the observed
+    factor is 0.98 and one tick is 0.001: cninfo's 2.0-per-ten dividend implies
+    exactly 0.98, eastmoney's 5.0-per-ten implies 0.95.
+    """
+    return channel_with(
+        [("2023-07-14", 10.0, 10.1), ("2023-07-17", 9.80, 9.80)],
+        open_days=(date(2023, 7, 14), date(2023, 7, 17)),
+        recorded=store_returning("abc123"),
+    )
+
+
+def test_a_settlement_reports_the_numbers_and_the_snapshot():
+    """Spec D3: the decision must be recomputable from stored bytes.
+
+    The trace carries the arithmetic and the hash of the raw response the
+    reference price was read from.
+    """
+    traces = []
+    channel = settled_channel()
+    cninfo = terms(cash_per_ten="2.0")
+    eastmoney = terms(cash_per_ten="5.0")
+
+    arbiter = PriceObservedArbiter(
+        channel.observe,
+        record=lambda cn, em, settlement, observation: traces.append(
+            (cn, em, settlement, observation)
+        ),
+    )
+    side = arbiter.arbitrate(cninfo, eastmoney)
+
+    assert side == "cninfo"
+    assert len(traces) == 1
+    got_cninfo, got_eastmoney, settlement, observation = traces[0]
+    assert got_cninfo == cninfo
+    assert got_eastmoney == eastmoney
+    assert observation.snapshot_sha256 == "abc123"
+    details = settlement.to_details()
+    assert details["side"] == "cninfo"
+    assert details["prev_close"] == 10.0
+    assert details["pre_close"] == 9.80
+    assert details["tick"] == pytest.approx(0.001)
+    assert details["cninfo_ticks"] == pytest.approx(0.0)
+    assert details["eastmoney_ticks"] == pytest.approx(30.0)
+
+
+def test_a_conflict_that_stays_quarantined_reports_nothing():
+    """No settlement means no trace; the absence is the evidence.
+
+    Both sides sit near the observation -- 0 and 2.0 ticks -- so neither is
+    distinguishable and the arbiter declines.
+    """
+    traces = []
+    channel = settled_channel()
+    arbiter = PriceObservedArbiter(
+        channel.observe, record=lambda *args: traces.append(args)
+    )
+
+    assert (
+        arbiter.arbitrate(terms(cash_per_ten="2.0"), terms(cash_per_ten="2.02"))
+        is None
+    )
+    assert traces == []
+
+
+def test_an_arbiter_without_a_record_callback_still_settles():
+    """The rule must not depend on the trace being wired."""
+    channel = settled_channel()
+    arbiter = PriceObservedArbiter(channel.observe)
+
+    assert (
+        arbiter.arbitrate(terms(cash_per_ten="2.0"), terms(cash_per_ten="5.0"))
+        == "cninfo"
+    )
