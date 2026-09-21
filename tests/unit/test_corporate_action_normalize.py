@@ -854,3 +854,37 @@ def test_quarantine_row_out_of_window_reason_reads_pandas_date_cells():
         quarantine_row_out_of_window_reason(row, _WINDOW_START, _WINDOW_END)
         == EXCLUSION_ANNOUNCEMENT_PRE_WINDOW_IMPLEMENTED
     )
+
+
+def test_float32_round_trip_noise_is_not_a_cross_source_conflict():
+    """A ratio pair differing by one float32 round trip is one event.
+
+    300124.SZ's real conflict states capitalization 9.99878 per ten shares on
+    one side and 9.998781 on the other: the same number after a float32 round
+    trip.  Two quarantined rows for it spend an operator's review on a
+    difference no supplier stated.
+    """
+    result = normalize_corporate_actions(
+        _cninfo_plan(cash_per_10=4.99939, cap_per_10=9.99878),
+        eastmoney_without_plan_column(per_share=0.499939, cap_per_10=9.998781),
+    )
+
+    assert result.quarantined.empty
+    assert len(result.accepted) == 1
+    assert result.accepted.iloc[0]["confirmed_by"] == "cninfo+eastmoney"
+
+
+def test_a_genuine_ratio_disagreement_survives_the_tolerance():
+    """600989.SH 2025-05-13 disagrees by 1.66e-5 -- two orders above float32.
+
+    Widening the tolerance to reach it would be the machine deciding the
+    difference does not matter, which is exactly the judgement this project
+    keeps for its owner.
+    """
+    result = normalize_corporate_actions(
+        _cninfo_plan(cash_per_10=4.10),
+        eastmoney_without_plan_column(per_share=0.409993),
+    )
+
+    assert result.accepted.empty
+    assert set(result.quarantined["reason"]) == {REASON_CROSS_SOURCE_CONFLICT}

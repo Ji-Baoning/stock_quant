@@ -751,15 +751,39 @@ def _reject_reason(event: dict[str, Any]) -> str | None:
     return None
 
 
+#: float32's machine epsilon, ``2 ** -23`` (≈ 1.19e-7), written as a power so
+#: it is exactly representable in ``Decimal`` and the comparison never leaves
+#: decimal arithmetic.  Supplier ratios arrive as float32 and are re-emitted as
+#: decimals, so two sides stating the same ratio can differ by one float32
+#: round trip.  A relative tolerance of exactly this width collapses that
+#: artifact and nothing wider: the narrowest genuine disagreement in the corpus
+#: (600989.SH 2025-05-13) is 1.66e-5, two orders of magnitude larger.
+_FLOAT32_RELATIVE_EPSILON = Decimal(2) ** -23
+
+
+def _same_ratio(left: Decimal, right: Decimal) -> bool:
+    """Whether two supplier ratios state the same number up to float32 noise."""
+    if left == right:
+        return True
+    scale = max(abs(left), abs(right))
+    if scale == 0:
+        return False
+    return abs(left - right) <= _FLOAT32_RELATIVE_EPSILON * scale
+
+
 def _same_facts(left: dict[str, Any], right: dict[str, Any]) -> bool:
     """Economic facts equal: record date, distribution and subscription terms."""
     return (
         left["record_date"] == right["record_date"]
-        and _zeroed(left["cash"]) == _zeroed(right["cash"])
-        and _zeroed(left["bonus"]) == _zeroed(right["bonus"])
-        and _zeroed(left["capitalization"]) == _zeroed(right["capitalization"])
-        and _zeroed(left["rights"]) == _zeroed(right["rights"])
-        and _zeroed(left["rights_price"]) == _zeroed(right["rights_price"])
+        and _same_ratio(_zeroed(left["cash"]), _zeroed(right["cash"]))
+        and _same_ratio(_zeroed(left["bonus"]), _zeroed(right["bonus"]))
+        and _same_ratio(
+            _zeroed(left["capitalization"]), _zeroed(right["capitalization"])
+        )
+        and _same_ratio(_zeroed(left["rights"]), _zeroed(right["rights"]))
+        and _same_ratio(
+            _zeroed(left["rights_price"]), _zeroed(right["rights_price"])
+        )
     )
 
 
