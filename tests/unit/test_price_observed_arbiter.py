@@ -7,13 +7,19 @@ clock.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from stock_quant.data_model.corporate_actions import ConflictTerms
+from stock_quant.data_sources.base import DataRequest, FetchResult, request_key
 from stock_quant.data_sources.price_observed import (
+    DAILY_ENDPOINT,
+    TUSHARE_SOURCE,
+    LazyDailyPriceChannel,
     PriceObservation,
     PriceObservedArbiter,
     expected_factor,
@@ -145,3 +151,178 @@ def test_a_side_with_subscription_terms_is_refused():
     )
 
     assert settlement is None
+
+
+def daily_frame(symbol: str, rows: list[tuple[str, float, float]]) -> pd.DataFrame:
+    """One tushare ``daily`` response: (trade_date, close, pre_close) rows."""
+    return pd.DataFrame(
+        [
+            {
+                "ts_code": symbol,
+                "trade_date": day,
+                "close": close,
+                "pre_close": pre_close,
+            }
+            for day, close, pre_close in rows
+        ]
+    )
+
+
+def store_returning(sha256: str):
+    """A stand-in for the content-addressed store's ``record_raw``."""
+
+    def record_raw(result):
+        return SimpleNamespace(sha256=sha256)
+
+    return record_raw
+
+
+def channel_with(rows, *, open_days, failures=None, snapshots=None, recorded=None):
+    """A channel over one stubbed response, with no network and no clock."""
+
+    def fetch_daily(symbol, start, end):
+        request = DataRequest(DAILY_ENDPOINT, (symbol,), start, end)
+        return FetchResult(
+            source=TUSHARE_SOURCE,
+            endpoint=DAILY_ENDPOINT,
+            request_key=request_key(request),
+            frame=daily_frame(symbol, rows),
+            metadata={"transport_id": TUSHARE_SOURCE},
+        )
+
+    target = failures if failures is not None else []
+    return LazyDailyPriceChannel(
+        fetch_daily,
+        open_days,
+        on_failure=lambda symbol, error: target.append((symbol, error)),
+        raw_snapshots=[] if snapshots is None else snapshots,
+        record_raw=store_returning("stub") if recorded is None else recorded,
+    )
+
+
+def test_observes_the_reference_price_when_the_prior_day_is_adjacent():
+    """The happy path: the row before the ex-date is the prior open day."""
+    channel = channel_with(
+        [("2023-07-14", 7.18, 7.20), ("2023-07-17", 4.60, 4.17828)],
+        open_days=(date(2023, 7, 14), date(2023, 7, 17)),
+    )
+
+    observation = channel.observe("600188.SH", date(2023, 7, 17))
+
+    assert observation is not None
+    assert observation.prev_close_date == date(2023, 7, 14)
+    assert observation.prev_close == 7.18
+    assert observation.pre_close == 4.17828
+
+
+def test_a_suspension_spanning_the_ex_date_settles_nothing():
+    """Spec §6 leaves this form unverified, so it must fail closed.
+
+    The frame's row before the ex-date is 2023-07-05, but the published
+    calendar says 2023-07-14 was open: the symbol did not trade normally into
+    its ex-date, where ``pre_close``'s meaning is unconfirmed.
+    """
+    channel = channel_with(
+        [("2023-07-05", 7.18, 7.20), ("2023-07-17", 4.60, 4.17828)],
+        open_days=(date(2023, 7, 14), date(2023, 7, 17)),
+    )
+
+    assert channel.observe("600188.SH", date(2023, 7, 17)) is None
+
+
+def test_a_channel_failure_settles_nothing_and_is_reported():
+    """A raise degrades to an absent channel, never to a guessed side."""
+    failures = []
+
+    def fetch_daily(symbol, start, end):
+        raise RuntimeError("supplier unreachable")
+
+    channel = LazyDailyPriceChannel(
+        fetch_daily,
+        (date(2023, 7, 14), date(2023, 7, 17)),
+        on_failure=lambda symbol, error: failures.append((symbol, error)),
+        raw_snapshots=[],
+        record_raw=store_returning("unreached"),
+    )
+
+    assert channel.observe("600188.SH", date(2023, 7, 17)) is None
+    assert [symbol for symbol, _ in failures] == ["600188.SH"]
+    assert isinstance(failures[0][1], RuntimeError)
+
+
+def test_a_symbol_that_failed_is_not_fetched_again():
+    """A dead lane is not retried within the run."""
+    attempts = []
+
+    def fetch_daily(symbol, start, end):
+        attempts.append(symbol)
+        raise RuntimeError("supplier unreachable")
+
+    channel = LazyDailyPriceChannel(
+        fetch_daily,
+        (date(2023, 7, 14), date(2023, 7, 17)),
+        on_failure=lambda symbol, error: None,
+        raw_snapshots=[],
+        record_raw=store_returning("unreached"),
+    )
+
+    channel.observe("600188.SH", date(2023, 7, 17))
+    channel.observe("600188.SH", date(2023, 7, 17))
+
+    assert attempts == ["600188.SH"]
+
+
+def test_the_observation_carries_the_snapshot_it_was_read_from():
+    """What settled a conflict must be the bytes the snapshot holds (D3)."""
+    snapshots = []
+    fetched = []
+
+    def record_raw(result):
+        fetched.append(result)
+        return SimpleNamespace(sha256="deadbeef")
+
+    channel = channel_with(
+        [("2023-07-14", 7.18, 7.20), ("2023-07-17", 4.60, 4.17828)],
+        open_days=(date(2023, 7, 14), date(2023, 7, 17)),
+        snapshots=snapshots,
+        recorded=record_raw,
+    )
+
+    observation = channel.observe("600188.SH", date(2023, 7, 17))
+
+    # The hash travels on the observation, and what the store returned is what
+    # the run keeps: the snapshot list holds record_raw's own return value.
+    assert observation.snapshot_sha256 == "deadbeef"
+    assert [snapshot.sha256 for snapshot in snapshots] == ["deadbeef"]
+
+    # One request, for the ex-date's trailing window.
+    assert len(fetched) == 1
+    assert fetched[0].endpoint == DAILY_ENDPOINT
+    assert fetched[0].request_key == request_key(
+        DataRequest(
+            DAILY_ENDPOINT,
+            ("600188.SH",),
+            date(2023, 7, 17) - timedelta(days=30),
+            date(2023, 7, 17),
+        )
+    )
+
+
+def test_a_missing_calendar_answer_settles_nothing():
+    """Without a published open day before the ex-date, nothing is claimed."""
+    channel = channel_with(
+        [("2023-07-14", 7.18, 7.20), ("2023-07-17", 4.60, 4.17828)],
+        open_days=(date(2023, 7, 17),),
+    )
+
+    assert channel.observe("600188.SH", date(2023, 7, 17)) is None
+
+
+def test_a_frame_without_the_ex_date_settles_nothing():
+    """A supplier that omits the ex-date from its own bars proves nothing."""
+    channel = channel_with(
+        [("2023-07-13", 7.18, 7.20), ("2023-07-14", 7.19, 7.18)],
+        open_days=(date(2023, 7, 14), date(2023, 7, 17)),
+    )
+
+    assert channel.observe("600188.SH", date(2023, 7, 17)) is None

@@ -217,3 +217,139 @@ class PriceObservedArbiter:
             return None
         settlement = settle(cninfo, eastmoney, observation)
         return None if settlement is None else settlement.side
+
+
+#: The window asked of the daily lane: wide enough for a normal week's
+#: holidays, narrow enough that a longer gap means the symbol did not trade
+#: normally into its ex-date -- in which case the adjacency check refuses it.
+LOOKBACK_DAYS = 30
+
+TUSHARE_SOURCE = "tushare"
+DAILY_ENDPOINT = "daily"
+
+_DATE_COLUMN = "trade_date"
+_CLOSE_COLUMN = "close"
+_PRE_CLOSE_COLUMN = "pre_close"
+
+
+class LazyDailyPriceChannel:
+    """The ex-rights reference price for one ``(symbol, ex_date)``, on demand.
+
+    Consulted only for a conflicted key, fetched once per symbol and cached;
+    every response goes through the same content-addressed raw store as every
+    supplier, so what settled a conflict is byte-for-byte what the snapshot
+    holds.  Anything the lane raises degrades to an absent channel -- it
+    asserts nothing, the fail-closed direction -- is reported to ``on_failure``
+    and is not retried within the run.
+
+    Adjacency is proven, not assumed: the row before the ex-date must sit on
+    the open day the published calendar says immediately precedes it.  A symbol
+    suspended into its ex-date therefore settles nothing, which is the form the
+    spec deliberately leaves unverified.
+    """
+
+    def __init__(
+        self,
+        fetch_daily: Callable[[str, date, date], FetchResult],
+        open_days: Iterable[date],
+        *,
+        on_failure: Callable[[str, Exception], None],
+        raw_snapshots: list[Any],
+        record_raw: Any,
+    ) -> None:
+        self._fetch_daily = fetch_daily
+        self._previous_open_day = _previous_open_days(open_days)
+        self._on_failure = on_failure
+        self._raw_snapshots = raw_snapshots
+        self._record_raw = record_raw
+        self._observations: dict[tuple[str, date], PriceObservation | None] = {}
+        self._failed: set[str] = set()
+
+    def observe(self, symbol: str, ex_date: date) -> PriceObservation | None:
+        key = (symbol, ex_date)
+        if key in self._observations:
+            return self._observations[key]
+        if symbol in self._failed:
+            return None
+        try:
+            start = ex_date - timedelta(days=LOOKBACK_DAYS)
+            result = self._fetch_daily(symbol, start, ex_date)
+        except Exception as error:  # noqa: BLE001 - best-effort evidence channel
+            self._on_failure(symbol, error)
+            self._failed.add(symbol)
+            return None
+        snapshot_sha256 = None
+        if result.frame is not None and not result.frame.empty:
+            snapshot = self._record_raw(result)
+            self._raw_snapshots.append(snapshot)
+            snapshot_sha256 = snapshot.sha256
+        observation = _read_observation(
+            result.frame,
+            ex_date,
+            self._previous_open_day.get(ex_date),
+            snapshot_sha256,
+        )
+        self._observations[key] = observation
+        return observation
+
+
+def _previous_open_days(open_days: Iterable[date]) -> dict[date, date]:
+    """Map each open day to the open day immediately before it."""
+    ordered = sorted(set(open_days))
+    return {day: previous for previous, day in zip(ordered, ordered[1:])}
+
+
+def _read_observation(
+    frame: pd.DataFrame | None,
+    ex_date: date,
+    prior_open_day: date | None,
+    snapshot_sha256: str | None,
+) -> PriceObservation | None:
+    """The observation ``frame`` supports, or ``None`` when it supports none.
+
+    Every refusal is one of the fail-closed shapes: the calendar names no open
+    day before this ex-date, the frame holds no row on the ex-date, no usable
+    row before it, or a row that is not the open day immediately preceding --
+    the suspension form.
+    """
+    if prior_open_day is None or frame is None or frame.empty:
+        return None
+    by_date: dict[date, dict[str, Any]] = {}
+    for record in frame.to_dict("records"):
+        day = _as_date(record.get(_DATE_COLUMN))
+        if day is not None:
+            by_date[day] = record
+    ex_row = by_date.get(ex_date)
+    if ex_row is None:
+        return None
+    earlier = [day for day in by_date if day < ex_date]
+    if not earlier:
+        return None
+    prev_close_date = max(earlier)
+    if prev_close_date != prior_open_day:
+        return None
+    prev_close = _as_float(by_date[prev_close_date].get(_CLOSE_COLUMN))
+    pre_close = _as_float(ex_row.get(_PRE_CLOSE_COLUMN))
+    if prev_close is None or pre_close is None or prev_close <= 0.0:
+        return None
+    return PriceObservation(
+        prev_close=prev_close,
+        prev_close_date=prev_close_date,
+        pre_close=pre_close,
+        snapshot_sha256=snapshot_sha256,
+    )
+
+
+def _as_date(value: Any) -> date | None:
+    try:
+        return date.fromisoformat(str(value).strip()[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(number) else number
