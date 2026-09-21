@@ -1,6 +1,6 @@
 # 价格观测仲裁：跨源冲突的第四条证据通道（2026-09-22）
 
-状态：**待 owner 复核**。本文定义公司行为跨源冲突的机械化裁定边界，是
+状态：**owner 已复核**（2026-09-22）。本文定义公司行为跨源冲突的机械化裁定边界，是
 [ADR-007](../../adr/007-corporate-action-third-party-arbitration.md)（第三方仲裁）
 与 [ADR-009](../../adr/009-corporate-action-absent-ex-date.md)（价格事件通道）的
 直接延伸，并复用 [ADR-012](../../adr/012-corporate-action-exemption-reads-the-classification.md)
