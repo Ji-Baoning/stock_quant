@@ -15,6 +15,13 @@ import pandas as pd
 import pytest
 
 from stock_quant.data_model.corporate_actions import ConflictTerms
+from stock_quant.data_pipeline import (
+    CODE_OPTIONAL_SOURCE_FAILURE,
+    CODE_PRICE_OBSERVED_SETTLEMENT,
+    FirstAnsweringArbiter,
+    _GuardedArbiter,
+    _price_settlement_issue,
+)
 from stock_quant.data_sources.base import DataRequest, FetchResult, request_key
 from stock_quant.data_sources.price_observed import (
     DAILY_ENDPOINT,
@@ -404,3 +411,148 @@ def test_an_arbiter_without_a_record_callback_still_settles():
         arbiter.arbitrate(terms(cash_per_ten="2.0"), terms(cash_per_ten="5.0"))
         == "cninfo"
     )
+
+
+class _Fixed:
+    """An arbiter that always answers the same way, and says who was asked."""
+
+    def __init__(self, name, side, calls):
+        self.name = name
+        self._side = side
+        self._calls = calls
+
+    def arbitrate(self, cninfo, eastmoney):
+        self._calls.append(self.name)
+        return self._side
+
+
+def test_the_chain_asks_each_lane_until_one_answers():
+    """TDX answers where it can; the price lane where TDX refuses."""
+    calls = []
+    chain = FirstAnsweringArbiter(
+        [_Fixed("tdx", None, calls), _Fixed("price_observed", "cninfo", calls)],
+        issues=[],
+    )
+
+    assert chain.arbitrate(terms(), terms(cash_per_ten="5.0")) == "cninfo"
+    assert calls == ["tdx", "price_observed"]
+
+
+def test_the_chain_names_who_decided_not_who_was_asked_first():
+    """``confirmed_by`` reads ``<side>+<authority>``, so the label must follow
+    the lane that answered."""
+    calls = []
+    chain = FirstAnsweringArbiter(
+        [
+            _Fixed("tdx", "eastmoney", calls),
+            _Fixed("price_observed", "cninfo", calls),
+        ],
+        issues=[],
+    )
+
+    assert chain.arbitrate(terms(), terms(cash_per_ten="5.0")) == "eastmoney"
+    assert calls == ["tdx"]
+    assert chain.name == "tdx"
+
+
+def test_the_guard_carries_the_answering_lane_name_through():
+    """The wrapper must read its inner arbiter's name after the call, not copy
+    it at construction."""
+    calls = []
+    guarded = _GuardedArbiter(
+        FirstAnsweringArbiter(
+            [
+                _Fixed("tdx", None, calls),
+                _Fixed("price_observed", "cninfo", calls),
+            ],
+            issues=[],
+        ),
+        issues=[],
+    )
+
+    assert guarded.arbitrate(terms(), terms(cash_per_ten="5.0")) == "cninfo"
+    assert guarded.name == "price_observed"
+
+
+def test_a_reviewed_key_is_still_never_arbitrated_by_the_new_lane():
+    """ADR-007's rail applies to the price lane for free, and must."""
+    calls = []
+    guarded = _GuardedArbiter(
+        FirstAnsweringArbiter(
+            [
+                _Fixed("tdx", None, calls),
+                _Fixed("price_observed", "cninfo", calls),
+            ],
+            issues=[],
+        ),
+        issues=[],
+        reviewed=frozenset({("600188.SH", _DAY)}),
+    )
+
+    assert guarded.arbitrate(terms(), terms(cash_per_ten="5.0")) is None
+    assert calls == []
+
+
+def test_a_raising_lane_degrades_to_the_next_one_and_is_reported():
+    """A dead lane asserts nothing, so the lane behind it may still answer."""
+    calls = []
+    issues = []
+
+    class _Raising:
+        name = "tdx"
+
+        def arbitrate(self, cninfo, eastmoney):
+            calls.append("tdx")
+            raise RuntimeError("channel down")
+
+    chain = FirstAnsweringArbiter(
+        [_Raising(), _Fixed("price_observed", "cninfo", calls)], issues=issues
+    )
+
+    assert chain.arbitrate(terms(), terms(cash_per_ten="5.0")) == "cninfo"
+    assert calls == ["tdx", "price_observed"]
+    assert [issue.code for issue in issues] == [CODE_OPTIONAL_SOURCE_FAILURE]
+
+
+def test_a_raising_lane_still_leaves_the_key_quarantined_when_no_lane_answers():
+    """With every lane down, the key keeps its conflict -- fail closed."""
+    issues = []
+
+    class _Raising:
+        def __init__(self, name):
+            self.name = name
+
+        def arbitrate(self, cninfo, eastmoney):
+            raise RuntimeError("channel down")
+
+    chain = FirstAnsweringArbiter(
+        [_Raising("tdx"), _Raising("price_observed")], issues=issues
+    )
+
+    assert chain.arbitrate(terms(), terms(cash_per_ten="5.0")) is None
+    assert [issue.code for issue in issues] == [
+        CODE_OPTIONAL_SOURCE_FAILURE,
+        CODE_OPTIONAL_SOURCE_FAILURE,
+    ]
+
+
+def test_a_settlement_puts_its_numbers_in_a_quality_issue():
+    """Spec D3: what settled the conflict must be readable from the report."""
+    cninfo = terms(cash_per_ten="2.0")
+    observation = PriceObservation(
+        prev_close=10.0,
+        prev_close_date=_PREV,
+        pre_close=9.80,
+        snapshot_sha256="abc123",
+    )
+    settlement = settle(cninfo, terms(cash_per_ten="5.0"), observation)
+
+    issue = _price_settlement_issue(cninfo, settlement, observation)
+
+    assert issue.code == CODE_PRICE_OBSERVED_SETTLEMENT
+    assert issue.symbol == "600188.SH"
+    assert issue.trade_date == _DAY
+    assert issue.details["prev_close"] == 10.0
+    assert issue.details["pre_close"] == 9.80
+    assert issue.details["snapshot_sha256"] == "abc123"
+    assert issue.details["cninfo_ticks"] == pytest.approx(0.0)

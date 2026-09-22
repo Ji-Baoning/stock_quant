@@ -15,10 +15,16 @@ akshare:
   enabled: true
   timeout_seconds: 30
   max_retries: 3
-# baostock data server (:10030) down since 2026-09-05; optional cross-check only.
-# Re-enable once reachable.
+# baostock is the optional cross-check daily source (unadjusted prices).  Its
+# data server (:10030) was unreachable from 2026-09-05 and the source was turned
+# off; it answered again on 2026-09-19 and is re-enabled here.  Optional by role
+# (`_REQUIRED_ROLE` in data_pipeline.py): an outage degrades
+# `compare_daily_sources`, it does not fail an update.  Unlike `tdx` below,
+# enabling it changes no published fact and needs no rebuild - it supplies daily
+# bars for cross-checking plus the supplier's own suspension rows
+# (`tradestatus=0`), which are the only suspension evidence this project has.
 baostock:
-  enabled: false
+  enabled: true
   timeout_seconds: 30
   max_retries: 3
 # TDX (通达信) is the corporate-action *conflict arbiter* of ADR-007 - not a

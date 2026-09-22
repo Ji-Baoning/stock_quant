@@ -611,6 +611,26 @@ def _request() -> DataUpdateRequest:
     return DataUpdateRequest(start_date=_WINDOW_START, end_date=_WINDOW_END)
 
 
+#: A symbol holds one published coverage row per covered window: ``update``
+#: carries the baseline's rows beside the fresh verdict it computes (ADR-006
+#: window scope), so a symbol's verdict for the requested window has to be
+#: named by its window rather than taken from the table by position.
+def _requested_window_rows(coverage: pd.DataFrame) -> pd.DataFrame:
+    """The published coverage rows for the window ``_request()`` asks for."""
+    return coverage.loc[
+        (coverage["window_start"] == pd.Timestamp(_WINDOW_START))
+        & (coverage["window_end"] == pd.Timestamp(_WINDOW_END))
+    ]
+
+
+def _verdict_for(coverage: pd.DataFrame, symbol: str) -> pd.Series:
+    """One symbol's verdict row for the window ``_request()`` asks for."""
+    rows = _requested_window_rows(coverage)
+    rows = rows.loc[rows["symbol"] == symbol]
+    assert len(rows) == 1, rows
+    return rows.iloc[0]
+
+
 def test_update_with_explicit_end_publishes_merged_dataset(project):
     pipeline = DataPipeline(project.root, sources=_all_stubs())
     result = pipeline.update(_request())
@@ -846,9 +866,12 @@ def test_update_all_action_endpoints_failed_publishes_null_checked_at(project):
     assert result.dataset_ref is not None
     with DatasetReader(project.root).open(result.dataset_ref.version) as context:
         coverage = context.read("corporate_action_coverage")
-    assert set(coverage["status"]) == {"UNTRUSTED"}
-    assert "SOURCE_FETCH_FAILED" in set(coverage["reason"])
-    assert coverage["checked_at"].isna().all()
+    # The carried baseline rows keep their own verdicts and their own
+    # checked_at; what this run failed to source is the requested window's.
+    window = _requested_window_rows(coverage)
+    assert set(window["status"]) == {"UNTRUSTED"}
+    assert "SOURCE_FETCH_FAILED" in set(window["reason"])
+    assert window["checked_at"].isna().all()
 
 
 def test_update_marks_mixed_accepted_and_unsupported_window_untrusted(project):
@@ -868,7 +891,7 @@ def test_update_marks_mixed_accepted_and_unsupported_window_untrusted(project):
     assert len(booked) == 1
     assert booked.iloc[0]["cash_dividend_per_share"] == pytest.approx(0.46)
     # ... yet the sibling rights issue keeps the window from reading VERIFIED.
-    row = coverage.loc[coverage["symbol"] == "600000.SH"].iloc[0]
+    row = _verdict_for(coverage, "600000.SH")
     assert row["status"] == "UNTRUSTED"
     assert row["reason"] == "UNSUPPORTED_ACTION"
 
@@ -894,7 +917,7 @@ def test_update_marks_clean_cross_confirmed_cash_dividend_verified(project):
     assert len(booked) == 1
     assert booked.iloc[0]["cash_dividend_per_share"] == pytest.approx(0.46)
     # ... and, with nothing quarantined, the window reads VERIFIED, reason None.
-    row = coverage.loc[coverage["symbol"] == "600036.SH"].iloc[0]
+    row = _verdict_for(coverage, "600036.SH")
     assert row["status"] == "VERIFIED"
     assert pd.isna(row["reason"])
 
@@ -917,7 +940,7 @@ def test_update_events_only_outside_window_read_verified_empty(project):
         facts = context.read("corporate_action")
         coverage = context.read("corporate_action_coverage")
     assert facts.loc[facts["symbol"] == "600036.SH"].empty
-    row = coverage.loc[coverage["symbol"] == "600036.SH"].iloc[0]
+    row = _verdict_for(coverage, "600036.SH")
     assert row["status"] == "VERIFIED_EMPTY"
     assert pd.isna(row["reason"])
 
@@ -944,7 +967,7 @@ def test_update_ignores_quarantine_rows_whose_dates_predate_the_window(project):
     # The in-window dividend still books and the window reads VERIFIED.
     booked = facts.loc[facts["symbol"] == "600036.SH"]
     assert len(booked) == 1
-    row = coverage.loc[coverage["symbol"] == "600036.SH"].iloc[0]
+    row = _verdict_for(coverage, "600036.SH")
     assert row["status"] == "VERIFIED"
     assert pd.isna(row["reason"])
 

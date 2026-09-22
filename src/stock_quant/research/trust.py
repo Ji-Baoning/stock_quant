@@ -111,6 +111,11 @@ def evaluate_corporate_action_trust(
             row_end = _as_date(row.get(_END_COLUMN))
             if row_start is None or row_end is None:
                 continue
+            if row_end < row_start:
+                # A row whose window ends before it starts covers no day, so it
+                # is evidence neither for nor against the symbol -- and both
+                # guards below would read it as overlapping the window.
+                continue
             if row_end < start or row_start > end:
                 continue
             if _status_text(row) in _TRUSTED_STATUSES:

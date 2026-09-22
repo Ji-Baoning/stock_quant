@@ -1,0 +1,43 @@
+# 依赖清单：本仓库经实测验证的具体环境钉版。
+#
+# 参照环境：conda env `sq312`（Python 3.12.11），stock-quant 以可编辑方式
+# 安装于本仓库。版本取自 2026-09-18 该环境的实际安装；逐项对应关系由对
+# src/tests/project 的 AST import 扫描核实，非猜测。
+#
+# 与 pyproject.toml 的分工：那里保留面向 PyPI 的抽象下限（>=），本文件
+# 钉住验证过能协同工作的具体版本。安装顺序：
+#   pip install -r requirements.txt
+#   pip install -e .
+#
+# requires-python：项目下限 3.10（pyproject）；pytdxdata 需 >= 3.11，故
+# 仲裁功能（ADR-007）建议 3.11+ 解释器。
+
+# ---- 运行时（src/stock_quant 直接 import）----
+pandas==3.0.6
+numpy==2.5.3
+pyarrow==25.0.1
+pydantic==2.13.5
+PyYAML==6.0.3
+typer==0.27.2
+Jinja2==3.1.6
+plotly==7.1.0
+# dataset.py 顶层导入（数据集存储/查询）；pyproject 未声明，见本文件头部
+duckdb==1.5.5
+# tushare_proxy.py 顶层导入 + base.py 超时包装；pyproject 未声明
+requests==2.34.2
+
+# ---- 数据源 SDK（适配器内惰性导入，按 sources.yml 启用）----
+# tushare：必需主源
+tushare==1.4.29
+# akshare：必需参照源（index_history + 公司行为核对）
+akshare==1.18.23
+# baostock：可选校验源，2026-09-05 起服务不可达，sources.yml 中已关闭
+baostock==0.9.3
+# pytdxdata：ADR-007 公司行为冲突仲裁器（可选，非数据源）。
+# 未装入参照环境；sources.yml 的 tdx 默认 enabled: false。需要时取消注释：
+# pytdxdata
+
+# ---- 开发 / 测试 ----
+pytest==9.1.1
+pytest-cov==7.1.0
+ruff==0.16.8

@@ -62,8 +62,12 @@ def test_daily_output_has_exact_canonical_column_order_and_dtypes():
     assert result.rejected.empty
     assert result.audit.empty
     assert result.valid.columns.tolist() == DAILY_COLUMNS
-    assert str(result.valid["trade_date"].dtype) == "datetime64[ns]"
-    assert str(result.valid["ingested_at"].dtype) == "datetime64[ns, UTC]"
+    # pandas 3.0 infers a datetime's unit from the values it parses instead of
+    # always widening to nanoseconds, so these units follow the fixture's own
+    # precision. The published unit is the Arrow schema's, which the writer
+    # casts to -- not this in-memory one.
+    assert str(result.valid["trade_date"].dtype) == "datetime64[s]"
+    assert str(result.valid["ingested_at"].dtype) == "datetime64[us, UTC]"
     assert result.valid["volume"].dtype == "int64"
     assert result.valid["close"].dtype == "float64"
     assert result.valid["amount"].dtype == "float64"

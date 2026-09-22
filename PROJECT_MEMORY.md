@@ -366,7 +366,7 @@ volume, amount, source, ingested_at
 | tushare `suspend_d` | 无访问权限（需更高积分档位） | 推荐的独立停牌证据源不可用，停牌回补建模被阻塞 |
 | tushare `index_daily` | 限 1 次/小时（低积分表现） | 指数行情拉取需长间隔 |
 | tushare `index_weight` | relay/代理均可透传（2026-09-13 实测逐月全历史可用） | 时点 csi300 成员证据已固化（见 8.4 已执行记录） |
-| baostock | 服务器 2026-09-05 起停机，`sources.yml` 已禁用 | 交叉校验源与其原生停牌日行（`tradestatus=0`）不可用；复机后可同时解锁停牌回补 |
+| baostock | 服务器 2026-09-05 起停机，2026-09-19 恢复并重新启用 | 交叉校验源与其原生停牌日行（`tradestatus=0`）重新可用；停牌回补的源侧阻塞解除，**回补本身尚未执行** |
 | akshare `stock_tfp_em`（东财停复牌） | 忽略历史日期参数：查 2016-05-19 返回的是近期记录 | 对 2015–2016 停牌潮无历史覆盖，不能作为停牌证据 |
 | akshare cninfo / eastmoney 公司行为端点 | 可用（探针 31 / 28 行）；双源偶发单点冲突 | 冲突走 `configs/corporate_action_reviews.yml` 人工复核；601318.SH 2018-06-07 分红已裁定采信 cninfo |
 | csindex 官方渠道 | 本网络 500 / 404 / 不可达 | canonical `csi300` 官方证据不可得（见 8.4） |

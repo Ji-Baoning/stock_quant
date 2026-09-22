@@ -109,7 +109,10 @@ from stock_quant.data_model.dataset import (
     DatasetReader,
     PublicationBlocked,
 )
-from stock_quant.data_model.ex_date_classification import classify_ex_date
+from stock_quant.data_model.ex_date_classification import (
+    MARKET_ADJUSTMENT_OBSERVED,
+    classify_ex_date,
+)
 from stock_quant.data_model.fetch_coverage import (
     KIND_CARRIED,
     KIND_FETCHED,
@@ -191,10 +194,21 @@ from stock_quant.data_sources.base import (
     request_key,
     translate_supplier_error,
 )
+from stock_quant.data_sources.baostock_factor import (
+    factor_event_dates,
+    fetch_adjust_factor_frames,
+    snapshot_result,
+)
 from stock_quant.data_sources.raw_store import (
     RawSnapshot,
     RawSnapshotEvidence,
     RawStore,
+)
+from stock_quant.data_sources.price_observed import (
+    DAILY_ENDPOINT,
+    TUSHARE_SOURCE,
+    LazyDailyPriceChannel,
+    PriceObservedArbiter,
 )
 from stock_quant.data_sources.tdx import (
     ARBITER_NAME,
@@ -219,6 +233,7 @@ CODE_REQUIRED_SOURCE_DISABLED = "required_source_disabled"
 CODE_NO_CURRENT_DATASET = "no_current_dataset"
 CODE_CALENDAR_EMPTY_NO_END = "calendar_empty_requires_explicit_end"
 CODE_OPTIONAL_SOURCE_FAILURE = "optional_source_failure"
+CODE_PRICE_OBSERVED_SETTLEMENT = "price_observed_settlement"
 CODE_UNIVERSE_MASTER_MISMATCH = "universe_master_mismatch"
 CODE_MASTER_SNAPSHOT_INCOMPLETE = "master_snapshot_incomplete"
 CODE_MASTER_BAR_BOUNDARY = "master_bar_boundary"
@@ -424,7 +439,16 @@ def _merge_carried_coverage(
     carried_end = pd.to_datetime(carried["window_end"])
     boundary = pd.Timestamp(fetch_start)
     before = carried[carried_end < boundary]
-    overlap = carried[carried_end >= boundary].copy()
+    overlap = carried[carried_end >= boundary]
+    if "window_start" in carried.columns:
+        # A row the fetched window provably covers from its own start onward is
+        # superseded wholesale; clipping its end instead would publish a row
+        # whose window_start follows its window_end, which the trust gate reads
+        # as an UNTRUSTED window no interval supports.  Supersession is dropped
+        # only when proven: an unreadable start keeps the clip-and-publish path.
+        inside = pd.to_datetime(overlap["window_start"]) >= boundary
+        overlap = overlap[~inside]
+    overlap = overlap.copy()
     if not overlap.empty:
         overlap["window_end"] = boundary - pd.Timedelta(days=1)
     return pd.concat([before, overlap, refreshed], ignore_index=True)
@@ -983,6 +1007,7 @@ class DataPipeline:
                         raw_snapshots,
                         current_ca,
                         current_quarantine,
+                        calendar_open,
                     )
                 )
                 # The refresh re-judges only its own contract window; the
@@ -2084,6 +2109,7 @@ class DataPipeline:
         raw_snapshots,
         current_ca,
         current_quarantine,
+        open_days,
     ):
         """Reconcile the corporate-action interfaces per held security.
 
@@ -2155,8 +2181,9 @@ class DataPipeline:
             if "akshare" not in self._overrides:
                 self._sleeper(1)
         arbiter = self._build_action_arbiter(
-            symbols, start, end, issues, raw_snapshots
+            symbols, start, end, issues, raw_snapshots, open_days
         )
+        factor_channel = self._build_factor_channel(end, issues, raw_snapshots)
         accepted_frames: list[pd.DataFrame] = []
         quarantined_frames: list[pd.DataFrame] = []
         for symbol in symbols:
@@ -2194,13 +2221,16 @@ class DataPipeline:
         # consequences) -- only this round's newly quarantined rows are
         # classified; carried history predates the record.
         _record_absent_ex_date_classifications(
-            quarantined, arbiter, start, end, issues
+            quarantined, arbiter, start, end, issues, factor_channel=factor_channel
         )
         # Narrow only the coverage input, once: the exclusion records an INFO
         # trace, so it must not re-run inside the per-symbol comprehension or
         # each symbol would append a duplicate audit row for the same exclusion.
         relevant_quarantine = _window_relevant_quarantine(
             quarantined, start, end, issues
+        )
+        demoted_by_symbol = _demoted_reasons_by_symbol(
+            relevant_quarantine, arbiter, factor_channel
         )
         coverage = coverage_frame(
             [
@@ -2211,6 +2241,7 @@ class DataPipeline:
                     outcomes_by_symbol[symbol],
                     _accepted_symbols(accepted),
                     _quarantine_reasons_by_symbol(relevant_quarantine),
+                    demoted_reasons=demoted_by_symbol.get(symbol),
                 )
                 for symbol in symbols
             ]
@@ -2224,42 +2255,134 @@ class DataPipeline:
             merged_quarantine,
         )
 
-    def _build_action_arbiter(self, symbols, start, end, issues, raw_snapshots):
-        """Build the ADR-007 conflict arbiter, or ``None`` when it is off.
+    def _build_action_arbiter(
+        self, symbols, start, end, issues, raw_snapshots, open_days
+    ):
+        """Build the ADR-007 conflict arbiter, or ``None`` when none is on.
 
-        The arbiter is off unless ``sources.yml`` enables ``tdx`` (the shipped
-        default).  It is a third opinion, never a source: it is not in
-        ``CORPORATE_ACTION_ENDPOINTS``, it adds no name to
-        ``_CONFIGURED_SOURCES``, it is never consulted where the two official
-        sources already agree, and it yields to any conflict an owner has
-        signed off on (see ``_GuardedArbiter``).
+        A chain of best-effort opinions, consulted in order and each asked only
+        about a ``(symbol, ex_date)`` the two official sources disagree on.  A
+        member is not a source: neither is in ``CORPORATE_ACTION_ENDPOINTS``,
+        neither adds a name to ``_CONFIGURED_SOURCES``, and both yield to any
+        conflict an owner has signed off on (see ``_GuardedArbiter``).
 
-        The TDX channel is touched lazily: only a symbol with an actual
+        Two lanes, gated separately and composing freely:
+
+        * the TDX third-opinion lane (ADR-007), off unless ``sources.yml``
+          enables ``tdx`` (the shipped default), and
+        * the exchange reference-price lane (ADR-013), off unless ``tushare``
+          is enabled -- the segment the lane's ``daily`` endpoint belongs to.
+
+        Either lane may be absent without disabling the other: an ``None`` here
+        means both are off, which is the state a run that arbitrates nothing
+        produces and the reason the gate moved off TDX alone.
+
+        Both channels are touched lazily: only a symbol with an actual
         cross-source disagreement costs a fetch, so a clean round makes no
-        arbiter call at all.  Its responses are written as raw snapshots
+        arbiter call at all.  Their responses are written as raw snapshots
         through the same content-addressed store as every supplier, so what
         arbitrated a rebuild is reproducible from bytes rather than from a
         later answer.  Failing to obtain them leaves that symbol's conflicts
         quarantined -- the state a disabled arbiter produces -- and is
         recorded as a warning.
         """
-        config = self._project_config.sources.get(ARBITER_NAME)
-        if config is None or not config.enabled:
-            return None
         reviewed = {
             (review.symbol, review.ex_date)
             for review in self._project_config.corporate_action_reviews
             if start <= review.ex_date <= end
         }
-        lazy = _LazyActionArbiter(
+        arbiters: list[object] = []
+        config = self._project_config.sources.get(ARBITER_NAME)
+        if config is not None and config.enabled:
+            arbiters.append(
+                _LazyActionArbiter(
+                    config,
+                    start,
+                    end,
+                    issues=issues,
+                    raw_snapshots=raw_snapshots,
+                    record_raw=self._record_raw,
+                )
+            )
+        price = self._build_price_channel(issues, raw_snapshots, open_days)
+        if price is not None:
+            channel, report_settlement = price
+            arbiters.append(
+                PriceObservedArbiter(channel.observe, record=report_settlement)
+            )
+        if not arbiters:
+            return None
+        return _GuardedArbiter(
+            FirstAnsweringArbiter(arbiters, issues), issues, reviewed
+        )
+
+    def _build_factor_channel(self, end: date, issues, raw_snapshots):
+        """Build the ADR-009 baostock channel, or ``None`` when it is off.
+
+        The channel serves only the absent-ex-date classification and stays
+        fail-closed: a disabled baostock asserts nothing rather than letting a
+        window conclude an absence from silence.
+        """
+        config = self._project_config.sources.get("baostock")
+        if config is None or not config.enabled:
+            return None
+        return _LazyFactorChannel(
             config,
-            start,
             end,
             issues=issues,
             raw_snapshots=raw_snapshots,
             record_raw=self._record_raw,
         )
-        return _GuardedArbiter(lazy, issues, reviewed)
+
+    def _build_price_channel(self, issues, raw_snapshots, open_days):
+        """Build the ADR-013 reference-price lane, or ``None`` when it is off.
+
+        Gated on the existing ``tushare`` segment rather than one of its own:
+        the lane reads that source's ``daily`` endpoint and adds no name to
+        ``_CONFIGURED_SOURCES``.  Its responses go through ``self._source`` so a
+        test override replaces them exactly as it replaces the source's bars.
+
+        Returns the channel with the reporter that turns a settlement into the
+        run's own quality issue -- the issue vocabulary lives in this module,
+        and the settlement rule must not import it.
+        """
+
+        def report_failure(symbol, error):
+            issues.append(
+                _issue(
+                    Severity.WARNING,
+                    CODE_OPTIONAL_SOURCE_FAILURE,
+                    details={
+                        "source": TUSHARE_SOURCE,
+                        "endpoint": DAILY_ENDPOINT,
+                        "symbol": symbol,
+                        "message": str(error),
+                    },
+                )
+            )
+
+        def report_settlement(cninfo, eastmoney, settlement, observation):
+            issues.append(_price_settlement_issue(cninfo, settlement, observation))
+
+        config = self._project_config.sources.get(TUSHARE_SOURCE)
+        if config is None or not config.enabled:
+            return None
+
+        def fetch_daily(symbol, start, ex_date):
+            return self._source(TUSHARE_SOURCE).fetch(
+                DataRequest(DAILY_ENDPOINT, (symbol,), start, ex_date)
+            )
+
+        return (
+            LazyDailyPriceChannel(
+                fetch_daily,
+                open_days,
+                on_failure=report_failure,
+                raw_snapshots=raw_snapshots,
+                record_raw=self._record_raw,
+            ),
+            report_settlement,
+        )
 
     def _reconcile_action_frames(
         self,
@@ -2776,6 +2899,7 @@ def _coverage_record_for(
     outcomes: dict[str, dict[str, object]],
     accepted_symbols: frozenset[str],
     quarantine_reasons: Mapping[str, set[str]],
+    demoted_reasons: set[str] | None = None,
 ) -> dict[str, object]:
     """Render one symbol/window's evidence row from its endpoint outcomes."""
     sources = [
@@ -2791,6 +2915,7 @@ def _coverage_record_for(
         outcomes,
         has_accepted=symbol in accepted_symbols,
         quarantine_reasons=quarantine_reasons.get(symbol),
+        demoted_reasons=demoted_reasons,
     )
     return coverage_record(
         symbol,
@@ -2810,7 +2935,62 @@ def _coverage_record_for(
 #: leaves the window as accounted-for as if no event had been reported at all.
 #: Every other reason -- and any reason not named here -- still withholds trust,
 #: so a reason added later fails closed.
+#:
+#: The exemption is evidence-conditional (ADR-012): it rests on the reported
+#: event being no price event, so a row it would exempt stops exempting --
+#: demoted back to blocking for its symbol -- when an admissible ADR-009
+#: channel observes a market adjustment at the row's probe date.
 _NON_BLOCKING_QUARANTINE_REASONS = frozenset({REASON_NON_DISTRIBUTIVE_RESTRUCTURING})
+
+
+def _demoted_reasons_by_symbol(
+    relevant_quarantine: pd.DataFrame,
+    arbiter: object | None,
+    factor_channel: "_LazyFactorChannel | None",
+) -> dict[str, set[str]]:
+    """Deny-listed reasons that a row's classification strips the exemption from.
+
+    ADR-012, per ADR-009 decision 4's requirement that any rule moving a
+    verdict name the classification it relies on: the demoting classification
+    is ``adjustment_observed`` on the market axis -- a stated supplier ex-date
+    is probed there, an absent one at its announcement anchor -- read from
+    the two admissible channels (TDX category-1 records, baostock's factor
+    series), both lazily fetched and cached.  A row whose market axis reads
+    bracketed-empty or unknown keeps the exemption: absence asserted from
+    silence is the old ADR-008 ground, and unknown stays fail-closed.
+    """
+    if relevant_quarantine is None or relevant_quarantine.empty:
+        return {}
+    frame_for = getattr(arbiter, "frame_for", None) if arbiter is not None else None
+    demoted: dict[str, set[str]] = {}
+    for record in relevant_quarantine.to_dict("records"):
+        reason = str(record.get("reason") or "")
+        if reason not in _NON_BLOCKING_QUARANTINE_REASONS:
+            continue
+        symbol = str(record["symbol"])
+        ex_date = _as_date(record.get("ex_date"))
+        probe = ex_date or _as_date(record.get("announcement_date"))
+        if probe is None:
+            continue
+        tdx_dates: list[date] = []
+        if frame_for is not None:
+            frame = frame_for(symbol)
+            if frame is not None and not frame.empty and "category" in frame.columns:
+                distribution = frame[frame["category"] == XDXR_CATEGORY_DISTRIBUTION]
+                tdx_dates = [
+                    day
+                    for day in (_as_date(value) for value in distribution["date"])
+                    if day is not None
+                ]
+        baostock_dates = factor_channel(symbol) if factor_channel else None
+        classification = classify_ex_date(
+            supplier_ex_date=ex_date,
+            probe_date=probe,
+            channels=(("tdx", tdx_dates), ("baostock", baostock_dates)),
+        )
+        if classification.market == MARKET_ADJUSTMENT_OBSERVED:
+            demoted.setdefault(symbol, set()).add(reason)
+    return demoted
 
 
 def _coverage_verdict(
@@ -2818,6 +2998,7 @@ def _coverage_verdict(
     *,
     has_accepted: bool,
     quarantine_reasons: set[str] | None,
+    demoted_reasons: set[str] | None = None,
 ) -> tuple[CoverageStatus, CoverageReason | None]:
     """Decide one symbol/window's status from its endpoint fetch outcomes.
 
@@ -2829,9 +3010,11 @@ def _coverage_verdict(
     for the same symbol/window was accepted, so a conflicting or unbooked event
     can never be masked by an accepted row while the coverage reads
     ``VERIFIED``.  The reasons listed in ``_NON_BLOCKING_QUARANTINE_REASONS``
-    are excluded from that rule and are the only ones.  A row whose every known
-    date lies outside the window is excluded by ``_window_relevant_quarantine``
-    before this decision (ADR-006).
+    are excluded from that rule -- except where ``demoted_reasons`` names them
+    for this symbol (ADR-012: an observed market adjustment at the row's probe
+    date strips the exemption).  A row whose every known date lies outside the
+    window is excluded by ``_window_relevant_quarantine`` before this decision
+    (ADR-006).
     """
     if any(not outcome["ok"] for outcome in outcomes.values()):
         return CoverageStatus.UNTRUSTED, CoverageReason.SOURCE_FETCH_FAILED
@@ -2839,6 +3022,7 @@ def _coverage_verdict(
         return CoverageStatus.VERIFIED_EMPTY, None
     if quarantine_reasons:
         blocking = quarantine_reasons - _NON_BLOCKING_QUARANTINE_REASONS
+        blocking |= quarantine_reasons & (demoted_reasons or set())
     else:
         blocking = set()
     if blocking:
@@ -2848,7 +3032,12 @@ def _coverage_verdict(
         )
     if has_accepted:
         return CoverageStatus.VERIFIED, None
-    return CoverageStatus.UNTRUSTED, CoverageReason.FACTS_INCOMPLETE
+    # ADR-006's principle carried to its end (ADR-012): the endpoints answered,
+    # no quarantined row can affect this window, and nothing was accepted -- so
+    # every event any supplier reported is either refused non-price evidence or
+    # provably about another period.  "Nothing happened here" is positively
+    # supported, not an unaccounted gap.
+    return CoverageStatus.VERIFIED_EMPTY, None
 
 
 def _coverage_reason_for_quarantine(
@@ -3179,6 +3368,7 @@ def _record_absent_ex_date_classifications(
     start: date,
     end: date,
     issues: list[QualityIssue],
+    factor_channel: "_LazyFactorChannel | None" = None,
 ) -> None:
     """Record the ADR-009 classification of newly quarantined ex-date-less rows.
 
@@ -3188,16 +3378,24 @@ def _record_absent_ex_date_classifications(
     changes).  Only rows this round newly quarantined are classified --
     carried history predates the record -- and the probe date is the row's
     announcement date, the best-known anchor when the supplier states no
-    ex-date.  The admissible channels: TDX category-1 records via the lazy
-    arbiter's frames, and baostock's adjustment-factor series, which is not
-    wired in this repo yet -- an absent channel asserts nothing, so an
+    ex-date.  The admissible channels (ADR-009 decision 3): TDX category-1
+    records via the lazy arbiter's frames, and baostock's adjustment-factor
+    series via ``factor_channel``; an absent channel asserts nothing, so an
     unbracketed row reads ``unknown`` and stays blocking (decision 2).
     """
-    if arbiter is None or quarantined is None or quarantined.empty:
+    if quarantined is None or quarantined.empty:
         return
-    frame_for = getattr(arbiter, "frame_for", None)
-    if frame_for is None:
+    frame_for = getattr(arbiter, "frame_for", None) if arbiter is not None else None
+    if frame_for is None and factor_channel is None:
         return
+    channels_consulted = [
+        name
+        for name, channel in (
+            ("tdx", frame_for),
+            ("baostock", factor_channel),
+        )
+        if channel is not None
+    ]
     for record in quarantined.to_dict("records"):
         if record.get("reason") != REASON_INCOMPLETE:
             continue
@@ -3211,19 +3409,21 @@ def _record_absent_ex_date_classifications(
         if not (start <= announcement <= end):
             continue
         symbol = str(record["symbol"])
-        frame = frame_for(symbol)
         tdx_dates: list[date] = []
-        if frame is not None and not frame.empty and "category" in frame.columns:
-            distribution = frame[frame["category"] == XDXR_CATEGORY_DISTRIBUTION]
-            tdx_dates = [
-                day
-                for day in (_as_date(value) for value in distribution["date"])
-                if day is not None
-            ]
+        if frame_for is not None:
+            frame = frame_for(symbol)
+            if frame is not None and not frame.empty and "category" in frame.columns:
+                distribution = frame[frame["category"] == XDXR_CATEGORY_DISTRIBUTION]
+                tdx_dates = [
+                    day
+                    for day in (_as_date(value) for value in distribution["date"])
+                    if day is not None
+                ]
+        baostock_dates = factor_channel(symbol) if factor_channel else None
         classification = classify_ex_date(
             supplier_ex_date=None,
             probe_date=announcement,
-            channels=(("tdx", tdx_dates), ("baostock", None)),
+            channels=(("tdx", tdx_dates), ("baostock", baostock_dates)),
         )
         issues.append(
             _issue(
@@ -3234,7 +3434,7 @@ def _record_absent_ex_date_classifications(
                 details={
                     "classification": classification.code,
                     "probe_date": announcement.isoformat(),
-                    "channels": ["tdx", "baostock_unwired"],
+                    "channels": channels_consulted,
                 },
             )
         )
@@ -3327,6 +3527,121 @@ class _LazyActionArbiter:
         return arbiter.arbitrate(cninfo, eastmoney)
 
 
+class _LazyFactorChannel:
+    """baostock's adjustment-factor series, fetched on first need (ADR-009).
+
+    The second admissible price-event channel of the absent-ex-date
+    classification: consulted only for a row the recorder classifies, cached
+    per symbol, and written as a raw snapshot through the same
+    content-addressed store as every supplier.  Anything the channel raises
+    degrades to an absent channel -- it asserts nothing, the fail-closed
+    direction -- recorded as a warning and not retried within the run.
+    """
+
+    def __init__(
+        self,
+        config: SourceConfig,
+        end: date,
+        *,
+        issues: list[QualityIssue],
+        raw_snapshots: list[RawSnapshot],
+        record_raw: Any,
+    ) -> None:
+        self._config = config
+        self._end = end
+        self._issues = issues
+        self._raw_snapshots = raw_snapshots
+        self._record_raw = record_raw
+        self._events: dict[str, list[date]] = {}
+        self._failed: set[str] = set()
+
+    def __call__(self, symbol: str) -> list[date] | None:
+        if symbol in self._events:
+            return self._events[symbol]
+        if symbol in self._failed:
+            return None
+        try:
+            frames = fetch_adjust_factor_frames(
+                [symbol], timeout=float(self._config.timeout_seconds), end=self._end
+            )
+        except Exception as error:  # noqa: BLE001 - best-effort evidence channel
+            self._issues.append(
+                _issue(
+                    Severity.WARNING,
+                    CODE_OPTIONAL_SOURCE_FAILURE,
+                    details={
+                        "source": "baostock",
+                        "endpoint": "adjust_factor",
+                        "symbol": symbol,
+                        "message": str(error),
+                    },
+                )
+            )
+            self._failed.add(symbol)
+            return None
+        frame = frames.get(symbol)
+        if frame is not None and not frame.empty:
+            self._raw_snapshots.append(
+                self._record_raw(snapshot_result(symbol, frame, end=self._end))
+            )
+        events = factor_event_dates(frame)
+        self._events[symbol] = events
+        return events
+
+
+class FirstAnsweringArbiter:
+    """Ask each conflict arbiter in turn; the first to name a side books it.
+
+    Order is policy, not preference: TDX is a genuinely independent third
+    opinion (ADR-007) while the price lane is an independent verification path
+    that shares the issuer's announcement as its origin with CNINFO (ADR-013),
+    so the stronger evidence is asked first and only a refusal falls through.
+
+    ``name`` always holds the name of the arbiter that last answered, so the
+    ``<side>+<authority>`` label ``_arbitrated_event`` builds names who decided
+    rather than who was asked first.  That is why ``_GuardedArbiter.name`` has
+    to read through instead of copying at construction.
+
+    A lane that raises is reported and skipped: it asserted nothing, which says
+    nothing about the lanes behind it.  With every lane down the answer is
+    ``None``, so the conflict keeps its quarantine.
+    """
+
+    def __init__(self, arbiters, issues) -> None:
+        self._arbiters = tuple(arbiters)
+        if not self._arbiters:
+            raise ValueError("an arbiter chain needs at least one arbiter")
+        self._issues = issues
+        self.name = self._arbiters[0].name
+
+    def arbitrate(self, cninfo, eastmoney):
+        for arbiter in self._arbiters:
+            try:
+                side = arbiter.arbitrate(cninfo, eastmoney)
+            except Exception as error:  # noqa: BLE001 - best-effort opinion
+                _warn_arbiter_failure(self._issues, cninfo.symbol, error)
+                continue
+            if side is not None:
+                self.name = arbiter.name
+                return side
+        return None
+
+    def frame_for(self, symbol: str):
+        """The first inner arbiter holding a frame for ``symbol``.
+
+        ADR-009's classification consults the same lazily fetched frames the
+        arbitration uses, so the chain forwards the hook rather than hiding it.
+        """
+        for arbiter in self._arbiters:
+            frame_for = getattr(arbiter, "frame_for", None)
+            if frame_for is None:
+                continue
+            frame = frame_for(symbol)
+            if frame is not None:
+                return frame
+        return None
+
+
 class _GuardedArbiter:
     """An arbiter that yields to a signed review and cannot lose a lane.
 
@@ -3348,7 +3663,17 @@ class _GuardedArbiter:
         self._arbiter = arbiter
         self._issues = issues
         self._reviewed = reviewed
-        self.name = arbiter.name
+
+    @property
+    def name(self):
+        """The inner arbiter's current name.
+
+        Read through rather than copied at construction: a first-answering
+        chain renames itself to whichever lane decided, and
+        ``_arbitrated_event`` reads ``name`` *after* ``arbitrate`` to build the
+        ``<side>+<authority>`` label.
+        """
+        return self._arbiter.name
 
     def frame_for(self, symbol: str):
         """The inner arbiter's raw frame for ``symbol``, when it has one.
@@ -3460,4 +3785,25 @@ def _issue(
         symbol=symbol,
         trade_date=trade_date,
         details=dict(details or {}),
+    )
+
+
+def _price_settlement_issue(cninfo, settlement, observation) -> QualityIssue:
+    """The INFO trace of one price-observed settlement (spec D3).
+
+    The label names the winner; this names the arithmetic that chose it and the
+    stored bytes the reference price came from, so a settlement can be
+    recomputed from the raw snapshot rather than taken on trust.
+    """
+    return _issue(
+        Severity.INFO,
+        CODE_PRICE_OBSERVED_SETTLEMENT,
+        symbol=cninfo.symbol,
+        trade_date=cninfo.ex_date,
+        details={
+            **settlement.to_details(),
+            "symbol": cninfo.symbol,
+            "ex_date": cninfo.ex_date.isoformat(),
+            "snapshot_sha256": observation.snapshot_sha256,
+        },
     )

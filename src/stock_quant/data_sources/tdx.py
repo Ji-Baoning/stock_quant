@@ -184,37 +184,43 @@ async def _fetch_xdxr(
     timeout: float,
     servers: Sequence[str] | None,
 ) -> dict[str, pd.DataFrame]:
-    market_type, client_type = _load_pytdxdata()
+    client_type = _load_pytdxdata()
     frames: dict[str, pd.DataFrame] = {}
     kwargs: dict[str, Any] = {"timeout": timeout}
     if servers:
         kwargs["standard_servers"] = list(servers)
     async with client_type(**kwargs) as client:
         for symbol in symbols:
-            market, code = _split_symbol(symbol, market_type)
-            records = await client.get_xdxr(market, code)
+            records = await client.get_xdxr(_tdx_symbol(symbol))
             frames[symbol] = build_xdxr_frame(symbol, records)
     return frames
 
 
 def _load_pytdxdata():
     try:
-        from pytdxdata import Market, TdxData
+        from pytdxdata import TdxData
     except ImportError as error:  # pragma: no cover - exercised by the guard test
         raise TdxUnavailableError(
             "the tdx arbiter needs the optional pytdxdata package "
             "(pip install pytdxdata); install it or leave sources.yml "
             "tdx.enabled false"
         ) from error
-    return Market, TdxData
+    return TdxData
 
 
-def _split_symbol(symbol: str, market_type: Any):
-    suffix = symbol.rpartition(".")[2].upper()
-    market_name = _MARKET_BY_SUFFIX.get(suffix)
-    if market_name is None:
+def _tdx_symbol(symbol: str) -> str:
+    """The channel's prefixed symbol (``sz300124``) for a canonical one.
+
+    pytdxdata 0.6.0 takes one prefixed string and rejects the suffixed
+    canonical form without a roundtrip, so the market scope is enforced here:
+    the standard market carries SH and SZ only, and anything else is not
+    arbitrated rather than guessed onto a market.
+    """
+    code, _, suffix = symbol.rpartition(".")
+    market = _MARKET_BY_SUFFIX.get(suffix.upper())
+    if not code or market is None:
         raise TdxUnavailableError(f"TDX has no market for {symbol!r}")
-    return market_type[market_name], symbol.rpartition(".")[0]
+    return f"{suffix.lower()}{code}"
 
 
 class TdxXdxrArbiter:

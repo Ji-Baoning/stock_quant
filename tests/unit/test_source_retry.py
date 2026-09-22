@@ -85,6 +85,18 @@ def test_retry_retries_rate_limit_but_not_authentication(fake_source, data_reque
     assert sleeps == [1.0]
 
 
+def test_protocol_level_connection_failures_classify_as_transient():
+    """A relay that closes mid-response ("Response ended prematurely") is a
+    transient failure: it must take the retry path, not an unretried FATAL."""
+    for message in (
+        "Response ended prematurely",
+        "IncompleteRead(0 bytes read)",
+        "RemoteDisconnected('Remote end closed connection without response')",
+    ):
+        classified = translate_supplier_error(RuntimeError(message))
+        assert isinstance(classified, ServerError)
+
+
 def test_retry_policy_refuses_limits_beyond_the_supplier_contract():
     """A caller cannot override the three-attempt, 30-second safety limits."""
     with pytest.raises(ValueError):

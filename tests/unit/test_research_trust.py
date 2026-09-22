@@ -141,6 +141,32 @@ def test_trust_reasons_are_per_symbol_deterministic_and_sorted():
     ]
 
 
+def test_trust_ignores_a_row_whose_window_is_inverted():
+    """A row whose start follows its end is not evidence for the symbol.
+
+    The carried-coverage merge once clipped a superseded row's ``window_end``
+    without dropping it, publishing ``window_start > window_end``.  Both
+    window guards read such a row as overlapping, so an ``UNTRUSTED`` one added
+    a failure no real interval supports.  It must be skipped, leaving only the
+    genuine evidence to decide the symbol.
+    """
+    decision = evaluate_corporate_action_trust(
+        coverage=coverage_frame(
+            [
+                coverage_record(
+                    "600000.SH", date(2026, 6, 20), date(2020, 12, 31),
+                    CoverageStatus.UNTRUSTED, CoverageReason.FACTS_INCOMPLETE,
+                ),
+                verified("600000.SH", date(2015, 1, 5), date(2026, 9, 18)),
+            ]
+        ),
+        symbols={"600000.SH"},
+        window_start=date(2015, 1, 5), window_end=date(2026, 9, 18),
+    )
+    assert decision.trusted
+    assert decision.reasons == ()
+
+
 def test_trust_mode_names_are_the_frozen_storage_values():
     assert DataTrustMode.RESEARCH.value == "research"
     assert DataTrustMode.ENGINEERING.value == "engineering"

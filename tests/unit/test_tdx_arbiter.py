@@ -608,6 +608,8 @@ def test_classification_records_for_newly_quarantined_absent_ex_dates(monkeypatc
         ]
     )
 
+    from stock_quant import data_pipeline
+
     data_pipeline._record_absent_ex_date_classifications(
         quarantine,
         _GuardedArbiter(lazy, issues),
@@ -646,6 +648,8 @@ def test_classification_with_an_unavailable_channel_reads_unknown(monkeypatch):
         ]
     )
 
+    from stock_quant import data_pipeline
+
     data_pipeline._record_absent_ex_date_classifications(
         quarantine,
         _GuardedArbiter(lazy, issues),
@@ -679,8 +683,295 @@ def test_classification_without_an_arbiter_records_nothing():
         ]
     )
 
+    from stock_quant import data_pipeline
+
     data_pipeline._record_absent_ex_date_classifications(
         quarantine, None, date(2026, 6, 20), date(2026, 9, 18), issues
     )
 
     assert issues == []
+
+
+# --------------------------------------------------------------------------- #
+# baostock's adjustment-factor series as the second classification channel
+# --------------------------------------------------------------------------- #
+
+
+def _factor_frame(rows):
+    import pandas as pd
+
+    return pd.DataFrame(
+        [
+            {
+                "code": "sz.600519",
+                "dividOperateDate": day,
+                "foreAdjustFactor": value,
+                "backAdjustFactor": value,
+                "adjustFactor": value,
+            }
+            for day, value in rows
+        ]
+    )
+
+
+def _factor_channel(monkeypatch, outcome, calls, raw_snapshots, issues=None):
+    """A ``_LazyFactorChannel`` over a scripted ``fetch_adjust_factor_frames``."""
+    from stock_quant import data_pipeline
+
+    def fake_fetch(symbols, *, timeout=30.0, end=None):
+        calls.extend(symbols)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return dict(outcome)
+
+    monkeypatch.setattr(data_pipeline, "fetch_adjust_factor_frames", fake_fetch)
+    return data_pipeline._LazyFactorChannel(
+        _StubConfig(),
+        date(2026, 9, 18),
+        issues=issues if issues is not None else [],
+        raw_snapshots=raw_snapshots,
+        record_raw=lambda result: result,
+    )
+
+
+_ABSENT_ROW = {
+    "symbol": "600519.SH",
+    "announcement_date": date(2026, 7, 1),
+    "ex_date": None,
+    "reason": "incomplete",
+}
+
+
+def test_a_bracketing_factor_series_asserts_absence_without_tdx(monkeypatch):
+    """baostock alone can carry the market axis; TDX is not required."""
+    calls: list[str] = []
+    channel = _factor_channel(
+        monkeypatch,
+        {
+            "600519.SH": _factor_frame(
+                [
+                    ("2025-01-01", "1.000000"),
+                    ("2026-06-01", "1.100000"),
+                    ("2026-08-01", "1.250000"),
+                ]
+            )
+        },
+        calls,
+        [],
+    )
+    issues: list = []
+
+    from stock_quant import data_pipeline
+
+    data_pipeline._record_absent_ex_date_classifications(
+        pd.DataFrame([_ABSENT_ROW]),
+        None,
+        date(2026, 6, 20),
+        date(2026, 9, 18),
+        issues,
+        factor_channel=channel,
+    )
+
+    classified = [issue for issue in issues if issue.code == "absent_ex_date_classified"]
+    assert len(classified) == 1
+    assert classified[0].details["classification"] == "absent+no_adjustment_bracketed_empty"
+    assert classified[0].details["channels"] == ["baostock"]
+    assert calls == ["600519.SH"]
+
+
+def test_a_factor_change_at_the_probe_reads_observed(monkeypatch):
+    """The series moving exactly at the probe is an observed adjustment."""
+    channel = _factor_channel(
+        monkeypatch,
+        {
+            "600519.SH": _factor_frame(
+                [("2026-06-01", "1.000000"), ("2026-07-01", "1.250000")]
+            )
+        },
+        [],
+        [],
+    )
+    issues: list = []
+
+    from stock_quant import data_pipeline
+
+    data_pipeline._record_absent_ex_date_classifications(
+        pd.DataFrame([_ABSENT_ROW]),
+        None,
+        date(2026, 6, 20),
+        date(2026, 9, 18),
+        issues,
+        factor_channel=channel,
+    )
+
+    classified = [issue for issue in issues if issue.code == "absent_ex_date_classified"]
+    assert classified[0].details["classification"] == "absent+adjustment_observed"
+
+
+def test_a_factor_series_is_recorded_as_a_raw_snapshot(monkeypatch):
+    """The channel's bytes land in the same content-addressed store."""
+    raw: list = []
+    channel = _factor_channel(
+        monkeypatch,
+        {"600519.SH": _factor_frame([("2026-06-01", "1.000000")])},
+        [],
+        raw,
+    )
+    channel("600519.SH")
+
+    assert len(raw) == 1
+    assert raw[0].endpoint == "adjust_factor"
+    assert raw[0].source == "baostock"
+
+
+def test_a_failing_factor_channel_degrades_to_unknown_with_a_warning(monkeypatch):
+    """The fail-closed direction: a dead baostock asserts nothing, once."""
+    calls: list[str] = []
+    issues: list = []
+    channel = _factor_channel(
+        monkeypatch,
+        RuntimeError("login failed"),
+        calls,
+        [],
+        issues=issues,
+    )
+
+    from stock_quant import data_pipeline
+
+    data_pipeline._record_absent_ex_date_classifications(
+        pd.DataFrame([_ABSENT_ROW, dict(_ABSENT_ROW)]),
+        None,
+        date(2026, 6, 20),
+        date(2026, 9, 18),
+        issues,
+        factor_channel=channel,
+    )
+
+    classified = [issue for issue in issues if issue.code == "absent_ex_date_classified"]
+    assert len(classified) == 2
+    assert all(
+        issue.details["classification"] == "absent+unknown" for issue in classified
+    )
+    warnings = [issue for issue in issues if issue.code == "optional_source_failure"]
+    assert len(warnings) == 1
+    assert calls == ["600519.SH"]
+
+
+def test_an_unbracketed_probe_before_the_first_change_reads_unknown(monkeypatch):
+    """A probe before the series' first change is covered by nothing."""
+    channel = _factor_channel(
+        monkeypatch,
+        {
+            "600519.SH": _factor_frame(
+                [
+                    ("2025-01-01", "1.000000"),
+                    ("2026-06-01", "1.100000"),
+                    ("2026-08-01", "1.250000"),
+                ]
+            )
+        },
+        [],
+        [],
+    )
+    issues: list = []
+    row = dict(_ABSENT_ROW, announcement_date=date(2026, 5, 1))
+
+    from stock_quant import data_pipeline
+
+    data_pipeline._record_absent_ex_date_classifications(
+        pd.DataFrame([row]),
+        None,
+        date(2026, 4, 20),
+        date(2026, 9, 18),
+        issues,
+        factor_channel=channel,
+    )
+
+    classified = [issue for issue in issues if issue.code == "absent_ex_date_classified"]
+    assert classified[0].details["classification"] == "absent+unknown"
+
+
+# --------------------------------------------------------------------------- #
+# ADR-012: the deny-list exemption reads the recorded classification
+# --------------------------------------------------------------------------- #
+
+
+def _non_distributive_row(symbol="600519.SH", ex_date=None, announced=date(2021, 12, 16)):
+    return {
+        "symbol": symbol,
+        "announcement_date": announced,
+        "record_date": None,
+        "ex_date": ex_date,
+        "reason": "non_distributive_restructuring",
+    }
+
+
+def test_a_tdx_event_at_the_stated_ex_date_demotes_the_exemption(monkeypatch):
+    """Row 5 of ADR-009's table: the market adjusted where the supplier stated."""
+    calls: list[str] = []
+    lazy = _lazy_arbiter(
+        monkeypatch,
+        {"600519.SH": _xdxr(fenhong=_tdx_sends(7.477), ex_date="2021-12-22")},
+        calls,
+        [],
+    )
+    from stock_quant import data_pipeline
+
+    demoted = data_pipeline._demoted_reasons_by_symbol(
+        pd.DataFrame([_non_distributive_row(ex_date=date(2021, 12, 22))]),
+        lazy,
+        None,
+    )
+    assert demoted == {"600519.SH": {"non_distributive_restructuring"}}
+    assert calls == ["600519.SH"]
+
+
+def test_a_bracketed_absence_keeps_the_exemption(monkeypatch):
+    """Row 1 ground: channels bracket the anchor and are empty -- exempt."""
+    calls: list[str] = []
+    lazy = _lazy_arbiter(
+        monkeypatch,
+        {
+            "600519.SH": _xdxr(
+                fenhong=_tdx_sends(1.0),
+                ex_date="2020-01-01",
+            )
+        },
+        calls,
+        [],
+    )
+    channel = _factor_channel(
+        monkeypatch,
+        {
+            "600519.SH": _factor_frame(
+                [
+                    ("2019-01-01", "1.000000"),
+                    ("2020-01-01", "1.100000"),
+                    ("2023-01-01", "1.250000"),
+                ]
+            )
+        },
+        calls,
+        [],
+    )
+    from stock_quant import data_pipeline
+
+    demoted = data_pipeline._demoted_reasons_by_symbol(
+        pd.DataFrame([_non_distributive_row(ex_date=None, announced=date(2021, 6, 1))]),
+        lazy,
+        channel,
+    )
+    assert demoted == {}
+
+
+def test_demotion_ignores_non_exempted_reasons(monkeypatch):
+    """Only deny-listed rows are candidates; incomplete blocks already."""
+    from stock_quant import data_pipeline
+
+    demoted = data_pipeline._demoted_reasons_by_symbol(
+        pd.DataFrame([dict(_ABSENT_ROW, reason="incomplete")]),
+        None,
+        None,
+    )
+    assert demoted == {}
+

@@ -143,6 +143,15 @@ content-addressed store（`_LazyFactorChannel` 的既有惰性形状，见
 任何一方。合并它等于替 owner 判断"这个差异不重要"——那正是本项目保留给人的决定。
 该条维持隔离。
 
+> **2026-09-22 修订（[ADR-014](../../adr/014-float32-floor-merge-after-the-channels.md)）。**
+> 本节容差的**宽度**（1 ULP）成立，**位置**被否决：放在 `_same_facts` 里会抢在
+> 通道之前合并，使 300124 / 301308 这两条 丁 类记录永远到不了仲裁者——实测把
+> `tests/unit/test_tdx_arbiter.py` 从 31 passed 打到 29，两个失败正是这两条记
+> 成了 `cninfo+eastmoney`。现在改为：`_same_facts` 恢复精确相等，容差在**所有
+> 通道都拒绝裁定之后**才生效，合并时取**有效位数多**的一侧而不是一律取 CNINFO
+> （300124 取 Eastmoney 的 `9.998781`，301308 取 CNINFO 的 `9.90744266`）。代价
+> 是这两个数字会随通道是否启用而不同，见 ADR-014 的 Consequences。
+
 ### D5 —— 分离度不足时不动
 
 若败方偏离不足 `L × tick`（两侧不可分辨），或赢方自身偏离已超 `W × tick`

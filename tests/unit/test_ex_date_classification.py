@@ -138,3 +138,113 @@ def test_no_probe_date_reads_unknown_not_a_special_verdict():
     )
     assert classification.code == "absent+unknown"
     assert classification.probe_date is None
+
+
+# --------------------------------------------------------------------------- #
+# baostock's adjustment-factor series as an event-date channel (ADR-009 #3)
+# --------------------------------------------------------------------------- #
+
+
+def _factor_frame(rows):
+    """A native-shape factor series: one row per (date, cumulative factor)."""
+    import pandas as pd
+
+    return pd.DataFrame(
+        [
+            {
+                "code": "sz.600519",
+                "dividOperateDate": day,
+                "foreAdjustFactor": value,
+                "backAdjustFactor": value,
+                "adjustFactor": value,
+            }
+            for day, value in rows
+        ]
+    )
+
+
+def test_a_factor_change_is_an_event_and_a_flat_row_is_not():
+    """The artifact row copies the factor forward; only changes are events."""
+    from stock_quant.data_sources.baostock_factor import factor_event_dates
+
+    frame = _factor_frame(
+        [
+            ("2015-01-05", "1.000000"),
+            ("2018-09-19", "1.304348"),
+            ("2019-07-19", "1.304348"),  # ADR-009's no-change artifact
+            ("2024-06-07", "1.500000"),
+        ]
+    )
+    assert factor_event_dates(frame) == [date(2018, 9, 19), date(2024, 6, 7)]
+
+
+def test_the_first_factor_row_is_a_baseline_never_an_event():
+    """A lone row asserts a baseline, so its date cannot read as observed."""
+    from stock_quant.data_sources.baostock_factor import factor_event_dates
+
+    assert factor_event_dates(_factor_frame([("2015-01-05", "1.000000")])) == []
+
+
+def test_an_absent_or_empty_series_answers_no_events():
+    """A missing frame and an empty one both assert nothing."""
+    from stock_quant.data_sources.baostock_factor import factor_event_dates
+
+    assert factor_event_dates(None) == []
+    assert factor_event_dates(_factor_frame([])) == []
+
+
+def test_logout_runs_while_the_socket_timeout_still_binds(monkeypatch):
+    """The 2026-09-21 hang: a logout recv after the restore is unbounded.
+
+    The flaky :10030 server stalls reads; every read of the fetch -- logout
+    included -- must run while the default socket timeout is bound.
+    """
+    import socket as socket_module
+    import sys
+
+    from stock_quant.data_sources import baostock_factor
+
+    events: list[str] = []
+    real_setdefault = socket_module.setdefaulttimeout
+
+    class _Response:
+        fields = ["code", "dividOperateDate", "adjustFactor"]
+        error_code = "0"
+
+        def next(self):
+            return False
+
+    class _Stub:
+        __version__ = "stub"
+
+        def login(self):
+            events.append("login")
+            return _Response()
+
+        def query_adjust_factor(self, code, start_date, end_date):
+            events.append("query")
+            return _Response()
+
+        def logout(self):
+            events.append("logout")
+
+    class _PatchedSocketModule:
+        def __getattr__(self, name):
+            return getattr(socket_module, name)
+
+        def setdefaulttimeout(self, value):
+            events.append(f"timeout={value}")
+            real_setdefault(value)
+
+    monkeypatch.setitem(sys.modules, "baostock", _Stub())
+    monkeypatch.setattr(baostock_factor, "socket", _PatchedSocketModule())
+
+    baostock_factor.fetch_adjust_factor_frames(["600519.SH"], timeout=30)
+
+    assert events == [
+        "timeout=30",
+        "login",
+        "query",
+        "logout",
+        f"timeout={socket_module.getdefaulttimeout()}",
+    ]

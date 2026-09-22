@@ -1,5 +1,6 @@
 """Offline recorded-response tests for supplier-specific raw contracts."""
 
+import socket
 import sys
 from datetime import date
 from pathlib import Path
@@ -557,6 +558,72 @@ def test_tushare_maps_chinese_daily_permission_denial_to_authentication_error(
 def test_baostock_maps_chinese_network_error_to_server_error():
     source = BaoStockSource(
         SourceConfig(), BaoStockClient(RuntimeError("网络接收错误"))
+    )
+
+    with pytest.raises(ServerError):
+        source.fetch(_request("daily", "sz.000001"))
+
+
+def test_baostock_bounds_sockets_with_config_timeout_and_restores_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """The SDK's raw TCP has no timeout of its own; the config knob must bound
+    it for the duration of the fetch and restore the previous default.
+
+    Logout is one of those reads: it runs before the restore, never after --
+    an unbounded logout recv against the flaky :10030 server is the
+    2026-09-21 hang.
+    """
+    applied: list[float | str | None] = []
+    monkeypatch.setattr(socket, "setdefaulttimeout", applied.append)
+
+    class _RecordingClient(BaoStockClient):
+        def logout(self) -> None:
+            applied.append("logout")
+            super().logout()
+
+    client = _RecordingClient(
+        BaoResponse(pd.DataFrame({"code": ["sz.000001"], "date": ["2020-01-01"]}))
+    )
+
+    result = BaoStockSource(SourceConfig(), client).fetch(
+        _request("daily", "sz.000001")
+    )
+
+    assert applied == [30, "logout", None]
+    assert client.logins == 1
+    assert client.logouts == 1
+    assert len(result.frame) == 1
+    assert capsys.readouterr().out == ""
+
+
+class _SwallowedTimeoutResponse:
+    """Mimic ``ResultData`` after ``send_msg`` swallowed a mid-page stall: the
+    SDK prints to stdout and ``next()`` reports normal exhaustion."""
+
+    error_code = "0"
+    fields = ["date", "code"]
+
+    def __init__(self) -> None:
+        self._calls = 0
+
+    def next(self) -> bool:
+        self._calls += 1
+        if self._calls == 1:
+            return True
+        print("接收数据异常，请稍后再试。")
+        return False
+
+    def get_row_data(self) -> list[str]:
+        return ["2020-01-01", "sz.000001"]
+
+
+def test_baostock_treats_swallowed_transport_failure_as_server_error():
+    """A swallowed pagination stall must fail loudly, never return a partial
+    frame that reads as a clean exhaustion."""
+
+    source = BaoStockSource(
+        SourceConfig(), BaoStockClient(_SwallowedTimeoutResponse())
     )
 
     with pytest.raises(ServerError):

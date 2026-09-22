@@ -76,7 +76,9 @@ def test_raw_store_writes_a_redacted_audit_manifest(tmp_path):
     manifest = snapshot.manifest
 
     assert manifest["row_count"] == 1
-    assert manifest["schema"] == {"ts_code": "object", "close": "float64"}
+    # The manifest records the observed dtypes, and pandas 3.0 infers its new
+    # `str` dtype for a string column rather than `object`.
+    assert manifest["schema"] == {"ts_code": "str", "close": "float64"}
     assert manifest["redacted"] is True
     assert manifest["request_parameters"]["token"] == "[REDACTED]"
     assert "secret-value" not in (snapshot.path / "manifest.json").read_text()

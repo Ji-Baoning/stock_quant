@@ -856,13 +856,24 @@ def test_quarantine_row_out_of_window_reason_reads_pandas_date_cells():
     )
 
 
-def test_float32_round_trip_noise_is_not_a_cross_source_conflict():
-    """A ratio pair differing by one float32 round trip is one event.
+class _NamingArbiter:
+    """An arbiter double that names one side, whatever the terms are."""
 
-    300124.SZ's real conflict states capitalization 9.99878 per ten shares on
-    one side and 9.998781 on the other: the same number after a float32 round
-    trip.  Two quarantined rows for it spend an operator's review on a
-    difference no supplier stated.
+    def __init__(self, side: str) -> None:
+        self.name = "channel"
+        self._side = side
+
+    def arbitrate(self, cninfo, eastmoney):
+        return self._side
+
+
+def test_a_one_ulp_pair_merges_to_the_side_stating_more_digits():
+    """300124.SZ 2016-05-18: 转增 9.998780 vs 9.998781, one float32 ULP apart.
+
+    Supplier ratios reach us through float32, so two sides stating one ratio
+    can land on adjacent float32 values.  With no channel able to adjudicate
+    they are the same number and book as one row -- carrying the more precise
+    rendering, Eastmoney's 7 digits over CNINFO's 6 (ADR-014).
     """
     result = normalize_corporate_actions(
         _cninfo_plan(cash_per_10=4.99939, cap_per_10=9.99878),
@@ -871,15 +882,59 @@ def test_float32_round_trip_noise_is_not_a_cross_source_conflict():
 
     assert result.quarantined.empty
     assert len(result.accepted) == 1
-    assert result.accepted.iloc[0]["confirmed_by"] == "cninfo+eastmoney"
+    row = result.accepted.iloc[0]
+    assert row["confirmed_by"] == "cninfo+eastmoney"
+    assert row["capitalization_ratio"] == pytest.approx(0.9998781)
+    assert row["cash_dividend_per_share"] == pytest.approx(0.499939)
 
 
-def test_a_genuine_ratio_disagreement_survives_the_tolerance():
-    """600989.SH 2025-05-13 disagrees by 1.66e-5 -- two orders above float32.
+def test_the_precision_winner_can_be_cninfo():
+    """301308.SZ 2026-06-02: cash 9.90744266 against 9.907442, one ULP apart.
 
-    Widening the tolerance to reach it would be the machine deciding the
-    difference does not matter, which is exactly the judgement this project
-    keeps for its owner.
+    The same rule pointing the other way -- CNINFO's 9 digits beat Eastmoney's
+    7 -- so the merge is neither "prefer CNINFO" (ADR-007 refutes that reading
+    on this very record) nor "prefer Eastmoney".
+    """
+    result = normalize_corporate_actions(
+        _cninfo_plan(cash_per_10=9.90744266),
+        eastmoney_without_plan_column(per_share=0.9907442),
+    )
+
+    assert result.quarantined.empty
+    assert len(result.accepted) == 1
+    row = result.accepted.iloc[0]
+    assert row["confirmed_by"] == "cninfo+eastmoney"
+    assert row["cash_dividend_per_share"] == pytest.approx(0.990744266)
+
+
+def test_a_channel_outranks_the_precision_merge():
+    """An adjudicating channel is asked before the digit rule applies.
+
+    On 300124.SZ's pair TDX corroborates CNINFO's 6-digit 9.998780, so with a
+    channel enabled the row carries CNINFO's value and names who decided.  The
+    digit rule is the fallback for when nothing can adjudicate, not a rival to
+    the evidence.
+    """
+    result = normalize_corporate_actions(
+        _cninfo_plan(cash_per_10=4.99939, cap_per_10=9.99878),
+        eastmoney_without_plan_column(per_share=0.499939, cap_per_10=9.998781),
+        arbiter=_NamingArbiter("cninfo"),
+    )
+
+    assert result.quarantined.empty
+    assert len(result.accepted) == 1
+    row = result.accepted.iloc[0]
+    assert row["confirmed_by"] == "cninfo+channel"
+    assert row["capitalization_ratio"] == pytest.approx(0.999878)
+
+
+def test_a_wide_ratio_disagreement_also_stays_quarantined():
+    """600989.SH 2025-05-13 disagrees by ~1e-5, two orders above float32.
+
+    The tolerance band ADR-007 §4 describes -- between float32 noise (1e-9 ..
+    4e-8) and a 丁-class disagreement (~1e-6) -- is too narrow to stand in for
+    the owner's judgement, so no tolerance exists.  A difference this wide is
+    unmistakably a real disagreement and stays quarantined.
     """
     result = normalize_corporate_actions(
         _cninfo_plan(cash_per_10=4.10),

@@ -429,10 +429,15 @@ def normalize_corporate_actions(
     """Reconcile the CNINFO and Eastmoney corporate-action frames.
 
     ``arbiter`` (ADR-007) is consulted **only** where the two sources disagree
-    on the same ``(symbol, ex_date)``.  Without one -- the default, and what a
-    rebuild with ``sources.yml`` ``tdx.enabled: false`` produces -- every
-    disagreement is quarantined exactly as before, and the booked value names
-    the side that was corroborated plus the arbiter that corroborated it.
+    on the same ``(symbol, ex_date)``, and it is asked *first*: the booked value
+    names the side that was corroborated plus the arbiter that corroborated it,
+    so a channel's verdict is never pre-empted (ADR-014).
+
+    Only when no arbiter can name a side does ``_merged_within_representation_
+    floor`` get a turn: a pair whose every field agrees to within float32's own
+    grid is one stated ratio in two renderings, and books as ``_BOTH_SOURCES``
+    carrying the longer rendering.  Anything further apart than that -- a real
+    disagreement no channel could settle -- is quarantined exactly as before.
     """
     cn_candidates, cn_quarantine = _standardize_source(cninfo, "cninfo")
     em_candidates, em_quarantine = _standardize_source(eastmoney, "eastmoney")
@@ -448,24 +453,28 @@ def normalize_corporate_actions(
                 accepted.append(_row(cn_event, confirmed_by=_BOTH_SOURCES))
             else:
                 booked = _arbitrated_event(cn_event, em_event, arbiter)
-                if booked is None:
-                    quarantined.append(
-                        _row(
-                            cn_event,
-                            confirmed_by=CONFLICT_SIDE_CNINFO,
-                            reason=REASON_CROSS_SOURCE_CONFLICT,
-                        )
-                    )
-                    quarantined.append(
-                        _row(
-                            em_event,
-                            confirmed_by=CONFLICT_SIDE_EASTMONEY,
-                            reason=REASON_CROSS_SOURCE_CONFLICT,
-                        )
-                    )
-                else:
+                if booked is not None:
                     event, confirmed_by = booked
                     accepted.append(_row(event, confirmed_by=confirmed_by))
+                    continue
+                merged = _merged_within_representation_floor(cn_event, em_event)
+                if merged is not None:
+                    accepted.append(_row(merged, confirmed_by=_BOTH_SOURCES))
+                    continue
+                quarantined.append(
+                    _row(
+                        cn_event,
+                        confirmed_by=CONFLICT_SIDE_CNINFO,
+                        reason=REASON_CROSS_SOURCE_CONFLICT,
+                    )
+                )
+                quarantined.append(
+                    _row(
+                        em_event,
+                        confirmed_by=CONFLICT_SIDE_EASTMONEY,
+                        reason=REASON_CROSS_SOURCE_CONFLICT,
+                    )
+                )
         elif cn_event is not None:
             accepted.append(_row(cn_event, confirmed_by=CONFLICT_SIDE_CNINFO))
         elif em_event is not None:
@@ -751,18 +760,41 @@ def _reject_reason(event: dict[str, Any]) -> str | None:
     return None
 
 
+def _same_facts(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Economic facts *identically* equal: record date and every ratio field.
+
+    Exact equality, and it stays exact: this is the basis on which the
+    corroborated classes are detected at all, so widening it would blur the
+    evidence a channel is asked to adjudicate (ADR-007 §4).  A pair agreeing
+    only to within float32's own grid is a different statement, and is handled
+    by ``_merged_within_representation_floor`` -- which runs only once every
+    channel has declined to name a side (ADR-014).
+    """
+    return (
+        left["record_date"] == right["record_date"]
+        and _zeroed(left["cash"]) == _zeroed(right["cash"])
+        and _zeroed(left["bonus"]) == _zeroed(right["bonus"])
+        and _zeroed(left["capitalization"]) == _zeroed(right["capitalization"])
+        and _zeroed(left["rights"]) == _zeroed(right["rights"])
+        and _zeroed(left["rights_price"]) == _zeroed(right["rights_price"])
+    )
+
+
 #: float32's machine epsilon, ``2 ** -23`` (≈ 1.19e-7), written as a power so
 #: it is exactly representable in ``Decimal`` and the comparison never leaves
-#: decimal arithmetic.  Supplier ratios arrive as float32 and are re-emitted as
-#: decimals, so two sides stating the same ratio can differ by one float32
-#: round trip.  A relative tolerance of exactly this width collapses that
-#: artifact and nothing wider: the narrowest genuine disagreement in the corpus
-#: (600989.SH 2025-05-13) is 1.66e-5, two orders of magnitude larger.
+#: decimal arithmetic.  It is the width of float32's own grid, and so the width
+#: at which two suppliers stating one ratio can still land on adjacent values:
+#: the published 丁-class pairs are exactly one ULP apart.  A corroborating
+#: channel separates pairs at that same one-ULP distance, which is why the
+#: channel is asked first and this floor is only the fallback (ADR-014).
 _FLOAT32_RELATIVE_EPSILON = Decimal(2) ** -23
 
+#: The per-share ratio fields, as ``_row`` renders them.
+_RATIO_FIELDS = ("cash", "bonus", "capitalization", "rights", "rights_price")
 
-def _same_ratio(left: Decimal, right: Decimal) -> bool:
-    """Whether two supplier ratios state the same number up to float32 noise."""
+
+def _within_representation_floor(left: Decimal, right: Decimal) -> bool:
+    """Whether two supplier ratios differ only inside float32's own grid."""
     if left == right:
         return True
     scale = max(abs(left), abs(right))
@@ -771,20 +803,47 @@ def _same_ratio(left: Decimal, right: Decimal) -> bool:
     return abs(left - right) <= _FLOAT32_RELATIVE_EPSILON * scale
 
 
-def _same_facts(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    """Economic facts equal: record date, distribution and subscription terms."""
-    return (
-        left["record_date"] == right["record_date"]
-        and _same_ratio(_zeroed(left["cash"]), _zeroed(right["cash"]))
-        and _same_ratio(_zeroed(left["bonus"]), _zeroed(right["bonus"]))
-        and _same_ratio(
-            _zeroed(left["capitalization"]), _zeroed(right["capitalization"])
-        )
-        and _same_ratio(_zeroed(left["rights"]), _zeroed(right["rights"]))
-        and _same_ratio(
-            _zeroed(left["rights_price"]), _zeroed(right["rights_price"])
-        )
-    )
+def _more_precise(left: Decimal, right: Decimal) -> Decimal:
+    """The side of a floor-level pair stating its ratio in more digits.
+
+    Two renderings of one float32 value differ in how much they say about it,
+    not in what the exchange did: 9.998781 states seven digits where 9.998780
+    states six, so the longer one carries strictly more of the number.  A tie
+    keeps ``left`` (CNINFO's side) -- the same party ``_same_facts`` favours by
+    treating the pair as one fact at all.
+    """
+    if len(right.as_tuple().digits) > len(left.as_tuple().digits):
+        return right
+    return left
+
+
+def _merged_within_representation_floor(
+    cn_event: dict[str, Any], em_event: dict[str, Any]
+) -> dict[str, Any] | None:
+    """One event from two sides differing only inside float32's grid.
+
+    ``None`` unless *every* ratio field is either identical or within one ULP
+    at its own magnitude -- one field further apart is a real disagreement and
+    keeps its quarantine, so this can never widen into a general tolerance.  The
+    record date must match exactly, as in ``_same_facts``.
+
+    The merged event keeps CNINFO's dates and status and takes each ratio field
+    from whichever side stated it in more digits.  Because the two sides state
+    one ratio, the row books ``_BOTH_SOURCES``: the choice between renderings is
+    not a doubt about the event.
+    """
+    if cn_event["record_date"] != em_event["record_date"]:
+        return None
+    merged = dict(cn_event)
+    for field in _RATIO_FIELDS:
+        left = _zeroed(cn_event[field])
+        right = _zeroed(em_event[field])
+        if left == right:
+            continue
+        if not _within_representation_floor(left, right):
+            return None
+        merged[field] = _more_precise(left, right)
+    return merged
 
 
 def _combine_same_day_events(

@@ -72,3 +72,57 @@ def test_unaccounted_quarantine_reasons_still_untrust_the_window():
         )
         assert status is CoverageStatus.UNTRUSTED, reasons
         assert reason is expected, reasons
+
+
+# --------------------------------------------------------------------------- #
+# ADR-012: the exemption is evidence-conditional; the fallback settles
+# --------------------------------------------------------------------------- #
+
+
+def test_an_observed_adjustment_demotes_the_exemption():
+    """ADR-009 row 5: the market adjusted, so the refusal hides a real event."""
+    status, reason = _coverage_verdict(
+        _FETCHED, has_accepted=True,
+        quarantine_reasons={REASON_NON_DISTRIBUTIVE_RESTRUCTURING},
+        demoted_reasons={REASON_NON_DISTRIBUTIVE_RESTRUCTURING},
+    )
+    assert status is CoverageStatus.UNTRUSTED
+    assert reason is CoverageReason.FACTS_INCOMPLETE
+
+
+def test_a_bracketed_or_unknown_classification_keeps_the_exemption():
+    """Absence from silence is ADR-008's ground; unknown stays fail-closed."""
+    status, reason = _coverage_verdict(
+        _FETCHED, has_accepted=False,
+        quarantine_reasons={REASON_NON_DISTRIBUTIVE_RESTRUCTURING},
+        demoted_reasons=set(),
+    )
+    assert status is CoverageStatus.VERIFIED_EMPTY
+    assert reason is None
+
+
+def test_demotion_composes_with_blocking_reasons():
+    """A demoted exemption beside an incomplete record still reads FACTS."""
+    status, reason = _coverage_verdict(
+        _FETCHED, has_accepted=True,
+        quarantine_reasons={
+            REASON_NON_DISTRIBUTIVE_RESTRUCTURING, REASON_INCOMPLETE,
+        },
+        demoted_reasons={REASON_NON_DISTRIBUTIVE_RESTRUCTURING},
+    )
+    assert status is CoverageStatus.UNTRUSTED
+    assert reason is CoverageReason.FACTS_INCOMPLETE
+
+
+def test_every_reported_event_accounted_for_reads_verified_empty():
+    """ADR-006 completed: out-of-window refusals are evidence about elsewhere.
+
+    The endpoints answered and reported events, none accepted, none quarantined
+    inside the window -- so every reported event provably belongs to another
+    period, and the window is positively empty rather than an unaccounted gap.
+    """
+    status, reason = _coverage_verdict(
+        _FETCHED, has_accepted=False, quarantine_reasons=set()
+    )
+    assert status is CoverageStatus.VERIFIED_EMPTY
+    assert reason is None

@@ -7,7 +7,7 @@ akshare:
   timeout_seconds: 30
   max_retries: 3
 baostock:
-  enabled: false
+  enabled: true
   timeout_seconds: 30
   max_retries: 3
 # Corporate-action conflict arbiter, not a source (ADR-007).  Shipped on
