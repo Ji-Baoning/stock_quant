@@ -1,0 +1,386 @@
+{
+  "record": "docs/operations/2026-09-26-xingyao-phase0-probes.md",
+  "owner_authorization": "2026-09-26, this session",
+  "probe_window_utc8": "2026-09-27 00:08 - 00:38",
+  "environment": {
+    "sdk": "AmazingData 1.1.9 + tgw 1.0.9.2",
+    "python": "sq312 3.12",
+    "bound": "every SDK call inside run_isolated(60s) killable worker",
+    "published_dataset": "e1db832808ba46ea2f5c88dc449a9d3a9153873bf6747b9d01c74e2f71b60de2",
+    "full_history_acceptance_start": "2015-01-05"
+  },
+  "probe_A_login": {
+    "login_return": true,
+    "calendar_days_SH": 8733,
+    "calendar_last": 20260924,
+    "small_fetch": {
+      "symbol": "000001.SZ",
+      "window": "2026-09-14..2026-09-22",
+      "rows": 7,
+      "columns": [
+        "code",
+        "kline_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount"
+      ],
+      "dtypes": {
+        "code": "str",
+        "kline_time": "datetime64[us]",
+        "open": "float64",
+        "high": "float64",
+        "low": "float64",
+        "close": "float64",
+        "volume": "int64",
+        "amount": "float64"
+      },
+      "sha256_csv": "d2193b57978d6d257af05c75f716c5a2f9f11d73746498bb9cda13a6acce5b52",
+      "elapsed_s": 2.93,
+      "sdk_version": "1.1.9",
+      "transport_id": "xingyao-broker-tcp",
+      "kline_times": [
+        "2026-09-14 00:00:00",
+        "2026-09-15 00:00:00",
+        "2026-09-16 00:00:00",
+        "2026-09-17 00:00:00",
+        "2026-09-18 00:00:00",
+        "2026-09-21 00:00:00",
+        "2026-09-22 00:00:00"
+      ]
+    }
+  },
+  "probe_1_suspension": {
+    "status_source": "InfoData.get_history_stock_status(661 published symbols, 20260901-20260924)",
+    "rows_scanned": 11862,
+    "symbols_with_suspension": 4,
+    "target": "601238.SH",
+    "suspension_days": [
+      "20260914",
+      "20260915",
+      "20260916",
+      "20260917",
+      "20260918",
+      "20260921",
+      "20260922",
+      "20260923",
+      "20260924"
+    ],
+    "suspension_days_present_in_kline": {
+      "20260914": false,
+      "20260915": false,
+      "20260916": false,
+      "20260917": false,
+      "20260918": false,
+      "20260921": false,
+      "20260922": false,
+      "20260923": false,
+      "20260924": false
+    },
+    "kline_rows": 6,
+    "kline_sha256_rows_json": "732a53725a17b5c70d0870adee5859f0b617fc07c25552b1fbfb2128a6a78ac0",
+    "verdict": "absent_rows"
+  },
+  "probe_2_normalize_zero_volume": {
+    "kind": "synthetic supplement (supplier emitted no zero-volume row)",
+    "zero_volume_valid_prices": {
+      "valid": 1,
+      "rejected": 0
+    },
+    "zero_volume_nan_prices": {
+      "valid": 0,
+      "rejected": 1,
+      "reason": "invalid_number"
+    },
+    "verdict": "no_block; row-level rejection is about unparseable prices, not zero volume"
+  },
+  "probe_3_full_market": {
+    "enumeration": {
+      "code_table_rows": 122790,
+      "SH_A(ASH+KSH)": 2328,
+      "SZ_A(numeric types 1+3, CNY, 00/30 prefix)": 2907,
+      "SZ_type_counts": {
+        "1": 1498,
+        "3": 1409
+      },
+      "market2_empty_type_rows": 6558,
+      "correction": "market 102 EQTY (2919) are HK stocks (2893 HKD), not 深A - corrects the 2026-09-25 evaluation's reading"
+    },
+    "recent_window": {
+      "range": "2026-06-15..2026-09-24 (69 trading days)",
+      "fetched_rows": 443870,
+      "normalized_rows": 431740,
+      "normalized_symbols": 7815,
+      "rejected_rows": 0
+    },
+    "hist_window": {
+      "range": "2020-06-01..2020-06-30",
+      "normalized_rows": 72787,
+      "normalized_symbols": 3661
+    },
+    "comparison": {
+      "recent": {
+        "xingyao_rows_in_window": 431740,
+        "xingyao_symbols_in_window": 7815,
+        "published_rows_in_window": 46785,
+        "matched_pairs_compared": 46741,
+        "issues": {
+          "info": 0,
+          "warning": 0,
+          "error": 0,
+          "by_code": {}
+        },
+        "only_in_published": 44,
+        "only_in_xingyao": 384999,
+        "sha256_xingyao_input": "4a359235802e81180afc1d63dff5a004489cc0cfe1b94c92996a4b28bac11cfe",
+        "sha256_published_input": "b9bf866e58f59c0b481b451e6efa0bbcbb65627f662d5421640832e7e867658b"
+      },
+      "hist": {
+        "xingyao_rows_in_window": 72787,
+        "xingyao_symbols_in_window": 3661,
+        "published_rows_in_window": 12233,
+        "matched_pairs_compared": 12207,
+        "issues": {
+          "info": 0,
+          "warning": 0,
+          "error": 0,
+          "by_code": {}
+        },
+        "only_in_published": 26,
+        "only_in_xingyao": 60580,
+        "sha256_xingyao_input": "ec81a9e366e9f0bf19579f559816bbaf18d0c42d2f917d007af854e2c7d88528",
+        "sha256_published_input": "2b5174ea12d225ba8a8b74398bdf7a391c87128c4100eb46791c787b7b155287"
+      }
+    },
+    "only_in_published_all": {
+      "recent": [
+        "000008.SZ 2026-07-07",
+        "000008.SZ 2026-07-08",
+        "000008.SZ 2026-07-09",
+        "000008.SZ 2026-07-10",
+        "000008.SZ 2026-07-13",
+        "000656.SZ 2026-07-01",
+        "000793.SZ 2026-06-18",
+        "000793.SZ 2026-07-30",
+        "600717.SH 2026-06-15",
+        "600717.SH 2026-06-16",
+        "600717.SH 2026-06-17",
+        "600717.SH 2026-06-18",
+        "600717.SH 2026-06-22",
+        "601059.SH 2026-09-15",
+        "601059.SH 2026-09-16",
+        "601059.SH 2026-09-17",
+        "601059.SH 2026-09-18",
+        "601059.SH 2026-09-21",
+        "601198.SH 2026-09-15",
+        "601198.SH 2026-09-16",
+        "601198.SH 2026-09-17",
+        "601198.SH 2026-09-18",
+        "601198.SH 2026-09-21",
+        "601238.SH 2026-09-14",
+        "601238.SH 2026-09-15",
+        "601238.SH 2026-09-16",
+        "601238.SH 2026-09-17",
+        "601238.SH 2026-09-18",
+        "601238.SH 2026-09-21",
+        "601995.SH 2026-09-15",
+        "601995.SH 2026-09-16",
+        "601995.SH 2026-09-17",
+        "601995.SH 2026-09-18",
+        "601995.SH 2026-09-21",
+        "688072.SH 2026-06-29",
+        "688072.SH 2026-06-30",
+        "688072.SH 2026-07-01",
+        "688072.SH 2026-07-02",
+        "688072.SH 2026-07-03",
+        "688072.SH 2026-07-06"
+      ],
+      "hist": [
+        "001979.SZ 2020-06-01",
+        "001979.SZ 2020-06-02",
+        "001979.SZ 2020-06-03",
+        "001979.SZ 2020-06-04",
+        "001979.SZ 2020-06-05",
+        "002049.SZ 2020-06-05",
+        "002470.SZ 2020-06-30",
+        "002500.SZ 2020-06-17",
+        "002500.SZ 2020-06-18",
+        "002500.SZ 2020-06-19",
+        "002500.SZ 2020-06-22",
+        "002500.SZ 2020-06-23",
+        "002500.SZ 2020-06-24",
+        "600037.SH 2020-06-01",
+        "600745.SH 2020-06-10",
+        "601111.SH 2020-06-09",
+        "601969.SH 2020-06-01",
+        "601969.SH 2020-06-02",
+        "601969.SH 2020-06-03",
+        "601969.SH 2020-06-04",
+        "601969.SH 2020-06-05",
+        "601969.SH 2020-06-08",
+        "601969.SH 2020-06-09",
+        "601969.SH 2020-06-10",
+        "601969.SH 2020-06-11",
+        "601969.SH 2020-06-12"
+      ]
+    },
+    "verdict": "0 INFO / 0 WARNING / 0 ERROR over 58948 matched pairs; all OHLC exactly equal"
+  },
+  "probe_4_delisted_depth": {
+    "000003.SZ_1997_rows": 0,
+    "000003.SZ_2002_rows": 0,
+    "boundary_measured": {
+      "2012_06_rows": 0,
+      "2013_01_rows": 20,
+      "2013_01_first": "2013-01-04",
+      "2013_12_rows": 22,
+      "2014_01_rows": 21,
+      "2014_12_rows": 23,
+      "2015_01_rows": 20,
+      "2005_2010_1990_rows": 0
+    },
+    "delisted_in_era": {
+      "601558.SH 2020H1": {
+        "rows": 96,
+        "first": "2020-01-02 00:00:00",
+        "last": "2020-06-23 00:00:00"
+      },
+      "300372.SZ 2017": {
+        "rows": 30,
+        "first": "2017-07-17 00:00:00",
+        "last": "2017-08-25 00:00:00"
+      }
+    },
+    "depth_vs_acceptance": "xingyao daily depth 2013-01-04..latest; covers full_history_acceptance_start 2015-01-05 with ~2y headroom"
+  },
+  "probe_5_quota": {
+    "total_week_flow": 1000000000,
+    "readings": [
+      {
+        "at": "2026-09-27T00:08",
+        "used": 0.23,
+        "note": "opening, equals 2026-09-25 evaluation closing"
+      },
+      {
+        "at": "2026-09-27T00:11 (before scan)",
+        "used": 0.24
+      },
+      {
+        "at": "2026-09-27T00:11:54 (after probe B)",
+        "used": 0.25
+      },
+      {
+        "at": "2026-09-27T00:38:22 (closing, after all probes)",
+        "used": 0.45
+      }
+    ],
+    "this_session_consumption_units": 0.22,
+    "sessions_about": 45,
+    "rows_fetched_about": 540000,
+    "verdict": "counter counts wire traffic; 1 unit = 1GB; see ops doc for the 23% vs 0.04% reconciliation"
+  },
+  "probe_6_units": {
+    "per_symbol": {
+      "000001.SZ": {
+        "days_compared": 71,
+        "sum_volume_xingyao": 7501837942,
+        "sum_volume_published": 7501837942,
+        "volume_ratio_pub_over_x_min_max": [
+          1.0,
+          1.0
+        ],
+        "sum_amount_xingyao": 83565884871.84,
+        "sum_amount_published": 83565884871.84,
+        "amount_ratio_pub_over_x_min_max": [
+          1.0,
+          1.0
+        ]
+      },
+      "600519.SH": {
+        "days_compared": 71,
+        "sum_volume_xingyao": 282561161,
+        "sum_volume_published": 282561161,
+        "volume_ratio_pub_over_x_min_max": [
+          1.0,
+          1.0
+        ],
+        "sum_amount_xingyao": 359561555128.74,
+        "sum_amount_published": 359561555124.0,
+        "amount_ratio_pub_over_x_min_max": [
+          1.0,
+          1.0
+        ]
+      },
+      "601238.SH": {
+        "days_compared": 64,
+        "sum_volume_xingyao": 2032155566,
+        "sum_volume_published": 2032155566,
+        "volume_ratio_pub_over_x_min_max": [
+          1.0,
+          1.0
+        ],
+        "sum_amount_xingyao": 10648828878.78,
+        "sum_amount_published": 10648828879.0,
+        "amount_ratio_pub_over_x_min_max": [
+          0.999999995,
+          1.000000005
+        ]
+      },
+      "300750.SZ": {
+        "days_compared": 71,
+        "sum_volume_xingyao": 2346098892,
+        "sum_volume_published": 2346098892,
+        "volume_ratio_pub_over_x_min_max": [
+          1.0,
+          1.0
+        ],
+        "sum_amount_xingyao": 867627883887.26,
+        "sum_amount_published": 867627883887.02,
+        "amount_ratio_pub_over_x_min_max": [
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "tushare_relay_cross_check": {
+      "available": true,
+      "rows": [
+        {
+          "ts_code": "000001.SZ",
+          "trade_date": "20260922",
+          "open": 11.7,
+          "high": 11.75,
+          "low": 11.62,
+          "close": 11.71,
+          "pre_close": 11.73,
+          "change": -0.02,
+          "pct_chg": -0.1705,
+          "vol": 759457.32,
+          "amount": 887703.11658
+        }
+      ]
+    },
+    "verdict": "volume in shares (股), amount in yuan (元); measured factors (1, 1)"
+  },
+  "fixture": {
+    "path": "tests/fixtures/xingyao_daily.csv",
+    "symbol": "601238.SH",
+    "window": "2026-09-04..2026-09-24",
+    "rows": 6,
+    "columns": [
+      "code",
+      "kline_time",
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume",
+      "amount"
+    ],
+    "sha256_csv": "83d01b71242fdf4d4ea6f201b0bca9b02b8bd9f8d3ef601a21a8dfb59feac567",
+    "absent_suspension_days": 9,
+    "contract_test": "tests/integration/test_source_contracts.py 48 passed (AD_* unset)"
+  }
+}

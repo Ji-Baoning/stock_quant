@@ -920,6 +920,11 @@ def test_xingyao_returns_recorded_native_columns(monkeypatch: pytest.MonkeyPatch
     contract test that reads a canonicalized frame cannot tell whether the
     supplier changed its layout.
 
+    The recorded window is a real supplier answer (Phase 0 probe, 2026-09-26
+    ops record): 601238.SH 2026-09-04..2026-09-24 spans nine suspension days
+    the supplier answers with ABSENT rows, not zero-volume rows, so the
+    fixture ends on 2026-09-11 and encodes that absence.
+
     The adapter refuses to start a worker without ``AD_*`` configured even
     when a client is injected, so the offline path sets the same dummy
     credentials the unit tests use; the fake never sees the network.
@@ -931,7 +936,7 @@ def test_xingyao_returns_recorded_native_columns(monkeypatch: pytest.MonkeyPatch
 
     result = XingyaoSource(SourceConfig(), client=fake).fetch(
         DataRequest(
-            "daily", ("000001.SZ",), date(2024, 1, 2), date(2024, 1, 5),
+            "daily", ("601238.SH",), date(2026, 9, 4), date(2026, 9, 24),
             {"adjustment": "unadjusted"},
         )
     )
