@@ -31,3 +31,6 @@ htmlcov/
 
 # Isolated implementation worktrees
 .worktrees/
+
+tools/ad_quality/
+tools/xysz/
