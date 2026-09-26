@@ -2,8 +2,8 @@ name: stock-quant
 channels:
   - conda-forge
 dependencies:
-  - python=3.10
-  - pandas
+  - python=3.12
+  - pandas>=3
   - numpy
   - pyarrow
   - duckdb
