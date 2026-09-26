@@ -65,6 +65,16 @@ def test_a_frame_without_the_requested_symbol_column_is_a_contract_break():
         factor_event_dates(_wide([1.0, 1.1]), "000002.SZ")
 
 
+def test_an_empty_frame_is_a_contract_break():
+    with pytest.raises(ContractError, match="no factor frame"):
+        factor_event_dates(pd.DataFrame(), "000001.SZ")
+
+
+def test_a_column_with_no_valid_values_is_a_contract_break():
+    with pytest.raises(ContractError, match="no valid values"):
+        factor_event_dates(_wide([None, None, None]), "000001.SZ")
+
+
 def test_a_single_valid_row_has_no_event():
     assert factor_event_dates(_wide([1.0]), "000001.SZ") == []
 

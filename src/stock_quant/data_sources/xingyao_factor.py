@@ -59,9 +59,17 @@ def factor_event_dates(frame: pd.DataFrame | None, symbol: str) -> list[date]:
     if symbol not in frame.columns:
         raise ContractError(f"xingyao factor frame has no column for {symbol!r}")
     series = _ordered_series(frame[symbol])
+    deduplicated = _deduplicate(series)
+    if not deduplicated:
+        # A column with no valid value at all -- an unlisted or mistaken
+        # symbol's all-empty cells -- cannot answer either: returning []
+        # would be silence asserting an absence.
+        raise ContractError(
+            f"xingyao factor column for {symbol!r} carries no valid values"
+        )
     events: list[date] = []
     previous: float | None = None
-    for day, value in _deduplicate(series).items():
+    for day, value in deduplicated.items():
         if previous is not None and value != previous:
             events.append(day)
         previous = value
@@ -148,15 +156,21 @@ def _fetch_backward_factor(*, symbol: str, end: str) -> pd.DataFrame:
 
     The verified real-SDK surface, mirroring the daily lane's ``_RealClient``:
     ``ad.login`` wants an int port and answers with a truthy flag -- falsy is
-    a credential refusal -- and an empty ``AD_HOST``/``AD_PORT`` is refused
-    before any connection is attempted.  ``end`` is kept so the worker's
-    question matches the recorded request's shape; the factor series itself is
-    always read over the whole listed history.
+    a credential refusal.  Missing or empty ``AD_USERNAME``/``AD_PASSWORD``
+    or ``AD_HOST``/``AD_PORT`` is refused before the SDK is even imported or
+    any connection is attempted, so every credential failure is the same
+    permanent error no matter which variable is at fault.  ``end`` is kept so
+    the worker's question matches the recorded request's shape; the factor
+    series itself is always read over the whole listed history.
     """
     import os
 
-    import AmazingData as ad
-
+    username = os.environ.get("AD_USERNAME", "")
+    password = os.environ.get("AD_PASSWORD", "")
+    if not username or not password:
+        raise AuthenticationError(
+            "xingyao requires AD_USERNAME/AD_PASSWORD to be configured"
+        )
     host = os.environ.get("AD_HOST", "")
     port = os.environ.get("AD_PORT", "")
     if not host or not port:
@@ -167,11 +181,14 @@ def _fetch_backward_factor(*, symbol: str, end: str) -> pd.DataFrame:
         port_number = int(port)
     except (TypeError, ValueError):
         raise AuthenticationError("xingyao requires a numeric AD_PORT") from None
+
+    import AmazingData as ad
+
     logged_in = False
     try:
         if not ad.login(
-            username=os.environ["AD_USERNAME"],
-            password=os.environ["AD_PASSWORD"],
+            username=username,
+            password=password,
             host=host,
             port=port_number,
         ):
