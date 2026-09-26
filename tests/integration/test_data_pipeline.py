@@ -658,6 +658,10 @@ def test_update_with_explicit_end_publishes_merged_dataset(project):
     # carries its not-run row.
     ok_names = {status.source for status in result.source_status if status.ok}
     assert ok_names == {"tushare", "akshare", "xingyao"}
+    baostock_status = next(
+        status for status in result.source_status if status.source == "baostock"
+    )
+    assert not baostock_status.ok and baostock_status.reason_code == "not_run"
 
 
 def test_successful_update_binds_sanitized_build_evidence(project):
@@ -1729,8 +1733,14 @@ def test_the_dormant_baostock_lane_still_works_when_a_test_asks_for_it(project):
 
     The lane is dormant in production (``enabled: false``) and in the default
     fixture, so nothing else exercises it.  Without this test a future change
-    could break the dormant call site -- including its ``reuse=False`` wiring
-    -- and nothing would notice.
+    could break the dormant call site and nothing would notice.  What this
+    run pins: the call site still dispatches when a test opts in, its rows
+    land in the call ledger as fetched, and nothing is served from disk.
+    The ``reuse=False`` call-site flag is behaviorally backed by the store's
+    admission gate, which refuses a stored baostock answer outright; that
+    gate is pinned by tests/unit/test_raw_reuse.py (the
+    ``("baostock", "daily"): False`` admission row and the wired-call-sites
+    test).
     """
     from conftest import write_sources
 
