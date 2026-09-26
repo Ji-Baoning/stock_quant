@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-09-26
 decision: baostock leaves the runtime — its supplier is unavailable and two of the three roles it was documented as holding were never real — and 星耀数智 (xingyao) takes over the two that were, the per-round validation daily lane and the ADR-009 lazy factor channel, as a newly registered optional source; because a lane that never runs must not hold an admission slot, ADR-015's allow-list substitutes ("xingyao","daily") for ("baostock","daily") rather than appending, so the allow-list stays exactly equal to the set of reuse=True call sites and the ADR-015 invariant is untouched.
 affects:
@@ -14,10 +14,6 @@ affects:
 ---
 
 # 016 — 星耀数智 succeeds baostock
-
-> **Not yet effective.** This ADR remains proposed. Its substitutions take
-> effect only after the daily and factor successor lanes ship in one release;
-> until then ADR-015 and the runtime continue to admit baostock daily.
 
 ## Context
 
@@ -128,6 +124,53 @@ baostock's ADR-015 admission is substituted rather than retained.**
     `sources.yml` ships `enabled: false` too, so a newly scaffolded project
     does not start out re-running this cleanup.
 
+11. **The Phase 0 probes fix the record's open constants and gate
+    enablement.** All six probes completed on 2026-09-27 without a BLOCKER
+    (`docs/operations/2026-09-26-xingyao-phase0-probes.md`, with
+    `.evidence.json`), and their findings are part of this decision:
+
+    - **Suspended days come back as absent rows, not zero-volume rows.** 601238.SH's nine
+      suspension days (2026-09-14..09-24) return no daily rows at all, where
+      the primary source (tushare) books zero-volume rows and baostock's
+      documented shape was present `tradestatus=0` rows. The missing-row flip
+      therefore never fires for a suspension day — both sides are absent —
+      and suspension days keep classifying as `unknown_or_suspended`. The
+      claim that xingyao carries the baostock lane item for item is narrowed
+      accordingly: the flip separates unexplained primary-source gaps, not
+      supplier-suspension shapes, and the residual row-shape difference
+      surfaces only in the existence comparison layer (measured: 44 and 26
+      symbol-days in the two probe windows, all published-side zero-volume
+      suspension rows).
+    - **Volume/amount units are measured (1, 1)** (probe 6: per-day volumes
+      integer-exact against the published set, amounts equal at display
+      precision to ≤±0.07 yuan/day, and a tushare relay cross-check exact
+      field for field). The promotion gate on units (spec §4.5/§2.4) is
+      closed; `_UNIT_FACTORS["xingyao"] = (1, 1)` is a measurement, not an
+      assumption.
+    - **Daily-bar depth starts 2013-01-04** (probe 4): the promotion
+      condition on history depth is satisfiable against the
+      `full_history_acceptance_start` = 2015-01-05 anchor, but nothing before
+      2013-01-04 is obtainable from this channel (a §3.3 promotion
+      constraint), post-2013 delistings are covered up to delisting, and
+      pre-2013 delistings are not.
+    - **Factor snapshots are clipped to the recorded `end`** (owner ruling
+      2026-09-26): the wide backward-factor frame is cut at the request's
+      `end` before storage, so a drift-audit re-ask of the same request
+      reproduces the stored bytes exactly.
+    - **The per-symbol validation wiring costs one login+calendar session per
+      symbol per round** (probe 5). The measured session bound is
+      F < 0.0025 quota units/session (its true value is unresolvable from the
+      counter's 0.01-unit granularity); 661 symbols extrapolate to ≈45-60
+      minutes of pure login wait per round; and the round's total cost lands
+      anywhere in ≈0.8%-167% of the weekly quota depending on the
+      unmeasurable F — the worst case is infeasible, and the decisive unknown
+      cannot be pinned from counter readings alone.
+
+    Therefore **xingyao ships `enabled: false`.** A batch channel — the SDK's
+    `query_kline` natively accepts a code list, and the Phase 0 probes
+    themselves fetched 1000 symbols per batch — is the recorded enabling
+    condition for `enabled: true`; enabling remains a config change only.
+
 ## What this does not change
 
 - **The ADR-013 arbitration chain** (TDX, then price observation) is untouched.
@@ -148,11 +191,22 @@ baostock's ADR-015 admission is substituted rather than retained.**
 
 ## Consequences
 
-- While baostock is down and 星耀's suspension-day row shape is unmeasured, the
-  missing classification degrades to `unknown_or_suspended` — a WARNING, and
-  not a publication blocker. Whether 星耀 restores the flip depends on whether
-  its suspended sessions appear as zero-volume rows or as absent rows; that is
-  a pre-implementation probe, not an assumption.
+- While baostock is down, the missing classification degrades to
+  `unknown_or_suspended` — a WARNING, and not a publication blocker. The
+  Phase 0 probes (decision 11) measured the answer for 星耀: suspended days
+  are absent rows on both sides, so the flip does not restore for suspension
+  days and `unknown_or_suspended` remains their classification; what the
+  xingyao lane can still flip are unexplained primary-source absences that
+  are not suspension-shaped.
+- **xingyao ships disabled (decision 11), so the two successor lanes are
+  absent at runtime.** With `enabled: false` the source is never constructed:
+  missing-row classifications stay `unknown_or_suspended` and the ADR-009
+  factor channel is absent — fail-closed, which is operationally the same
+  state the dead baostock service left, with every lane, admission slot and
+  audit path wired for a one-switch enable. That is the honest shape of this
+  release: the succession's capabilities exist in code and tests, not yet in
+  rounds, and they start running only when the batch-channel prerequisite
+  lands.
 - A newly registered source widens every reading that iterates the configured
   set: `source_status` and `build_config.source_status` gain a row, and every
   "all sources ok" assertion acquires a new participant. Combined with
@@ -204,6 +258,9 @@ baostock's ADR-015 admission is substituted rather than retained.**
 ## Evidence
 
 - 星耀 quality evaluation: `docs/research/2026-09-25-xingyao-data-quality-evaluation.md`.
+- Phase 0 probe measurements and their sha256 evidence file:
+  `docs/operations/2026-09-26-xingyao-phase0-probes.md`
+  (`.evidence.json` alongside it).
 - Design record with the implementation boundaries, the seven affected
   assertions and the Phase 0 probes:
   `docs/superpowers/specs/2026-09-26-xingyao-baostock-succession-design.md`.

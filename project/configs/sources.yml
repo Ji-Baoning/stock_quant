@@ -15,16 +15,23 @@ akshare:
   enabled: true
   timeout_seconds: 30
   max_retries: 3
-# baostock is the optional cross-check daily source (unadjusted prices).  Its
-# data server (:10030) was unreachable from 2026-09-05 and the source was turned
-# off; it answered again on 2026-09-19 and is re-enabled here.  Optional by role
-# (`_REQUIRED_ROLE` in data_pipeline.py): an outage degrades
-# `compare_daily_sources`, it does not fail an update.  Unlike `tdx` below,
-# enabling it changes no published fact and needs no rebuild - it supplies daily
-# bars for cross-checking plus the supplier's own suspension rows
-# (`tradestatus=0`), which are the only suspension evidence this project has.
+# baostock is the FORMer optional cross-check daily source (unadjusted
+# prices).  Its data server (:10030) was unreachable from 2026-09-05,
+# briefly answered on 2026-09-19, and is unavailable again as of 2026-09-26
+# (owner report); it is disabled by default from that date.  xingyao holds
+# both of the roles it really had -- the validation daily lane and the
+# ADR-009 factor channel (ADR-016) -- so disabling it removes no capability
+# that is not carried elsewhere.  Two claims that used to sit here were
+# never true and are recorded as such: an outage never degraded
+# `compare_daily_sources` (its only production consumer reads a published
+# `daily_bar` sample), and the supplier's own suspension rows
+# (`tradestatus=0`) were never read as suspension evidence -- `tradestatus`
+# appears once in `src/`, as a field declaration, and the project's
+# suspension facts come from tushare's `pre_close` chain.  Re-enabling the
+# source is a config change; re-admitting it to raw-snapshot reuse is not
+# (ADR-015 decision 1, as amended by ADR-016).
 baostock:
-  enabled: true
+  enabled: false
   timeout_seconds: 30
   max_retries: 3
 # 星耀数智 (tgw broker SDK): the optional validation daily source that
@@ -35,9 +42,18 @@ baostock:
 # AD_USERNAME/AD_PASSWORD/AD_HOST/AD_PORT; absent either, the source reports
 # `optional_source_unavailable` and the update proceeds.  Every live call runs
 # in a killable child process (`timeout_seconds` bounds the process, not the
-# socket).  Volume/amount units are unverified pending the Phase 0 probe.
+# socket).  Volume/amount units are measured shares/yuan -- (1, 1) (Phase 0
+# probe 6, docs/operations/2026-09-26-xingyao-phase0-probes.md §七).
+# Shipped DISABLED (ADR-016 decision 11, owner ruling 2026-09-26): the
+# validation lane dispatches per symbol, so a round costs one login+calendar
+# session per symbol -- measured bound F < 0.0025 quota units/session,
+# 661 symbols ≈ 45-60 min/round and ≈0.8%-167% of the weekly quota depending
+# on the unmeasurable F.  A batch channel (the SDK's `query_kline` accepts a
+# code list) is the recorded enabling condition for `enabled: true`; until
+# then the disabled source fails closed exactly like the baostock outage it
+# succeeds.  Enabling is a config change only.
 xingyao:
-  enabled: true
+  enabled: false
   timeout_seconds: 30
   max_retries: 2
 # TDX (通达信) is the corporate-action *conflict arbiter* of ADR-007 - not a

@@ -31,8 +31,13 @@ requests==2.34.2
 tushare==1.4.29
 # akshare：必需参照源（index_history + 公司行为核对）
 akshare==1.18.23
-# baostock：可选校验源，2026-09-05 起服务不可达，sources.yml 中已关闭
+# baostock：FORMer 可选校验源；服务 2026-09-26 起再次不可用（owner 报告），
+# sources.yml 默认关闭；其两个真实角色已由 xingyao 承接（ADR-016）
 baostock==0.9.3
+# 星耀数智（xingyao，ADR-016）：供应商私有包 `tgw` + `AmazingData`，PyPI 无包，
+# wheel 由操作者自备（本仓库不携带）；前置 `tables`(PyTables)，缺失时复权因子
+# 等接口直接 ImportError。不进默认依赖；sources.yml 默认 `enabled: false`
+# （批量通道为启用前置）。安装程序见 RUNBOOK 阶段 4c。
 # pytdxdata：ADR-007 公司行为冲突仲裁器（可选，非数据源）。
 # 未装入参照环境；sources.yml 的 tdx 默认 enabled: false。需要时取消注释：
 # pytdxdata

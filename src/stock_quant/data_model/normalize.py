@@ -43,8 +43,11 @@ _UNIT_FACTORS = {
     # transport; units are identical by contract (lots / thousand-yuan).
     "tushare_proxy": (100, 1000),
     "baostock": (1, 1),
-    # Unverified against any external source until the Phase 0 volume probe
-    # (design §4.5) closes; (1, 1) is the assumption, not a measurement.
+    # Measured, not assumed (Phase 0 probe 6, 2026-09-27): per-day volumes are
+    # integer-exact against the published set, amounts equal at display
+    # precision (<= +/-0.07 yuan/day, float/rounding scale), and a tushare
+    # relay cross-check matches field for field.
+    # docs/operations/2026-09-26-xingyao-phase0-probes.md section 7.
     "xingyao": (1, 1),
 }
 

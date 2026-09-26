@@ -106,7 +106,8 @@ setsid nohup python -m stock_quant data update --start 2015-01-05 --root project
 
 ### 阶段 4b · 原始快照复用与恢复（ADR-015）
 
-四个逐符号通道（tushare/baostock 日线、akshare 基准）在发请求前先查 raw 树：
+四个逐符号车道（tushare/xingyao 日线、akshare 基准——准入表经 ADR-016 以
+xingyao 替换 baostock）在发请求前先查 raw 树：
 同请求（端点 × 标的 × 窗口 × 参数完全一致）且字节哈希复验通过的最新快照直接
 复用，不发网络调用；公司行为、交易日历、证券主档、懒仲裁通道**永远实时**。
 复用情况在发布版本的 `build_config.raw_snapshot_reuse`（reused/fetched 计数）
@@ -135,6 +136,61 @@ setsid nohup python -m stock_quant data update --start 2015-01-05 --root project
    `verify_evidence` 按项目根下的路径解析，副本无法让已发布版本可复验。
    无论选哪边，在 `docs/operations/` 落一条日期化操作记录，写明这是有意的
    取舍。
+
+### 阶段 4c · 星耀数智（xingyao）与 baostock 退役（ADR-016）
+
+xingyao 接替 baostock 的两个真实角色（每轮校验日线车道 + ADR-009 懒因子通道），
+但**出厂默认 `enabled: false`**（ADR-016 decision 11）：校验车道按逐标的分发，
+每个标的每轮要花一次"登录 + 完整交易日历"会话（实测界 F < 0.0025 配额单位/会话，
+661 标的外推 ≈45–60 分钟/轮，单轮配额占比 ≈0.8%–167%，取决于不可测的 F）。
+批量通道是 `enabled: true` 的前置条件（见下方启用程序）；在那之前车道与因子通道
+均处于缺席（fail-closed），与 baostock 服务不可用的运行状态相同，而全部接线与
+测试已就位，启用只是改配置。
+
+**私有包安装（wheel 由操作者自备，不入库）**：
+
+- 包名：`tgw`（星耀数智 broker SDK）与 `AmazingData`（其数据封装层）；PyPI 无包，
+  wheel 由操作者自备后 `pip install <wheel 文件>`。本仓库与其文档不携带任何
+  wheel 或安装路径。
+- 前置依赖：`tables`（PyTables）——缺失时复权因子等接口直接 ImportError。
+- 不进默认依赖：`requirements.txt` / `environment.yml` 只留注释，不写条目。
+
+**凭据**：只读环境变量 `AD_USERNAME` / `AD_PASSWORD` / `AD_HOST` / `AD_PORT`
+（延续 `.env` 用法，凭据绝不入库）。缺包或缺凭据 → 源报
+`optional_source_unavailable` WARNING，更新继续，不阻塞发布。
+
+**实时契约测试**：`python -m pytest -m external`（需网络 + `AD_*` 凭据；与阶段 3
+同一命令，星耀用例在其中）。
+
+**配额预算**：登录 logon json 携带 `UsedWeekFlow` / `TotalWeekFlow`，
+**1 计数单位 = 1GB 线上流量**（`TotalWeekFlow = 1e9` 实测）。做预算一律取
+计数器起止读数，**不要用存储字节估算**（Phase 0 实测系数与会话开销界：
+F < 0.0025 单位/会话【界】、日 K 行线上成本 ≈170–390 B/行【推断界，不可跨端点
+套用】；见 `docs/operations/2026-09-26-xingyao-phase0-probes.md` §六）。
+
+**baostock 禁用/恢复程序**（ADR-016）：
+
+- 现状：`enabled: false`（2026-09-26 起，服务不可达；两个真实角色已由 xingyao
+  承接，注释中的两处历史失实宣称已更正）。
+- 恢复**车道**（重新用它抓校验日线）：把 `project/configs/sources.yml` 的
+  `baostock.enabled` 改回 `true` 即可——纯配置变更，不影响已发布事实。
+- 恢复**复用**（raw 快照 raw-snapshot reuse）：**不是**配置变更——其准入槽已被
+  `("xingyao","daily")` 替换（ADR-015 decision 1，经 ADR-016 修订），重新准入是
+  带自己决策记录的代码变更。
+- baostock 的 raw 快照与其他源同受约束：删除证据目录走阶段 4b 的三步程序
+  （原文：ADR-015 设计记录
+  `docs/superpowers/specs/2026-09-25-raw-snapshot-reuse-design.md` §2.7），
+  此处不重复。
+
+**xingyao 启用程序（前置：批量通道）**：
+
+1. 先落地批量抓取通道并验收——SDK 的 `query_kline` 原生接受代码列表（Phase 0
+   探针即以 1000 只/批抓取）；在逐标的 worker 契约下全宇宙单轮成本
+   ≈0.8%–167% 周配额，最坏情形不可行（ADR-016 decision 11）。
+2. 把 `project/configs/sources.yml` 的 `xingyao.enabled` 改为 `true`（仅配置
+   变更）；首轮小窗口核对 `validation_present` 翻转行为与调用账本
+   `raw_snapshot_reuse` 的 `reused` 段。
+3. 备援主源扶正是另一个决定（ADR-016 decision 7 不变），不随本开关发生。
 
 ## 阶段 5 · 指数成分（csi300）证据导入与定义冻结（正式研究的前置）
 

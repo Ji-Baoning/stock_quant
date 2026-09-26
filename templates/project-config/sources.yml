@@ -7,11 +7,20 @@ akshare:
   timeout_seconds: 30
   max_retries: 3
 baostock:
-  enabled: true
+  # Former optional cross-check daily source (unadjusted prices); its data
+  # server has been unavailable since 2026-09-26 (owner report) and xingyao
+  # holds both of the roles it really had (ADR-016).  See
+  # project/configs/sources.yml for the full history and the re-enable /
+  # re-admission distinction.
+  enabled: false
   timeout_seconds: 30
   max_retries: 3
 xingyao:
-  enabled: true
+  # The validation daily source and the ADR-009 factor channel (ADR-016);
+  # ships disabled pending a batch fetch channel (the per-symbol lane costs
+  # one login session per symbol per round).  See
+  # project/configs/sources.yml.
+  enabled: false
   timeout_seconds: 30
   max_retries: 2
 # Corporate-action conflict arbiter, not a source (ADR-007).  Shipped on

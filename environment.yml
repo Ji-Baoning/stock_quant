@@ -12,9 +12,14 @@ dependencies:
   - pyyaml
   - tushare
   - akshare=1.18.23
+  # baostock：FORMer 可选校验源，sources.yml 默认关闭（ADR-016）
   - baostock
   - jinja2
   - plotly
   - pytest
   - pytest-cov
   - ruff
+  # 星耀数智（xingyao，ADR-016）需要供应商私有包 tgw + AmazingData：PyPI/conda
+  # 均无包，wheel 由操作者自备，前置 tables(PyTables)；不进默认依赖，
+  # sources.yml 默认 enabled: false（批量通道为启用前置）。安装程序见
+  # RUNBOOK 阶段 4c。

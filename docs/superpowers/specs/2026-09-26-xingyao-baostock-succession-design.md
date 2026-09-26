@@ -2,7 +2,10 @@
 
 - 日期：2026-09-26
 - 状态：**owner 已复核（2026-09-26），按"新增独立车道 + 移除 baostock 准入"修订；
-  决策层已落 `docs/adr/016-xingyao-baostock-succession.md`（status: proposed，实施完成后转 accepted）**
+  决策层已落 `docs/adr/016-xingyao-baostock-succession.md`（已转 accepted，2026-09-26）。
+  实施与 Phase 0 六项探针均已完成（2026-09-27），结论按回写清单落在本 spec
+  §2.1/§2.4/§3.1/§3.3 与 ADR-016 decision 11；xingyao 以 `enabled: false` 出厂
+  （批量通道为其启用前置，ADR-016）**
 - 上游：[2026-09-12-data-source-role-division-design.md](2026-09-12-data-source-role-division-design.md)、
   [2026-09-25-raw-snapshot-reuse-design.md](2026-09-25-raw-snapshot-reuse-design.md)（ADR-015）
 - 数据源质量评估：[2026-09-25-xingyao-data-quality-evaluation.md](../../research/2026-09-25-xingyao-data-quality-evaluation.md)
@@ -13,13 +16,17 @@
 
 | 批次 | 内容 | 改动层次 | 效果 |
 | --- | --- | --- | --- |
-| 1 | 星耀适配器（daily）接替 baostock 校验车道 | 适配器 + pipeline 车道 + 登记 | `primary_source_missing` 翻转能力**有条件**恢复（取决于 Phase 0 停牌日行形态，§4.1）；每轮增量窗口流量 ≈1-2MB（配额口径待 §4.4 校准） |
+| 1 | 星耀适配器（daily）接替 baostock 校验车道 | 适配器 + pipeline 车道 + 登记 | 翻转只覆盖**非停牌形态**的主源缺席：Phase 0 实测停牌日 = 缺行，停牌日分类保持 `unknown_or_suspended`（§2.1）；配额口径已实测钉死，车道数据本体每轮 ≈0.8–1.8% 周配额（§2.4） |
 | 2 | 星耀因子通道接替 baostock adjust_factor（ADR-009 懒通道），随后才休眠 baostock 全部车道 | 独立因子模块 + 懒通道接线 + 配置切换 | 缺席 ex-date 分类连续保有第二 price-event 通道，不出现过渡空窗 |
 | 治理 | ADR-016 + REUSABLE_CHANNELS **替换** baostock 条目 + RUNBOOK | 配置 + ADR | 接替决策可追溯 |
 
 批次 1/2 是开发与验收边界，**不是可分开上线的发布边界**。两批代码与
 `baostock.enabled: false`、复用准入替换必须在同一发布中原子落地；在批次 2 通过前，
 baostock 保持启用，以免现有 `_build_factor_channel` 因共享配置开关而提前消失。
+（已按此原子落地：2026-09-27 发布同时切换 `baostock.enabled: false`、替换准入并转正
+ADR-016 与 ADR-015 修订。**xingyao 本身以 `enabled: false` 出厂**——逐标的 worker
+契约的会话固定开销使全宇宙校验单轮成本落在 ≈0.8%–167% 周配额区间（F 未定点值），
+批量通道是 `enabled: true` 的前置条件（§3.1、ADR-016 decision 11）。）
 
 另保留：星耀为 **daily_bar 备选主源候选**（relay 故障时按程序切换；本期不执行切换）。
 
@@ -57,6 +64,12 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
   两类均 WARNING，均不在 `PUBLICATION_BLOCKING_CODES`（[gates.py:42-64](../../../src/stock_quant/data_quality/gates.py#L42-L64)）。
 - baostock 完全下线的退化：缺失分类退为 `unknown_or_suspended`（WARNING，不阻塞）；
   `unexplained_primary_gap` **不会变多**（只由 tushare pre_close 链算出）。
+- **Phase 0 实测（2026-09-27，[探针记录](../../operations/2026-09-26-xingyao-phase0-probes.md) §二）**：
+  xingyao 的停牌日也是**缺行**（601238.SH 九个停牌日全部缺行；全市场旁证 44/26 个
+  "标的-日"均为已发布侧的零量停牌行）。因此即使星耀启用，停牌日的缺失分类仍为
+  `unknown_or_suspended`——主源（tushare 零量停牌行）与星耀（缺行）的形态差异落在
+  存在性比对层；与 baostock（文档口径为 `tradestatus=0` 行）的等价性主张相应收窄
+  （ADR-016 decision 11）。
 
 ### 2.2 validation 行只做存在性判定，从不进 compare
 
@@ -91,20 +104,27 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
 ### 2.4 星耀侧能力（2026-09-25 实测，评估报告为准）
 
 - 日K：`query_kline` 不复权，日期在 `kline_time` 列；沪深北覆盖（评估时 7 标的抽样 +
-  全量代码表佐证），分钟/快照通道独立存在。**volume/amount 的单位（股 vs 手）评估报告
-  从未对外部源校验**——(1.0, 1.0) 是待测假设，列 §4.5。
+  全量代码表佐证），分钟/快照通道独立存在。**volume/amount 的单位已实测（Phase 0
+  探针 6）：股/元，`_UNIT_FACTORS["xingyao"] = (1, 1)` 由假设转为实测结论**——4 标的
+  逐日 volume 整数完全相等、amount 在显示精度下相等（逐日 ≤±0.07 元，浮点/舍入量级），
+  tushare relay 交叉核对逐字段相等（[探针记录](../../operations/2026-09-26-xingyao-phase0-probes.md) §七）。
+  §4.5 的单位门闭合。
 - 复权因子：`get_backward_factor([symbol], is_local=False)` 返回以交易日为索引、symbol
   为列的**宽表**；实测 8733 行是该返回帧按完整交易日历对齐后的行数，因而既是日历长度，
   也是返回帧行数，不能直接理解为该证券有 8733 个有效因子观测。上市前/退市后的单元格
   可能为空；事件提取必须先选择目标 symbol 列、清除空值并排序，再比较相邻有效因子。
 - 已知口径坑位（适配器必须吸收）：沪深代码表封装层 -76 故障（枚举走 tgw 原生
   `QueryCodeTable`，本期适配器不需要）；K线日期在列不在索引。
-- 成本标定：约 81 字节/行（评估报告 §一）；校验车道每轮增量窗口 ≈1-2 万行 ≈1-2MB。
-  **"周配额 1GB、占比 <1%"这一整句建在未定的配额基数上**——评估报告里 23% 与 0.04%
-  两个数字相差约 500 倍（§4.4），故本节不给结论数，只保留"每轮 1-2MB"这个由帧长直接
-  算出的量。
-- 待实测（Phase 0）：**星耀停牌日的行形态**（零量行或缺行）——决定 validation 行在停牌日
-  的翻转能力（§4.1）；以及**成交量单位**（§4.5）。
+- 成本标定（**Phase 0 探针 5 已定口径**）：计数器在登录 logon json（`UsedWeekFlow`/
+  `TotalWeekFlow`，`TotalWeekFlow=1e9` 实测），**1 计数单位 = 1GB 线上流量**，不是存储
+  字节数——评估报告里 23% 与 0.04% 的约 500 倍差即源于此（0.23 是线上流量计数，0.04%
+  是存储字节估算）。系数：会话固定开销 F < 0.0025 单位/会话【实测界，真值在计数器粒度下
+  不可分辨】；日 K 行线上成本 ≈170–390 B/行【推断界，不可跨端点套用——评估报告的
+  81 B/行属代码表端点】。校验车道数据本体每轮 ≈0.008–0.018 单位 ≈ 周配额 0.8–1.8%；
+  **做配额预算一律用计数器读数，不用存储字节估算**（[探针记录](../../operations/2026-09-26-xingyao-phase0-probes.md) §六）。
+- 原"待实测（Phase 0）"两项均已有实测结论（2026-09-27，六项探针全部完成、无 BLOCKED）：
+  停牌日行形态 = **缺行**（停牌日分类保持 `unknown_or_suspended`，§2.1）；成交量单位 =
+  **(1, 1)**（见上）。结果与证据见[探针记录](../../operations/2026-09-26-xingyao-phase0-probes.md)。
 
 ### 2.5 复用与登记的既有接线（ADR-015 落地状态）
 
@@ -162,6 +182,17 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
   `audit_failures`，使进程退出非零；`drifted` 与 `audit_failures` 在报告中分列，避免
   “0 drifted”掩盖“0 successfully audited”。当前仅按 source 映射且吞成 `fetch_failed`
   的路径见 [drift_audit.py:81-145](../../../project/drift_audit.py#L81-L145)。
+
+- **逐标的接线的成本界限（Phase 0 探针 5 回写）**：`XingyaoSource` 契约是逐标的分发——
+  每次 fetch = 一个新 worker = 一次 login + 一次完整交易日历。用实测界重算一轮全宇宙
+  （661 标的）校验：会话开销 661 × F（F < 0.0025 单位/会话【实测界】）→ [0, 1.65) 单位；
+  数据本体仅 ≈0.008–0.018 单位；**单轮合计 ≈0.8%–167% 周配额，最坏情形不可行**，且
+  661 次登录握手本身即每轮 ≈45–60 分钟的纯等待（界定探针 5 会话实测 27.5 s 含 worker
+  启动，外推）。定性结论与 F 无关：逐标的接线把同一次会话固定开销花 661 遍，批量通道
+  只花 1–2 遍（SDK `query_kline` 原生接受代码列表，Phase 0 即以 1000 只/批抓取）。
+  **因此星耀以 `enabled: false` 出厂；批量专用通道（或缩小每轮标的集、降低轮频）是
+  扶正星耀或全宇宙跑校验车道前的先决条件**（ADR-016 decision 11；系数与区间见
+  [探针记录](../../operations/2026-09-26-xingyao-phase0-probes.md) §六）。
 
 **登记（每处几行）**：
 
@@ -227,10 +258,20 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
   data_contracts.py:33）→ 双变量保险丝仿 `TUSHARE_ALLOW_OFFICIAL_PUBLISH` 模式。
 - **本期不做**：不改 `data_contracts.py`、不建运行时自动 failover、不做代码表 endpoint
   （备援切换需要枚举能力时再加，走 tgw 原生 `QueryCodeTable`）。
-- 扶正为常驻主源的附加条件（ADR-016 记录）：退市股历史覆盖 ✓、历史深度 ✓、
-  连续 N 周校验车道无 ERROR 级 `close_difference`。
+- 扶正为常驻主源的附加条件（ADR-016 记录）：退市股历史覆盖、历史深度、
+  连续 N 周校验车道无 ERROR 级 `close_difference`。**Phase 0 实测（探针 4）落界**：
+  深度起点 **2013-01-04**（2013 前该账号/权限档无数据；是否产品级限制无法从本侧判别，
+  已如实记录）；`full_history_acceptance_start` = 2015-01-05 的验收锚可满足（深度比锚点
+  多约 2 年）；2013 后退市股实测覆盖至退市（601558.SH、300372.SZ），2013 前退市
+  （如 000003.SZ）无覆盖——由深度边界完全解释。前两项为**带边界的满足**，深度约束随
+  ADR-016 decision 11 记录。
 
 ## 4. Phase 0 前置实测（实施时第一批，结果决定细节口径）
+
+> **已完成（2026-09-27 实测，六项全部完成、无 BLOCKED）。** 结果、系数与 sha256 证据见
+> [Phase 0 实测记录](../../operations/2026-09-26-xingyao-phase0-probes.md)；
+> 判定分流已回写本 spec（§2.1/§2.4/§3.1/§3.3）与 ADR-016（decision 11）。以下为
+> 实施时的探针定义，留档不改。
 
 1. **星耀停牌日行形态**：找近期停牌股（`get_history_stock_status` 检索 + 日K对照），
    确认停牌日是**零量行**还是**缺行**。零量行 → validation 行照常提供存在性翻转
