@@ -10,6 +10,16 @@ affects:
 
 # 015 — Raw-snapshot reuse for eligible channels
 
+> **Amendment (ADR-016, 2026-09-26).** Decision 1's channel list substitutes
+> `("xingyao", "daily")` for `("baostock", "daily")`; read the Context
+> paragraph's cost example ("the baostock bounded retries alone cost hours at
+> 659 symbols") as the tushare daily lane, since baostock's lane is now
+> dormant. baostock left the runtime, and a lane that never runs must not hold
+> an admission slot, so the list still equals the set of `reuse=True` call
+> sites and the invariant below is unchanged — this ADR is amended, not
+> superseded. Read [ADR-016](016-xingyao-baostock-succession.md) for the
+> succession itself.
+
 ## Context
 
 Spec D5 (2026-09-19) made the *window plan* incremental: `last_covered_plus_1`
