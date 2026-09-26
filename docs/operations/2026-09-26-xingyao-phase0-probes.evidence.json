@@ -111,7 +111,7 @@
     "recent_window": {
       "range": "2026-06-15..2026-09-24 (69 trading days)",
       "fetched_rows": 443870,
-      "normalized_rows": 431740,
+      "comparison_rows_pre_cap": 443870,
       "normalized_symbols": 7815,
       "rejected_rows": 0,
       "fetched_rows_exact": {
