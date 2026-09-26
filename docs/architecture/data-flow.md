@@ -37,6 +37,20 @@ config fails before any service is constructed. See
 A source-fetch failure blocks the update: no dataset version is published and
 `CURRENT` is unchanged.
 
+**Raw-snapshot reuse (ADR-015).** Before each per-symbol request on the four
+`_dispatch` lanes (primary daily, head-anchor probe, benchmarks, validation
+daily), the raw store is asked for the newest stored answer to an exactly
+identical request; a candidate is served back only when its bytes still
+re-verify and it is not empty, and a stored-but-rejected candidate is a
+visible warning followed by the live request. The admitted channels are the
+`REUSABLE_CHANNELS` constant in `data_sources/raw_store.py`; corporate
+actions, the trading calendar, the security master and the lazy arbitration
+channels are always fetched live. A reused snapshot joins the round's
+`raw_snapshots` evidence like a fetched one, `build_config.raw_snapshot_reuse`
+counts reused versus fetched per channel, the call ledger carries a `reused`
+section, and `build_config.baseline_version` names the baseline version the
+carried tables came from.
+
 ## 2. Publication — the `dataset` version
 
 `stock_quant.data_model.dataset.DatasetPublisher.publish` is the only writer:

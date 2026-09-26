@@ -240,6 +240,13 @@ CODE_MASTER_BAR_BOUNDARY = "master_bar_boundary"
 CODE_MASTER_COVERAGE_MISMATCH = "master_coverage_mismatch"
 CODE_UNIVERSE_DEFINITION_INVALID = "universe_definition_invalid"
 CODE_ADJUSTED_BAR_MISSING_FROM_DATASET = "adjusted_bar_missing_from_dataset"
+CODE_REUSE_CANDIDATE_REJECTED = "reuse_candidate_rejected"
+
+#: The ``build_config`` key naming the baseline version this update carried
+#: forward from.  Always written -- an explicit ``null`` (no baseline) keeps
+#: "missing key = legacy contract" the single meaning it already has for the
+#: calendar-evidence keys.
+BASELINE_VERSION_KEY = "baseline_version"
 
 #: Canonical standardized table holding untrusted corporate-action rows.
 TABLE_CORPORATE_ACTION_QUARANTINE = "corporate_action_quarantine"
@@ -358,6 +365,45 @@ def _raw_snapshot_evidence_rows(
         )
         unique[key] = row
     return [unique[key] for key in sorted(unique)]
+
+
+def _reuse_evidence(
+    counts: Mapping[str, Mapping[str, Mapping[str, int]]],
+) -> dict[str, dict[str, dict[str, int]]]:
+    """Sanitized reuse counters per source x endpoint, deterministically ordered.
+
+    Build evidence, not runtime telemetry: endpoint names and integers only,
+    sorted, so identical fetch behaviour renders an identical
+    ``build_config.raw_snapshot_reuse`` (ADR-015).
+    """
+    return {
+        source: {
+            endpoint: {
+                "reused": int(row.get("reused", 0)),
+                "fetched": int(row.get("fetched", 0)),
+            }
+            for endpoint, row in sorted(endpoints.items())
+        }
+        for source, endpoints in sorted(counts.items())
+    }
+
+
+def _reused_ledger_payload(
+    counts: Mapping[str, Mapping[str, Mapping[str, int]]],
+) -> dict[str, dict[str, int]]:
+    """The per source x endpoint reused-request counts the ledger renders.
+
+    Endpoints that dispatched but reused nothing stay out, so a non-empty
+    entry always means quota actually saved.
+    """
+    return {
+        source: {
+            endpoint: int(row.get("reused", 0))
+            for endpoint, row in sorted(endpoints.items())
+            if int(row.get("reused", 0)) > 0
+        }
+        for source, endpoints in counts.items()
+    }
 
 
 def _recorded_fetch_spans(payload: object) -> dict[str, tuple[date, date]]:
@@ -481,6 +527,8 @@ def dataset_build_config(
     definition_hashes: Mapping[str, str],
     skipped_definitions: Sequence[str],
     table_fetch_coverage: Mapping[str, object] | None = None,
+    baseline_version: str | None = None,
+    raw_snapshot_reuse: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """The exact sanitized payload hashed into a published dataset version.
 
@@ -493,6 +541,13 @@ def dataset_build_config(
     payload read compatibly but never accepted as fully evidenced.  When
     supplied, ``table_fetch_coverage`` records which history segments this
     build re-fetched, carried from the baseline, or skipped (spec D5.3).
+    ``baseline_version`` is always written -- ``null`` when the build had no
+    baseline -- so "missing key" keeps its legacy-contract meaning; it names
+    the immutable version this build carried its tables forward from, closing
+    the carried-segment chain to that manifest.  When supplied,
+    ``raw_snapshot_reuse`` carries the per source x endpoint {reused,
+    fetched} counters of the lanes that may serve stored snapshots back
+    (ADR-015) as deterministic build evidence.
     """
     config = {
         "origin": "data_update",
@@ -514,9 +569,12 @@ def dataset_build_config(
         ),
         DEFINITION_HASHES_KEY: dict(definition_hashes),
         SKIPPED_DEFINITIONS_KEY: list(skipped_definitions),
+        BASELINE_VERSION_KEY: baseline_version,
     }
     if table_fetch_coverage:
         config["table_fetch_coverage"] = dict(table_fetch_coverage)
+    if raw_snapshot_reuse:
+        config["raw_snapshot_reuse"] = dict(raw_snapshot_reuse)
     return config
 
 
@@ -627,6 +685,11 @@ class DataPipeline:
         # instance), reset at the start of each ``update()``; the call ledger
         # renders its per-source accounting from this at the end of the run.
         self._sources_used: dict[str, DataSource] = {}
+        # Per source x endpoint {reused, fetched} counters for the lanes that
+        # consult the raw store before fetching (ADR-015), reset with
+        # ``_sources_used``; they feed ``build_config.raw_snapshot_reuse``
+        # and the ledger's ``reused`` section.
+        self._reuse_counts: dict[str, dict[str, dict[str, int]]] = {}
 
     # -- public surface --------------------------------------------------- #
 
@@ -729,6 +792,7 @@ class DataPipeline:
         """Run one gated, raw-preserving data update."""
         run_id = f"data_update_{uuid.uuid4().hex[:12]}"
         self._sources_used = {}
+        self._reuse_counts = {}
         statuses: dict[str, SourceStatus] = {}
         issues: list[QualityIssue] = []
         raw_snapshots: list[RawSnapshot] = []
@@ -759,6 +823,7 @@ class DataPipeline:
             current_quarantine,
             baseline_spans,
             fetch_coverage,
+            baseline_version,
         ) = baseline
         recorded_spans, carried_master_coverage, carried_ca_coverage, (
             baseline_covered
@@ -1251,6 +1316,8 @@ class DataPipeline:
                     table_fetch_coverage=to_build_config_payload(
                         fetch_segments
                     ),
+                    baseline_version=baseline_version,
+                    raw_snapshot_reuse=_reuse_evidence(self._reuse_counts),
                 ),
                 table_tiers=table_tiers,
             )
@@ -1273,9 +1340,16 @@ class DataPipeline:
         # Call ledger (spec D5.5): after a successful publish, persist the
         # per-source endpoint x count accounting for this update run under
         # ``data/runs/<run_id>/call_ledger.json``.  Only parameter shapes and
-        # endpoint names are ever recorded -- never credentials.
+        # endpoint names are ever recorded -- never credentials.  The
+        # ``reused`` section (ADR-015) lists the requests served from stored
+        # snapshots, which consumed no supplier quota.
         write_call_ledger(
-            self._project_root, run_id, render_call_ledger(self._active_sources())
+            self._project_root,
+            run_id,
+            render_call_ledger(
+                self._active_sources(),
+                reused=_reused_ledger_payload(self._reuse_counts),
+            ),
         )
         return self._result(
             issues,
@@ -1466,8 +1540,11 @@ class DataPipeline:
         """The carried master/calendar/daily/action/membership/quarantine state.
 
         Returns ``(master, open_days, daily, ca, membership, quarantine,
-        baseline_spans, fetch_coverage)`` where ``fetch_coverage`` is the
-        pair of (recorded per-table spans, carried evidence frames), or
+        baseline_spans, fetch_coverage, baseline_version)`` where
+        ``fetch_coverage`` is the pair of (recorded per-table spans, carried
+        evidence frames) and ``baseline_version`` names the immutable version
+        the carried tables came from (the ``build_config.baseline_version``
+        the next manifest publishes so carried segments stay traceable), or
         ``None`` after a FATAL issue when no dataset exists yet.  The
         immutable ``universe_membership`` raw table is carried too when the
         baseline dataset already has one (older datasets simply update
@@ -1558,6 +1635,7 @@ class DataPipeline:
             quarantine,
             spans,
             fetch_coverage,
+            str(ref.version),
         )
 
     def _require_available(
@@ -1607,18 +1685,20 @@ class DataPipeline:
         if source is None:
             return True
         for symbol in symbols:
-            result = self._dispatch(
+            dispatched = self._dispatch(
                 "tushare", source, "daily", symbol, start, end,
                 {"adjustment": "unadjusted"}, required=True, issues=issues,
+                reuse=True,
             )
-            if result is None:
+            if dispatched is None:
                 statuses["tushare"] = SourceStatus(
                     "tushare", True, False,
                     reason=f"required fetch failed for {symbol}",
                     reason_code="source_fetch_failed",
                 )
                 return True
-            raw_snapshots.append(self._record_raw(result))
+            result, snapshot = dispatched
+            raw_snapshots.append(snapshot)
             # The raw response (pre_close in particular) is the suspension
             # evidence consumed later by _materialize_suspensions.
             raw_daily_frames[symbol] = result.frame
@@ -1707,13 +1787,15 @@ class DataPipeline:
                 chunk_start = max(
                     list_date, chunk_end - timedelta(days=_ANCHOR_PROBE_DAYS - 1)
                 )
-                result = self._dispatch(
+                dispatched = self._dispatch(
                     "tushare", source, "daily", symbol, chunk_start, chunk_end,
                     {"adjustment": "unadjusted"}, required=False, issues=issues,
+                    reuse=True, allow_empty=True,
                 )
-                if result is None:
+                if dispatched is None:
                     break
-                raw_snapshots.append(self._record_raw(result))
+                result, snapshot = dispatched
+                raw_snapshots.append(snapshot)
                 if not result.frame.empty:
                     raw_daily_frames[symbol] = pd.concat(
                         [result.frame, raw], ignore_index=True
@@ -1807,18 +1889,19 @@ class DataPipeline:
         if source is None:
             return True
         for symbol in symbols:
-            result = self._dispatch(
+            dispatched = self._dispatch(
                 "akshare", source, "index_history", symbol, start, end, {},
-                required=True, issues=issues,
+                required=True, issues=issues, reuse=True,
             )
-            if result is None:
+            if dispatched is None:
                 statuses["akshare"] = SourceStatus(
                     "akshare", True, False,
                     reason=f"required fetch failed for {symbol}",
                     reason_code="source_fetch_failed",
                 )
                 return True
-            raw_snapshots.append(self._record_raw(result))
+            result, snapshot = dispatched
+            raw_snapshots.append(snapshot)
             try:
                 clean = _normalize_index(result.frame, symbol, result.metadata)
             except Exception as error:  # noqa: BLE001 - required reference role
@@ -2470,14 +2553,16 @@ class DataPipeline:
             return
         failures = 0
         for symbol in symbols:
-            result = self._dispatch(
+            dispatched = self._dispatch(
                 "baostock", source, "daily", symbol, start, end,
                 {"adjustment": "unadjusted"}, required=False, issues=issues,
+                reuse=True,
             )
-            if result is None:
+            if dispatched is None:
                 failures += 1
                 continue
-            raw_snapshots.append(self._record_raw(result))
+            result, snapshot = dispatched
+            raw_snapshots.append(snapshot)
             validation_rows.append(
                 normalize_daily(
                     result.frame, "baostock", _ingest_time(result.metadata)
@@ -2532,7 +2617,25 @@ class DataPipeline:
         *,
         required: bool,
         issues=None,
+        reuse: bool = False,
+        allow_empty: bool = False,
     ):
+        """One per-symbol request: ``(result, snapshot)`` or ``None``.
+
+        With ``reuse`` the raw store is consulted first (ADR-015): an exact
+        match on endpoint x symbol x window x params whose stored bytes still
+        verify is answered from disk and never reaches ``fetch_with_retry``.
+        A stored candidate that exists but is refused -- tampered bytes, a
+        foreign request shape, an empty frame -- is a visible
+        ``reuse_candidate_rejected`` warning before the live request runs
+        under the normal retry policy.  The snapshot is returned alongside
+        the result so the caller records the exact evidence this answer came
+        from, whether it was fetched live or read back.
+
+        Eligibility is enforced inside ``RawStore.resolve_reusable`` via
+        ``REUSABLE_CHANNELS``; passing ``reuse=True`` only asks for the
+        lookup, it cannot widen the channel set.
+        """
         config: SourceConfig = self._project_config.sources.get(
             name, SourceConfig()
         )
@@ -2542,8 +2645,36 @@ class DataPipeline:
             call_timeout_seconds=config.timeout_seconds,
         )
         request = DataRequest(endpoint, (symbol,), start, end, params)
+        if reuse:
+            resolved = self._raw_store.resolve_reusable(
+                name, endpoint, request, allow_empty=allow_empty
+            )
+            if resolved is not None:
+                snapshot, frame = resolved
+                self._count_fetch(name, endpoint, "reused")
+                return (
+                    FetchResult(
+                        source=name,
+                        endpoint=endpoint,
+                        request_key=request_key(request),
+                        frame=frame,
+                        metadata=dict(snapshot.manifest.get("metadata") or {}),
+                    ),
+                    snapshot,
+                )
+            if issues is not None and self._raw_store.has_candidate(
+                name, endpoint, request
+            ):
+                issues.append(
+                    _issue(
+                        Severity.WARNING,
+                        CODE_REUSE_CANDIDATE_REJECTED,
+                        symbol=symbol,
+                        details={"source": name, "endpoint": endpoint},
+                    )
+                )
         try:
-            return fetch_with_retry(
+            result = fetch_with_retry(
                 source, request, policy, sleeper=self._sleeper
             )
         except Exception as error:  # noqa: BLE001
@@ -2576,6 +2707,15 @@ class DataPipeline:
                     )
                 )
             return None
+        self._count_fetch(name, endpoint, "fetched")
+        return result, self._record_raw(result)
+
+    def _count_fetch(self, name: str, endpoint: str, kind: str) -> None:
+        """Count one dispatched request as ``reused`` or ``fetched`` (ADR-015)."""
+        row = self._reuse_counts.setdefault(name, {}).setdefault(
+            endpoint, {"reused": 0, "fetched": 0}
+        )
+        row[kind] += 1
 
     def _fetch_one(self, source, request):
         config = self._project_config.sources.get(

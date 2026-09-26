@@ -25,12 +25,33 @@ def _summarize_calls(calls: object) -> tuple[int, dict[str, int]]:
     return len(records), endpoints
 
 
-def render_call_ledger(sources: Mapping[str, object]) -> dict[str, object]:
-    """Normalized ledger rows: one entry per source."""
+def render_call_ledger(
+    sources: Mapping[str, object],
+    reused: Mapping[str, Mapping[str, int]] | None = None,
+) -> dict[str, object]:
+    """Normalized ledger rows: one entry per source.
+
+    ``reused`` carries, per source x endpoint, how many requests were served
+    from stored raw snapshots instead of the supplier (ADR-015).  Every row
+    always carries the key -- empty when the source reused nothing -- so the
+    ledger shape is stable across rounds and quota accounting stays
+    comparable: reused requests consume no supplier quota.
+    """
     rows: dict[str, object] = {}
     for name, source in sorted(sources.items()):
         total, endpoints = _summarize_calls(getattr(source, "calls", 0))
-        rows[name] = {"calls": total, "endpoints": endpoints}
+        reused_endpoints: dict[str, int] = {}
+        reused_for_source = (reused or {}).get(name)
+        if isinstance(reused_for_source, Mapping):
+            reused_endpoints = {
+                str(endpoint): int(count)
+                for endpoint, count in sorted(reused_for_source.items())
+            }
+        rows[name] = {
+            "calls": total,
+            "endpoints": endpoints,
+            "reused": reused_endpoints,
+        }
     return rows
 
 

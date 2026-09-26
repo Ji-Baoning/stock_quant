@@ -104,6 +104,38 @@ setsid nohup python -m stock_quant data update --start 2015-01-05 --root project
   --end 2026-08-30`——显式窗口偏离契约取数窗时所有表跳过取数，只留下
   NOT_FETCHED 记录（spec D5.2/F1）。
 
+### 阶段 4b · 原始快照复用与恢复（ADR-015）
+
+四个逐符号通道（tushare/baostock 日线、akshare 基准）在发请求前先查 raw 树：
+同请求（端点 × 标的 × 窗口 × 参数完全一致）且字节哈希复验通过的最新快照直接
+复用，不发网络调用；公司行为、交易日历、证券主档、懒仲裁通道**永远实时**。
+复用情况在发布版本的 `build_config.raw_snapshot_reuse`（reused/fetched 计数）
+与 `data/runs/<run_id>/call_ledger.json` 的 `reused` 段可见。
+
+**「重试轮拿不到某个窗口的新数据」的恢复动作是删除该请求的证据目录**：
+
+```
+<项目根>/data/raw/<source>/<endpoint>/<transport_id>/<request_key>/
+```
+
+删除不可逆，且会波及已发布版本的验收复验（验收逐条读盘 `verify_evidence`；
+字节一删，绑定该快照的版本此后任何验收复核都以 `snapshot_unverifiable`
+失败）。因此**顺序不可颠倒**：
+
+1. **先查绑定**：扫描 `<项目根>/data/standardized/*/dataset_manifest.json`
+   的 `build_config.raw_snapshots`，按 **`(source, endpoint, request_key)`**
+   匹配——删除单位是整个 `request_key` 目录，会一并带走该请求下的**所有**
+   `file_sha256` 变体，所以比对键不能带 `file_sha256`；命中的行把各自绑定的
+   `file_sha256` 列出来供判断。`RawStore.verify_evidence` 只能证明「存在且
+   一致」，证明不了「没人还在用」，留档不能替代这一步。
+2. **未被任何仍需复验的版本绑定** → 删除目录，重跑 `data update`。
+3. **已被绑定** → 二选一，没有第三种选择：删除并接受该版本此后不可再验收
+   （`snapshot_unverifiable`），须尽快以新数据重发布 + 重新验收；或保留目录，
+   接受该窗口继续被复用。把证据目录复制到别处**不算**保留——
+   `verify_evidence` 按项目根下的路径解析，副本无法让已发布版本可复验。
+   无论选哪边，在 `docs/operations/` 落一条日期化操作记录，写明这是有意的
+   取舍。
+
 ## 阶段 5 · 指数成分（csi300）证据导入与定义冻结（正式研究的前置）
 
 正式 `research run` 不再使用 `security_master` 全量证券：因子在每个信号日先按

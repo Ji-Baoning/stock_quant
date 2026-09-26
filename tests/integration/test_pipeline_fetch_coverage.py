@@ -315,8 +315,10 @@ def test_update_writes_call_ledger(tmp_path):
     The ledger lands under ``data/runs/<run_id>/call_ledger.json`` only after
     a successful publish, one row per source the update actually used.  The
     stub suppliers expose no ``calls`` counter, so every row renders the
-    zero-call contract shape; endpoint names and parameter shapes are the
-    only things a real ledger records -- never credentials.
+    zero-call contract shape; the ``reused`` section (ADR-015) is always
+    present and empty here because no snapshot was ever stored twice.
+    Endpoint names and parameter shapes are the only things a real ledger
+    records -- never credentials.
     """
     project = build_fixture_project(tmp_path / "project")
     result = DataPipeline(project.root, sources=_all_stubs()).update(
@@ -327,6 +329,6 @@ def test_update_writes_call_ledger(tmp_path):
     assert path.is_file()
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload == {
-        name: {"calls": 0, "endpoints": {}}
+        name: {"calls": 0, "endpoints": {}, "reused": {}}
         for name in ("tushare", "akshare", "baostock")
     }

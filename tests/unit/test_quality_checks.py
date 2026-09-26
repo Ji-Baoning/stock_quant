@@ -476,11 +476,17 @@ def _primary_fetch_pipeline(monkeypatch) -> SimpleNamespace:
     fetch_result = SimpleNamespace(
         frame=frame, metadata={"response_timestamp": "2021-11-03T00:00:00Z"}
     )
-    monkeypatch.setattr(pipeline, "_dispatch", lambda *args, **kwargs: fetch_result)
+    # ADR-015: _dispatch returns (result, snapshot); the stored snapshot is
+    # appended to the round's evidence verbatim, so a stand-in object is fine.
+    snapshot = SimpleNamespace(sha256="stub")
+    monkeypatch.setattr(
+        pipeline,
+        "_dispatch",
+        lambda *args, **kwargs: (fetch_result, snapshot),
+    )
     monkeypatch.setattr(
         pipeline, "_adapter_or_fail", lambda name, statuses: object()
     )
-    monkeypatch.setattr(pipeline, "_record_raw", lambda result: result)
     return pipeline
 
 

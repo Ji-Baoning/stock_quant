@@ -13,12 +13,32 @@ from typing import Any
 
 import pandas as pd
 
-from stock_quant.data_sources.base import FetchResult
+from stock_quant.data_sources.base import (
+    DataRequest,
+    FetchResult,
+    request_key,
+)
 
 #: Reserved: it means "this snapshot predates transport tracking".  It is
 #: never a valid value for a *new* snapshot, so the directory name can never
 #: collide with the legacy layout (design §2.3).
 RESERVED_TRANSPORT_ID = "unknown"
+
+#: The channels whose stored answers :meth:`RawStore.resolve_reusable` may
+#: serve back (ADR-015).  Membership is the first reuse gate: a
+#: ``(source, endpoint)`` outside the set is always fetched live, so the
+#: trading calendar (the clock), the security master (the universe
+#: definition), the corporate-action endpoints (a revision-sensitive
+#: disclosure channel on its mandatory lookback) and the lazy arbitration
+#: channels can never be answered from disk, no matter what their caller
+#: asks for.
+REUSABLE_CHANNELS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("tushare", "daily"),
+        ("baostock", "daily"),
+        ("akshare", "index_history"),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -149,6 +169,152 @@ class RawStore:
             if manifest.get(key) != expected:
                 raise ValueError(f"raw manifest {key} mismatch")
         return RawSnapshot(path=path, sha256=file_sha256, manifest=manifest)
+
+    def resolve_reusable(
+        self,
+        source: str,
+        endpoint: str,
+        request: DataRequest,
+        *,
+        allow_empty: bool = False,
+    ) -> tuple[RawSnapshot, pd.DataFrame] | None:
+        """The newest stored answer to exactly this request, or ``None``.
+
+        Reuse (ADR-015) is gated first on :data:`REUSABLE_CHANNELS`; then the
+        candidates for this request's key are ordered by
+        ``(response_timestamp desc, missing last, file_sha256 secondary)``
+        and **only the newest one is considered**.  A candidate is served
+        back only after two checks both pass: a defensive comparison of the
+        stored ``request_parameters`` against this request (a missing or
+        wrongly-shaped record never matches, and never raises), and a full
+        :meth:`verify_evidence` re-verification of the stored bytes.  When
+        the newest candidate fails either check the method returns ``None``
+        -- it never falls back to an older candidate, because an older
+        digest under the same request key is by definition a supplier-revised
+        historical observation, and silently reusing it would demote a
+        tamper signal into a successful reuse.
+
+        An empty frame is absence, not an answer (the ADR-009 stance):
+        ``None`` unless the caller passes ``allow_empty=True``, which only
+        the head-anchor backfill probe does.
+
+        The glob covers the five-segment layout only; the four-segment
+        pre-transport tree that :meth:`verify_evidence` can still read is
+        deliberately never matched, so legacy snapshots are always re-fetched.
+        """
+        if (source, endpoint) not in REUSABLE_CHANNELS:
+            return None
+        source = _path_component(source, "source")
+        endpoint = _path_component(endpoint, "endpoint")
+        key = request_key(request)
+        candidates: list[tuple[tuple[int, pd.Timestamp, str], Path, dict[str, Any], str]] = []
+        pattern = f"{source}/{endpoint}/*/{key}/*/manifest.json"
+        for manifest_path in sorted(self._root.glob(pattern)):
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if not isinstance(manifest, dict):
+                    raise ValueError("raw manifest is not a mapping")
+                sha = _sha256_value(str(manifest["file_sha256"]))
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                continue  # an unreadable candidate is not evidence
+            candidates.append(
+                (_candidate_order(manifest), manifest_path, manifest, sha)
+            )
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        _, manifest_path, manifest, sha = candidates[0]
+        if not _request_matches(manifest.get("request_parameters"), request):
+            return None
+        try:
+            snapshot = self.verify_evidence(
+                RawSnapshotEvidence(
+                    source=source,
+                    endpoint=endpoint,
+                    request_key=key,
+                    file_sha256=sha,
+                    manifest_sha256=_sha256_file(manifest_path),
+                    transport_id=manifest.get("transport_id"),
+                )
+            )
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        frame = pd.read_parquet(snapshot.path / "data.parquet")
+        if frame.empty and not allow_empty:
+            return None
+        return snapshot, frame
+
+    def has_candidate(
+        self, source: str, endpoint: str, request: DataRequest
+    ) -> bool:
+        """Whether any stored snapshot directory exists for this request.
+
+        Existence only -- no verification, no channel gate.  The fetch layer
+        uses it to tell a normal miss ("nothing stored yet") from a refused
+        candidate ("something was stored but ``resolve_reusable`` would not
+        serve it"), which is worth a visible warning.
+        """
+        try:
+            source = _path_component(source, "source")
+            endpoint = _path_component(endpoint, "endpoint")
+            key = request_key(request)
+        except ValueError:
+            return False
+        pattern = f"{source}/{endpoint}/*/{key}/*/manifest.json"
+        return any(self._root.glob(pattern))
+
+
+def _candidate_order(manifest: dict[str, Any]) -> tuple[int, pd.Timestamp, str]:
+    """Sort key picking the newest stored answer for one request key.
+
+    Present timestamps order newest-first; a missing or unparseable
+    ``response_timestamp`` sorts after every present one; ``file_sha256``
+    breaks remaining ties deterministically.  All timestamps are normalised
+    to UTC so naive and aware forms stay comparable.
+    """
+    sha = str(manifest.get("file_sha256", ""))
+    raw = manifest.get("response_timestamp")
+    if isinstance(raw, str) and raw:
+        try:
+            timestamp = pd.Timestamp(raw)
+        except (ValueError, TypeError):
+            timestamp = pd.NaT
+        if not pd.isna(timestamp):
+            if timestamp.tz is None:
+                timestamp = timestamp.tz_localize("UTC")
+            else:
+                timestamp = timestamp.tz_convert("UTC")
+            return (1, timestamp, sha)
+    return (0, _MISSING_TIMESTAMP, sha)
+
+
+#: Sentinel placing candidates without a usable ``response_timestamp`` after
+#: every timestamped one, in UTC so the tuple comparison stays type-stable.
+_MISSING_TIMESTAMP = pd.Timestamp.min.tz_localize("UTC")
+
+
+def _request_matches(stored: object, request: DataRequest) -> bool:
+    """Defensive equality between a stored manifest's request shape and ours.
+
+    The request-key directory name already hashes these fields; this check
+    keeps a foreign or hand-edited manifest from being served as the answer.
+    JSON round-tripping on both sides normalises tuples to lists, so the
+    comparison is shape-stable; anything non-serialisable fails closed.
+    """
+    if not isinstance(stored, dict):
+        return False
+    expected = {
+        "symbols": list(request.symbols),
+        "start_date": request.start_date.isoformat(),
+        "end_date": request.end_date.isoformat(),
+        "params": request.params,
+    }
+    try:
+        return json.dumps(stored, sort_keys=True) == json.dumps(
+            expected, sort_keys=True
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def _manifest_for(

@@ -654,10 +654,19 @@ def _fixture_fetch_results() -> tuple[FetchResult, ...]:
         start_date=_UPDATE_WINDOW_START,
         end_date=_UPDATE_WINDOW_END,
     )
+    # The full akshare raw shape, not a minimal close-only frame: this stored
+    # snapshot shares its request key with a real benchmark update over the
+    # same window, and raw-snapshot reuse (ADR-015) may serve it back through
+    # ``_normalize_index``, which requires the open/high/low/volume columns.
     index_history = pd.DataFrame(
         {
             "日期": sessions,
+            "开盘": [4000.0] * len(sessions),
+            "最高": [4000.0] * len(sessions),
+            "最低": [4000.0] * len(sessions),
             "收盘": [4000.0] * len(sessions),
+            "成交量": [0] * len(sessions),
+            "成交额": [0.0] * len(sessions),
         }
     )
     return (
