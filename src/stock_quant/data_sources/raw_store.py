@@ -25,17 +25,19 @@ from stock_quant.data_sources.base import (
 RESERVED_TRANSPORT_ID = "unknown"
 
 #: The channels whose stored answers :meth:`RawStore.resolve_reusable` may
-#: serve back (ADR-015).  Membership is the first reuse gate: a
-#: ``(source, endpoint)`` outside the set is always fetched live, so the
-#: trading calendar (the clock), the security master (the universe
-#: definition), the corporate-action endpoints (a revision-sensitive
-#: disclosure channel on its mandatory lookback) and the lazy arbitration
-#: channels can never be answered from disk, no matter what their caller
-#: asks for.
+#: serve back (ADR-015 decision 1, amended by ADR-016).  The list is exactly
+#: the set of ``reuse=True`` call sites: baostock's daily lane keeps its code
+#: but not its reuse, because a lane that no longer runs must not hold an
+#: admission slot.  Membership is the first reuse gate: a ``(source,
+#: endpoint)`` outside the set is always fetched live, so the trading calendar
+#: (the clock), the security master (the universe definition), the
+#: corporate-action endpoints (a revision-sensitive disclosure channel on its
+#: mandatory lookback) and the lazy arbitration channels can never be answered
+#: from disk, no matter what their caller asks for.
 REUSABLE_CHANNELS: frozenset[tuple[str, str]] = frozenset(
     {
         ("tushare", "daily"),
-        ("baostock", "daily"),
+        ("xingyao", "daily"),
         ("akshare", "index_history"),
     }
 )

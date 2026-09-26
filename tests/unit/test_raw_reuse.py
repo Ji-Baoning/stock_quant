@@ -237,7 +237,8 @@ def test_resolve_reusable_ignores_the_legacy_four_segment_layout(tmp_path):
 #: narrowed by the incremental plan may replay a stored answer (design §2.3).
 _ADMITTED = {
     ("tushare", "daily"): True,
-    ("baostock", "daily"): True,
+    ("xingyao", "daily"): True,
+    ("baostock", "daily"): False,
     ("akshare", "index_history"): True,
     ("tushare", "trade_cal"): False,
     ("tushare", "stock_basic"): False,
@@ -271,14 +272,15 @@ def test_the_admitted_channel_set_is_the_declared_one():
 
 
 def test_the_admitted_set_covers_exactly_the_reuse_call_sites():
-    """Every admitted channel is one of the four wired call sites (design §2.4).
+    """Every admitted channel is a wired ``reuse=True`` call site (design §5).
 
     A channel added here without a call site, or a call site wired to a
     channel that is not admitted, means the policy and the wiring drifted.
+    baostock keeps its lane but not its reuse: a dormant lane holds no slot.
     """
     wired = {
         ("tushare", "daily"),  # _fetch_primary_stock, _deepen_head_anchors
-        ("baostock", "daily"),  # _fetch_validation_daily
+        ("xingyao", "daily"),  # _fetch_validation_daily (xingyao)
         ("akshare", "index_history"),  # _fetch_benchmarks
     }
     assert raw_store.REUSABLE_CHANNELS == frozenset(wired)

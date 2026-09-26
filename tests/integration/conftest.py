@@ -316,12 +316,19 @@ def _wf_membership_facts(universe: Universe) -> list[dict[str, object]]:
 
 
 def _fixture_sources_yaml() -> str:
-    """The template ``sources.yml`` with every supplier enabled by default.
+    """The template ``sources.yml`` with the live suppliers enabled.
 
-    The fixture projects must not inherit the template's per-supplier toggles:
-    the template may ship with ``baostock.enabled: false`` (an operator
-    preference), while fixture updates expect every optional supplier to be
-    attempted unless a test explicitly disables one via ``write_sources``.
+    Fixture projects do not inherit the template's per-supplier toggles: the
+    template may ship a supplier disabled (an operator preference), while
+    fixture updates expect every *working* optional supplier to be attempted
+    unless a test explicitly disables one via ``write_sources``.
+
+    baostock is the exception and mirrors production (ADR-016): its supplier
+    is unavailable and xingyao holds both of its roles, so leaving it enabled
+    would make every ordinary fixture test exercise a lane the project no
+    longer runs, and would put a dispatched baostock row in the call ledger
+    that production never produces.  Tests that need the dormant lane opt in
+    explicitly -- ``write_sources(project.root, baostock=True)``.
     """
     payload = yaml.safe_load(
         (_TEMPLATE_CONFIG / "sources.yml").read_text(encoding="utf-8")
@@ -329,6 +336,7 @@ def _fixture_sources_yaml() -> str:
     for settings in payload.values():
         if isinstance(settings, dict):
             settings["enabled"] = True
+    payload["baostock"]["enabled"] = False
     return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
 
 
@@ -912,22 +920,33 @@ def math_exp(value: float) -> float:
 
 
 def write_sources(project_root: Path, *, tushare: bool = True,
-                  akshare: bool = True, baostock: bool = True) -> None:
+                  akshare: bool = True, baostock: bool = False,
+                  xingyao: bool = True) -> None:
     """Rewrite ``configs/sources.yml`` enabling or disabling each supplier.
 
-    Fixture projects start from the template ``sources.yml`` with every
-    supplier enabled; tests that need a specific enablement call this before
-    constructing any pipeline so the config gate (never a CLI flag) decides
-    which sources may be built.
+    Defaults mirror the project's shipped state: the working suppliers are on,
+    and baostock is off (ADR-016) unless a test asks for the dormant lane.
+    Tests that need a specific enablement call this before constructing any
+    pipeline so the config gate (never a CLI flag) decides which sources may
+    be built.  xingyao is written explicitly: a sources.yml without its
+    segment silently disables the validation lane for the whole test.
+
+    The rest of the document (``tdx``, the data contracts) is carried through
+    untouched: a sources.yml reduced to the supplier segments would publish
+    with ``unregistered_table`` FATALs, and the dormant-lane opt-in needs a
+    published round to read its call ledger from.
     """
-    (Path(project_root) / "configs" / "sources.yml").write_text(
-        yaml.safe_dump(
-            {
-                "tushare": {"enabled": tushare},
-                "akshare": {"enabled": akshare},
-                "baostock": {"enabled": baostock},
-            }
-        ),
+    path = Path(project_root) / "configs" / "sources.yml"
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for name, enabled in (
+        ("tushare", tushare),
+        ("akshare", akshare),
+        ("baostock", baostock),
+        ("xingyao", xingyao),
+    ):
+        payload.setdefault(name, {})["enabled"] = enabled
+    path.write_text(
+        yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
 

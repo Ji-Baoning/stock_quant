@@ -1094,8 +1094,11 @@ class DataPipeline:
 
         # ---- optional validation daily ---------------------------------- #
         validation_rows: list[pd.DataFrame] = []
-        if "baostock" in enabled and not daily_skipped:
+        for lane_name, lane_reuse in (("baostock", False), ("xingyao", True)):
+            if lane_name not in enabled or daily_skipped:
+                continue
             self._fetch_validation_daily(
+                lane_name,
                 enabled,
                 equity_symbols,
                 daily_start,
@@ -1104,6 +1107,7 @@ class DataPipeline:
                 statuses,
                 raw_snapshots,
                 validation_rows,
+                reuse=lane_reuse,
             )
 
         # ---- quality report over the merged canonical daily ------------- #
@@ -2539,6 +2543,7 @@ class DataPipeline:
 
     def _fetch_validation_daily(
         self,
+        name,
         enabled,
         symbols,
         start,
@@ -2547,11 +2552,21 @@ class DataPipeline:
         statuses,
         raw_snapshots,
         validation_rows,
+        *,
+        reuse: bool,
     ) -> None:
-        source = self._adapter_or_warn("baostock", issues)
+        """One optional validation lane: existence evidence for the flip.
+
+        The lane is per-source so each supplier owns a status row and a raw
+        tree; the rows never enter a publication (``_merge_daily`` merges
+        primary+benchmark only) and their only consumer is
+        ``validation_present``.  ``reuse`` mirrors the admission table: the
+        source that currently holds the slot reuses, a dormant one does not.
+        """
+        source = self._adapter_or_warn(name, issues)
         if source is None:
-            statuses["baostock"] = SourceStatus(
-                "baostock", False, False,
+            statuses[name] = SourceStatus(
+                name, False, False,
                 reason="optional source unavailable",
                 reason_code="optional_source_unavailable",
             )
@@ -2559,9 +2574,9 @@ class DataPipeline:
         failures = 0
         for symbol in symbols:
             dispatched = self._dispatch(
-                "baostock", source, "daily", symbol, start, end,
+                name, source, "daily", symbol, start, end,
                 {"adjustment": "unadjusted"}, required=False, issues=issues,
-                reuse=True,
+                reuse=reuse,
             )
             if dispatched is None:
                 failures += 1
@@ -2570,19 +2585,17 @@ class DataPipeline:
             raw_snapshots.append(snapshot)
             validation_rows.append(
                 normalize_daily(
-                    result.frame, "baostock", _ingest_time(result.metadata)
+                    result.frame, name, _ingest_time(result.metadata)
                 ).valid
             )
         if failures:
-            statuses["baostock"] = SourceStatus(
-                "baostock", False, False,
+            statuses[name] = SourceStatus(
+                name, False, False,
                 reason=f"{failures} of {len(symbols)} validation requests failed",
                 reason_code="partial_fetch_failure",
             )
         else:
-            statuses["baostock"] = SourceStatus(
-                "baostock", False, True, reason_code="ok"
-            )
+            statuses[name] = SourceStatus(name, False, True, reason_code="ok")
 
     def _adapter_or_fail(self, name, statuses):
         try:

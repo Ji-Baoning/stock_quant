@@ -222,19 +222,19 @@ class _DailyVolumeDrift:
         return result
 
 
+#: Every configurable supplier, so ``sources=`` overrides can never be the
+#: reason a lane was built from a real adapter.  baostock is off by default in
+#: fixtures (ADR-016) but stays here: tests that opt the dormant lane back in
+#: pass the same dict.
+_STUB_NAMES = ("tushare", "akshare", "baostock", "xingyao")
+
+
 def _all_stubs() -> dict[str, DataSource]:
-    return {
-        name: StubAdapter(name)
-        for name in ("tushare", "akshare", "baostock")
-    }
+    return {name: StubAdapter(name) for name in _STUB_NAMES}
 
 
 def _sources(tushare) -> dict[str, DataSource]:
-    return {
-        "tushare": tushare,
-        "akshare": StubAdapter("akshare"),
-        "baostock": StubAdapter("baostock"),
-    }
+    return {name: StubAdapter(name) for name in _STUB_NAMES} | {"tushare": tushare}
 
 
 def _request() -> DataUpdateRequest:
@@ -305,11 +305,8 @@ def test_a_retry_round_reuses_the_stored_prefix(tmp_path):
     retry_akshare = StubAdapter("akshare")
     result = DataPipeline(
         project.root,
-        sources={
-            "tushare": retry_tushare,
-            "akshare": retry_akshare,
-            "baostock": StubAdapter("baostock"),
-        },
+        sources=_all_stubs()
+        | {"tushare": retry_tushare, "akshare": retry_akshare},
     ).update(_request())
     assert result.dataset_ref is not None
 
@@ -334,7 +331,7 @@ def test_a_retry_round_reuses_the_stored_prefix(tmp_path):
     build = _manifest_build(project.root, result.dataset_ref.version)
     assert build["raw_snapshot_reuse"] == {
         "akshare": {"index_history": {"reused": 0, "fetched": 2}},
-        "baostock": {"daily": {"reused": 0, "fetched": len(symbols)}},
+        "xingyao": {"daily": {"reused": 0, "fetched": len(symbols)}},
         "tushare": {"daily": {"reused": 10, "fetched": len(symbols) - 10}},
     }
     evidence = {
@@ -352,7 +349,7 @@ def test_a_retry_round_reuses_the_stored_prefix(tmp_path):
     assert ledger["tushare"]["endpoints"]["daily"] == len(symbols) - 10
     assert ledger["tushare"]["reused"] == {"daily": 10}
     assert ledger["akshare"]["reused"] == {}
-    assert ledger["baostock"]["reused"] == {}
+    assert ledger["xingyao"]["reused"] == {}
 
     # The carried-plus-fetched tiling still validates offline.
     violations = validate_table_fetch_coverage(

@@ -103,6 +103,9 @@ class StubAdapter:
     only (so an action endpoint can fail while the same supplier still serves
     its benchmark history); ``negative_close_symbol`` injects one illegal
     (negative-close) bar so the publication gate blocks;
+    ``missing_daily_symbol`` omits that symbol's rows from every ``daily``
+    answer (the frame keeps its columns, so normalization sees a well-formed
+    but empty response -- the primary gap the flip classification consumes);
     ``action_frames`` maps a symbol to per-endpoint corporate-action frames
     (returned for ``cninfo_corporate_actions`` / ``eastmoney_corporate_actions``
     only, so one symbol can hold accepted plus quarantined events);
@@ -116,6 +119,7 @@ class StubAdapter:
     name: str
     raise_with: type[Exception] | None = None
     negative_close_symbol: str | None = None
+    missing_daily_symbol: str | None = None
     failing_endpoints: tuple[str, ...] = ()
     action_frames: dict[str, dict[str, pd.DataFrame]] | None = None
     stock_basic_symbols: tuple[str, ...] | None = None
@@ -192,6 +196,18 @@ class StubAdapter:
             return pd.DataFrame()
         if request.endpoint == "stock_metadata":
             return pd.DataFrame()
+        if (
+            request.endpoint == "daily"
+            and symbol == self.missing_daily_symbol
+        ):
+            # Well-formed but empty: the supplier answered, named every
+            # column, and carried no rows for this symbol.
+            return pd.DataFrame(
+                columns=[
+                    "code", "date", "open", "high", "low", "close",
+                    "volume", "amount",
+                ]
+            )
         rows: list[dict[str, object]] = []
         for day in sessions:
             close = -55.0 if symbol == self.negative_close_symbol else 55.0
@@ -285,6 +301,7 @@ def _all_stubs(**overrides) -> dict[str, DataSource]:
         "tushare": StubAdapter("tushare"),
         "akshare": StubAdapter("akshare"),
         "baostock": StubAdapter("baostock"),
+        "xingyao": StubAdapter("xingyao"),
     }
     for name, override in overrides.items():
         if override is not None:
@@ -637,7 +654,10 @@ def test_update_with_explicit_end_publishes_merged_dataset(project):
     assert result.dataset_ref is not None
     assert result.dataset_ref.version != project.version
     assert result.resolved_end_date == _WINDOW_END
-    assert all(status.ok for status in result.source_status)
+    # Every live source ends ok; baostock is dormant by default (ADR-016) and
+    # carries its not-run row.
+    ok_names = {status.source for status in result.source_status if status.ok}
+    assert ok_names == {"tushare", "akshare", "xingyao"}
 
 
 def test_successful_update_binds_sanitized_build_evidence(project):
@@ -686,7 +706,13 @@ def test_successful_update_binds_sanitized_build_evidence(project):
         set(row) == {"source", "required", "ok", "reason_code"}
         for row in build["source_status"]
     )
-    assert all(row["reason_code"] == "ok" for row in build["source_status"])
+    # Every live source reports ok; baostock is dormant by default (ADR-016)
+    # and reports its not-run code.
+    assert {
+        row["source"]
+        for row in build["source_status"]
+        if row["reason_code"] == "ok"
+    } == {"tushare", "akshare", "xingyao"}
     assert "token" not in json.dumps(build).lower()
 
 
@@ -1025,15 +1051,21 @@ def test_required_source_failure_blocks_update(project):
 
 
 def test_optional_validation_failure_still_publishes(project):
-    failing = StubAdapter("baostock", raise_with=ServerError)
-    pipeline = DataPipeline(project.root, sources=_all_stubs(baostock=failing))
+    """A failed optional source degrades the classification, never the release.
+
+    baostock used to be the failing source here.  It is off by default now
+    (ADR-016), so the failing optional source is the one that actually holds
+    the validation lane: xingyao.
+    """
+    failing = StubAdapter("xingyao", raise_with=ServerError)
+    pipeline = DataPipeline(project.root, sources=_all_stubs(xingyao=failing))
     result = pipeline.update(_request())
     assert result.dataset_ref is not None
     assert CODE_OPTIONAL_SOURCE_FAILURE in result.quality_report.by_code()
-    baostock_status = next(
-        status for status in result.source_status if status.source == "baostock"
+    xingyao_status = next(
+        status for status in result.source_status if status.source == "xingyao"
     )
-    assert not baostock_status.ok and not baostock_status.required
+    assert not xingyao_status.ok and not xingyao_status.required
 
 
 def test_disabled_required_source_is_never_called(tmp_path):
@@ -1654,3 +1686,67 @@ def test_validate_ignores_a_compatible_legacy_fallback_field_but_not_a_new_one(
     assert "removed_fallback_field_present" in DataPipeline(
         project.root
     ).validate(fresh_version).by_code()
+
+
+def test_the_xingyao_lane_flips_the_missing_classification(project):
+    """A primary gap that xingyao answers classifies as a primary gap.
+
+    The lane's only consumer is the flip: a symbol-day absent from the
+    primary source but present in the validation source is
+    `primary_source_missing`, not `unknown_or_suspended` (design §2.1).
+    """
+    from stock_quant.data_quality.gates import PUBLICATION_BLOCKING_CODES
+
+    result = DataPipeline(
+        project.root,
+        sources=_all_stubs(
+            tushare=StubAdapter("tushare", missing_daily_symbol="000001.SZ")
+        ),
+    ).update(_request())
+    codes = result.quality_report.by_code()
+    assert "primary_source_missing" in codes
+    assert "primary_source_missing" not in PUBLICATION_BLOCKING_CODES
+    xingyao = next(
+        status for status in result.source_status if status.source == "xingyao"
+    )
+    assert xingyao.ok and not xingyao.required
+
+
+def test_the_validation_lane_reports_the_xingyao_source_not_baostock(project):
+    """The new lane owns its own status row; the swapped name is the proof.
+
+    baostock is off by default in fixtures (ADR-016), so it carries a not-run
+    status rather than an ok one -- the lane moved, it did not multiply.
+    """
+    result = DataPipeline(project.root, sources=_all_stubs()).update(_request())
+    ok_names = {status.source for status in result.source_status if status.ok}
+    assert "xingyao" in ok_names
+    assert "baostock" not in ok_names
+
+
+def test_the_dormant_baostock_lane_still_works_when_a_test_asks_for_it(project):
+    """ADR-016 keeps baostock's lane in the tree; this is its only coverage.
+
+    The lane is dormant in production (``enabled: false``) and in the default
+    fixture, so nothing else exercises it.  Without this test a future change
+    could break the dormant call site -- including its ``reuse=False`` wiring
+    -- and nothing would notice.
+    """
+    from conftest import write_sources
+
+    write_sources(project.root, baostock=True)
+    result = DataPipeline(project.root, sources=_all_stubs()).update(_request())
+    baostock_status = next(
+        status for status in result.source_status if status.source == "baostock"
+    )
+    assert baostock_status.ok and not baostock_status.required
+    ledger = json.loads(
+        (project.root / "data" / "runs" / result.run_id / "call_ledger.json")
+        .read_text(encoding="utf-8")
+    )
+    assert ledger["baostock"]["calls"] > 0, (
+        "the dormant lane dispatched but the ledger lost it"
+    )
+    assert ledger["baostock"]["reused"] == {}, (
+        "baostock is not admitted to reuse (ADR-016 decision 4)"
+    )

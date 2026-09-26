@@ -170,10 +170,14 @@ class StubAdapter:
 
 
 def _all_stubs() -> dict[str, DataSource]:
-    return {
-        name: StubAdapter(name)
-        for name in ("tushare", "akshare", "baostock")
-    }
+    return {name: StubAdapter(name) for name in _STUB_NAMES}
+
+
+#: Every configurable supplier, so ``sources=`` overrides can never be the
+#: reason a lane was built from a real adapter.  baostock is off by default in
+#: fixtures (ADR-016) but stays here: tests that opt the dormant lane back in
+#: pass the same dict.
+_STUB_NAMES = ("tushare", "akshare", "baostock", "xingyao")
 
 
 def _manifest_build(project_root: Path, version: str) -> dict:
@@ -330,5 +334,5 @@ def test_update_writes_call_ledger(tmp_path):
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload == {
         name: {"calls": 0, "endpoints": {}, "reused": {}}
-        for name in ("tushare", "akshare", "baostock")
+        for name in ("tushare", "akshare", "xingyao")
     }
