@@ -29,6 +29,7 @@
 | `project/rebuild_trading_calendar.py` | retired | 保留历史重建实现，入口拒绝执行 | `python -m stock_quant data update --root project` |
 | `project/refresh_corporate_action_coverage.py` | migration | 刷新公司行为证据的历史辅助工具 | `python -m stock_quant data update --root project` |
 | `project/refresh_index_membership.py` | migration | 将已下载成分快照转为成员事实 | `python -m stock_quant data index-membership prepare --root project` |
+| `project/replay_price_arbitration.py` | diagnostic | 按观察价规则重放已发布冲突的结算结果 | 无替代项 |
 | `project/test.py` | retired | 历史 SDK 试验片段，不得作为操作入口 | 无替代项 |
 | `project/trim_universe_membership.py` | migration | 从冻结成员派生可交易子集 | 无替代项 |
 | `project/verify_update_readiness.py` | diagnostic | 在网络更新前进行只读预检 | 无替代项 |
