@@ -1819,3 +1819,84 @@ def test_a_failing_factor_channel_degrades_to_an_absent_channel(project, monkeyp
         if issue.code == CODE_OPTIONAL_SOURCE_FAILURE
     ]
     assert any(detail.get("source") == "xingyao" for detail in details)
+
+
+def _wide_factor_frame(symbol: str) -> pd.DataFrame:
+    """A xingyao-shaped wide factor frame: calendar index, one symbol column."""
+    return pd.DataFrame(
+        {symbol: [1.0, 1.05]},
+        index=pd.DatetimeIndex([date(2020, 1, 2), date(2020, 1, 3)]),
+    )
+
+
+def _assert_backward_factor_snapshot(project, result) -> None:
+    """The update's evidence capture stored the factor answer in the store.
+
+    The digests travel on the result (``raw_snapshots``), the bytes land in
+    the content-addressed tree under ``xingyao/backward_factor``; both sides
+    are checked so the assertion cannot pass on a dangling pointer.
+    """
+    factor_dir = project.root / "data" / "raw" / "xingyao" / "backward_factor"
+    manifests = sorted(factor_dir.glob("*/*/*/manifest.json"))
+    assert manifests, "the factor answer never landed in the raw store"
+    for manifest_path in manifests:
+        manifest = json.loads(manifest_path.read_text())
+        assert manifest["source"] == "xingyao"
+        assert manifest["endpoint"] == "backward_factor"
+        assert manifest_path.parent.name in set(result.raw_snapshots)
+
+
+def test_the_xingyao_factor_channel_records_its_raw_evidence(project, monkeypatch):
+    """Green path: the production wiring snapshots the supplier's wide frame.
+
+    The factory builds the channel and must bind ``end`` into
+    ``snapshot_result`` itself; a bare function reference would die inside the
+    evidence capture's best-effort guard on every successful fetch and the
+    run would silently record nothing (review round 1).
+    """
+    import stock_quant.data_sources.xingyao_factor as factor_module
+
+    frame = _wide_factor_frame("600036.SH")
+    monkeypatch.setattr(factor_module, "fetch_factor_frame", lambda symbol, **_: frame)
+    result = DataPipeline(
+        project.root, sources=_absent_ex_date_probe_sources()
+    ).update(_request())
+    _assert_backward_factor_snapshot(project, result)
+    failures = [
+        issue.details
+        for issue in result.quality_report.issues
+        if issue.code == CODE_OPTIONAL_SOURCE_FAILURE
+        and issue.details.get("source") == "xingyao"
+    ]
+    assert failures == []
+
+
+def test_a_factor_contract_break_keeps_the_evidence_it_carried(project, monkeypatch):
+    """The rework's core guarantee: extraction refuses, the answer survives.
+
+    A ``ContractError`` from the event rule must not cost the raw snapshot --
+    capture happens before interpretation -- and the channel degrades to the
+    WARNING-level absent channel without blocking the publication.
+    """
+    import stock_quant.data_sources.xingyao_factor as factor_module
+    from stock_quant.data_sources.base import ContractError
+
+    frame = _wide_factor_frame("600036.SH")
+    monkeypatch.setattr(factor_module, "fetch_factor_frame", lambda symbol, **_: frame)
+
+    def _refuse(frame, symbol):
+        raise ContractError("xingyao factor frame unreadable")
+
+    monkeypatch.setattr(factor_module, "factor_event_dates", _refuse)
+    result = DataPipeline(
+        project.root, sources=_absent_ex_date_probe_sources()
+    ).update(_request())
+    assert result.dataset_ref is not None, result.quality_report
+    failures = [
+        issue
+        for issue in result.quality_report.issues
+        if issue.code == CODE_OPTIONAL_SOURCE_FAILURE
+        and issue.details.get("source") == "xingyao"
+    ]
+    assert len(failures) == 1
+    _assert_backward_factor_snapshot(project, result)

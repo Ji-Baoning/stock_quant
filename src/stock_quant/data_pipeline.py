@@ -2429,7 +2429,12 @@ class DataPipeline:
                 end=end,
             ),
             factor_event_dates,
-            snapshot_result,
+            # ``snapshot_result`` demands ``end``; the channel calls its
+            # snapshot maker with the bare (symbol, frame), so the binding
+            # happens here.  A bare reference would TypeError inside the
+            # evidence capture's best-effort guard on every successful fetch
+            # and the supplier's answer would silently never be stored.
+            lambda symbol, frame: snapshot_result(symbol, frame, end=end),
             end,
             issues=issues,
             raw_snapshots=raw_snapshots,
