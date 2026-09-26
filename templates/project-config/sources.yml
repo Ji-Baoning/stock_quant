@@ -10,6 +10,10 @@ baostock:
   enabled: true
   timeout_seconds: 30
   max_retries: 3
+xingyao:
+  enabled: true
+  timeout_seconds: 30
+  max_retries: 2
 # Corporate-action conflict arbiter, not a source (ADR-007).  Shipped on
 # (owner decision 2026-09-20): it is consulted lazily, only where the two
 # official sources disagree, and a clean round makes no TDX call; absent

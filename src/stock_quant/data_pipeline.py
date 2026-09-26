@@ -258,8 +258,13 @@ TABLE_CORPORATE_ACTION_COVERAGE = "corporate_action_coverage"
 #: every published dataset manifest (and which is hashed into the version id).
 DATASET_BUILD_CONTRACT_VERSION = 1
 
-_CONFIGURED_SOURCES = ("tushare", "akshare", "baostock")
-_REQUIRED_ROLE = {"tushare": True, "akshare": True, "baostock": False}
+_CONFIGURED_SOURCES = ("tushare", "akshare", "baostock", "xingyao")
+_REQUIRED_ROLE = {
+    "tushare": True,
+    "akshare": True,
+    "baostock": False,
+    "xingyao": False,
+}
 
 #: Corporate-action interfaces requested per symbol, as ``(endpoint, bucket)``.
 #: Every one of them must answer before a window may read ``VERIFIED``, so the
@@ -2853,6 +2858,10 @@ def _build_source(name: str, config: SourceConfig) -> DataSource:
         from stock_quant.data_sources.baostock import BaoStockSource
 
         return BaoStockSource(config, client=None)
+    if name == "xingyao":
+        from stock_quant.data_sources.xingyao import XingyaoSource
+
+        return XingyaoSource(config, client=None)
     raise ValueError(f"unknown configured source: {name}")
 
 

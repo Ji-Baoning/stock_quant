@@ -27,6 +27,19 @@ baostock:
   enabled: true
   timeout_seconds: 30
   max_retries: 3
+# 星耀数智 (tgw broker SDK): the optional validation daily source that
+# replaces baostock, and the ADR-009 factor channel's second price-event
+# channel.  Optional by role (`_REQUIRED_ROLE`): an outage degrades the
+# missing-row classification and the factor channel, never a publication.
+# Needs the supplier's private wheel (tgw / AmazingData) and credentials in
+# AD_USERNAME/AD_PASSWORD/AD_HOST/AD_PORT; absent either, the source reports
+# `optional_source_unavailable` and the update proceeds.  Every live call runs
+# in a killable child process (`timeout_seconds` bounds the process, not the
+# socket).  Volume/amount units are unverified pending the Phase 0 probe.
+xingyao:
+  enabled: true
+  timeout_seconds: 30
+  max_retries: 2
 # TDX (通达信) is the corporate-action *conflict arbiter* of ADR-007 - not a
 # source.  It adds no name to `_CONFIGURED_SOURCES`, is never added to
 # `CORPORATE_ACTION_ENDPOINTS`, and never supplies a booked row: it is asked

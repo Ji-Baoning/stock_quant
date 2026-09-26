@@ -41,6 +41,9 @@ _UNIT_FACTORS = {
     # transport; units are identical by contract (lots / thousand-yuan).
     "tushare_proxy": (100, 1000),
     "baostock": (1, 1),
+    # Unverified against any external source until the Phase 0 volume probe
+    # (design §4.5) closes; (1, 1) is the assumption, not a measurement.
+    "xingyao": (1, 1),
 }
 
 _UNADJUSTED = "unadjusted"

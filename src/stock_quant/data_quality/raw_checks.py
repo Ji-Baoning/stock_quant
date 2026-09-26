@@ -58,7 +58,9 @@ from stock_quant.data_quality.models import (
 # price: either materialized from its pre_close chain over an absent day, or
 # canonicalized from a raw response row that reported the session with zero
 # open/high/low and zero volume; see data_model/suspensions.py.
-KNOWN_SUPPLIERS = frozenset({"tushare", "akshare", "baostock", "tushare_suspend"})
+KNOWN_SUPPLIERS = frozenset(
+    {"tushare", "akshare", "baostock", "tushare_suspend", "xingyao"}
+)
 DOCUMENTED_ADJUSTMENTS = frozenset({"unadjusted"})
 
 _PRICE_COLUMNS = ("open", "high", "low", "close")
