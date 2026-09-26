@@ -20,6 +20,7 @@ from stock_quant.data_sources.base import (
     ServerError,
 )
 from stock_quant.data_sources.tushare import TushareSource
+from stock_quant.data_sources.xingyao import XingyaoSource
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 
@@ -910,3 +911,49 @@ def test_tushare_trade_cal_names_a_client_without_the_endpoint(monkeypatch):
                 {"exchange": "SSE"},
             )
         )
+
+
+def test_xingyao_returns_recorded_native_columns(monkeypatch: pytest.MonkeyPatch):
+    """The adapter must hand back the supplier's own columns, unfiltered.
+
+    Renaming or dropping happens in normalization, never in the adapter: a
+    contract test that reads a canonicalized frame cannot tell whether the
+    supplier changed its layout.
+
+    The adapter refuses to start a worker without ``AD_*`` configured even
+    when a client is injected, so the offline path sets the same dummy
+    credentials the unit tests use; the fake never sees the network.
+    """
+    monkeypatch.setenv("AD_USERNAME", "test-user")
+    monkeypatch.setenv("AD_PASSWORD", "test-secret")
+    frame = pd.read_csv(FIXTURES / "xingyao_daily.csv")
+    fake = _FakeXingyao(frame)
+
+    result = XingyaoSource(SourceConfig(), client=fake).fetch(
+        DataRequest(
+            "daily", ("000001.SZ",), date(2024, 1, 2), date(2024, 1, 5),
+            {"adjustment": "unadjusted"},
+        )
+    )
+
+    assert list(result.frame.columns) == list(frame.columns)
+    assert "kline_time" in result.frame.columns
+    assert result.metadata["transport_id"] == "xingyao-broker-tcp"
+
+
+class _FakeXingyao:
+    """Serves the recorded frame; announces the SDK version the fixture came from."""
+
+    __version__ = "recorded"
+
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self._frame = frame
+
+    def login(self, **_):
+        return object()
+
+    def logout(self) -> None:
+        return None
+
+    def query_kline(self, **_):
+        return self._frame
