@@ -1,13 +1,48 @@
-"""Drift-audit report: pure rendering, redaction, verdict classification."""
+"""Drift-audit report: rendering, redaction, dispatch, and incomplete audits.
+
+An audit that could not compare two thirds of its targets must not exit 0.
+"""
 
 from __future__ import annotations
 
-import sys
+import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "project"))
+import pytest
 
-from drift_audit import classify_drift, render_audit_record  # noqa: E402
+from stock_quant.config import SourceConfig
+from stock_quant.data_sources.raw_store import RawSnapshotEvidence
+
+#: ``project/`` is an operator directory, not an installed package.
+_SPEC = importlib.util.spec_from_file_location(
+    "drift_audit", Path(__file__).resolve().parents[2] / "project" / "drift_audit.py"
+)
+drift_audit = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(drift_audit)
+
+classify_drift = drift_audit.classify_drift
+render_audit_record = drift_audit.render_audit_record
+
+
+def _config() -> SimpleNamespace:
+    """Only ``config.sources`` is read, and only to pick a segment."""
+    return SimpleNamespace(
+        sources={
+            name: SourceConfig() for name in ("tushare", "akshare", "baostock", "xingyao")
+        }
+    )
+
+
+def _evidence(source: str, endpoint: str) -> RawSnapshotEvidence:
+    return RawSnapshotEvidence(
+        source=source,
+        endpoint=endpoint,
+        request_key="a" * 32,
+        file_sha256="b" * 64,
+        manifest_sha256="c" * 64,
+        transport_id="xingyao-broker-tcp",
+    )
 
 
 def test_classify_drift():
@@ -24,7 +59,7 @@ def test_redaction_never_leaks_credentials():
         "fetched_sha256": "b" * 64,
         "note": "TUSHARE_TOKEN=SECRETVALUE123",
     }
-    rendered = render_audit_record("version-1", [row])
+    rendered = render_audit_record("version-1", [row], drifted=0, audit_failures=0)
     assert "SECRETVALUE123" not in rendered
     assert "TUSHARE_TOKEN" not in rendered
     # Endpoint names and hashes are allowed (no credential segments).
@@ -32,6 +67,60 @@ def test_redaction_never_leaks_credentials():
 
 
 def test_render_audit_record_shape():
-    rendered = render_audit_record("version-1", [])
+    rendered = render_audit_record("version-1", [], drifted=0, audit_failures=0)
     assert "# 漂移审计" in rendered or "drift audit" in rendered.lower()
     assert "version-1" in rendered
+
+
+def test_the_record_keeps_the_endpoint_the_audit_was_asked_to_compare():
+    assert _evidence("xingyao", "backward_factor").endpoint == "backward_factor"
+
+
+def test_a_known_xingyao_endpoint_dispatches_to_its_own_builder(monkeypatch):
+    """The two xingyao endpoints are different adapters, not one prefixed one."""
+    seen: list[str] = []
+
+    def _daily(config):
+        seen.append("daily")
+        return SimpleNamespace(name="xingyao")
+
+    def _factor(config):
+        seen.append("backward_factor")
+        return SimpleNamespace(name="xingyao")
+
+    monkeypatch.setattr(drift_audit, "_xingyao_daily_source", _daily)
+    monkeypatch.setattr(drift_audit, "_xingyao_factor_source", _factor)
+    config = _config()
+
+    assert drift_audit._source_for("xingyao", "daily", config).name == "xingyao"
+    assert (
+        drift_audit._source_for("xingyao", "backward_factor", config).name
+        == "xingyao"
+    )
+    assert seen == ["daily", "backward_factor"]
+
+
+def test_an_unknown_endpoint_is_refused_rather_than_silently_skipped():
+    """A mapping that fell through to the daily adapter would compare nothing."""
+    with pytest.raises(ValueError, match="backward_factor_v2"):
+        drift_audit._source_for("xingyao", "backward_factor_v2", _config())
+
+
+def test_an_unknown_source_is_still_refused():
+    with pytest.raises(ValueError, match="not_a_source"):
+        drift_audit._source_for("not_a_source", "daily", _config())
+
+
+def test_the_unverifiable_and_the_unfetchable_both_count_as_audit_failures():
+    rows = [
+        {"endpoint": "daily", "fetched_sha256": "unverifiable"},
+        {"endpoint": "daily", "fetched_sha256": "fetch_failed"},
+        {"endpoint": "daily", "fetched_sha256": "c" * 64, "note": "stable"},
+    ]
+    assert drift_audit.count_audit_failures(rows) == 2
+
+
+def test_the_record_separates_drift_from_incomplete_audits():
+    body = drift_audit.render_audit_record("v1", [], drifted=0, audit_failures=3)
+    assert "0" in body and "3" in body
+    assert "未完成" in body

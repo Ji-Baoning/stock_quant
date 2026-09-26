@@ -42,7 +42,13 @@ def classify_drift(stored_sha256: str, fetched_sha256: str) -> tuple[str, str | 
     return "drifted", stored_sha256
 
 
-def render_audit_record(version: str, rows: Sequence[Mapping[str, object]]) -> str:
+def render_audit_record(
+    version: str,
+    rows: Sequence[Mapping[str, object]],
+    *,
+    drifted: int,
+    audit_failures: int,
+) -> str:
     """Operator-facing ops-record body; endpoint names + hashes only."""
     today = date.today().isoformat()
     lines = [
@@ -62,7 +68,24 @@ def render_audit_record(version: str, rows: Sequence[Mapping[str, object]]) -> s
             f"- {row.get('source', 'unknown')} {endpoint} "
             f"key={request_key} stored={stored} fetched={fetched}"
         )
+    lines.extend(
+        [
+            "",
+            f"汇总：比对完成 {len(rows) - audit_failures} 条，漂移 {drifted} 条，"
+            f"未完成 {audit_failures} 条。",
+            "未完成不是通过：它表示这个通道本轮没有被审到，需在下次审计前修好。",
+        ]
+    )
     return "\n".join(lines) + "\n"
+
+
+def count_audit_failures(rows: Sequence[Mapping[str, object]]) -> int:
+    """Rows the audit could not compare: unverifiable or unfetchable."""
+    return sum(
+        1
+        for row in rows
+        if str(row.get("fetched_sha256", "")) in ("unverifiable", "fetch_failed")
+    )
 
 
 def load_targets(project_root: Path, version: str) -> list[RawSnapshotEvidence]:
@@ -78,14 +101,43 @@ def load_targets(project_root: Path, version: str) -> list[RawSnapshotEvidence]:
     return [RawSnapshotEvidence(**row) for row in rows]
 
 
-def _source_for(name: str, config: ProjectConfig):
+def _xingyao_daily_source(config):
+    from stock_quant.data_sources.xingyao import XingyaoSource
+
+    return XingyaoSource(config)
+
+
+def _xingyao_factor_source(config):
+    from stock_quant.data_sources.xingyao_factor import XingyaoFactorSource
+
+    return XingyaoFactorSource(config)
+
+
+def _source_for(name: str, endpoint: str, config: ProjectConfig):
+    """The adapter that can re-ask this exact question.
+
+    Dispatch is on the pair for xingyao, and only for xingyao: its factor
+    channel answers through a wide-table API its daily adapter knows nothing
+    about, so a source-prefix mapping alone would send the audit back with a
+    request the supplier cannot honour -- or worse, report a comparison it
+    never made.  The other three adapters serve all of their own endpoints, so
+    their prefix dispatch stays as it is.  An unknown endpoint raises, and
+    ``run`` counts that as an audit failure rather than a pass.
+    """
     if name.startswith("tushare"):
         return TushareSource(config.sources["tushare"])
     if name.startswith("akshare"):
         return AkShareSource(config.sources["akshare"])
     if name.startswith("baostock"):
         return BaoStockSource(config.sources["baostock"])
-    raise ValueError(f"no adapter for raw-snapshot source {name!r}")
+    if name.startswith("xingyao"):
+        if endpoint == "daily":
+            return _xingyao_daily_source(config.sources["xingyao"])
+        if endpoint == "backward_factor":
+            return _xingyao_factor_source(config.sources["xingyao"])
+    raise ValueError(
+        f"no adapter for raw-snapshot source {name!r} endpoint {endpoint!r}"
+    )
 
 
 def run(
@@ -95,7 +147,11 @@ def run(
     version: str | None = None,
     output: Path | None = None,
 ) -> int:
-    """Re-fetch and compare; write the dated ops record; return drift count."""
+    """Re-fetch and compare; write the dated ops record.
+
+    Returns the count of drifted snapshots plus the count of snapshots the
+    audit could not compare at all: an unfinished audit is not a pass.
+    """
     publisher = DatasetPublisher(root)
     pinned = version or publisher.current().version
     print(f"drift audit: dataset={pinned}")
@@ -120,7 +176,7 @@ def run(
             continue
         parameters = snapshot.manifest.get("request_parameters", {})
         try:
-            source = _source_for(evidence.source, config)
+            source = _source_for(evidence.source, evidence.endpoint, config)
             request = DataRequest(
                 str(snapshot.manifest.get("endpoint", evidence.endpoint)),
                 tuple(str(symbol) for symbol in parameters.get("symbols", [])),
@@ -153,12 +209,19 @@ def run(
                 "note": verdict,
             }
         )
+    audit_failures = count_audit_failures(rows)
     if output is None:
         output = Path(root) / "docs" / "operations" / f"{date.today().isoformat()}-drift-audit.md"
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(render_audit_record(pinned, rows), encoding="utf-8")
-    print(f"drift audit: {len(rows)} snapshots, {drifted} drifted -> {output}")
-    return drifted
+    output.write_text(
+        render_audit_record(pinned, rows, drifted=drifted, audit_failures=audit_failures),
+        encoding="utf-8",
+    )
+    print(
+        f"drift audit: {len(rows)} snapshots, {drifted} drifted, "
+        f"{audit_failures} unfinished -> {output}"
+    )
+    return drifted + audit_failures
 
 
 def main(argv: Sequence[str] | None = None) -> int:
