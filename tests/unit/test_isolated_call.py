@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import time
 
 import pytest
@@ -38,6 +39,10 @@ def _raises_arbitrary() -> None:
 
 def _leaks_environment() -> dict[str, str]:
     return dict(os.environ)
+
+
+def _kills_own_process() -> None:
+    os.kill(os.getpid(), signal.SIGKILL)
 
 
 def test_a_finished_call_returns_its_payload_in_the_parent() -> None:
@@ -76,3 +81,9 @@ def test_the_child_payload_is_what_the_target_returned_never_the_environment() -
     finally:
         os.environ.pop("AD_PASSWORD", None)
     assert leaked["AD_PASSWORD"] == "must-not-travel"
+
+
+def test_a_child_that_dies_without_reporting_is_reported_transient() -> None:
+    with pytest.raises(ServerError) as caught:
+        run_isolated(_kills_own_process, timeout_seconds=10)
+    assert "died without reporting" in str(caught.value)

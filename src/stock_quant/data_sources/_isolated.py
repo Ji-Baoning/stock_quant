@@ -96,7 +96,13 @@ def run_isolated(
             raise ServerError(
                 f"supplier call exceeded the {timeout_seconds}s process timeout"
             )
-        outcome: _ChildOutcome = receiver.recv()
+        try:
+            outcome: _ChildOutcome = receiver.recv()
+        except EOFError:
+            # The pipe closed with nothing sent: the child died without
+            # reporting (killed, OOM, native crash) or could not serialise its
+            # outcome.  Either way it is transient from this side.
+            raise ServerError("supplier worker died without reporting") from None
     finally:
         _reap(process)
         receiver.close()
