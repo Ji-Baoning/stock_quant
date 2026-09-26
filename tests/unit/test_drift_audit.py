@@ -124,3 +124,27 @@ def test_the_record_separates_drift_from_incomplete_audits():
     body = drift_audit.render_audit_record("v1", [], drifted=0, audit_failures=3)
     assert "0" in body and "3" in body
     assert "未完成" in body
+
+
+def _patch_main_io(monkeypatch, count: int) -> None:
+    """Route main() to a stubbed run() returning ``count`` unfinished rows."""
+    monkeypatch.setattr(drift_audit, "resolve_project_root", lambda root: root)
+    monkeypatch.setattr(drift_audit, "load_project_config", lambda root: SimpleNamespace())
+    monkeypatch.setattr(drift_audit, "run", lambda *args, **kwargs: count)
+
+
+def test_the_process_exit_code_is_clamped_so_an_incomplete_audit_never_exits_zero(
+    monkeypatch,
+):
+    """POSIX keeps only the low 8 bits: a raw 256 would reach the shell as 0."""
+    _patch_main_io(monkeypatch, 256)
+    with pytest.raises(SystemExit) as excinfo:
+        drift_audit.main([])
+    assert excinfo.value.code == 255
+
+
+def test_a_fully_compared_audit_still_exits_zero(monkeypatch):
+    _patch_main_io(monkeypatch, 0)
+    with pytest.raises(SystemExit) as excinfo:
+        drift_audit.main([])
+    assert excinfo.value.code == 0

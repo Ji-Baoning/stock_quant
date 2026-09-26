@@ -20,7 +20,7 @@ import argparse
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping, NoReturn, Sequence
 
 from stock_quant.config import ProjectConfig, load_project_config
 from stock_quant.data_model.dataset import DatasetPublisher
@@ -224,7 +224,7 @@ def run(
     return drifted + audit_failures
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> NoReturn:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--version", type=str, default=None)
@@ -232,8 +232,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = resolve_project_root(args.root)
     config = load_project_config(root)
-    return run(root, config, version=args.version, output=args.output)
+    count = run(root, config, version=args.version, output=args.output)
+    # POSIX keeps only the low 8 bits of the exit status, so a raw 256 (or any
+    # multiple of 256) would reach the shell as 0 -- silently passing an audit
+    # that never completed.  Clamp while preserving zero/non-zero semantics.
+    sys.exit(min(count, 255))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
