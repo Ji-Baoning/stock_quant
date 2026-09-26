@@ -194,11 +194,6 @@ from stock_quant.data_sources.base import (
     request_key,
     translate_supplier_error,
 )
-from stock_quant.data_sources.baostock_factor import (
-    factor_event_dates,
-    fetch_adjust_factor_frames,
-    snapshot_result,
-)
 from stock_quant.data_sources.raw_store import (
     RawSnapshot,
     RawSnapshotEvidence,
@@ -2409,17 +2404,32 @@ class DataPipeline:
         )
 
     def _build_factor_channel(self, end: date, issues, raw_snapshots):
-        """Build the ADR-009 baostock channel, or ``None`` when it is off.
+        """Build the ADR-009 factor channel, or ``None`` when it is off.
 
         The channel serves only the absent-ex-date classification and stays
-        fail-closed: a disabled baostock asserts nothing rather than letting a
-        window conclude an absence from silence.
+        fail-closed: a disabled source asserts nothing rather than letting a
+        window conclude an absence from silence.  The implementation is
+        xingyao's (ADR-016); baostock's module stays in the tree as the
+        dormant predecessor.
         """
-        config = self._project_config.sources.get("baostock")
+        from stock_quant.data_sources.xingyao_factor import (
+            factor_event_dates,
+            fetch_factor_frame,
+            snapshot_result,
+        )
+
+        config = self._project_config.sources.get("xingyao")
         if config is None or not config.enabled:
             return None
         return _LazyFactorChannel(
-            config,
+            "xingyao",
+            lambda symbol: fetch_factor_frame(
+                symbol,
+                timeout_seconds=float(config.timeout_seconds),
+                end=end,
+            ),
+            factor_event_dates,
+            snapshot_result,
             end,
             issues=issues,
             raw_snapshots=raw_snapshots,
@@ -3116,10 +3126,12 @@ def _demoted_reasons_by_symbol(
     verdict name the classification it relies on: the demoting classification
     is ``adjustment_observed`` on the market axis -- a stated supplier ex-date
     is probed there, an absent one at its announcement anchor -- read from
-    the two admissible channels (TDX category-1 records, baostock's factor
-    series), both lazily fetched and cached.  A row whose market axis reads
-    bracketed-empty or unknown keeps the exemption: absence asserted from
-    silence is the old ADR-008 ground, and unknown stays fail-closed.
+    the two admissible channels (TDX category-1 records, xingyao's factor
+    series -- the slot name spec §3.2 fixes even though the event rule is
+    baostock's, unchanged), both lazily fetched and cached.  A row whose
+    market axis reads bracketed-empty or unknown keeps the exemption:
+    absence asserted from silence is the old ADR-008 ground, and unknown
+    stays fail-closed.
     """
     if relevant_quarantine is None or relevant_quarantine.empty:
         return {}
@@ -3144,11 +3156,11 @@ def _demoted_reasons_by_symbol(
                     for day in (_as_date(value) for value in distribution["date"])
                     if day is not None
                 ]
-        baostock_dates = factor_channel(symbol) if factor_channel else None
+        factor_dates = factor_channel(symbol) if factor_channel else None
         classification = classify_ex_date(
             supplier_ex_date=ex_date,
             probe_date=probe,
-            channels=(("tdx", tdx_dates), ("baostock", baostock_dates)),
+            channels=(("tdx", tdx_dates), ("xingyao", factor_dates)),
         )
         if classification.market == MARKET_ADJUSTMENT_OBSERVED:
             demoted.setdefault(symbol, set()).add(reason)
@@ -3541,9 +3553,12 @@ def _record_absent_ex_date_classifications(
     carried history predates the record -- and the probe date is the row's
     announcement date, the best-known anchor when the supplier states no
     ex-date.  The admissible channels (ADR-009 decision 3): TDX category-1
-    records via the lazy arbiter's frames, and baostock's adjustment-factor
-    series via ``factor_channel``; an absent channel asserts nothing, so an
-    unbracketed row reads ``unknown`` and stays blocking (decision 2).
+    records via the lazy arbiter's frames, and the adjustment-factor series
+    via ``factor_channel`` -- wired to xingyao (ADR-016) and labelled
+    ``xingyao`` in every new record per spec §3.2; a published record's
+    historical ``baostock`` label stays as published (immutable history).
+    An absent channel asserts nothing, so an unbracketed row reads
+    ``unknown`` and stays blocking (decision 2).
     """
     if quarantined is None or quarantined.empty:
         return
@@ -3554,7 +3569,7 @@ def _record_absent_ex_date_classifications(
         name
         for name, channel in (
             ("tdx", frame_for),
-            ("baostock", factor_channel),
+            ("xingyao", factor_channel),
         )
         if channel is not None
     ]
@@ -3581,11 +3596,11 @@ def _record_absent_ex_date_classifications(
                     for day in (_as_date(value) for value in distribution["date"])
                     if day is not None
                 ]
-        baostock_dates = factor_channel(symbol) if factor_channel else None
+        factor_dates = factor_channel(symbol) if factor_channel else None
         classification = classify_ex_date(
             supplier_ex_date=None,
             probe_date=announcement,
-            channels=(("tdx", tdx_dates), ("baostock", baostock_dates)),
+            channels=(("tdx", tdx_dates), ("xingyao", factor_dates)),
         )
         issues.append(
             _issue(
@@ -3690,7 +3705,7 @@ class _LazyActionArbiter:
 
 
 class _LazyFactorChannel:
-    """baostock's adjustment-factor series, fetched on first need (ADR-009).
+    """The ADR-009 price-event series, fetched on first need.
 
     The second admissible price-event channel of the absent-ex-date
     classification: consulted only for a row the recorder classifies, cached
@@ -3698,18 +3713,34 @@ class _LazyFactorChannel:
     content-addressed store as every supplier.  Anything the channel raises
     degrades to an absent channel -- it asserts nothing, the fail-closed
     direction -- recorded as a warning and not retried within the run.
+
+    The channel is source-agnostic since ADR-016 moved its wiring to xingyao:
+    the fetch, the event rule and the snapshot shape are injected (the rule
+    itself is baostock's, unchanged -- ADR-009 decision 3).  ``__call__``
+    keeps three failure domains apart on purpose: a single ``try`` would press
+    "could not fetch the frame", "could not store the frame" and "could not
+    interpret the frame" into one record, losing the raw answer exactly when
+    the contract breaks -- so the evidence is captured before it is
+    interpreted, and a recording failure is never the channel's failure (the
+    store already logs its own).
     """
 
     def __init__(
         self,
-        config: SourceConfig,
+        source_name: str,
+        fetch_frame: Any,
+        extract_events: Any,
+        make_snapshot: Any,
         end: date,
         *,
         issues: list[QualityIssue],
         raw_snapshots: list[RawSnapshot],
         record_raw: Any,
     ) -> None:
-        self._config = config
+        self._source_name = source_name
+        self._fetch_frame = fetch_frame
+        self._extract_events = extract_events
+        self._make_snapshot = make_snapshot
         self._end = end
         self._issues = issues
         self._raw_snapshots = raw_snapshots
@@ -3723,32 +3754,44 @@ class _LazyFactorChannel:
         if symbol in self._failed:
             return None
         try:
-            frames = fetch_adjust_factor_frames(
-                [symbol], timeout=float(self._config.timeout_seconds), end=self._end
-            )
+            frame = self._fetch_frame(symbol)
         except Exception as error:  # noqa: BLE001 - best-effort evidence channel
-            self._issues.append(
-                _issue(
-                    Severity.WARNING,
-                    CODE_OPTIONAL_SOURCE_FAILURE,
-                    details={
-                        "source": "baostock",
-                        "endpoint": "adjust_factor",
-                        "symbol": symbol,
-                        "message": str(error),
-                    },
-                )
-            )
-            self._failed.add(symbol)
+            self._report(symbol, error)
             return None
-        frame = frames.get(symbol)
+        # Capture the evidence before interpreting it: extraction can refuse a
+        # frame (ContractError) and the raw answer is exactly what must not be
+        # lost in that case.  A recording failure is never the channel's
+        # failure -- the store already logs its own.
         if frame is not None and not frame.empty:
-            self._raw_snapshots.append(
-                self._record_raw(snapshot_result(symbol, frame, end=self._end))
-            )
-        events = factor_event_dates(frame)
+            try:
+                self._raw_snapshots.append(
+                    self._record_raw(self._make_snapshot(symbol, frame))
+                )
+            except Exception:  # noqa: BLE001 - evidence capture is best effort
+                pass
+        try:
+            events = self._extract_events(frame, symbol)
+        except Exception as error:  # noqa: BLE001 - best-effort evidence channel
+            self._report(symbol, error)
+            return None
         self._events[symbol] = events
         return events
+
+    def _report(self, symbol: str, error: BaseException) -> None:
+        """One warning, one cache entry: an absent channel stays absent."""
+        self._issues.append(
+            _issue(
+                Severity.WARNING,
+                CODE_OPTIONAL_SOURCE_FAILURE,
+                details={
+                    "source": self._source_name,
+                    "endpoint": "backward_factor",
+                    "symbol": symbol,
+                    "message": str(error),
+                },
+            )
+        )
+        self._failed.add(symbol)
 
 
 class FirstAnsweringArbiter:

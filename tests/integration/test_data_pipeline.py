@@ -548,15 +548,20 @@ def _eastmoney_cash_out_of_window(symbol: str) -> pd.DataFrame:
     )
 
 
-def _cninfo_cash_plus_stale_plan(symbol: str) -> pd.DataFrame:
+def _cninfo_cash_plus_stale_plan(
+    symbol: str, *, announced: str = "1998-06-01"
+) -> pd.DataFrame:
     """The cross-confirmable cash dividend plus a stale implemented plan.
 
-    The appended row is a 1998 plan the supplier marks ``实施`` but reports with
-    no ex-date and no record date.  It cannot be booked (``_standardize_source``
-    keys candidates on ``(symbol, ex_date)``), and it survives
-    ``filter_corporate_actions_to_window`` on purpose -- that filter keeps an
-    implemented record whose ex-date is missing so reconciliation can flag it
-    -- so it lands in the quarantine table as ``incomplete``.
+    The appended row is a plan the supplier marks ``实施`` but reports with
+    no ex-date and no record date.  It cannot be booked
+    (``_standardize_source`` keys candidates on ``(symbol, ex_date)``), and it
+    survives ``filter_corporate_actions_to_window`` on purpose -- that filter
+    keeps an implemented record whose ex-date is missing so reconciliation can
+    flag it -- so it lands in the quarantine table as ``incomplete``.  The
+    announcement date defaults before every fixture window; pass ``announced``
+    to put the ex-date-less row inside one so the ADR-009 classification
+    reaches it.
     """
     code = symbol.split(".")[0]
     stale = pd.DataFrame(
@@ -564,7 +569,7 @@ def _cninfo_cash_plus_stale_plan(symbol: str) -> pd.DataFrame:
             {
                 "证券代码": code,
                 "证券简称": "placeholder",
-                "公告日期": "1998-06-01",
+                "公告日期": announced,
                 "股权登记日": "",
                 "除权除息日": "",
                 "派息(税前)(元/10股)": 1.0,
@@ -589,6 +594,24 @@ def _stale_pre_window_plan_sources() -> dict[str, DataSource]:
         action_frames={
             "600036.SH": {
                 "cninfo_corporate_actions": _cninfo_cash_plus_stale_plan("600036.SH"),
+                "eastmoney_corporate_actions": _eastmoney_cash("600036.SH"),
+            }
+        },
+    )
+    return _all_stubs(akshare=source)
+
+
+def _absent_ex_date_probe_sources() -> dict[str, DataSource]:
+    """``600036.SH`` carries an implemented plan announced IN the window that
+    reports no ex-date, so the ADR-009 classification must consult the factor
+    channel; every other symbol answers no events."""
+    source = StubAdapter(
+        "akshare",
+        action_frames={
+            "600036.SH": {
+                "cninfo_corporate_actions": _cninfo_cash_plus_stale_plan(
+                    "600036.SH", announced="2021-11-05"
+                ),
                 "eastmoney_corporate_actions": _eastmoney_cash("600036.SH"),
             }
         },
@@ -1760,3 +1783,39 @@ def test_the_dormant_baostock_lane_still_works_when_a_test_asks_for_it(project):
     assert ledger["baostock"]["reused"] == {}, (
         "baostock is not admitted to reuse (ADR-016 decision 4)"
     )
+
+
+def test_a_failing_factor_channel_degrades_to_an_absent_channel(project, monkeypatch):
+    """Fail-closed: an unavailable factor channel asserts nothing.
+
+    The channel is WARNING-level and never blocks, but it must not report
+    "no events" -- that would let a window conclude an absence from silence
+    (ADR-009 decision 2).
+    """
+    import stock_quant.data_sources.xingyao_factor as factor_module
+    from stock_quant import data_pipeline
+
+    def _explode(symbol, **_):
+        raise RuntimeError("factor worker died")
+
+    monkeypatch.setattr(factor_module, "fetch_factor_frame", _explode)
+    # The channel is consulted only through the absent-ex-date classification
+    # of an in-window ex-date-less row (the probe sources below), and the TDX
+    # lane must stay off so the factor channel is the classification's only
+    # reachable opinion: an empty xdxr answer reads as no TDX frame, offline.
+    monkeypatch.setattr(
+        data_pipeline,
+        "fetch_xdxr_frames",
+        lambda symbols, **_: {symbol: pd.DataFrame() for symbol in symbols},
+    )
+    result = DataPipeline(
+        project.root, sources=_absent_ex_date_probe_sources()
+    ).update(_request())
+    codes = result.quality_report.by_code()
+    assert CODE_OPTIONAL_SOURCE_FAILURE in codes
+    details = [
+        issue.details
+        for issue in result.quality_report.issues
+        if issue.code == CODE_OPTIONAL_SOURCE_FAILURE
+    ]
+    assert any(detail.get("source") == "xingyao" for detail in details)

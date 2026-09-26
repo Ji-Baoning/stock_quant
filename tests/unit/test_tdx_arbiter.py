@@ -714,20 +714,31 @@ def _factor_frame(rows):
     )
 
 
-def _factor_channel(monkeypatch, outcome, calls, raw_snapshots, issues=None):
-    """A ``_LazyFactorChannel`` over a scripted ``fetch_adjust_factor_frames``."""
-    from stock_quant import data_pipeline
+def _factor_channel(outcome, calls, raw_snapshots, issues=None):
+    """A ``_LazyFactorChannel`` over a scripted factor-frame fetch.
 
-    def fake_fetch(symbols, *, timeout=30.0, end=None):
-        calls.extend(symbols)
+    The channel is source-agnostic since ADR-016 moved its wiring to xingyao,
+    so the rule these tests pin -- baostock's (ADR-009 decision 3, unchanged):
+    the first valid value is the baseline and an event is a change against it
+    -- is injected explicitly from baostock's module, the rule's reference
+    implementation that stays in the tree as the dormant predecessor.
+    """
+    from stock_quant import data_pipeline
+    from stock_quant.data_sources import baostock_factor
+
+    def fake_fetch(symbol):
+        calls.append(symbol)
         if isinstance(outcome, Exception):
             raise outcome
-        return dict(outcome)
+        return dict(outcome).get(symbol)
 
-    monkeypatch.setattr(data_pipeline, "fetch_adjust_factor_frames", fake_fetch)
+    end = date(2026, 9, 18)
     return data_pipeline._LazyFactorChannel(
-        _StubConfig(),
-        date(2026, 9, 18),
+        "baostock",
+        fake_fetch,
+        lambda frame, symbol: baostock_factor.factor_event_dates(frame),
+        lambda symbol, frame: baostock_factor.snapshot_result(symbol, frame, end=end),
+        end,
         issues=issues if issues is not None else [],
         raw_snapshots=raw_snapshots,
         record_raw=lambda result: result,
@@ -746,7 +757,6 @@ def test_a_bracketing_factor_series_asserts_absence_without_tdx(monkeypatch):
     """baostock alone can carry the market axis; TDX is not required."""
     calls: list[str] = []
     channel = _factor_channel(
-        monkeypatch,
         {
             "600519.SH": _factor_frame(
                 [
@@ -775,14 +785,15 @@ def test_a_bracketing_factor_series_asserts_absence_without_tdx(monkeypatch):
     classified = [issue for issue in issues if issue.code == "absent_ex_date_classified"]
     assert len(classified) == 1
     assert classified[0].details["classification"] == "absent+no_adjustment_bracketed_empty"
-    assert classified[0].details["channels"] == ["baostock"]
+    # The label is the channel slot's name (spec §3.2: new records read
+    # "xingyao"), independent of which rule implementation is injected.
+    assert classified[0].details["channels"] == ["xingyao"]
     assert calls == ["600519.SH"]
 
 
 def test_a_factor_change_at_the_probe_reads_observed(monkeypatch):
     """The series moving exactly at the probe is an observed adjustment."""
     channel = _factor_channel(
-        monkeypatch,
         {
             "600519.SH": _factor_frame(
                 [("2026-06-01", "1.000000"), ("2026-07-01", "1.250000")]
@@ -812,7 +823,6 @@ def test_a_factor_series_is_recorded_as_a_raw_snapshot(monkeypatch):
     """The channel's bytes land in the same content-addressed store."""
     raw: list = []
     channel = _factor_channel(
-        monkeypatch,
         {"600519.SH": _factor_frame([("2026-06-01", "1.000000")])},
         [],
         raw,
@@ -829,7 +839,6 @@ def test_a_failing_factor_channel_degrades_to_unknown_with_a_warning(monkeypatch
     calls: list[str] = []
     issues: list = []
     channel = _factor_channel(
-        monkeypatch,
         RuntimeError("login failed"),
         calls,
         [],
@@ -860,7 +869,6 @@ def test_a_failing_factor_channel_degrades_to_unknown_with_a_warning(monkeypatch
 def test_an_unbracketed_probe_before_the_first_change_reads_unknown(monkeypatch):
     """A probe before the series' first change is covered by nothing."""
     channel = _factor_channel(
-        monkeypatch,
         {
             "600519.SH": _factor_frame(
                 [
@@ -941,7 +949,6 @@ def test_a_bracketed_absence_keeps_the_exemption(monkeypatch):
         [],
     )
     channel = _factor_channel(
-        monkeypatch,
         {
             "600519.SH": _factor_frame(
                 [
