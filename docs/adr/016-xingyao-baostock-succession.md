@@ -15,6 +15,10 @@ affects:
 
 # 016 — 星耀数智 succeeds baostock
 
+> **Not yet effective.** This ADR remains proposed. Its substitutions take
+> effect only after the daily and factor successor lanes ship in one release;
+> until then ADR-015 and the runtime continue to admit baostock daily.
+
 ## Context
 
 baostock's data server (`:10030`) was unreachable from 2026-09-05 and answered
@@ -43,7 +47,7 @@ runtime roles, and the record needs to state which of them were real:
    `daily_bar` price sample; validation rows are never fed to it. The comment
    at `project/configs/sources.yml:21-25` states both non-facts today.
 
-星耀数智 passed a full quality evaluation on 2026-09-25 (13 checks: 11 pass, 2
+星耀数智 passed a full quality evaluation on 2026-09-25 (14 checks: 11 pass, 2
 warn, 1 fail; prices, financials and yields day-by-day identical to independent
 sources), and its backward-adjustment factor is a per-symbol full-history daily
 series — the same semantics as baostock's `adjustFactor`, from a source that is
@@ -73,6 +77,8 @@ baostock's ADR-015 admission is substituted rather than retained.**
 3. **baostock's lanes go dormant, not deleted.** `enabled: false` in
    `project/configs/sources.yml` means the source is never constructed and its
    lanes never execute. The adapter and `baostock_factor.py` stay in the tree.
+   This config change ships only after both xingyao successor lanes are ready;
+   the two implementation batches may be tested separately but are one release.
 
 4. **ADR-015 is amended, not superseded, and by substitution.** Its allow-list
    becomes `("tushare","daily")`, `("xingyao","daily")`,
@@ -96,14 +102,31 @@ baostock's ADR-015 admission is substituted rather than retained.**
    This record does not change `data_contracts.py`, adds no broker transport
    kind, and builds no runtime failover. Promotion has its own conditions.
 
-8. **The compensating control extends to the new source.** `drift_audit`'s
-   `_source_for` maps raw-tree prefixes to sources and raises for anything it
-   does not know; that exception is caught as `fetch_failed`, which is not
-   counted as drift and does not affect the exit code. Left alone, the
-   quarterly drift audit would report success over an audit it never performed.
-   The prefix is added with the source.
+8. **The compensating control extends to both new endpoints.** `drift_audit`
+   dispatches by `(source, endpoint)`: xingyao daily uses the daily adapter and
+   `backward_factor` uses a minimal `XingyaoFactorSource` implementing the same
+   `DataSource.fetch(DataRequest) -> FetchResult` boundary. The factor adapter
+   exists only so the audit can reproduce the original request and snapshot
+   shape; it is not added to `_CONFIGURED_SOURCES`. Unknown endpoints,
+   unverifiable snapshots and fetch failures count as audit failures and make
+   the command exit non-zero; zero drift can no longer hide zero completed
+   comparisons.
 
 9. **The two false comments are corrected**, with this record as the reason.
+
+10. **The test fixtures follow the runtime.** `_fixture_sources_yaml` had been
+    force-enabling every supplier segment so that fixtures exercise every
+    optional source rather than inheriting an operator toggle. That exemption
+    is withdrawn for baostock: fixtures now set `baostock.enabled: false`,
+    matching the shipped runtime. Leaving it enabled would run a lane the
+    project no longer runs in every ordinary fixture update, and would put a
+    dispatched baostock row in the call ledger that production never produces
+    — a fixture reproducing a shape the runtime cannot reach misleads exactly
+    the assertions this record changes. The dormant lane is *not* deleted:
+    tests that need it opt in with `write_sources(baostock=True)`, and one
+    such test is the sole guard on the `reuse=False` wiring. The template
+    `sources.yml` ships `enabled: false` too, so a newly scaffolded project
+    does not start out re-running this cleanup.
 
 ## What this does not change
 
@@ -113,6 +136,10 @@ baostock's ADR-015 admission is substituted rather than retained.**
   enter `compare_daily_sources` and never enter a publication.
 - **ADR-009's channel semantics** are preserved: the factor channel is asked
   lazily, fails closed, and asserts nothing when absent.
+- **Hard timeout semantics.** tgw broker calls run behind a terminable process
+  boundary because the repository's requests timeout cannot bound this TCP
+  callback SDK; expiry terminates the worker and enters the ordinary transient
+  retry path.
 - **Published history.** Records already published with a `"baostock"` factor
   channel label keep that label; published datasets are immutable and their
   evidence is not rewritten.
@@ -127,10 +154,19 @@ baostock's ADR-015 admission is substituted rather than retained.**
   its suspended sessions appear as zero-volume rows or as absent rows; that is
   a pre-implementation probe, not an assumption.
 - A newly registered source widens every reading that iterates the configured
-  set: `source_status`, `build_config.source_status` and the call ledger all
-  gain a row, and every "all sources ok" assertion acquires a new participant.
-  The design record enumerates the seven existing assertions this touches; the
-  cost is test churn, not behaviour.
+  set: `source_status` and `build_config.source_status` gain a row, and every
+  "all sources ok" assertion acquires a new participant. Combined with
+  decision 10 the call ledger is unaffected: it only registers sources that
+  actually dispatched, and baostock no longer does. The design record
+  enumerates the existing assertions this touches; the cost is test churn, not
+  behaviour.
+- **The dormant lane loses its default coverage** (decision 10). Nothing in
+  the ordinary fixture path exercises baostock's validation call site any more,
+  so its `reuse=False` wiring is guarded by exactly one opt-in test. The
+  alternative — keeping the fixture exemption — would have covered it by
+  default while making every other fixture assertion describe a runtime the
+  project does not have. The coverage is now deliberate and named, and if that
+  test is ever deleted the wiring has no guard at all.
 - The call ledger's per-source `calls`/`endpoints` counters are zero for every
   source in the repository (no adapter defines `calls`); only the `reused`
   section is real. The new source's ledger row therefore carries presence and
@@ -141,6 +177,14 @@ baostock's ADR-015 admission is substituted rather than retained.**
 
 ## Rejected alternatives
 
+- **Keep the fixtures' force-enable exemption for baostock** (the pre-decision
+  shape: fixtures run every supplier, so baostock's lane keeps executing with
+  `reuse=False`). It covers the dormant call site by default, which is a real
+  benefit; but it costs the fixture's likeness to the runtime — the ledger
+  grows a baostock row production cannot produce, and "all sources ok" is
+  asserted over a source that is retired. Likeness of the fixture to the
+  shipped behaviour was preferred over incidental coverage, and the coverage
+  was bought back explicitly instead (decision 10).
 - **Keep `("baostock","daily")` in the allow-list** so that the reuse semantics
   return with the service. It buys a hypothetical future config-only recovery
   at the price of holding an admission slot for a lane that never runs, and of

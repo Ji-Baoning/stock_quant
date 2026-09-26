@@ -10,15 +10,13 @@ affects:
 
 # 015 — Raw-snapshot reuse for eligible channels
 
-> **Amendment (ADR-016, 2026-09-26).** Decision 1's channel list substitutes
-> `("xingyao", "daily")` for `("baostock", "daily")`; read the Context
-> paragraph's cost example ("the baostock bounded retries alone cost hours at
-> 659 symbols") as the tushare daily lane, since baostock's lane is now
-> dormant. baostock left the runtime, and a lane that never runs must not hold
-> an admission slot, so the list still equals the set of `reuse=True` call
-> sites and the invariant below is unchanged — this ADR is amended, not
-> superseded. Read [ADR-016](016-xingyao-baostock-succession.md) for the
-> succession itself.
+> **Pending amendment (ADR-016, proposed 2026-09-26).** The accepted decision
+> below and the current runtime still admit `("baostock", "daily")`.
+> [ADR-016](016-xingyao-baostock-succession.md) proposes substituting
+> `("xingyao", "daily")` once both successor lanes ship atomically and ADR-016
+> becomes accepted. At that point this note becomes an effective amendment and
+> the Context cost example is read as the tushare daily lane. Until then it is a
+> forward pointer only and does not rewrite this ADR's current channel list.
 
 ## Context
 

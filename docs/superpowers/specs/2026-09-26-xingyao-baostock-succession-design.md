@@ -13,9 +13,13 @@
 
 | 批次 | 内容 | 改动层次 | 效果 |
 | --- | --- | --- | --- |
-| 1 | 星耀适配器（daily）接替 baostock 校验车道；baostock 车道休眠 | 适配器 + pipeline 车道 + 登记 | `primary_source_missing` 翻转能力**有条件**恢复（取决于 Phase 0 停牌日行形态，§4.1）；每轮增量窗口流量 ≈1-2MB（配额口径待 §4.4 校准） |
-| 2 | 星耀因子通道接替 baostock adjust_factor（ADR-009 懒通道） | 独立因子模块 + 懒通道接线 | 缺席 ex-date 分类恢复第二 price-event 通道 |
+| 1 | 星耀适配器（daily）接替 baostock 校验车道 | 适配器 + pipeline 车道 + 登记 | `primary_source_missing` 翻转能力**有条件**恢复（取决于 Phase 0 停牌日行形态，§4.1）；每轮增量窗口流量 ≈1-2MB（配额口径待 §4.4 校准） |
+| 2 | 星耀因子通道接替 baostock adjust_factor（ADR-009 懒通道），随后才休眠 baostock 全部车道 | 独立因子模块 + 懒通道接线 + 配置切换 | 缺席 ex-date 分类连续保有第二 price-event 通道，不出现过渡空窗 |
 | 治理 | ADR-016 + REUSABLE_CHANNELS **替换** baostock 条目 + RUNBOOK | 配置 + ADR | 接替决策可追溯 |
+
+批次 1/2 是开发与验收边界，**不是可分开上线的发布边界**。两批代码与
+`baostock.enabled: false`、复用准入替换必须在同一发布中原子落地；在批次 2 通过前，
+baostock 保持启用，以免现有 `_build_factor_channel` 因共享配置开关而提前消失。
 
 另保留：星耀为 **daily_bar 备选主源候选**（relay 故障时按程序切换；本期不执行切换）。
 
@@ -33,8 +37,8 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
 3. **sources.yml 注释宣称的停牌证据与 compare 参与**——经核查**两者均不成立**（§2.1、
    §2.2），随本次接替一并修正注释，避免继续误导。
 
-星耀数智经 2026-09-25 全量质量评估（13 项检查 11 过，行情/财务/收益率与独立来源
-逐日一致），具备接替资格；其 `get_backward_factor` 为日频全历史累计复权因子序列，
+星耀数智经 2026-09-25 全量质量评估（14 项检查：11 过、2 警告、1 失败；行情/财务/
+收益率与独立来源逐日一致），具备接替资格；其 `get_backward_factor` 为日频全历史累计复权因子序列，
 与 baostock `adjustFactor` 同语义且更完整。
 
 ## 2. 事实基础（2026-09-26 逐条核实，含对既有注释的两处证伪）
@@ -89,9 +93,10 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
 - 日K：`query_kline` 不复权，日期在 `kline_time` 列；沪深北覆盖（评估时 7 标的抽样 +
   全量代码表佐证），分钟/快照通道独立存在。**volume/amount 的单位（股 vs 手）评估报告
   从未对外部源校验**——(1.0, 1.0) 是待测假设，列 §4.5。
-- 复权因子：`get_backward_factor` 返回**每符号全历史日频**累计后复权因子 DataFrame，
-  相邻行变化即除权事件——`factor_event_dates` 的天然等价物。（注意：不要引用"8733 行
-  实测"，评估报告里的 8733 是**交易日历**天数，不是因子序列行数。）
+- 复权因子：`get_backward_factor([symbol], is_local=False)` 返回以交易日为索引、symbol
+  为列的**宽表**；实测 8733 行是该返回帧按完整交易日历对齐后的行数，因而既是日历长度，
+  也是返回帧行数，不能直接理解为该证券有 8733 个有效因子观测。上市前/退市后的单元格
+  可能为空；事件提取必须先选择目标 symbol 列、清除空值并排序，再比较相邻有效因子。
 - 已知口径坑位（适配器必须吸收）：沪深代码表封装层 -76 故障（枚举走 tgw 原生
   `QueryCodeTable`，本期适配器不需要）；K线日期在列不在索引。
 - 成本标定：约 81 字节/行（评估报告 §一）；校验车道每轮增量窗口 ≈1-2 万行 ≈1-2MB。
@@ -127,7 +132,12 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
 - endpoint 仅 `daily`：`query_kline` 不复权、per-symbol 窗口请求、日期取 `kline_time`
   列、params `{"adjustment":"unadjusted"}`；复用 `validate_supplier_frame` 与
   `fetch_with_retry`。
-- 错误映射：tgw -76 / 超时 → `ServerError`（瞬时，参与重试）；登录失败 →
+- **硬超时边界**：`fetch_with_retry` 的 `default_request_timeout` 只覆盖 `requests`，不能
+  约束 tgw 的 broker TCP/回调等待；不得把线程或错误文本映射冒充调用超时。所有登录、
+  `query_kline` 与 `get_backward_factor` 实时调用必须运行在可终止的子进程边界内，父进程
+  最多等待 `timeout_seconds`，到期终止并回收子进程、抛 `ServerError`，再由
+  `fetch_with_retry` 决定是否重试。子进程异常只回传脱敏的类型/消息，不回传环境变量。
+- 错误映射：tgw -76 / 上述父进程超时 → `ServerError`（瞬时，参与重试）；登录失败 →
   `AuthenticationError`（不重试）；`translate_supplier_error` 现有关键词不覆盖的
   tgw 错误文本在适配器内先行翻译。
 - `transport_id = "xingyao-broker-tcp"`（对齐 base.py 的 transport 防塌缩要求）。
@@ -137,16 +147,21 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
 - **新增独立 xingyao 校验车道**（owner 2026-09-26 定调："新增独立车道 + 移除 baostock
   准入"）：新车道 `required=False, reuse=True`，与 baostock 车道语义逐项一致
   （同窗口、同符号集、同存在性消费）。
-- baostock 校验车道**休眠**：`sources.yml` 里 `enabled: false` 使其永不执行；其调用点
-  保留但改为 `reuse=False`——休眠车道不得占用准入额度（§5）。代价：恢复 baostock 车道
-  仍是改配置，但其复用语义需重新准入，不会自动随配置回归。
+- baostock 校验车道在**批次 1/2 同一发布的最后一步**休眠：`sources.yml` 里
+  `enabled: false` 使其永不执行；其调用点保留但改为 `reuse=False`——休眠车道不得占用
+  准入额度（§5）。不得先发布这个配置变更，否则同一个开关会让尚未被星耀接替的
+  ADR-009 因子通道提前消失。代价：恢复 baostock 车道仍是改配置，但其复用语义需重新
+  准入，不会自动随配置回归。
 - `_CONFIGURED_SOURCES` 追加 `"xingyao"`，`_REQUIRED_ROLE["xingyao"] = False`——**漏写
   `_REQUIRED_ROLE` 会在 `_REQUIRED_ROLE[name]` 处直接 KeyError**；`baostock` 保留在注册表。
 - `_build_source` 加 `xingyao` 分支，否则 `raise ValueError`（[:2843-2856](../../../src/stock_quant/data_pipeline.py#L2843-L2856)）。
-- **`project/drift_audit.py` 必须同步扩展**：`_source_for`（[:81-88](../../../project/drift_audit.py#L81-L88)）
-  只认 tushare/akshare/baostock，新前缀抛 `ValueError`，而该异常被 [:130-145](../../../project/drift_audit.py#L130-L145)
-  的 `except Exception` 吞成 `"fetch_failed"`——不计入漂移计数、不影响退出码。不改则
-  D5.4 这个补偿控制对星耀通道**静默为空**：看起来通过了，实际什么都没审。
+- **`project/drift_audit.py` 必须按 `(source, endpoint)` 扩展**，不能只给 `_source_for`
+  增加 xingyao 前缀：`("xingyao", "daily")` 用日线适配器重取；
+  `("xingyao", "backward_factor")` 用 `xingyao_factor.py` 的专用重取入口，并按原
+  `DataRequest` 重建同形状快照。未知 endpoint、快照不可验证和实时重取失败均计入
+  `audit_failures`，使进程退出非零；`drifted` 与 `audit_failures` 在报告中分列，避免
+  “0 drifted”掩盖“0 successfully audited”。当前仅按 source 映射且吞成 `fetch_failed`
+  的路径见 [drift_audit.py:81-145](../../../project/drift_audit.py#L81-L145)。
 
 **登记（每处几行）**：
 
@@ -170,15 +185,26 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
   `tools/xysz/xysz/xysz_tools/`，且已由提交 `10be36885` 明确排除出仓库，wheel 由操作者
   自备。前置 `tables`(PyTables)：缺失时复权因子等接口直接 ImportError。不进默认依赖。
 
-### 3.2 批次 2：因子通道接替（ADR-009 邻域，独立成批）
+### 3.2 批次 2：因子通道接替（ADR-009 邻域，独立开发验收、与批次 1 原子发布）
 
 **新增 `src/stock_quant/data_sources/xingyao_factor.py`**：
 
-- `fetch_factor_event_dates(symbol) -> list[date]`：`get_backward_factor` 全序列拉取
-  （每符号一次、进程内缓存），相邻行因子变化 → 事件日期列表——与
-  `factor_event_dates` 同返回形状；自带登录（复用 xingyao.py 的登录工具）。
+- `fetch_factor_event_dates(symbol) -> list[date]`：调用
+  `get_backward_factor([symbol], is_local=False)`（每符号一次、进程内缓存），要求返回
+  DataFrame 且精确包含目标 symbol 列；索引必须可解析为日期。选择该列后转为有限数值，
+  丢弃空值，按日期稳定升序；重复日期若值冲突则 `ContractError`，相同则折叠。第一个
+  **有效**值只作基线，之后每次精确数值变化的日期才是事件——与现有
+  `factor_event_dates` 的 fail-closed 语义相同。空帧、无目标列、无有效值均返回缺席通道，
+  不得断言“无事件”。
 - 快照以 `source="xingyao", endpoint="backward_factor"` 落 raw（对齐
-  baostock_factor.py 的 snapshot_result 模式）。
+  baostock_factor.py 的 snapshot_result 模式），保存供应商返回的**单 symbol 原生宽表及
+  日期索引**，不把派生事件列表冒充原始响应。快照 metadata 必须带可重建的
+  `request_parameters`，供漂移审计按同一请求重取。
+- 模块同时提供最小 `XingyaoFactorSource`（`name = "xingyao"`，实现
+  `fetch(DataRequest) -> FetchResult`，且只接受 `endpoint="backward_factor"` 与单一
+  symbol）。它只把 `fetch_factor_frame`/`snapshot_result` 包成现有 `DataSource` 契约，
+  专供 `drift_audit` 按原请求重取同形状快照；不进入 `_CONFIGURED_SOURCES`，也不取代
+  daily 的 `XingyaoSource`。
 - **幅度同样不丢弃不使用**：本批次只接替"日期"语义；相邻比值作为价格因子属
   ADR-013 域的潜在增强，超出本 spec 范围（见 §6）。
 
@@ -189,6 +215,9 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
   （WARNING + `_failed` + `None`）。
 - 分类标签：新记录 `channels=(("tdx",…),("xingyao",…))`；**历史已发布记录中的
   `"baostock"` 标签保留原样**（不可变发布，不改写历史）。
+- 发布顺序：只有本节单元/集成测试通过且 xingyao 因子通道已接线后，才在同一提交/发布中
+  把 `baostock.enabled` 改为 false 并替换 ADR-015 准入；仓库不得存在“baostock 已禁用、
+  xingyao factor 尚未接线”的可发布中间状态。
 
 ### 3.3 备选主源候选（本 spec 只声明，不接线）
 
@@ -223,6 +252,9 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
    volume/amount 单位**。(1.0, 1.0) 是假设而非结论。取 ≥3 只标的的区间累计成交量与独立
    来源比对，确认是股还是手，据此定 `_UNIT_FACTORS["xingyao"]`。（批次 1 校验行不进发布
    表，故不阻塞批次 1；但 §3.3 扶正为主源前必须闭合。）
+6. **硬超时探针**：用不会回调的假 tgw 调用验证父进程在 `timeout_seconds` 后终止并回收
+   worker，返回可重试的 `ServerError`；再用一次真实小窗口调用验证正常响应不会遗留子进程。
+   此项不通过不得启用 xingyao 默认车道。
 
 ## 5. 与 ADR-015 的关系
 
@@ -230,8 +262,10 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
   条目数仍为 3，因此 ADR-015 Decision 第 1 条的准入不变量（"准入集恰好等于 `reuse=True`
   调用点集"）继续成立、断言无需放宽——这正是选"替换"而非"并存"的理由。baostock 休眠
   车道若恢复，其复用语义须重新准入（记入 ADR-016），不随配置开关自动回归。
-- **ADR-015 修订方式：加指针，不改正文**（不静默重写历史）。ADR-015 顶部加一段
-  **Amendment (ADR-016)** 说明：Decision 1 的通道枚举以 xingyao 替换 baostock（车道
+- **ADR-015 修订方式：先加 pending 指针，实施后生效**（不静默重写历史）。ADR-016 仍为
+  `proposed` 或代码尚未原子落地时，ADR-015 顶部只能写 **Pending amendment**，并明确
+  当前有效准入仍是 baostock；实施完成且 ADR-016 转 `accepted` 后，再把它改为
+  **Amendment (ADR-016)**，说明 Decision 1 的通道枚举以 xingyao 替换 baostock（车道
   总数不变）；Context 段 [:25-26](../../adr/015-raw-snapshot-reuse-for-eligible-channels.md#L25-L26)
   的成本论据 "the baostock bounded retries alone cost hours at 659 symbols" 应改读为
   tushare daily 车道（659 只的成本形状不变）。ADR-015 的 `status` 保持 `accepted`——
@@ -265,48 +299,73 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
 
 - **`tests/unit/test_xingyao_source.py`**：离线假体测帧翻译（`kline_time` 日期列、单位因子
   取自 §4.5 结论）、错误映射（-76→ServerError 可重试、登录失败→AuthenticationError
-  不重试）、惰性 import 缺失 → optional 降级语义、transport_id 固定值。
-- **`tests/unit/test_xingyao_factor.py`**：相邻因子变化 → 事件日期提取（含首行、无变化、
-  单行序列）；快照落盘形状（source/endpoint）。
+  不重试）、惰性 import 缺失 → optional 降级语义、transport_id 固定值；另用永不返回的
+  假调用证明子进程硬超时、终止与回收。
+- **`tests/unit/test_xingyao_factor.py`**：宽表目标列选择、日期索引排序、前后 NaN、内部 NaN、
+  重复日期相同值折叠/冲突拒绝、首个有效值、无变化、单行序列；快照保留原生宽表索引并带
+  可重建 request metadata。
+- **`tests/unit/test_drift_audit.py`**：按 endpoint 分派 xingyao daily/backward_factor；未知
+  endpoint、不可验证快照和 fetch failure 均增加 `audit_failures` 并使退出码非零。
 - **`tests/fixtures/xingyao_daily.csv`** + `tests/integration/test_source_contracts.py`
   离线契约，对齐既有源 fixture 模式（假客户端 + 原生列断言，参照 `baostock_daily.csv`
   与 `test_*_returns_recorded_native_columns`）。此文件是纯增量，不破坏既有断言。
 - **`tests/external/`**：实时契约（仅 `pytest -m external`，需 `AD_*` 凭据）。
 
-### 7.1 既有断言：必须改动的是七处（落在四个测试文件；推翻初稿的"既有断言不动"）
+### 7.1 既有断言：夹具与生产一致地停跑 baostock 车道
 
-初稿称"唯一例外是 `REUSABLE_CHANNELS` 防回归断言"，**该说法不成立**。新增一个已注册源会
-连带打破一切断言"全部源 ok"的测试，因为 `source_status` / `build_config.source_status`
-遍历 `_CONFIGURED_SOURCES` 全体。逐处如下：
+`tests/integration/conftest.py::_fixture_sources_yaml` 原先把模板中的**每个 supplier** 强制
+`enabled = true`，理由是夹具要覆盖所有可选源、不继承生产模板的运维开关。**决定 A
+（2026-09-26）取消这一豁免**：baostock 的 supplier 不可用、两个真实角色均已在同一发布中
+由 xingyao 承担（decision 2/6），继续默认启用它会让每个普通夹具测试都执行一条项目不再
+运行的车道，并在调用账本里留下一条生产不会产生的 baostock 行——夹具要复现的是运行形态，
+不是一段历史。因此夹具显式把 `baostock.enabled` 置为 `False`，与生产一致。
 
-| 断言 | 断因 | 处理 |
-| --- | --- | --- |
-| `tests/integration/test_pipeline_fetch_coverage.py::test_update_writes_call_ledger`（精确字典含三源零值行） | baostock 不再被构造 → 退出账本；xingyao 进入 | 测试项目加 xingyao 桩，字典按实际参与源生成 |
-| `tests/integration/test_data_pipeline.py::test_update_with_explicit_end_publishes_merged_dataset`（`all(status.ok)`） | `_CONFIGURED_SOURCES` 新增 xingyao → `ok=False` | 同上（桩化 xingyao） |
-| `tests/integration/test_data_pipeline.py::test_successful_update_binds_sanitized_build_evidence`（`reason_code == "ok"`） | 同上（经 `_source_evidence`） | 同上 |
-| `tests/integration/test_raw_snapshot_reuse.py::test_a_retry_round_reuses_the_stored_prefix`（`raw_snapshot_reuse` 精确字典） | baostock 键消失 / xingyao 键出现 | 同步字典 |
-| 同测试 `ledger["baostock"]["reused"]` | 键不存在 → KeyError | 改指 xingyao |
-| `tests/integration/test_data_pipeline.py::test_optional_validation_failure_still_publishes` | 注入的是 baostock 桩，车道已换 → 不再产生 `CODE_OPTIONAL_SOURCE_FAILURE` | 桩改指 xingyao（可选源失败的角色随车道转移） |
-| `tests/unit/test_raw_reuse.py` 两条准入断言（`_ADMITTED` 表 + "恰好等于调用点集"） | 见 §5 | baostock 翻 `False`、xingyao 入册；**不变量不变** |
+**休眠车道不删。** 需要覆盖它的测试自行 `write_sources(baostock=True)` 显式打开。代价照实
+记下：休眠调用点——包括其 `reuse=False` 接线——不再被默认测试路径覆盖，改由一条专门测试
+盯住（`test_the_dormant_baostock_lane_still_works_when_a_test_asks_for_it`，它同时断言该源的
+`reused == 0`，把 decision 4 的准入排除钉在行为上）。这是显式的覆盖，不是默认的覆盖。
 
-另需同步的测试侧 helper（初稿清单未列）：`tests/integration/test_pipeline_fetch_coverage.py`
-的 `_all_stubs()` / `_sources()`、`tests/integration/conftest.py` 的 `_fixture_sources_yaml`。
-`templates/project-config/sources.yml` 也必须加 xingyao 条目——否则夹具项目里星耀无处构造。
+需要改动的既有形态：
+
+- **四个位置的 helper**：三个测试文件中的 `_all_stubs()` / `_sources()` 加 xingyao 桩，否则
+  管线会尝试构造私有真适配器，使 xingyao status 为 unavailable；`write_sources` 增加
+  `xingyao` 形参并把 `baostock` 默认值改为 `False`——它原先只写 tushare/akshare/baostock
+  三段、**没有 xingyao**，任何调用它的测试都会静默关掉星耀车道。补桩后 `all(status.ok)`
+  与 `reason_code == "ok"` 两处断言原文不动。
+- `test_update_writes_call_ledger` 的精确字典新增 xingyao 并**删去 baostock**：账本只登记
+  真正 dispatch 过的源。
+- `test_a_retry_round_reuses_the_stored_prefix` 的 `raw_snapshot_reuse` 精确字典新增 xingyao、
+  删去 baostock；`ledger["baostock"]["reused"] == {}` 会 KeyError，改为对 xingyao 断言同一
+  事实（该源 dispatch 了但没有可复用的快照）。
+- `test_optional_validation_failure_still_publishes` 的**行为契约保留、制造者换源**：它验证
+  “可选源失败仍不阻塞发布”，原先靠失败的 baostock 桩制造失败；现在 baostock 不跑，改注入
+  失败的 xingyao 桩——它才是当前持有校验车道的源。
+- `tests/unit/test_raw_reuse.py` 的 `_ADMITTED` 与“准入集恰好等于调用点集”两条断言同步
+  替换：baostock 为不可复用、xingyao 为可复用，不变量不变。
+- `test_disabled_baostock_is_never_constructed_or_fetched` **不动**：它自己
+  `write_sources(baostock=False)`，与新默认值一致，请求只点名 baostock 使启用集收窄为空。
+
+`templates/project-config/sources.yml` 须增加 xingyao 段，并把 baostock 段改为
+`enabled: false`——模板是新项目的脚手架默认值，带着一个已停用的 supplier 出厂只会让每个
+新项目重演这次清理。夹具不依赖模板的开关语义（它显式设定该值），两处都要有。
 
 ### 7.2 新增集成测试
 
 - validation 车道接替：stub xingyao 源 → `validation_present` 翻转恢复
   （`primary_source_missing` 分类回归）；星耀停牌日形态按 §4.1 结论分别断言。
 - 因子懒通道失败降级（WARNING + 缺席通道）。
-- 账本与 `raw_snapshot_reuse` 形状：xingyao 行出现、baostock 行消失。**注意**：账本的
+- 账本与 `raw_snapshot_reuse` 形状：夹具默认只有 xingyao 一行（baostock 未 dispatch），
+  xingyao 记录可复用车道计数与实时 `fetched`。**注意**：账本的
   `calls`/`endpoints` 恒为 0（`src/` 内没有任何适配器定义 `calls`，`render_call_ledger`
   走 `getattr(source, "calls", 0)` 兜底），因此只能断言**行的存在/缺席**与 `reused` 段，
   不能断言调用数——初稿"账本形状含 xingyao calls"的说法本身就是错的。
+- 休眠车道的显式覆盖（§7.1）：`write_sources(baostock=True)` 打开后该源 dispatch、账本出现
+  baostock 行且 `reused == 0`。这条测试是 `reuse=False` 接线的唯一守卫。
 
 ## 8. 验证命令
 
 ```bash
-pytest tests/unit/test_xingyao_source.py tests/unit/test_xingyao_factor.py -q
+pytest tests/unit/test_xingyao_source.py tests/unit/test_xingyao_factor.py tests/unit/test_drift_audit.py -q
 pytest tests/integration/test_source_contracts.py tests/integration/test_data_pipeline.py -q
 pytest tests/unit/test_raw_reuse.py tests/unit/test_context_governance_docs.py -q
 pytest tests/integration/test_pipeline_fetch_coverage.py tests/integration/test_raw_snapshot_reuse.py -q
@@ -324,14 +383,15 @@ python tools/check_context_governance.py --root .
 `docs/adr/016-xingyao-baostock-succession.md`。
 
 **改动**：`src/stock_quant/data_pipeline.py`（注册表 + `_build_source` + 新校验车道 +
-懒通道）、`project/drift_audit.py`（`_source_for` 加 xingyao 分支，否则 D5.4 静默失效）、
+懒通道）、`project/drift_audit.py`（按 source+endpoint 分派并让未完成审计退出非零）、
 `src/stock_quant/data_model/normalize.py`、`src/stock_quant/data_quality/raw_checks.py`、
 `src/stock_quant/data_sources/raw_store.py`（准入常量**替换**）、
 `project/configs/sources.yml` 与 `templates/project-config/sources.yml`（后者必须加
-xingyao 条目，否则夹具项目无处构造）、`requirements.txt`、`environment.yml`、
-`RUNBOOK.md`（私有包安装、external 说明、baostock 禁用/恢复程序）、
+xingyao 条目、并把 baostock 段改为 `enabled: false`）、`requirements.txt`、
+`environment.yml`、`RUNBOOK.md`（私有包安装、external 说明、baostock 禁用/恢复程序）、
 `docs/adr/DECISIONS_INDEX.md`、ADR-015 顶部的 Amendment 指针（+ ADR-016 本体），
-以及 §7.1 列出的七处既有断言与测试 helper（`_all_stubs`/`_sources`/`_fixture_sources_yaml`）。
+以及 `tests/unit/test_drift_audit.py`、§7.1 列出的精确字典、准入断言与测试 helper
+（`_all_stubs`/`_sources`/`write_sources`/`_fixture_sources_yaml`）。
 
 **不碰**：`cli.py`、`price_observed.py`、ADR-013 链、公司行动/成分/停牌证据链、
-`data_contracts.py`、已发布数据与既有测试语义（§7.1 所列六处除外）。
+`data_contracts.py`、已发布数据与既有测试语义（§7.1 所列精确形状除外）。
