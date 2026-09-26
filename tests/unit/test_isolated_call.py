@@ -74,7 +74,7 @@ def test_an_unexpected_child_failure_is_reported_transient_with_its_type() -> No
     assert "RuntimeError" in str(caught.value)
 
 
-def test_the_child_payload_is_what_the_target_returned_never_the_environment() -> None:
+def test_the_child_payload_is_exactly_what_the_target_returned() -> None:
     os.environ["AD_PASSWORD"] = "must-not-travel"
     try:
         leaked = run_isolated(_leaks_environment, timeout_seconds=10)

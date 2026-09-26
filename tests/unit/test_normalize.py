@@ -233,6 +233,36 @@ def test_tushare_fractional_share_volume_is_still_rejected():
     assert result.rejected.iloc[0]["vol"] == 1263029.644
 
 
+def test_xingyao_native_kline_time_frame_normalizes_directly():
+    """Regression: the validation lane feeds xingyao's frame unrenamed.
+
+    The adapter returns the SDK's own columns (``kline_time`` carries the
+    date), so ``normalize_daily`` must accept the native layout without a
+    rename, exactly as baostock's ``date`` does downstream.
+    """
+    raw = pd.DataFrame(
+        {
+            "kline_time": ["2024-01-02", "2024-01-03"],
+            "code": ["000001.SZ", "000001.SZ"],
+            "open": [10.0, 10.5],
+            "high": [11.0, 11.2],
+            "low": [9.0, 9.2],
+            "close": [10.5, 10.8],
+            "volume": [100, 120],
+            "amount": [1050.0, 1296.0],
+        }
+    )
+    result = normalize_daily(raw, "xingyao", INGESTED_AT)
+
+    assert result.rejected.empty
+    assert result.audit.empty
+    assert result.valid["trade_date"].tolist() == [
+        pd.Timestamp("2024-01-02"),
+        pd.Timestamp("2024-01-03"),
+    ]
+    assert result.valid["symbol"].tolist() == ["000001.SZ", "000001.SZ"]
+
+
 def test_empty_daily_frame_yields_typed_empty_clean_result():
     raw = pd.DataFrame(
         columns=["date", "code", "open", "high", "low", "close", "volume", "amount"]

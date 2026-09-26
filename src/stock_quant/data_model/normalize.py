@@ -28,7 +28,9 @@ from stock_quant.data_model.schemas import AUDIT_COLUMNS, DAILY_COLUMNS
 from stock_quant.data_model.symbols import SymbolNormalizationError, normalize_symbol
 
 _SYMBOL_COLUMNS = ("code", "ts_code", "symbol")
-_DATE_COLUMNS = ("date", "trade_date")
+# "kline_time" is xingyao's native date column; the adapter returns the
+# supplier's frame unrenamed and normalization picks the rename up here.
+_DATE_COLUMNS = ("date", "trade_date", "kline_time")
 _VOLUME_COLUMNS = ("volume", "vol")
 _NUMERIC_COLUMNS = ("open", "high", "low", "close", "amount")
 
