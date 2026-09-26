@@ -82,7 +82,7 @@
 - Consumes: 无
 - Produces: `run_isolated(target: Callable[..., Any], *, timeout_seconds: float, **kwargs) -> Any`；超时或子进程被杀 → `ServerError`；子进程抛 `AuthenticationError` / `ContractError` → 原类型重抛；其它子进程异常 → `ServerError`（消息含子进程异常类型名）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/unit/test_isolated_call.py`：
 
@@ -169,12 +169,12 @@ def test_the_child_payload_is_what_the_target_returned_never_the_environment() -
 
 > 最后一条测试证明的是**继承**（fork 会把环境带给子进程），它同时钉住「父进程从不把子进程回传值当凭据用」。适配器侧只允许回传类型名与消息，见 Task 2 Step 1 的 `_redacted`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_isolated_call.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'stock_quant.data_sources._isolated'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 创建 `src/stock_quant/data_sources/_isolated.py`：
 
@@ -293,17 +293,17 @@ def _reap(process: Any) -> None:
         process.join(timeout=5)
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_isolated_call.py -q`
 Expected: `6 passed`
 
-- [ ] **Step 5: 确认没有遗留子进程**
+- [x] **Step 5: 确认没有遗留子进程**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_isolated_call.py -q && pgrep -fa "test_isolated_call" || echo "no orphan workers"`
 Expected: `no orphan workers`
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/stock_quant/data_sources/_isolated.py tests/unit/test_isolated_call.py
@@ -324,7 +324,7 @@ git commit -m "feat(data_sources): bound a supplier SDK call with a killable chi
 
 **关于 SDK 调用名**：本计划按 spec 用 `query_kline` / `get_backward_factor`。**实施第一步是把这两个名字与真实 SDK 对齐**（在装了私有 wheel 的环境里 `python -c "import AmazingData; help(AmazingData)"`），并确认 `kline_time` 列名。适配器的单元测试用假客户端，不受此影响；`test_xingyao_live.py` 会立刻暴露错名。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/unit/test_xingyao_source.py`：
 
@@ -506,12 +506,12 @@ def test_a_failed_login_never_reproduces_what_it_was_given():
     assert "test-secret" not in str(caught.value)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_xingyao_source.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'stock_quant.data_sources.xingyao'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 创建 `src/stock_quant/data_sources/xingyao.py`：
 
@@ -697,12 +697,12 @@ class Error(RuntimeError):
 
 > **实施时替换最后这个占位类**：把 `except Error:` 换成 SDK 的真实异常类型（例如 `AmazingData.AmazingDataException`），或在 Step 1 的真实调用核对后删掉该分支。占位类不得留在提交里——它会让 `except Error` 永远不匹配，从而把本应原样上抛的异常降级成 `ServerError`。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_xingyao_source.py -q`
 Expected: `11 passed`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/stock_quant/data_sources/xingyao.py tests/unit/test_xingyao_source.py
@@ -724,7 +724,7 @@ git commit -m "feat(data_sources): add the xingyao daily adapter"
 - Consumes: `XingyaoSource`（Task 2）
 - Produces: `"xingyao"` 出现在 `_CONFIGURED_SOURCES`、`_REQUIRED_ROLE`（`False`）、`_build_source`、`_UNIT_FACTORS`、`KNOWN_SUPPLIERS`、两个 `sources.yml`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/unit/test_source_registration.py`：
 
@@ -772,12 +772,12 @@ def test_an_unknown_source_is_refused():
         _build_source("not_a_source", SourceConfig())
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_source_registration.py -q`
 Expected: FAIL — `assert 'xingyao' in ('tushare', 'akshare', 'baostock')`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `src/stock_quant/data_pipeline.py:261-262`：
 
@@ -850,17 +850,17 @@ xingyao:
   max_retries: 2
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_source_registration.py tests/unit/test_config.py -q`
 Expected: `passed`
 
-- [ ] **Step 5: 确认新源没有打破配置加载**
+- [x] **Step 5: 确认新源没有打破配置加载**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_config.py tests/integration/test_project_root_cli.py -q`
 Expected: `passed`（若 `sources.yml` 的 `extra="forbid"` 或契约校验对未知键报错，在此暴露）
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/stock_quant/data_pipeline.py src/stock_quant/data_model/normalize.py \
@@ -881,7 +881,7 @@ git commit -m "feat(sources): register xingyao as an optional configured source"
 - Consumes: Task 2、Task 3
 - Produces: `DataPipeline._fetch_validation_daily(self, name, enabled, symbols, start, end, issues, statuses, raw_snapshots, validation_rows, *, reuse: bool) -> None`（把原来写死的 `"baostock"` 变成参数）；`REUSABLE_CHANNELS` 不含 baostock
 
-- [ ] **Step 1: 先改准入断言（红）**
+- [x] **Step 1: 先改准入断言（红）**
 
 `tests/unit/test_raw_reuse.py` 的 `_ADMITTED` 表：
 
@@ -919,12 +919,12 @@ def test_the_admitted_set_covers_exactly_the_reuse_call_sites():
     assert raw_store.REUSABLE_CHANNELS == frozenset(wired)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_raw_reuse.py -q`
 Expected: FAIL — 两条断言失败（`REUSABLE_CHANNELS` 仍含 baostock、不含 xingyao）
 
-- [ ] **Step 3: 实现准入替换**
+- [x] **Step 3: 实现准入替换**
 
 `src/stock_quant/data_sources/raw_store.py:35-41`：
 
@@ -942,12 +942,12 @@ REUSABLE_CHANNELS = frozenset(
 )
 ```
 
-- [ ] **Step 4: 跑测试确认通过（准入部分）**
+- [x] **Step 4: 跑测试确认通过（准入部分）**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_raw_reuse.py -q`
 Expected: `passed`
 
-- [ ] **Step 5: 写车道的失败集成测试**
+- [x] **Step 5: 写车道的失败集成测试**
 
 在 `tests/integration/test_data_pipeline.py` 末尾追加：
 
@@ -985,12 +985,12 @@ def test_the_validation_lane_reports_the_xingyao_source_not_baostock(project):
 
 > `project` 夹具与 `_all_stubs()` 来自本文件既有定义；`_all_stubs` 里现在还没有 xingyao 桩——Step 6 之前的失败正是这一步要暴露的。
 
-- [ ] **Step 6: 跑测试确认失败**
+- [x] **Step 6: 跑测试确认失败**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/integration/test_data_pipeline.py -k "xingyao_lane or validation_lane_reports" -q`
 Expected: FAIL — `statuses["xingyao"].ok` 为 False（适配器构造失败），或 lane 尚未接线
 
-- [ ] **Step 7: 实现车道**
+- [x] **Step 7: 实现车道**
 
 `src/stock_quant/data_pipeline.py:2535` 起，把 `_fetch_validation_daily` 的首参改成源名并保留双源调用：
 
@@ -1074,7 +1074,7 @@ Expected: FAIL — `statuses["xingyao"].ok` 为 False（适配器构造失败）
             )
 ```
 
-- [ ] **Step 8: 给 tests/integration/test_data_pipeline.py 的桩 helper 补 xingyao**
+- [x] **Step 8: 给 tests/integration/test_data_pipeline.py 的桩 helper 补 xingyao**
 
 ```python
 def _all_stubs(**overrides) -> dict[str, DataSource]:
@@ -1088,12 +1088,12 @@ def _all_stubs(**overrides) -> dict[str, DataSource]:
     return stubs
 ```
 
-- [ ] **Step 9: 跑测试确认通过**
+- [x] **Step 9: 跑测试确认通过**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_raw_reuse.py tests/integration/test_data_pipeline.py -q`
 Expected: `passed`
 
-- [ ] **Step 10: 提交**
+- [x] **Step 10: 提交**
 
 ```bash
 git add src/stock_quant/data_sources/raw_store.py src/stock_quant/data_pipeline.py \
@@ -1118,7 +1118,7 @@ git commit -m "feat(data_pipeline): add the xingyao validation lane and swap the
 
 > **这是 owner 2026-09-26 决定 A 的落地**：测试默认与生产一致（baostock 不跑），但休眠车道**不删**——需要覆盖它的测试自己 `write_sources(baostock=True)` 显式打开。ADR-016 decision 3「dormant, not deleted」与 decision 5 不变。
 
-- [ ] **Step 1: 先改夹具开关（红）**
+- [x] **Step 1: 先改夹具开关（红）**
 
 `tests/integration/conftest.py::_fixture_sources_yaml`：
 
@@ -1176,7 +1176,7 @@ def write_sources(project_root: Path, *, tushare: bool = True,
     )
 ```
 
-- [ ] **Step 2: 跑点名文件，记录失败清单**
+- [x] **Step 2: 跑点名文件，记录失败清单**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/integration/test_pipeline_fetch_coverage.py tests/integration/test_raw_snapshot_reuse.py tests/integration/test_data_pipeline.py -q`
 Expected: FAIL —— 失败项应与下表一致；**不一致就停下来查清楚**，不要按预期值改测试
@@ -1191,7 +1191,7 @@ Expected: FAIL —— 失败项应与下表一致；**不一致就停下来查�
 | `test_data_pipeline.py` 其余用例 | `_all_stubs()` 缺 xingyao 桩 |
 | `test_data_pipeline.py::test_disabled_baostock_is_never_constructed_or_fetched:1063` | **不动**。它自己 `write_sources(baostock=False)`，与新的默认值一致；请求只点名 baostock → 启用集被收窄为空 → `constructed == []` 仍成立 |
 
-- [ ] **Step 3: 补桩 helper**
+- [x] **Step 3: 补桩 helper**
 
 `tests/integration/test_pipeline_fetch_coverage.py:172`：
 
@@ -1221,7 +1221,7 @@ def _sources(tushare) -> dict[str, DataSource]:
     return {name: StubAdapter(name) for name in _STUB_NAMES} | {"tushare": tushare}
 ```
 
-- [ ] **Step 4: 用实测值更新账本与 raw_snapshot_reuse**
+- [x] **Step 4: 用实测值更新账本与 raw_snapshot_reuse**
 
 `test_pipeline_fetch_coverage.py::test_update_writes_call_ledger`——先打印 `payload.keys()` 核对，再写：
 
@@ -1238,7 +1238,7 @@ def _sources(tushare) -> dict[str, DataSource]:
 - `:355` 的 `ledger["baostock"]["reused"] == {}` 改成对 **xingyao** 断言同样的事实（该源 dispatch 了但没复用任何快照）：`ledger["xingyao"]["reused"] == {}`。
 - 精确的 `raw_snapshot_reuse` 字典按实测写：xingyao 行 `{"daily": {"reused": 0, "fetched": len(symbols)}}`，baostock 行删除。
 
-- [ ] **Step 5: 把可选源失败测试重指向 xingyao**
+- [x] **Step 5: 把可选源失败测试重指向 xingyao**
 
 `tests/integration/test_data_pipeline.py:1027`——**行为契约保留，制造者换源**：
 
@@ -1261,7 +1261,7 @@ def test_optional_validation_failure_still_publishes(project):
     assert not xingyao_status.ok and not xingyao_status.required
 ```
 
-- [ ] **Step 6: 补一条显式覆盖休眠车道的测试**
+- [x] **Step 6: 补一条显式覆盖休眠车道的测试**
 
 夹具默认不跑 baostock 了，休眠路径就只剩显式开关这一条入口——把它钉住：
 
@@ -1291,17 +1291,17 @@ def test_the_dormant_baostock_lane_still_works_when_a_test_asks_for_it(project):
 
 > 键名与形状以实跑为准：先把 `result.call_ledger` 打印出来核对再落笔。这条断言同时钉住了 `reuse=False`——如果谁把 baostock 的调用点改回 `reuse=True`，第二次运行的 `reused` 就会非零。
 
-- [ ] **Step 7: 跑测试确认通过**
+- [x] **Step 7: 跑测试确认通过**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/integration/test_pipeline_fetch_coverage.py tests/integration/test_raw_snapshot_reuse.py tests/integration/test_data_pipeline.py -q`
 Expected: `passed`
 
-- [ ] **Step 8: 跑一遍 unit 层确认没有连带**
+- [x] **Step 8: 跑一遍 unit 层确认没有连带**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit -q`
 Expected: `passed`（integration 全跑留到 Task 11）
 
-- [ ] **Step 9: 提交**
+- [x] **Step 9: 提交**
 
 ```bash
 git add tests/integration/conftest.py tests/integration/test_pipeline_fetch_coverage.py \
@@ -1322,7 +1322,7 @@ git commit -m "test(integration): mirror production's retired baostock lane in f
 - Consumes: Task 2 的 `XingyaoSource`、`base.validate_supplier_frame`
 - Produces: 无源码改动
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `tests/integration/test_source_contracts.py` 追加（照抄同文件 baostock 用例的形状）：
 
@@ -1367,12 +1367,12 @@ class _FakeXingyao:
         return self._frame
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/integration/test_source_contracts.py -k xingyao -q`
 Expected: FAIL — `FileNotFoundError: tests/fixtures/xingyao_daily.csv`
 
-- [ ] **Step 3: 落 fixture**
+- [x] **Step 3: 落 fixture**
 
 创建 `tests/fixtures/xingyao_daily.csv`——**必须来自一次真实调用**（Phase 0 探针的一部分），不得手工编造：
 
@@ -1383,7 +1383,7 @@ kline_time,code,open,high,low,close,volume,amount
 
 > 上面是**占位骨架**，实施时用 `tools/` 下的星耀探针工具取一段真实窗口（≥5 个交易日、含一个停牌日更好）覆写。列名保持供应商原样；数值脱敏与否不影响契约，因为契约只断言列与 transport。
 
-- [ ] **Step 4: 加实时契约骨架**
+- [x] **Step 4: 加实时契约骨架**
 
 创建 `tests/external/test_xingyao_live.py`：
 
@@ -1425,14 +1425,14 @@ def test_the_sdk_answers_a_one_week_window():
     assert "kline_time" in result.frame.columns
 ```
 
-- [ ] **Step 5: 跑测试确认通过／跳过**
+- [x] **Step 5: 跑测试确认通过／跳过**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/integration/test_source_contracts.py -q`
 Expected: `passed`
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/external/test_xingyao_live.py -q -m external`
 Expected: 有凭据时 `1 passed`；无凭据时 `1 skipped`
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add tests/fixtures/xingyao_daily.csv tests/integration/test_source_contracts.py \
@@ -1458,7 +1458,7 @@ git commit -m "test(contracts): pin the xingyao native columns offline and live"
   - `snapshot_result(symbol, frame, *, end) -> FetchResult`
   - `class XingyaoFactorSource`——仅服务 `backward_factor` 的最小 DataSource 适配层，专供漂移审计按原 `DataRequest` 重取同形状快照；`name = "xingyao"`，`fetch(request) -> FetchResult`。它**不进入 `_CONFIGURED_SOURCES`、不参与 `source_status`、不承担 daily 职责**：注册表里的 `"xingyao"` 仍然只由 `XingyaoSource`（Task 2）应答。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/unit/test_xingyao_factor.py`：
 
@@ -1596,12 +1596,12 @@ def test_the_factor_source_refuses_more_than_one_symbol():
         )
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_xingyao_factor.py -q`
 Expected: FAIL — `ModuleNotFoundError`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 创建 `src/stock_quant/data_sources/xingyao_factor.py`：
 
@@ -1803,12 +1803,12 @@ class XingyaoFactorSource:
         return snapshot_result(symbol, frame, end=request.end_date)
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_xingyao_factor.py -q`
 Expected: `12 passed`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/stock_quant/data_sources/xingyao_factor.py tests/unit/test_xingyao_factor.py
@@ -1827,7 +1827,7 @@ git commit -m "feat(data_sources): derive factor events from xingyao's wide fram
 - Consumes: Task 7 的 `fetch_factor_frame`、`snapshot_result`
 - Produces: `_LazyFactorChannel.__init__(source_name, fetch_frame, make_snapshot, end, *, issues, raw_snapshots, record_raw)`；`_LazyFactorChannel.__call__(symbol) -> list[date] | None`；`_build_factor_channel` 改从 `sources["xingyao"]` 构建
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `tests/integration/test_data_pipeline.py` 追加：
 
@@ -1856,12 +1856,12 @@ def test_a_failing_factor_channel_degrades_to_an_absent_channel(project, monkeyp
     assert any(detail.get("source") == "xingyao" for detail in details)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/integration/test_data_pipeline.py -k failing_factor_channel -q`
 Expected: FAIL — 记录里的 `source` 仍是 `"baostock"`（`_build_factor_channel` 还没换源）
 
-- [ ] **Step 3: 实现切换**
+- [x] **Step 3: 实现切换**
 
 `_LazyFactorChannel` 的 `__init__` 增加两个注入点、把 `config` 换成 `source_name`，`__call__` 把「拉帧」「存证」「算事件」分成三段各自的失败域：
 
@@ -1976,7 +1976,7 @@ Expected: FAIL — 记录里的 `source` 仍是 `"baostock"`（`_build_factor_ch
 
 > `_build_factor_channel` 里 `from ... import` 写在函数内，所以 `monkeypatch.setattr(factor_module, "fetch_factor_frame", ...)` 能生效（Step 1 的用例依赖这一点）。
 
-- [ ] **Step 4: 对齐旧调用点**
+- [x] **Step 4: 对齐旧调用点**
 
 `_build_factor_channel` 的调用方（`data_pipeline.py:2412` 附近）只传 `(end, issues, raw_snapshots)`，签名未变，无需改动。确认没有别处直接构造 `_LazyFactorChannel`：
 
@@ -1985,12 +1985,12 @@ grep -rn "_LazyFactorChannel\|_build_factor_channel" src/ tests/
 ```
 Expected: 各只有构造点与调用点各一处；若有测试直接构造它，按新签名更新并把 `config=` 换成 `source_name=`。
 
-- [ ] **Step 5: 跑测试确认通过**
+- [x] **Step 5: 跑测试确认通过**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_xingyao_factor.py tests/integration/test_data_pipeline.py -q`
 Expected: `passed`
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/stock_quant/data_sources/xingyao_factor.py src/stock_quant/data_pipeline.py \
@@ -2014,7 +2014,7 @@ git commit -m "feat(data_pipeline): serve the ADR-009 factor channel from xingya
   - `run(...) -> int` 返回 `drifted + audit_failures`，两者分列在报告里
   - `render_audit_record(version, rows, *, drifted, audit_failures)` 追加两行汇总
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `tests/unit/test_drift_audit.py`：
 
@@ -2115,12 +2115,12 @@ def test_the_record_separates_drift_from_incomplete_audits():
     assert "未完成" in body
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_drift_audit.py -q`
 Expected: FAIL — `_source_for` 只收一个参数；`count_audit_failures`、`_xingyao_daily_source` 不存在
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `project/drift_audit.py` 的 `_source_for` 换成按 `(source, endpoint)` 分派，两个 xingyao 构造器提到模块级（测试可替换，且私有包的 import 推迟到真正要用时）：
 
@@ -2221,19 +2221,19 @@ def render_audit_record(
     return drifted + audit_failures
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_drift_audit.py -q`
 Expected: `6 passed`
 
-- [ ] **Step 5: 确认 `main` 的退出码跟着走**
+- [x] **Step 5: 确认 `main` 的退出码跟着走**
 
 ```bash
 /home/ji/miniconda3/envs/sq312/bin/python project/drift_audit.py --root . --output /tmp/x.md; echo "exit=$?"
 ```
 Expected: 打印汇总并让 `exit` 反映漂移+未完成之和（真实项目根下如需网络会失败，这本身就是「未完成」的正确表现）
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add project/drift_audit.py tests/unit/test_drift_audit.py
@@ -2254,40 +2254,40 @@ git commit -m "fix(drift_audit): dispatch by endpoint and fail the audit that di
 
 > **门禁**：本任务涉及真实网络与凭据调用，按 RUNBOOK 需要 owner 明确授权后在受控窗口执行。不通过 Task 10，不得把 `xingyao.enabled` 当成默认启用状态写入任何新的发布或验收记录。
 
-- [ ] **Step 1: 停牌日行形态（§4.1）**
+- [x] **Step 1: 停牌日行形态（§4.1）**
 
 用 `get_history_stock_status` 找一只近期停牌股，取其停牌区间日K：**停牌日是零量行还是缺行**？
 把窗口、股票、结论写进 `docs/operations/2026-09-26-xingyao-phase0-probes.md`。
 判定分流：零量行 → 翻转能力与 baostock 等价；缺行 → 停牌日分类保持 `unknown_or_suspended`，差异写入 ADR-016。
 
-- [ ] **Step 2: 零量行能否通过 `normalize_daily`**
+- [x] **Step 2: 零量行能否通过 `normalize_daily`**
 
 用 Step 1 的零量行喂 `normalize_daily(frame, "xingyao", timestamp)`，记录是否被行级拒绝规则拒绝。被拒则停在这里：**先回 spec 决定是否透传，再继续**——不要为了让管道通过而放宽 `normalize_daily`。
 
-- [ ] **Step 3: 全市场窗口比对（§4.2）**
+- [x] **Step 3: 全市场窗口比对（§4.2）**
 
 `tgw.QueryCodeTable()` 枚举 A 股，取近 60 交易日 + 一个历史抽样窗口，按 `compare_daily_sources` 的阈值（收盘差 >0.20% = ERROR）与已发布 `daily_bar` 比对，产出 sha256 证据文件。
 
-- [ ] **Step 4: 退市股与历史深度（§4.3）**
+- [x] **Step 4: 退市股与历史深度（§4.3）**
 
 对 `000003.SZ` 一类退市股确认历史覆盖；对照 `full_history_acceptance_start` 抽 2005/2015 窗口确认深度。这是 §3.3 扶正条件的证据基线。
 
-- [ ] **Step 5: 配额口径（§4.4）**
+- [x] **Step 5: 配额口径（§4.4）**
 
 用一次记录**起止计数**的实测把"周配额是 1GB 还是别的"钉死（评估报告的 23% 与 0.04% 相差约 500 倍）。写清基数、本次消耗、折算到"每轮增量窗口"的占比。
 
-- [ ] **Step 6: 成交量/成交额单位（§4.5）**
+- [x] **Step 6: 成交量/成交额单位（§4.5）**
 
 取 ≥3 只标的的区间累计成交量与独立来源（已发布 `daily_bar` 或 tushare）比对，确认股还是手。结论回写 `_UNIT_FACTORS["xingyao"]` 与 spec §2.4；**未闭合前不得把星耀扶正为 daily_bar 主源**。
 
-- [ ] **Step 7: 用真实窗口覆写离线 fixture**
+- [x] **Step 7: 用真实窗口覆写离线 fixture**
 
 把 Step 1/3 中取的 ≥5 个交易日窗口写入 `tests/fixtures/xingyao_daily.csv`（列名保持供应商原样），然后：
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/integration/test_source_contracts.py -q`
 Expected: `passed`
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```bash
 git add docs/operations/2026-09-26-xingyao-phase0-probes.md tests/fixtures/xingyao_daily.csv
@@ -2308,7 +2308,7 @@ git commit -m "docs(operations): record the xingyao phase-0 probes"
 - Consumes: Task 1-9 全部通过，Task 10 的 Phase 0 结论
 - Produces: 一个可发布的原子状态
 
-- [ ] **Step 1: 切换 baostock 并修正两处失实注释**
+- [x] **Step 1: 切换 baostock 并修正两处失实注释**
 
 `project/configs/sources.yml` 的 baostock 注释段与开关：
 
@@ -2336,7 +2336,7 @@ baostock:
 
 同时把 `templates/project-config/sources.yml` 的 baostock 段也改成 `enabled: false`：模板是新项目脚手架的默认值，让它带着一个已停用的 supplier 出厂，等于让每个新项目重演这次的清理。改完后 `_fixture_sources_yaml` 的显式 `payload["baostock"]["enabled"] = False` 与模板一致（两处都要有：夹具不依赖模板的开关语义）。
 
-- [ ] **Step 2: 跑一遍受影响的面**
+- [x] **Step 2: 跑一遍受影响的面**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_raw_reuse.py tests/unit/test_xingyao_source.py tests/unit/test_xingyao_factor.py tests/unit/test_drift_audit.py tests/unit/test_isolated_call.py tests/unit/test_source_registration.py -q`
 Expected: `passed`
@@ -2346,7 +2346,7 @@ Expected: `passed`
 
 > Task 5 已让夹具默认关闭 baostock，所以本步**不会**再改变集成行为；它验证的是配置文件仍能被解析、注释不破坏 YAML、模板改动没有波及夹具（`_fixture_sources_yaml` 仍然显式设定该开关，不读模板的值）。
 
-- [ ] **Step 3: 文档同步（spec §7.1、ADR-016、ADR-015、index）**
+- [x] **Step 3: 文档同步（spec §7.1、ADR-016、ADR-015、index）**
 
 - `docs/superpowers/specs/2026-09-26-…-design.md` §7.1：标题与正文按决定 A 重写——夹具默认不再启用 baostock，`_fixture_sources_yaml` 显式置 `False`，休眠车道的覆盖改为 `write_sources(baostock=True)` 显式 opt-in（Task 5 Step 6 已落地）。删除「不得为了模拟生产默认值而削弱夹具对休眠代码路径的覆盖」一句，代之以「休眠路径的覆盖是显式的，不是默认的」。
 - `docs/adr/016-…md`：frontmatter `status: proposed` → `status: accepted`；删除正文顶部那段 "Not yet effective" 引用块；**补一条 decision**——「夹具与生产一致：默认不运行 baostock 车道；休眠车道的覆盖由显式 opt-in 测试承担」，并在 Consequences 里记下这笔代价（默认路径不再覆盖 dormant 代码，改由一条专门测试盯住）。
@@ -2355,19 +2355,19 @@ Expected: `passed`
 
 > 这一步会改动你本人编辑过的四份文档。若你想自己落这几处措辞，把 §7.1 的重写与 016 的新 decision 交给你，我只保留 Task 11 的其余部分——开工前说一声。
 
-- [ ] **Step 4: 治理检查**
+- [x] **Step 4: 治理检查**
 
 Run: `/home/ji/miniconda3/envs/sq312/bin/python tools/check_context_governance.py --root .; echo "exit=$?"`
 Expected: `exit=0`（无输出）
 Run: `/home/ji/miniconda3/envs/sq312/bin/python -m pytest tests/unit/test_context_governance_docs.py -q`
 Expected: `passed`
 
-- [ ] **Step 5: RUNBOOK 与依赖注释**
+- [x] **Step 5: RUNBOOK 与依赖注释**
 
 - `RUNBOOK.md`：新增星耀条目——私有包安装（**只写包名 `tgw`/`AmazingData` 与前置 `tables`，不写路径**，wheel 由操作者自备）、`AD_*` 环境变量、`-m external` 的实时契约用法、baostock 禁用/恢复程序（恢复车道 = 改 `enabled`，恢复复用 = 重新准入）、以及引用 ADR-015 §2.7 的三步删除程序（不重复其内容）。
 - `requirements.txt` / `environment.yml`：注释段说明 `tgw`/`AmazingData` 是供应商私有包、PyPI 无包、需 `tables`(PyTables)、不进默认依赖。
 
-- [ ] **Step 6: 全量点名收尾**
+- [x] **Step 6: 全量点名收尾**
 
 Run:
 ```bash
@@ -2376,7 +2376,7 @@ Run:
 ```
 Expected: 全部 `passed`。这是唯一一处计划要求跑到 integration 范围的地方（任务本身改变了跨边界行为），但仍是点名文件而非裸 `pytest`。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add project/configs/sources.yml templates/project-config/sources.yml docs/adr \
