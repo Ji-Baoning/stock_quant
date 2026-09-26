@@ -113,12 +113,33 @@
       "fetched_rows": 443870,
       "normalized_rows": 431740,
       "normalized_symbols": 7815,
-      "rejected_rows": 0
+      "rejected_rows": 0,
+      "fetched_rows_exact": {
+        "probe_C": 232811,
+        "probe_C2_sz": 211059,
+        "total": 443870
+      },
+      "normalized_rows_exact": 443870,
+      "comparison_rows_post_cap": 431740,
+      "cap": "trade_date <= published max 2026-09-22",
+      "cap_excluded_rows": {
+        "2026-09-23": 6076,
+        "2026-09-24": 6054,
+        "total": 12130,
+        "cause": "window-edge filtering only; normalization lost 0 rows (rejected=0, duplicates=0)"
+      }
     },
     "hist_window": {
       "range": "2020-06-01..2020-06-30",
       "normalized_rows": 72787,
-      "normalized_symbols": 3661
+      "normalized_symbols": 3661,
+      "fetched_rows_exact": {
+        "probe_C": 30788,
+        "probe_C2_sz": 41999,
+        "total": 72787
+      },
+      "normalized_rows_exact": 72787,
+      "note": "fetched == normalized; the earlier '~72,000' was rounding, now exact"
     },
     "comparison": {
       "recent": {
@@ -279,7 +300,24 @@
     "this_session_consumption_units": 0.22,
     "sessions_about": 45,
     "rows_fetched_about": 540000,
-    "verdict": "counter counts wire traffic; 1 unit = 1GB; see ops doc for the 23% vs 0.04% reconciliation"
+    "verdict": "counter counts wire traffic; 1 unit = 1GB; see ops doc for the 23% vs 0.04% reconciliation",
+    "decomposition_model": {
+      "session_cost_F": "< 0.0025 units/session [MEASURED BOUND, probe F]",
+      "kline_row_cost_B": "170-390 B/row [INFERRED from phase totals: 0.22 - 45*F_bound - ~0.02 code tables, over 516,657 kline rows; not pinnable without a readings-around-one-batch probe]",
+      "lane_661_symbols_per_round": {
+        "sessions": "661 x F in [0, 1.65) units",
+        "data": "46,785 measured published rows (661 x 71 trading days - 44 suspension absences, 2026-06-15..09-22) x B = 0.008-0.018 units (0.8-1.8%)",
+        "total": "~0.8% - 167% of weekly quota; decisive unknown is F",
+        "batched_alternative": "1-2 sessions + same data = ~1-2% per round"
+      },
+      "full_market_backfill_5235x62": "~0.08-0.19 units (8-19%)",
+      "this_session_consumption": {
+        "opening": 0.23,
+        "closing": 0.45,
+        "delta_units": 0.22,
+        "covers": "~45 sessions, 516,657 kline rows (443,870 recent + 72,787 hist, exact) + ~320 probe-A/B/D/D2 rows, 11,862 status rows, 2 full code tables"
+      }
+    }
   },
   "probe_6_units": {
     "per_symbol": {
@@ -382,5 +420,29 @@
     "sha256_csv": "83d01b71242fdf4d4ea6f201b0bca9b02b8bd9f8d3ef601a21a8dfb59feac567",
     "absent_suspension_days": 9,
     "contract_test": "tests/integration/test_source_contracts.py 48 passed (AD_* unset)"
-  }
+  },
+  "probe_F_session_cost": [
+    {
+      "at": "2026-09-27T01:01:29+0800..01:01:58+0800",
+      "bounded": "one run_isolated worker, 60s, 27.5s elapsed; NO data queries",
+      "sequence": "reading r1 -> 1x (login + full SH calendar) -> reading r2 -> 4x (login + calendar) -> reading r3",
+      "raw_readings": {
+        "r1_pre": {
+          "total_week_flow": 1000000000,
+          "used_week_flow": 0.45
+        },
+        "r2_after_1_session": {
+          "total_week_flow": 1000000000,
+          "used_week_flow": 0.45
+        },
+        "r3_after_5_sessions": {
+          "total_week_flow": 1000000000,
+          "used_week_flow": 0.45
+        }
+      },
+      "counter_display_granularity": 0.01,
+      "pinned": "per-session fixed cost (login + full trading calendar, no data) F < 0.0025 units (both deltas 0.00; single-session pair and 4-session pair)",
+      "supersedes": "the earlier 'session ~= 0.004 units' and '~380-420 B/row measured' claims, which were estimates, not measurements"
+    }
+  ]
 }
