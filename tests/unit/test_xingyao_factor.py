@@ -10,6 +10,7 @@ import pytest
 from stock_quant.config import SourceConfig
 from stock_quant.data_sources.base import ContractError, DataRequest
 from stock_quant.data_sources.xingyao_factor import (
+    _clip_to_end,
     factor_event_dates,
     snapshot_result,
 )
@@ -143,3 +144,39 @@ def test_the_factor_source_refuses_more_than_one_symbol():
                 {},
             )
         )
+
+
+def test_the_clip_drops_rows_beyond_end_and_keeps_the_row_on_it():
+    frame = _wide([1.0, 1.1, 1.2, 1.3])
+    clipped = _clip_to_end(frame, "2024-01-03")
+    assert list(clipped.index) == list(pd.to_datetime(["2024-01-02", "2024-01-03"]))
+    assert clipped["000001.SZ"].tolist() == [1.0, 1.1]
+
+
+def test_the_clip_parses_a_string_index_and_accepts_a_date_end():
+    frame = pd.DataFrame({"000001.SZ": [1.0, 1.1]}, index=["2024-01-02", "2024-01-03"])
+    clipped = _clip_to_end(frame, date(2024, 1, 3))
+    assert list(clipped.index) == ["2024-01-02", "2024-01-03"]
+    assert clipped["000001.SZ"].tolist() == [1.0, 1.1]
+
+
+def test_the_clip_returns_an_empty_frame_when_every_row_is_beyond_end():
+    assert _clip_to_end(_wide([1.0, 1.1]), date(2020, 1, 1)).empty
+
+
+def test_fetch_factor_frame_defaults_end_to_today(monkeypatch):
+    import stock_quant.data_sources.xingyao_factor as module
+
+    asked: dict[str, object] = {}
+    frame = _wide([1.0, 1.1])
+
+    def _fake_run_isolated(target, *, timeout_seconds, **kwargs):
+        asked.update(kwargs)
+        asked["timeout_seconds"] = timeout_seconds
+        return frame
+
+    monkeypatch.setattr(module, "run_isolated", _fake_run_isolated)
+    result = module.fetch_factor_frame("000001.SZ", timeout_seconds=1.0)
+    assert result.equals(frame)
+    assert asked["end"] == date.today().isoformat()
+    assert asked["symbol"] == "000001.SZ"

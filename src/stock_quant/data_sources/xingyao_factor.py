@@ -159,9 +159,11 @@ def _fetch_backward_factor(*, symbol: str, end: str) -> pd.DataFrame:
     a credential refusal.  Missing or empty ``AD_USERNAME``/``AD_PASSWORD``
     or ``AD_HOST``/``AD_PORT`` is refused before the SDK is even imported or
     any connection is attempted, so every credential failure is the same
-    permanent error no matter which variable is at fault.  ``end`` is kept so
-    the worker's question matches the recorded request's shape; the factor
-    series itself is always read over the whole listed history.
+    permanent error no matter which variable is at fault.  The factor series
+    is read over the whole listed history and then clipped to ``end``
+    (owner ruling 2026-09-26): the raw answer's calendar-length index grows
+    every trading day, and the stored bytes must be a function of the
+    recorded request for the drift audit's re-ask to compare hashes.
     """
     import os
 
@@ -195,7 +197,8 @@ def _fetch_backward_factor(*, symbol: str, end: str) -> pd.DataFrame:
             raise AuthenticationError("xingyao rejected the credentials")
         logged_in = True
         response = ad.BaseData().get_backward_factor([symbol], is_local=False)
-        return _to_frame(response)
+        # Owner ruling 2026-09-26: clip to the recorded end (bytes follow the request).
+        return _clip_to_end(_to_frame(response), end)
     except (AuthenticationError, ContractError):
         raise
     except Exception as error:  # noqa: BLE001 - map, never leak SDK text upward
@@ -218,6 +221,16 @@ def _to_frame(response: Any) -> pd.DataFrame:
     if hasattr(response, "to_frame"):
         return response.to_frame()
     raise ContractError("xingyao returned an unreadable factor response")
+
+
+def _clip_to_end(frame: pd.DataFrame, end: str | date) -> pd.DataFrame:
+    """The rows whose index date is on or before ``end``; the clip is inclusive.
+
+    An unparseable index cell coerces to NaT and falls out -- the downstream
+    contract guards, not this helper, own what an unreadable index means.
+    """
+    parsed = pd.to_datetime(pd.Index(frame.index), errors="coerce")
+    return frame.loc[parsed <= pd.to_datetime(end)]
 
 
 class XingyaoFactorSource:
