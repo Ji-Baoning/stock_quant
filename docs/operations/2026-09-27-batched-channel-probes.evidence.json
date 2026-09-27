@@ -1,0 +1,113 @@
+{
+  "_status": "awaiting_authorization",
+  "record": "docs/operations/2026-09-27-batched-channel-probes.md",
+  "script": "project/probe_batch_channel.py",
+  "note": "骨架（Task 10 Step 1）：全部测值为 null，本文件从未由脚本写入。owner 授权后逐条运行（Step 2），脚本按段合并回填 probes 并把 _status 翻转为 measured；字段名与脚本的 write_evidence 输出一一对应。凭据只存在于 AD_* 环境变量，任何字段都不含凭据材料。",
+  "probes": {
+    "probe_limit_daily": {
+      "measured_at_utc": null,
+      "command": null,
+      "endpoint": "daily",
+      "symbols_file": null,
+      "code_count": null,
+      "window": {
+        "start": "2026-09-14",
+        "end": "2026-09-24"
+      },
+      "trials": [],
+      "max_acceptable_codes": null,
+      "verdict": null
+    },
+    "probe_limit_backward_factor": {
+      "measured_at_utc": null,
+      "command": null,
+      "endpoint": "backward_factor",
+      "symbols_file": null,
+      "code_count": null,
+      "window": {
+        "end": null
+      },
+      "trials": [],
+      "max_acceptable_codes": null,
+      "verdict": null
+    },
+    "probe_absence": {
+      "measured_at_utc": null,
+      "command": null,
+      "symbols_file": null,
+      "code_count": null,
+      "absence_symbol": "601238.SH",
+      "control_symbol": "601059.SH",
+      "window": {
+        "start": "2026-09-14",
+        "end": "2026-09-24"
+      },
+      "answered_keys": null,
+      "row_counts": null,
+      "refused": [],
+      "absence_status": null,
+      "control_status": null,
+      "verdict": null
+    },
+    "probe_latency_daily": {
+      "measured_at_utc": null,
+      "command": null,
+      "endpoint": "daily",
+      "symbols_file": null,
+      "code_count": null,
+      "window": {
+        "start": "2026-09-14",
+        "end": "2026-09-24"
+      },
+      "repeats": null,
+      "attempts": [],
+      "max_elapsed_seconds": null,
+      "suggested_timeout_seconds": null,
+      "timeout_field": "batch_timeout_seconds",
+      "verdict": null
+    },
+    "probe_latency_backward_factor": {
+      "measured_at_utc": null,
+      "command": null,
+      "endpoint": "backward_factor",
+      "symbols_file": null,
+      "code_count": null,
+      "window": {
+        "end": null
+      },
+      "repeats": null,
+      "attempts": [],
+      "max_elapsed_seconds": null,
+      "suggested_timeout_seconds": null,
+      "timeout_field": "factor_batch_timeout_seconds",
+      "verdict": null
+    },
+    "probe_counters": {
+      "measured_at_utc": null,
+      "command": null,
+      "symbols_file": null,
+      "code_count": null,
+      "window": {
+        "start": "2026-09-14",
+        "end": "2026-09-24"
+      },
+      "factor_end": null,
+      "daily": {
+        "sessions": null,
+        "code_queries": null,
+        "attempt_code_counts": null,
+        "expected": 1,
+        "status_counts": null
+      },
+      "factor": {
+        "sessions": null,
+        "code_queries": null,
+        "attempt_code_counts": null,
+        "factor_batch_size": null,
+        "expected": null,
+        "chunks": []
+      },
+      "verdict": null
+    }
+  }
+}
