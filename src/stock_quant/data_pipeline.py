@@ -190,6 +190,7 @@ from stock_quant.data_quality.raw_checks import (
 )
 from stock_quant.data_sources.base import (
     AuthenticationError,
+    ContractError,
     DataRequest,
     DataSource,
     FetchResult,
@@ -2320,7 +2321,9 @@ class DataPipeline:
         arbiter = self._build_action_arbiter(
             symbols, start, end, issues, raw_snapshots, open_days, candidates
         )
-        factor_channel = self._build_factor_channel(end, issues, raw_snapshots)
+        factor_channel = self._build_factor_channel(
+            end, issues, raw_snapshots, candidates
+        )
         accepted_frames: list[pd.DataFrame] = []
         quarantined_frames: list[pd.DataFrame] = []
         for symbol in symbols:
@@ -2458,7 +2461,9 @@ class DataPipeline:
             FirstAnsweringArbiter(arbiters, issues), issues, reviewed
         )
 
-    def _build_factor_channel(self, end: date, issues, raw_snapshots):
+    def _build_factor_channel(
+        self, end: date, issues, raw_snapshots, candidates: Sequence[str] = ()
+    ):
         """Build the ADR-009 factor channel, or ``None`` when it is off.
 
         The channel serves only the absent-ex-date classification and stays
@@ -2476,7 +2481,7 @@ class DataPipeline:
         config = self._project_config.sources.get("xingyao")
         if config is None or not config.enabled:
             return None
-        return _LazyFactorChannel(
+        channel = _LazyFactorChannel(
             "xingyao",
             lambda symbol: fetch_factor_frame(
                 symbol,
@@ -2494,7 +2499,35 @@ class DataPipeline:
             issues=issues,
             raw_snapshots=raw_snapshots,
             record_raw=self._record_raw,
+            fetch_frames=(
+                None
+                if config.factor_batch_size is None
+                or config.factor_batch_timeout_seconds is None
+                else lambda symbols: self._fetch_factor_chunks(
+                    symbols,
+                    chunk_size=int(config.factor_batch_size),
+                    timeout_seconds=float(config.factor_batch_timeout_seconds),
+                    end=end,
+                )
+            ),
         )
+        channel.prefetch(candidates)
+        return channel
+
+    def _fetch_factor_chunks(
+        self, symbols, *, chunk_size: int, timeout_seconds: float, end
+    ):
+        """Chunked multi-code factor reads, each chunk one session (ADR-020 D6)."""
+        from stock_quant.data_sources.xingyao_factor import fetch_factor_frames
+
+        frames: dict[str, pd.DataFrame] = {}
+        for start in range(0, len(symbols), chunk_size):
+            chunk = list(symbols[start : start + chunk_size])
+            self._transport_attempt("xingyao", "backward_factor")(len(chunk))
+            frames.update(
+                fetch_factor_frames(chunk, timeout_seconds=timeout_seconds, end=end)
+            )
+        return frames
 
     def _build_price_channel(self, issues, raw_snapshots, open_days):
         """Build the ADR-013 reference-price lane, or ``None`` when it is off.
@@ -4121,6 +4154,7 @@ class _LazyFactorChannel:
         issues: list[QualityIssue],
         raw_snapshots: list[RawSnapshot],
         record_raw: Any,
+        fetch_frames: Any | None = None,
     ) -> None:
         self._source_name = source_name
         self._fetch_frame = fetch_frame
@@ -4130,6 +4164,7 @@ class _LazyFactorChannel:
         self._issues = issues
         self._raw_snapshots = raw_snapshots
         self._record_raw = record_raw
+        self._fetch_frames = fetch_frames
         self._events: dict[str, list[date]] = {}
         self._failed: set[str] = set()
 
@@ -4161,6 +4196,48 @@ class _LazyFactorChannel:
             return None
         self._events[symbol] = events
         return events
+
+    def prefetch(self, symbols: Iterable[str]) -> None:
+        """Warm the per-symbol cache from chunked multi-code reads.
+
+        Best effort in the same direction as the lazy path, and recorded the
+        same way: a chunk that fails warns once per symbol, and a code the
+        answer did not carry is an absent answer, not a cache miss -- it is
+        reported through the same ``_report`` the lazy path uses rather than
+        stored as a silent ``None``, which would turn a fail-closed case into
+        an unexplained absence.
+        """
+        if self._fetch_frames is None:
+            return
+        pending = [
+            symbol
+            for symbol in dict.fromkeys(symbols)
+            if symbol not in self._frames and symbol not in self._failed
+        ]
+        if not pending:
+            return
+        try:
+            frames = self._fetch_frames(pending)
+        except Exception as error:  # noqa: BLE001 - best-effort evidence channel
+            for symbol in pending:
+                self._report(symbol, error)
+            return
+        for symbol in pending:
+            frame = frames.get(symbol)
+            if frame is None:
+                self._report(
+                    symbol,
+                    ContractError(f"xingyao returned no factor frame for {symbol!r}"),
+                )
+                continue
+            if not frame.empty:
+                try:
+                    self._raw_snapshots.append(
+                        self._record_raw(self._make_snapshot(symbol, frame))
+                    )
+                except Exception:  # noqa: BLE001 - evidence capture is best effort
+                    pass
+            self._frames[symbol] = frame
 
     def _report(self, symbol: str, error: BaseException) -> None:
         """One warning, one cache entry: an absent channel stays absent."""

@@ -20,6 +20,7 @@ message, a metadata record or a log line.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
 
@@ -76,22 +77,33 @@ def factor_event_dates(frame: pd.DataFrame | None, symbol: str) -> list[date]:
     return events
 
 
+def fetch_factor_frames(
+    symbols: Sequence[str], *, timeout_seconds: float, end: date | None = None
+) -> dict[str, pd.DataFrame]:
+    """One worker for a whole chunk of factor series.
+
+    The stored bytes stay per symbol (the supplier's own wide frame for that
+    code); this only changes how many sessions it takes to obtain them.  A
+    code the answer did not carry is simply absent from the mapping -- the
+    caller must not invent a frame for it.
+    """
+    return run_isolated(
+        _fetch_backward_factor_batch,
+        timeout_seconds=timeout_seconds,
+        symbols=list(symbols),
+        end=(end or date.today()).isoformat(),
+    )
+
+
 def fetch_factor_frame(
     symbol: str, *, timeout_seconds: float, end: date | None = None
 ) -> pd.DataFrame:
-    """One worker, one symbol, the supplier's wide frame as it answered it.
-
-    Split from the event extraction on purpose: the frame is what must be
-    snapshotted, and extraction can raise ``ContractError`` on a frame that is
-    still the honest record of what the supplier said.  Fusing the two would
-    discard raw evidence exactly when it is most interesting.
-    """
-    return run_isolated(
-        _fetch_backward_factor,
-        timeout_seconds=timeout_seconds,
-        symbol=symbol,
-        end=(end or date.today()).isoformat(),
-    )
+    """One worker, one symbol: the strict path keeps ADR-009's stance."""
+    frames = fetch_factor_frames([symbol], timeout_seconds=timeout_seconds, end=end)
+    frame = frames.get(symbol)
+    if frame is None:
+        raise ContractError(f"xingyao returned no factor frame for {symbol!r}")
+    return frame
 
 
 def fetch_factor_event_dates(
@@ -151,19 +163,17 @@ def _deduplicate(series: pd.Series) -> dict[date, float]:
     return out
 
 
-def _fetch_backward_factor(*, symbol: str, end: str) -> pd.DataFrame:
-    """The worker body: login, one wide-table query, logout.
+def _login_and_import():
+    """The factor workers' shared credential check, SDK import and login.
 
-    The verified real-SDK surface, mirroring the daily lane's ``_RealClient``:
-    ``ad.login`` wants an int port and answers with a truthy flag -- falsy is
-    a credential refusal.  Missing or empty ``AD_USERNAME``/``AD_PASSWORD``
-    or ``AD_HOST``/``AD_PORT`` is refused before the SDK is even imported or
-    any connection is attempted, so every credential failure is the same
-    permanent error no matter which variable is at fault.  The factor series
-    is read over the whole listed history and then clipped to ``end``
-    (owner ruling 2026-09-26): the raw answer's calendar-length index grows
-    every trading day, and the stored bytes must be a function of the
-    recorded request for the drift audit's re-ask to compare hashes.
+    Extracted verbatim from ``_fetch_backward_factor`` (the error texts are
+    pinned): ``ad.login`` wants an int port and answers with a truthy flag --
+    falsy is a credential refusal.  Missing or empty ``AD_USERNAME``/
+    ``AD_PASSWORD`` or ``AD_HOST``/``AD_PORT`` is refused before the SDK is
+    even imported or any connection is attempted, so every credential failure
+    is the same permanent error no matter which variable is at fault.  The
+    module is returned only after the login has succeeded, so a caller's
+    ``finally`` can always log out.
     """
     import os
 
@@ -186,16 +196,26 @@ def _fetch_backward_factor(*, symbol: str, end: str) -> pd.DataFrame:
 
     import AmazingData as ad
 
-    logged_in = False
+    if not ad.login(
+        username=username,
+        password=password,
+        host=host,
+        port=port_number,
+    ):
+        raise AuthenticationError("xingyao rejected the credentials")
+    return ad
+
+
+def _fetch_backward_factor(*, symbol: str, end: str) -> pd.DataFrame:
+    """The worker body: login, one wide-table query, logout.
+
+    The factor series is read over the whole listed history and then clipped
+    to ``end`` (owner ruling 2026-09-26): the raw answer's calendar-length
+    index grows every trading day, and the stored bytes must be a function of
+    the recorded request for the drift audit's re-ask to compare hashes.
+    """
+    ad = _login_and_import()
     try:
-        if not ad.login(
-            username=username,
-            password=password,
-            host=host,
-            port=port_number,
-        ):
-            raise AuthenticationError("xingyao rejected the credentials")
-        logged_in = True
         response = ad.BaseData().get_backward_factor([symbol], is_local=False)
         # Owner ruling 2026-09-26: clip to the recorded end (bytes follow the request).
         return _clip_to_end(_to_frame(response), end)
@@ -208,11 +228,43 @@ def _fetch_backward_factor(*, symbol: str, end: str) -> pd.DataFrame:
             f"xingyao factor request failed ({type(error).__name__})"
         ) from None
     finally:
-        if logged_in:
-            try:
-                ad.logout()
-            except Exception:  # noqa: BLE001 - a logout failure costs nothing
-                pass
+        try:
+            ad.logout()
+        except Exception:  # noqa: BLE001 - a logout failure costs nothing
+            pass
+
+
+def _fetch_backward_factor_batch(
+    *, symbols: list[str], end: str
+) -> dict[str, pd.DataFrame]:
+    """The batch worker body: one login, one multi-code query, one logout.
+
+    Same credential and error discipline as the single-symbol worker.  Every
+    frame is clipped to the recorded ``end`` so its bytes remain a function of
+    the request (owner ruling 2026-09-26).
+    """
+    ad = _login_and_import()
+    try:
+        response = ad.BaseData().get_backward_factor(list(symbols), is_local=False)
+        if not isinstance(response, Mapping):
+            raise ContractError("xingyao returned an unreadable factor response")
+        return {
+            code: _clip_to_end(_to_frame(frame), end)
+            for code, frame in response.items()
+        }
+    except (AuthenticationError, ContractError):
+        raise
+    except Exception as error:  # noqa: BLE001 - map, never leak SDK text upward
+        if _looks_like_authentication(error):
+            raise AuthenticationError("xingyao rejected the credentials") from None
+        raise ServerError(
+            f"xingyao factor request failed ({type(error).__name__})"
+        ) from None
+    finally:
+        try:
+            ad.logout()
+        except Exception:  # noqa: BLE001 - a logout failure costs nothing
+            pass
 
 
 def _to_frame(response: Any) -> pd.DataFrame:

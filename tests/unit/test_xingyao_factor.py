@@ -173,10 +173,75 @@ def test_fetch_factor_frame_defaults_end_to_today(monkeypatch):
     def _fake_run_isolated(target, *, timeout_seconds, **kwargs):
         asked.update(kwargs)
         asked["timeout_seconds"] = timeout_seconds
-        return frame
+        return {code: frame for code in kwargs["symbols"]}
 
     monkeypatch.setattr(module, "run_isolated", _fake_run_isolated)
     result = module.fetch_factor_frame("000001.SZ", timeout_seconds=1.0)
     assert result.equals(frame)
     assert asked["end"] == date.today().isoformat()
-    assert asked["symbol"] == "000001.SZ"
+    assert asked["symbols"] == ["000001.SZ"]
+
+
+def test_a_factor_chunk_is_one_call_for_several_codes(monkeypatch):
+    """The factor endpoint is batched on its own terms (ADR-020 D5/D6)."""
+    from stock_quant.data_sources import xingyao_factor
+
+    calls: list[list[str]] = []
+    wide = _wide([1.0, 1.05])
+
+    def fake_isolated(target, *, timeout_seconds, **kwargs):
+        calls.append(list(kwargs["symbols"]))
+        return {code: wide for code in kwargs["symbols"]}
+
+    monkeypatch.setattr(xingyao_factor, "run_isolated", fake_isolated)
+    frames = xingyao_factor.fetch_factor_frames(
+        ["000001.SZ", "600000.SH"], timeout_seconds=120.0
+    )
+
+    assert calls == [["000001.SZ", "600000.SH"]]
+    assert set(frames) == {"000001.SZ", "600000.SH"}
+
+
+def test_a_single_symbol_factor_fetch_still_uses_one_worker(monkeypatch):
+    from stock_quant.data_sources import xingyao_factor
+
+    calls: list[list[str]] = []
+    wide = _wide([1.0, 1.05])
+
+    def fake_isolated(target, *, timeout_seconds, **kwargs):
+        calls.append(list(kwargs["symbols"]))
+        return {code: wide for code in kwargs["symbols"]}
+
+    monkeypatch.setattr(xingyao_factor, "run_isolated", fake_isolated)
+    frame = xingyao_factor.fetch_factor_frame("000001.SZ", timeout_seconds=30.0)
+
+    assert calls == [["000001.SZ"]]
+    assert not frame.empty
+
+
+def test_a_missing_code_in_a_factor_answer_is_dropped_not_invented(monkeypatch):
+    """No supplier object means no frame -- never a synthesised one."""
+    from stock_quant.data_sources import xingyao_factor
+
+    wide = _wide([1.0, 1.05])
+
+    def fake_isolated(target, *, timeout_seconds, **kwargs):
+        return {"000001.SZ": wide}
+
+    monkeypatch.setattr(xingyao_factor, "run_isolated", fake_isolated)
+    frames = xingyao_factor.fetch_factor_frames(
+        ["000001.SZ", "600000.SH"], timeout_seconds=120.0
+    )
+
+    assert set(frames) == {"000001.SZ"}
+
+
+def test_a_single_symbol_factor_fetch_still_refuses_an_absent_code(monkeypatch):
+    """The single-symbol path keeps ADR-009's strictness."""
+    from stock_quant.data_sources import xingyao_factor
+
+    monkeypatch.setattr(
+        xingyao_factor, "run_isolated", lambda target, *, timeout_seconds, **kwargs: {}
+    )
+    with pytest.raises(ContractError):
+        xingyao_factor.fetch_factor_frame("000001.SZ", timeout_seconds=30.0)

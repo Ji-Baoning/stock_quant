@@ -22,6 +22,7 @@ from stock_quant.data_model.corporate_actions import (
     normalize_corporate_actions,
 )
 from stock_quant.data_pipeline import ARBITER_NAME, _GuardedArbiter
+from stock_quant.data_sources.base import DataRequest, FetchResult, request_key
 from stock_quant.data_sources.tdx import (
     XDXR_COLUMNS,
     TdxUnavailableError,
@@ -1173,4 +1174,96 @@ def test_the_candidate_pool_reaches_the_lazy_arbiter_through_its_wrappers(
     )
 
     assert calls == [["600519.SH"]]
+
+
+# --------------------------------------------------------------------------- #
+# the factor channel's batched prefetch (ADR-020 D5/D6)
+# --------------------------------------------------------------------------- #
+
+
+def _factor_answer(symbol: str) -> pd.DataFrame:
+    """A dates-indexed, code-columned wide factor frame for one symbol.
+
+    The plan's ``_factor_frame()`` shape; this file's ``_factor_frame(rows)``
+    helper hardcodes the ``600519.SH`` column, so the prefetched answers are
+    built here instead.
+    """
+    return pd.DataFrame(
+        {
+            symbol: pd.Series(
+                [1.0, 1.05],
+                index=pd.to_datetime(["2025-01-02", "2025-01-03"]),
+            )
+        }
+    )
+
+
+def _prefetchable_channel(fetch_frames, issues, raw_snapshots):
+    """A factor channel whose lazy single-symbol path must never be reached."""
+    from stock_quant import data_pipeline
+
+    return data_pipeline._LazyFactorChannel(
+        "xingyao",
+        lambda symbol: pytest.fail("the lazy single-symbol path must not run"),
+        lambda frame, symbol: [],
+        lambda symbol, frame: FetchResult(
+            source="xingyao",
+            endpoint="backward_factor",
+            request_key=request_key(
+                DataRequest(
+                    "backward_factor",
+                    (symbol,),
+                    date(1990, 12, 19),
+                    date(2020, 12, 31),
+                )
+            ),
+            frame=frame,
+            metadata={"transport_id": "xingyao-broker-tcp"},
+        ),
+        date(2020, 12, 31),
+        issues=issues,
+        raw_snapshots=raw_snapshots,
+        record_raw=lambda result: result,
+        fetch_frames=fetch_frames,
+    )
+
+
+def test_a_factor_prefetch_answers_a_whole_chunk_without_the_lazy_path():
+    asked: list[list[str]] = []
+    issues: list = []
+    snapshots: list = []
+
+    def fetch_frames(symbols):
+        asked.append(list(symbols))
+        return {symbol: _factor_answer(symbol) for symbol in symbols}
+
+    channel = _prefetchable_channel(fetch_frames, issues, snapshots)
+    channel.prefetch(["000001.SZ", "600000.SH"])
+
+    assert asked == [["000001.SZ", "600000.SH"]]
+    assert channel.frame_for("000001.SZ") is not None
+    assert len(snapshots) == 2, "each code's own frame is still its own evidence"
+    assert issues == []
+
+
+def test_a_code_the_factor_answer_did_not_carry_is_reported_not_cached():
+    asked: list[list[str]] = []
+    issues: list = []
+
+    def fetch_frames(symbols):
+        asked.append(list(symbols))
+        return {"000001.SZ": _factor_answer("000001.SZ")}
+
+    channel = _prefetchable_channel(fetch_frames, issues, [])
+    channel.prefetch(["000001.SZ", "600000.SH"])
+
+    assert asked == [["000001.SZ", "600000.SH"]], "one chunk, not a session per code"
+    assert [i for i in issues if i.details.get("symbol") == "600000.SH"]
+    assert channel.frame_for("600000.SH") is None
+    assert asked == [["000001.SZ", "600000.SH"]], "and it is not asked again"
+
+
+def test_a_factor_channel_without_a_batch_fetcher_prefetches_nothing():
+    channel = _prefetchable_channel(None, [], [])
+    channel.prefetch(["000001.SZ"])
 
