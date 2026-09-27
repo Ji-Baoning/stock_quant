@@ -165,13 +165,23 @@ per-symbol evidence contract.**
 - **Batch evidence does not enter dataset identity.** It binds to a published
   version only by hash, through `build_config.batch_request_evidence`; the
   per-symbol snapshots keep carrying the dataset's raw evidence.
-- **The batch constants stay unfrozen until the probes run.** The batch field
-  pairs in `sources.yml` ship commented out; with a pair unset the lane falls
-  back to per-symbol requests rather than guessing a default chunk size. The
-  `empty` branch's retention is likewise decided by probe 2
-  (`docs/operations/2026-09-27-batched-channel-probes.md`, awaiting owner
-  authorization to run): if the supplier never returns a zero-row object, the
-  branch should not stay.
+- **The daily batch pair is frozen from measurement; the factor pair is not.**
+  The 2026-09-27 probes (`docs/operations/2026-09-27-batched-channel-probes.md`,
+  run under owner authorization) measured a 329-code daily chunk accepted in
+  one call (max full-chunk wall clock 6.46s over three clean repeats), frozen
+  as `batch_size: 329` / `batch_timeout_seconds: 20` in both `sources.yml`
+  files. The backward-factor probes could not measure a chunk: the endpoint
+  answers a multi-code call with a single wide frame (one column per code,
+  full-history index), not a mapping keyed by code, so the D5 factor shard
+  assumption does not hold — `factor_batch_*` stay unset, the factor channel
+  keeps its per-symbol fallback, and the wide-table follow-up awaits an owner
+  ruling (ops record §六-1). Probe 2 measured the suspension shape: a symbol
+  with no trading day in the whole window comes back as a present key holding
+  an unframe-able value — `refused`, never a zero-row object — so per-symbol
+  `refused` noise for long-suspended symbols is the accepted fail-closed
+  behaviour at enablement time, and the `empty` branch stays (fail-safe; no
+  zero-row object was ever observed, which one probe window cannot generalize
+  into "never").
 - **The `SourceStatus` vocabulary gains `batch_fetch_failure`** — a
   non-blocking, chunk-level failure code alongside the per-symbol
   `partial_fetch_failure`. Without it a whole-chunk failure would pass as
@@ -200,13 +210,14 @@ per-symbol evidence contract.**
 
 ## Evidence
 
-- Batch-channel probe plan and skeleton measurements:
-  `docs/operations/2026-09-27-batched-channel-probes.md` (`.evidence.json`
-  alongside it). **The measurements await owner authorization** — the probe
-  commands each log into the broker and consume weekly quota, so nothing has
-  been executed; the frozen constants (`batch_size`, `batch_timeout_seconds`,
-  `factor_batch_size`, `factor_batch_timeout_seconds`) and the `empty`
-  branch's fate are recorded there once it runs.
+- Batch-channel probes, run 2026-09-27 under owner authorization
+  (`docs/operations/2026-09-27-batched-channel-probes.md`, `.evidence.json`
+  alongside it, `_status: measured`): daily chunk ceiling 329 codes (a
+  659-code call is refused because a whole-window-suspended code comes back
+  unusable, not because of size), full-chunk latency max 6.463s, lane counter
+  model confirmed (1 session / 1 code query / attempt code count 329), the
+  absence shape and the factor wide-table finding, and the two items awaiting
+  an owner ruling (§六).
 - Design record with the batch boundary, failure semantics, interface and
   probe plan: `docs/superpowers/specs/2026-09-27-batched-validation-channel-design.md`.
 - The precondition this record satisfies: ADR-016 decision 11 and its probe 5

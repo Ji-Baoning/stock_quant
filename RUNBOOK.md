@@ -191,11 +191,14 @@ F < 0.0025 单位/会话【界】、日 K 行线上成本 ≈170–390 B/行【�
 
 1. 批量抓取通道已落地并验收（ADR-020）——SDK 的 `query_kline` 原生接受代码
    列表（Phase 0 探针即以 1000 只/批抓取）；xingyao 校验车道与因子通道已切
-   分片批量，缺批量配置对时回退逐标的。批量常量（`batch_size` 等）仍待探针
-   实测冻结（`project/probe_batch_channel.py`，见
-   `docs/operations/2026-09-27-batched-channel-probes.md`，待 owner 授权
-   运行）；未配置批量对就启用会把车道退回逐标的 worker 契约，全宇宙单轮成本
-   ≈0.8%–167% 周配额，最坏情形不可行（ADR-016 decision 11）。
+   分片批量，缺批量配置对时回退逐标的。daily 批量对已按实测冻结
+   （2026-09-27 探针：329-code 片可一次接受、整片墙钟最大 6.5s，车道计数
+   1 会话/1 code 查询；`batch_size: 329`、`batch_timeout_seconds: 20`，见
+   `docs/operations/2026-09-27-batched-channel-probes.md`）。factor 批量对
+   **未冻结**：因子端点多 code 返回宽表而非 mapping，批量分片假设不成立
+   （ops 记录 §六-1，待 owner 裁定），因子通道继续逐标的。启用须知悉：
+   全窗口无交易日的标的在批量答案里为逐标的 `refused`（fail-closed 现状，
+   ops 记录 §六-2）。
 2. 把 `project/configs/sources.yml` 的 `xingyao.enabled` 改为 `true`（仅配置
    变更）；首轮小窗口核对 `validation_present` 翻转行为与调用账本
    `raw_snapshot_reuse` 的 `reused` 段。

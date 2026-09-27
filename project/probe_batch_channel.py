@@ -5,10 +5,11 @@ Never run this without the owner's go-ahead: it logs in to the broker and
 consumes quota.  Every reading is printed and written to an evidence JSON so
 the frozen default can be traced to a measurement rather than to a guess.
 
-Status: written, never executed (batched-validation-channel plan Task 10
-Step 1).  Running any subcommand below is Step 2 and waits for the owner's
-explicit authorization; until then nothing here may be executed, and no
-measured value may be frozen into a sources.yml.
+Status: executed 2026-09-27 under owner authorization (Task 10 Step 2; see
+docs/operations/2026-09-27-batched-channel-probes.md for the readings and the
+two items that still await an owner ruling).  The run fixed one dispatch bug
+in ``main`` -- the four handlers' signatures differ in parameter order, so the
+shared positional call was replaced with per-probe all-keyword calls.
 
 Every subcommand requires ``--symbols-file`` (one code per line, ``#``
 comments allowed); there is no built-in code list.  Daily probes go through
@@ -980,32 +981,59 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError) as error:
         print(f"symbols file error: {error}")
         return 1
+    # All-keyword invocation: the four handlers' signatures differ in
+    # parameter order, and a positional call cannot be shared by them.
     if args.probe == "probe-limit":
         handler = run_probe_limit
-        kwargs = {"endpoint": args.endpoint}
+        kwargs = dict(
+            endpoint=args.endpoint,
+            symbols=symbols,
+            symbols_file=args.symbols_file,
+            evidence_path=args.evidence,
+            window_start=args.window_start,
+            window_end=args.window_end,
+            factor_end=args.factor_end,
+            timeout_seconds=args.timeout_seconds,
+        )
     elif args.probe == "probe-absence":
         handler = run_probe_absence
-        kwargs = {
-            "absence_symbol": args.absence_symbol,
-            "control_symbol": args.control_symbol,
-        }
+        kwargs = dict(
+            symbols=symbols,
+            symbols_file=args.symbols_file,
+            evidence_path=args.evidence,
+            window_start=args.window_start,
+            window_end=args.window_end,
+            absence_symbol=args.absence_symbol,
+            control_symbol=args.control_symbol,
+            timeout_seconds=args.timeout_seconds,
+        )
     elif args.probe == "probe-latency":
         handler = run_probe_latency
-        kwargs = {"endpoint": args.endpoint, "repeats": args.repeats}
+        kwargs = dict(
+            endpoint=args.endpoint,
+            symbols=symbols,
+            symbols_file=args.symbols_file,
+            evidence_path=args.evidence,
+            repeats=args.repeats,
+            window_start=args.window_start,
+            window_end=args.window_end,
+            factor_end=args.factor_end,
+            timeout_seconds=args.timeout_seconds,
+        )
     else:
         handler = run_probe_counters
-        kwargs = {"factor_batch_size": args.factor_batch_size}
-    try:
-        handler(
-            symbols,
-            args.symbols_file,
-            args.evidence,
-            args.window_start,
-            args.window_end,
-            args.factor_end,
-            args.timeout_seconds,
-            **kwargs,
+        kwargs = dict(
+            symbols=symbols,
+            symbols_file=args.symbols_file,
+            evidence_path=args.evidence,
+            window_start=args.window_start,
+            window_end=args.window_end,
+            factor_end=args.factor_end,
+            timeout_seconds=args.timeout_seconds,
+            factor_batch_size=args.factor_batch_size,
         )
+    try:
+        handler(**kwargs)
     except AuthenticationError as error:
         print(f"authentication rejected: {error}")
         print(
