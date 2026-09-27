@@ -46,7 +46,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import pandas as pd
 
@@ -56,6 +56,10 @@ from stock_quant.data_model.adjusted_bar import (
     ADJUSTMENT_NAME,
     action_id_of,
     build_adjusted_bars,
+)
+from stock_quant.data_model.batch_evidence import (
+    BatchOutcomeRecord,
+    BatchRequestEvidence,
 )
 from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.calendar_coverage import (
@@ -190,10 +194,12 @@ from stock_quant.data_sources.base import (
     DataSource,
     FetchResult,
     RetryPolicy,
+    fetch_batch_with_retry,
     fetch_with_retry,
     request_key,
     translate_supplier_error,
 )
+from stock_quant.data_sources.batch_evidence_store import BatchEvidenceStore
 from stock_quant.data_sources.raw_store import (
     RawSnapshot,
     RawSnapshotEvidence,
@@ -388,6 +394,12 @@ def _reuse_evidence(
     }
 
 
+def _chunks(symbols: Sequence[str], size: int) -> Iterator[list[str]]:
+    """Contiguous chunks: the batch order must follow the requested order."""
+    for start in range(0, len(symbols), size):
+        yield list(symbols[start : start + size])
+
+
 def _reused_ledger_payload(
     counts: Mapping[str, Mapping[str, Mapping[str, int]]],
 ) -> dict[str, dict[str, int]]:
@@ -529,6 +541,7 @@ def dataset_build_config(
     table_fetch_coverage: Mapping[str, object] | None = None,
     baseline_version: str | None = None,
     raw_snapshot_reuse: Mapping[str, object] | None = None,
+    batch_request_evidence: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """The exact sanitized payload hashed into a published dataset version.
 
@@ -547,7 +560,10 @@ def dataset_build_config(
     the carried-segment chain to that manifest.  When supplied,
     ``raw_snapshot_reuse`` carries the per source x endpoint {reused,
     fetched} counters of the lanes that may serve stored snapshots back
-    (ADR-015) as deterministic build evidence.
+    (ADR-015) as deterministic build evidence.  ``batch_request_evidence``
+    records the hashes of the batch transmission evidence a round actually
+    used (ADR-020 D8), so the dataset version can point back at the batch
+    records it was built from.
     """
     config = {
         "origin": "data_update",
@@ -575,6 +591,8 @@ def dataset_build_config(
         config["table_fetch_coverage"] = dict(table_fetch_coverage)
     if raw_snapshot_reuse:
         config["raw_snapshot_reuse"] = dict(raw_snapshot_reuse)
+    if batch_request_evidence:
+        config["batch_request_evidence"] = list(batch_request_evidence)
     return config
 
 
@@ -705,6 +723,14 @@ class DataPipeline:
         # ``_sources_used``; they feed ``build_config.raw_snapshot_reuse``
         # and the ledger's ``reused`` section.
         self._reuse_counts: dict[str, dict[str, dict[str, int]]] = {}
+        # Attempted transport operations per source x endpoint: sessions
+        # established and code-bearing queries issued (ADR-020 D6).  Counted
+        # by the parent before each worker start, so retries and bisections
+        # are visible; they feed the ledger's ``transport`` section.
+        self._transport_counts: dict[str, dict[str, dict[str, int]]] = {}
+        # Content addresses of the batch evidence records this run wrote,
+        # bound into build_config on publish and on every failure path.
+        self._batch_evidence_shas: set[str] = set()
 
     # -- public surface --------------------------------------------------- #
 
@@ -808,6 +834,8 @@ class DataPipeline:
         run_id = f"data_update_{uuid.uuid4().hex[:12]}"
         self._sources_used = {}
         self._reuse_counts = {}
+        self._transport_counts = {}
+        self._batch_evidence_shas = set()
         statuses: dict[str, SourceStatus] = {}
         issues: list[QualityIssue] = []
         raw_snapshots: list[RawSnapshot] = []
@@ -1337,6 +1365,7 @@ class DataPipeline:
                     ),
                     baseline_version=baseline_version,
                     raw_snapshot_reuse=_reuse_evidence(self._reuse_counts),
+                    batch_request_evidence=sorted(self._batch_evidence_shas),
                 ),
                 table_tiers=table_tiers,
             )
@@ -2607,16 +2636,141 @@ class DataPipeline:
         source = self._adapter_or_warn(name, issues)
         if source is None:
             statuses[name] = SourceStatus(
-                name, False, False,
+                name,
+                False,
+                False,
                 reason="optional source unavailable",
                 reason_code="optional_source_unavailable",
             )
             return
+        config = self._project_config.sources.get(name, SourceConfig())
+        if (
+            getattr(source, "fetch_batch", None) is None
+            or config.batch_size is None
+            or config.batch_timeout_seconds is None
+        ):
+            # No batch capability, or no frozen batch pair: the lane stays
+            # per-symbol.  An unfrozen pair is not guessed at (ADR-020 D6).
+            self._fetch_validation_per_symbol(
+                name,
+                source,
+                symbols,
+                start,
+                end,
+                issues,
+                statuses,
+                raw_snapshots,
+                validation_rows,
+                reuse=reuse,
+            )
+            return
+        policy = RetryPolicy(
+            max_attempts=min(config.max_retries + 1, 3),
+            maximum_wait_seconds=min(config.timeout_seconds, 30),
+            call_timeout_seconds=config.timeout_seconds,
+        )
+        failures = 0
+        chunk_failed = False
+        for chunk in _chunks(symbols, int(config.batch_size)):
+            pending, hits = self._partition_reusable(
+                name, "daily", chunk, start, end, issues, reuse=reuse
+            )
+            for result, snapshot in hits:
+                raw_snapshots.append(snapshot)
+                validation_rows.append(
+                    normalize_daily(
+                        result.frame, name, _ingest_time(result.metadata)
+                    ).valid
+                )
+            if not pending:
+                continue
+            requests = [
+                DataRequest(
+                    "daily", (symbol,), start, end, {"adjustment": "unadjusted"}
+                )
+                for symbol in pending
+            ]
+            try:
+                batch = fetch_batch_with_retry(
+                    source,
+                    requests,
+                    policy,
+                    sleeper=self._sleeper,
+                    on_attempt=self._transport_attempt(name, "daily"),
+                )
+            except Exception as error:  # noqa: BLE001 - optional lane
+                chunk_failed = True
+                failures += len(pending)
+                issues.append(
+                    _issue(
+                        Severity.WARNING,
+                        CODE_OPTIONAL_SOURCE_FAILURE,
+                        details={
+                            "source": name,
+                            "endpoint": "daily",
+                            "batch_size": len(pending),
+                            "symbols": ",".join(pending),
+                            "message": str(translate_supplier_error(error)),
+                        },
+                    )
+                )
+                continue
+            failures += self._record_batch_outcomes(
+                name, batch, requests, issues, raw_snapshots, validation_rows
+            )
+        if chunk_failed:
+            statuses[name] = SourceStatus(
+                name,
+                False,
+                False,
+                reason=(
+                    f"a batch chunk failed after retry and bisection "
+                    f"({failures} of {len(symbols)} validation requests unanswered)"
+                ),
+                reason_code="batch_fetch_failure",
+            )
+        elif failures:
+            statuses[name] = SourceStatus(
+                name,
+                False,
+                False,
+                reason=f"{failures} of {len(symbols)} validation requests failed",
+                reason_code="partial_fetch_failure",
+            )
+        else:
+            statuses[name] = SourceStatus(name, False, True, reason_code="ok")
+
+    def _fetch_validation_per_symbol(
+        self,
+        name,
+        source,
+        symbols,
+        start,
+        end,
+        issues,
+        statuses,
+        raw_snapshots,
+        validation_rows,
+        *,
+        reuse,
+    ) -> None:
+        """The pre-batch lane, kept for adapters without ``fetch_batch``.
+
+        Behaviour is unchanged from the per-symbol era, so a lane that is not
+        batched keeps producing exactly the evidence it produced before.
+        """
         failures = 0
         for symbol in symbols:
             dispatched = self._dispatch(
-                name, source, "daily", symbol, start, end,
-                {"adjustment": "unadjusted"}, required=False, issues=issues,
+                name,
+                source,
+                "daily",
+                symbol,
+                start,
+                end,
+                {"adjustment": "unadjusted"},
+                required=False,
+                issues=issues,
                 reuse=reuse,
             )
             if dispatched is None:
@@ -2625,18 +2779,166 @@ class DataPipeline:
             result, snapshot = dispatched
             raw_snapshots.append(snapshot)
             validation_rows.append(
-                normalize_daily(
-                    result.frame, name, _ingest_time(result.metadata)
-                ).valid
+                normalize_daily(result.frame, name, _ingest_time(result.metadata)).valid
             )
         if failures:
             statuses[name] = SourceStatus(
-                name, False, False,
+                name,
+                False,
+                False,
                 reason=f"{failures} of {len(symbols)} validation requests failed",
                 reason_code="partial_fetch_failure",
             )
         else:
             statuses[name] = SourceStatus(name, False, True, reason_code="ok")
+
+    def _partition_reusable(
+        self, name, endpoint, symbols, start, end, issues, *, reuse
+    ):
+        """Reuse first, network second: hits served, misses returned.
+
+        Mirrors ``_dispatch``'s reuse step exactly -- same lookup, same
+        ``reuse_candidate_rejected`` warning for a candidate that exists but
+        is refused, same ``FetchResult`` rebuilt from the stored manifest --
+        so a reused answer and a fetched answer reach the same downstream.
+        """
+        store = BatchEvidenceStore(self._project_root)
+        pending: list[str] = []
+        hits: list[tuple[FetchResult, RawSnapshot]] = []
+        for symbol in symbols:
+            request = DataRequest(
+                endpoint, (symbol,), start, end, {"adjustment": "unadjusted"}
+            )
+            if reuse:
+                resolved = self._raw_store.resolve_reusable(name, endpoint, request)
+                if resolved is not None:
+                    snapshot, frame = resolved
+                    self._count_fetch(name, endpoint, "reused")
+                    # The bytes came back from the store, but the batch that
+                    # produced them is still the transport fact behind this
+                    # run's evidence: without this the version's
+                    # ``batch_request_evidence`` would silently lose every
+                    # chunk that reuse answered (spec §5).
+                    origin = store.lookup_by_snapshot(
+                        name, endpoint, request_key(request), snapshot.sha256
+                    )
+                    if origin is not None:
+                        self._batch_evidence_shas.add(origin.sha256)
+                    hits.append(
+                        (
+                            FetchResult(
+                                source=name,
+                                endpoint=endpoint,
+                                request_key=request_key(request),
+                                frame=frame,
+                                metadata=dict(
+                                    snapshot.manifest.get("metadata") or {}
+                                ),
+                            ),
+                            snapshot,
+                        )
+                    )
+                    continue
+                if issues is not None and self._raw_store.has_candidate(
+                    name, endpoint, request
+                ):
+                    issues.append(
+                        _issue(
+                            Severity.WARNING,
+                            CODE_REUSE_CANDIDATE_REJECTED,
+                            symbol=symbol,
+                            details={"source": name, "endpoint": endpoint},
+                        )
+                    )
+            pending.append(symbol)
+        return pending, hits
+
+    def _record_batch_outcomes(
+        self, name, batch, requests, issues, raw_snapshots, validation_rows
+    ) -> int:
+        """Book one chunk's outcomes and its batch provenance; return refusals."""
+        failures = 0
+        recorded: dict[str, BatchOutcomeRecord] = {}
+        for request, outcome in zip(requests, batch.outcomes, strict=True):
+            symbol = request.symbols[0]
+            if outcome.status == "refused":
+                failures += 1
+                issues.append(
+                    _issue(
+                        Severity.WARNING,
+                        CODE_OPTIONAL_SOURCE_FAILURE,
+                        symbol=symbol,
+                        details={
+                            "source": name,
+                            "endpoint": "daily",
+                            "symbol": symbol,
+                            "message": outcome.message,
+                        },
+                    )
+                )
+                recorded[symbol] = BatchOutcomeRecord(
+                    symbol, request_key(request), "refused", None, outcome.message
+                )
+                continue
+            # ``ok`` and ``empty`` take the same path: both are answers the
+            # supplier gave an object for, so both are snapshotted as-is.
+            snapshot = self._record_raw(outcome.result)
+            raw_snapshots.append(snapshot)
+            self._count_fetch(name, "daily", "fetched")
+            if outcome.status == "ok":
+                validation_rows.append(
+                    normalize_daily(
+                        outcome.result.frame,
+                        name,
+                        _ingest_time(outcome.result.metadata),
+                    ).valid
+                )
+            recorded[symbol] = BatchOutcomeRecord(
+                symbol, outcome.result.request_key, outcome.status, snapshot.sha256
+            )
+        self._save_batch_evidence(name, batch, recorded)
+        return failures
+
+    def _save_batch_evidence(self, name, batch, recorded) -> None:
+        """Bind each transmission to what it produced, per symbol.
+
+        Written even when a symbol was refused: a refusal has no snapshot but
+        is still a fact about the batch, and losing it would leave the record
+        claiming the symbol was never asked for.
+        """
+        store = BatchEvidenceStore(self._project_root)
+        for transmission in batch.transmissions:
+            outcomes = tuple(
+                recorded[symbol]
+                for symbol in transmission.symbols
+                if symbol in recorded
+            )
+            if not outcomes:
+                continue
+            evidence = BatchRequestEvidence(
+                source=name,
+                endpoint="daily",
+                transport_id=transmission.transport_id,
+                batch_id=transmission.batch_id,
+                batch_request_parameters=transmission.request_parameters,
+                request_timestamp=transmission.request_timestamp,
+                response_timestamp=transmission.response_timestamp,
+                outcomes=outcomes,
+            )
+            store.save(evidence)
+            self._batch_evidence_shas.add(evidence.sha256)
+
+    def _transport_attempt(self, name: str, endpoint: str):
+        """A hook the batch call fires once per attempted worker start."""
+
+        def attempt(code_count: int) -> None:
+            row = self._transport_counts.setdefault(name, {}).setdefault(
+                endpoint, {"sessions": 0, "code_queries": 0}
+            )
+            row["sessions"] += 1
+            row["code_queries"] += 1
+
+        return attempt
 
     def _adapter_or_fail(self, name, statuses):
         try:
