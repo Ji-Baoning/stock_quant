@@ -18,6 +18,30 @@ class SourceConfig(BaseModel):
     enabled: bool = True
     timeout_seconds: int = Field(default=30, ge=1, le=120)
     max_retries: int = Field(default=3, ge=0, le=3)
+    #: Batch fields come in pairs and are off unless both are set: a size with
+    #: no process bound would let one call hold the run, and a bound with no
+    #: size cannot be applied.  Unset means the batch channel is not used at
+    #: all (the lane falls back to per-symbol requests); the defaults are
+    #: frozen from the batch-channel probes (docs/operations/), never guessed
+    #: here.
+    batch_size: int | None = Field(default=None, ge=1, le=1000)
+    batch_timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
+    factor_batch_size: int | None = Field(default=None, ge=1, le=1000)
+    factor_batch_timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
+
+    @model_validator(mode="after")
+    def _batch_fields_are_paired(self) -> "SourceConfig":
+        for size_field, timeout_field in (
+            ("batch_size", "batch_timeout_seconds"),
+            ("factor_batch_size", "factor_batch_timeout_seconds"),
+        ):
+            size = getattr(self, size_field)
+            timeout = getattr(self, timeout_field)
+            if (size is None) != (timeout is None):
+                raise ValueError(
+                    f"{size_field} and {timeout_field} must be configured together"
+                )
+        return self
 
 
 class CostRate(BaseModel):

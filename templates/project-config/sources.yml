@@ -20,6 +20,14 @@ xingyao:
   # ships disabled pending a batch fetch channel (the per-symbol lane costs
   # one login session per symbol per round).  See
   # project/configs/sources.yml.
+  # 批量通道（ADR-020）：日线校验车道与因子通道各有一对字段，取值由
+  # project/probe_batch_channel.py 的实测冻结（见 docs/operations/）。
+  # 成对配置：只给 size 或只给 timeout 会被 SourceConfig 拒绝；
+  # 两者都不给 = 该端点仍走逐标的请求，不猜默认值。
+  # batch_size: 1000
+  # batch_timeout_seconds: 180
+  # factor_batch_size: 200
+  # factor_batch_timeout_seconds: 300
   enabled: false
   timeout_seconds: 30
   max_retries: 2
