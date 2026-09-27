@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from datetime import date
+
 import pandas as pd
 import pytest
 
@@ -48,8 +51,20 @@ class FakeKline:
 
 
 class FakeSdk:
-    def __init__(self, *, login_error: Exception | None = None,
-                 kline_error: Exception | None = None) -> None:
+    """Stand-in for the SDK: one multi-code answer, keyed by code.
+
+    The answer travels back from a forked child, so a fake that merely
+    *records* what it was asked cannot be read back by these tests -- the
+    append happens in the child.  What the tests assert on is the answer's
+    content, which the worker does return.
+    """
+
+    def __init__(
+        self,
+        *,
+        login_error: Exception | None = None,
+        kline_error: Exception | None = None,
+    ) -> None:
         self.login_error = login_error
         self.kline_error = kline_error
         self.logins = 0
@@ -60,10 +75,13 @@ class FakeSdk:
             raise self.login_error
         return object()
 
-    def query_kline(self, **_):
+    def query_kline(self, *, symbols=None, **_):
         if self.kline_error is not None:
             raise self.kline_error
-        return FakeKline()
+        return {
+            code: FakeKline(rows=[{**row, "code": code} for row in FakeKline().rows])
+            for code in list(symbols or [])
+        }
 
 
 def _request(endpoint: str = "daily", symbols: tuple[str, ...] = ("000001.SZ",)):
@@ -122,14 +140,19 @@ def test_an_empty_frame_is_a_contract_error_not_an_empty_answer():
 
 
 class _EmptySdk(FakeSdk):
-    def query_kline(self, **_):
-        return FakeKline(rows=[])
+    def query_kline(self, *, symbols=None, **_):
+        # The real SDK's zero-row answer keeps the columns; a frame built
+        # from no rows alone would not, and the parent would refuse it.
+        return {code: FakeKline().to_frame().iloc[:0] for code in symbols}
 
 
 def test_a_frame_without_the_date_column_is_a_contract_error():
     class _NoDate(FakeSdk):
-        def query_kline(self, **_):
-            return FakeKline(rows=[{"code": "000001.SZ", "close": 10.5}])
+        def query_kline(self, *, symbols=None, **_):
+            return {
+                code: FakeKline(rows=[{"code": code, "close": 10.5}])
+                for code in symbols
+            }
 
     with pytest.raises(ContractError):
         _source(_NoDate()).fetch(_request())
@@ -139,21 +162,24 @@ def test_a_row_outside_the_requested_window_is_a_contract_error():
     """An out-of-window row means the request was not honoured as written."""
 
     class _OutOfWindow(FakeSdk):
-        def query_kline(self, **_):
-            return FakeKline(
-                rows=[
-                    {
-                        "kline_time": "2023-12-01",
-                        "code": "000001.SZ",
-                        "open": 1.0,
-                        "high": 1.0,
-                        "low": 1.0,
-                        "close": 1.0,
-                        "volume": 1.0,
-                        "amount": 1.0,
-                    }
-                ]
-            )
+        def query_kline(self, *, symbols=None, **_):
+            return {
+                code: FakeKline(
+                    rows=[
+                        {
+                            "kline_time": "2023-12-01",
+                            "code": code,
+                            "open": 1.0,
+                            "high": 1.0,
+                            "low": 1.0,
+                            "close": 1.0,
+                            "volume": 1.0,
+                            "amount": 1.0,
+                        }
+                    ]
+                )
+                for code in symbols
+            }
 
     with pytest.raises(ContractError):
         _source(_OutOfWindow()).fetch(_request())
@@ -173,3 +199,129 @@ def test_a_failed_login_never_reproduces_what_it_was_given():
     with pytest.raises(AuthenticationError) as caught:
         source.fetch(_request())
     assert "test-secret" not in str(caught.value)
+
+
+def _batch_request(symbols):
+    return [
+        DataRequest("daily", (symbol,), _START, _END, {"adjustment": "unadjusted"})
+        for symbol in symbols
+    ]
+
+
+def test_one_batch_call_answers_every_requested_symbol():
+    """One login, one calendar, one query -- however many codes (ADR-020 D1)."""
+    result = _source(FakeSdk()).fetch_batch(_batch_request(["000001.SZ", "600000.SH"]))
+
+    assert [outcome.symbol for outcome in result.outcomes] == [
+        "000001.SZ",
+        "600000.SH",
+    ]
+    assert all(outcome.status == "ok" for outcome in result.outcomes)
+    assert len(result.transmissions) == 1
+    assert json.loads(result.transmissions[0].request_parameters)["symbols"] == [
+        "000001.SZ",
+        "600000.SH",
+    ]
+
+
+def test_each_ok_outcome_carries_its_own_fetch_result():
+    """request_key and metadata stay per symbol even when one call served both."""
+    result = _source(FakeSdk()).fetch_batch(_batch_request(["000001.SZ", "600000.SH"]))
+    first, second = (outcome.result for outcome in result.outcomes)
+
+    assert first.request_key != second.request_key
+    assert first.metadata["transport_id"] == "xingyao-broker-tcp"
+    assert first.metadata["supplier_endpoint"] == "xingyao.query_kline"
+    assert first.metadata["request_timestamp"] == second.metadata["request_timestamp"]
+    assert first.frame["code"].tolist() == ["000001.SZ", "000001.SZ"]
+    assert second.frame["code"].tolist() == ["600000.SH", "600000.SH"]
+
+
+def test_a_supplier_object_with_no_rows_is_an_empty_answer():
+    """The zero-row object exists, so it is an answer -- and is snapshotted."""
+    result = _source(_EmptySdk()).fetch_batch(_batch_request(["000001.SZ"]))
+
+    assert result.outcomes[0].status == "empty"
+    assert result.outcomes[0].result is not None
+    assert result.outcomes[0].result.frame.empty
+
+
+def test_a_code_absent_from_the_answer_is_refused_not_empty():
+    """Fail-closed: an absent key has an unknowable cause (ADR-020 D2)."""
+
+    class _Partial(FakeSdk):
+        def query_kline(self, *, symbols=None, **_):
+            return {"000001.SZ": FakeKline()}
+
+    result = _source(_Partial()).fetch_batch(_batch_request(["000001.SZ", "600000.SH"]))
+
+    assert [outcome.status for outcome in result.outcomes] == ["ok", "refused"]
+    assert result.outcomes[1].result is None
+    assert result.outcomes[1].message
+
+
+def test_a_contract_break_in_one_code_refuses_only_that_code():
+    """Layer 2: one bad frame must not take the chunk down with it."""
+
+    class _OneBad(FakeSdk):
+        def query_kline(self, *, symbols=None, **_):
+            return {
+                "000001.SZ": FakeKline(),
+                "600000.SH": FakeKline(rows=[{"code": "600000.SH", "close": 1.0}]),
+            }
+
+    result = _source(_OneBad()).fetch_batch(_batch_request(["000001.SZ", "600000.SH"]))
+
+    assert [outcome.status for outcome in result.outcomes] == ["ok", "refused"]
+
+
+def test_an_answer_that_is_not_a_mapping_terminates_without_retry():
+    """A whole-call contract break is permanent, not transient (spec §4 layer 1)."""
+
+    class _NotAMapping(FakeSdk):
+        def query_kline(self, *, symbols=None, **_):
+            return object()
+
+    with pytest.raises(ContractError):
+        _source(_NotAMapping()).fetch_batch(_batch_request(["000001.SZ"]))
+
+
+def test_a_value_that_is_not_a_frame_refuses_that_code_in_the_parent():
+    """The worker never judges a code; it only makes the value transportable."""
+
+    class _Unreadable(FakeSdk):
+        def query_kline(self, *, symbols=None, **_):
+            return {"000001.SZ": object()}
+
+    result = _source(_Unreadable()).fetch_batch(_batch_request(["000001.SZ"]))
+
+    assert result.outcomes[0].status == "refused"
+    assert result.outcomes[0].result is None
+
+
+def test_batch_and_single_request_judge_an_empty_answer_differently():
+    """ADR-020 D2's boundary: the lane may call a zero-row object an answer,
+    the single-request path may not."""
+    with pytest.raises(ContractError):
+        _source(_EmptySdk()).fetch(_request())
+    result = _source(_EmptySdk()).fetch_batch(_batch_request(["000001.SZ"]))
+    assert result.outcomes[0].status == "empty"
+
+
+def test_each_batch_call_reports_one_attempt_with_its_code_count():
+    """The parent counts attempts: a child-side counter never comes back."""
+    attempts: list[int] = []
+    _source(FakeSdk()).fetch_batch(
+        _batch_request(["000001.SZ", "600000.SH"]), on_attempt=attempts.append
+    )
+    assert attempts == [2]
+
+
+def test_a_batch_request_that_is_not_one_window_is_refused():
+    with pytest.raises(ValueError, match="exactly one window"):
+        _source(FakeSdk()).fetch_batch(
+            [
+                DataRequest("daily", ("000001.SZ",), _START, _END, {}),
+                DataRequest("daily", ("600000.SH",), _START, date(2024, 1, 6), {}),
+            ]
+        )

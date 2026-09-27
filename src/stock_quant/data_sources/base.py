@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Callable, Iterator, Protocol
+from typing import Any, Callable, Iterator, Protocol
 
 import pandas as pd
 
@@ -194,6 +195,88 @@ def fetch_with_retry(
                 f"supplier call exceeded the {policy.call_timeout_seconds}s timeout"
             )
             failure.__cause__ = expiry
+        except TransientSourceError as error:
+            failure = error
+        if attempt == policy.max_attempts:
+            raise failure
+        wait_seconds = min(attempt, policy.maximum_wait_seconds)
+        if wait_seconds:
+            sleeper(wait_seconds)
+    raise AssertionError("retry loop must return or raise")
+
+
+def fetch_batch_with_retry(
+    source: Any,
+    requests: Sequence[DataRequest],
+    policy: RetryPolicy,
+    *,
+    sleeper: Callable[[float], None] = time.sleep,
+    on_attempt: Callable[[int], None] | None = None,
+    max_bisect_levels: int = 2,
+) -> Any:
+    """One batch chunk: retry transient faults, then bisect -- and nothing else.
+
+    ``source`` is duck-typed (``Any``, not ``DataSource``): the batch
+    capability is optional and the caller checks for it before getting here,
+    and ``DataSource`` stays the two-method Protocol it is (spec §5).
+
+    Bisection is a *retry* policy, never an attribution policy.  Only a
+    timeout or a server-side fault that survived its retries splits the chunk;
+    bad credentials, a configuration error, a contract-breaking batch answer
+    and a rate limit do not (splitting a rate-limited chunk would work around
+    the supplier's own control rather than respect it).  Whatever still fails
+    after bisection is a *chunk-level* failure: the caller records the chunk
+    and never invents a per-symbol verdict from it.
+    """
+    try:
+        return _fetch_batch_attempts(
+            source, requests, policy, sleeper=sleeper, on_attempt=on_attempt
+        )
+    except (TimeoutError, ServerError):
+        if max_bisect_levels <= 0 or len(requests) <= 1:
+            raise
+        middle = len(requests) // 2
+        left = fetch_batch_with_retry(
+            source,
+            requests[:middle],
+            policy,
+            sleeper=sleeper,
+            on_attempt=on_attempt,
+            max_bisect_levels=max_bisect_levels - 1,
+        )
+        right = fetch_batch_with_retry(
+            source,
+            requests[middle:],
+            policy,
+            sleeper=sleeper,
+            on_attempt=on_attempt,
+            max_bisect_levels=max_bisect_levels - 1,
+        )
+        return type(left)(
+            outcomes=left.outcomes + right.outcomes,
+            transmissions=left.transmissions + right.transmissions,
+        )
+
+
+def _fetch_batch_attempts(
+    source: Any,
+    requests: Sequence[DataRequest],
+    policy: RetryPolicy,
+    *,
+    sleeper: Callable[[float], None],
+    on_attempt: Callable[[int], None] | None,
+) -> Any:
+    """Attempts under the adapter's own process bound, then the policy's wait.
+
+    Deliberately *no* ``default_request_timeout`` wrapper here (unlike
+    ``fetch_with_retry``): that bounds an HTTP session, and a batch call's
+    bound is the adapter's own ``run_isolated`` timeout.  Only the wait
+    between attempts comes from the policy.
+    """
+    for attempt in range(1, policy.max_attempts + 1):
+        failure: Exception
+        try:
+            return source.fetch_batch(requests, on_attempt=on_attempt)
         except TransientSourceError as error:
             failure = error
         if attempt == policy.max_attempts:

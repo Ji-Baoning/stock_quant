@@ -13,11 +13,17 @@ error message that reaches the quality report, or a snapshot.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
 
 from stock_quant.config import SourceConfig
+from stock_quant.data_model.batch_evidence import (
+    batch_id_for,
+    batch_request_parameters,
+)
 from stock_quant.data_sources._isolated import run_isolated
 from stock_quant.data_sources.base import (
     AuthenticationError,
@@ -43,6 +49,56 @@ DATE_COLUMN = "kline_time"
 _REQUIRED_ENVIRONMENT = ("AD_USERNAME", "AD_PASSWORD")
 
 
+@dataclass(frozen=True)
+class UnreadableFrame:
+    """A per-code answer the worker could not turn into a frame.
+
+    Conversion, not judgement: the child must not decide that a code is
+    refused (spec §4 layer 2 gives that verdict to the parent), but a value
+    that is not a frame and has no ``to_frame`` cannot cross the process
+    boundary either.  It travels as this marker and is mapped to ``refused``
+    in the parent.
+    """
+
+    message: str
+
+
+@dataclass(frozen=True)
+class BatchOutcome:
+    """One requested symbol's outcome from a multi-code call.
+
+    ``result`` is the adapter-assembled ``FetchResult`` for ``ok``/``empty``
+    (its ``request_key`` and metadata are the symbol's own, even though one
+    call served the whole chunk), and ``None`` for ``refused`` -- a refusal
+    has no supplier object, so no snapshot may stand in for one.
+    """
+
+    symbol: str
+    status: str
+    result: FetchResult | None = None
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class BatchTransmission:
+    """One actual multi-code call: what it asked, and when it answered."""
+
+    symbols: tuple[str, ...]
+    request_parameters: str
+    batch_id: str
+    transport_id: str
+    request_timestamp: str
+    response_timestamp: str
+
+
+@dataclass(frozen=True)
+class BatchResult:
+    """Outcomes aligned with the requests, plus the transmissions behind them."""
+
+    outcomes: tuple[BatchOutcome, ...]
+    transmissions: tuple[BatchTransmission, ...]
+
+
 class XingyaoSource:
     """Frames come from a broker session bounded by a killable worker."""
 
@@ -64,21 +120,100 @@ class XingyaoSource:
             raise ValueError("xingyao daily requests take exactly one symbol")
         _require_credentials()
         request_timestamp = _utc_timestamp()
-        frame = run_isolated(
-            _fetch_kline,
+        frames = run_isolated(
+            _fetch_kline_batch,
             timeout_seconds=float(self.config.timeout_seconds),
             client=self._client,
-            symbol=request.symbols[0],
+            symbols=[request.symbols[0]],
             start=request.start_date,
             end=request.end_date,
         )
         response_timestamp = _utc_timestamp()
+        frame = _frame_for(frames, request.symbols[0])
+        # The single-request path keeps its strictness: silence is not an
+        # answer here (ADR-009).  The relaxed zero-row rule belongs to the
+        # lane's batch outcomes, not to this path (ADR-020 D2).
         validate_supplier_frame(
             frame,
             request,
             symbol_columns=("code",),
             date_columns=(DATE_COLUMN,),
         )
+        return self._fetch_result(request, frame, request_timestamp, response_timestamp)
+
+    def fetch_batch(
+        self,
+        requests: Sequence[DataRequest],
+        *,
+        on_attempt: Callable[[int], None] | None = None,
+    ) -> BatchResult:
+        """One multi-code call for the whole chunk; three states per symbol.
+
+        Preconditions (the lane guarantees them): one endpoint, one window,
+        exactly one symbol per request.  The returned outcomes are aligned
+        with ``requests`` positionally, which is what lets the reuse partition
+        hand back only the misses.
+        """
+        if not requests:
+            return BatchResult(outcomes=(), transmissions=())
+        if {request.endpoint for request in requests} != {"daily"}:
+            raise ValueError("XingyaoSource serves only the daily endpoint")
+        if any(len(request.symbols) != 1 for request in requests):
+            raise ValueError("xingyao daily requests take exactly one symbol")
+        symbols = tuple(request.symbols[0] for request in requests)
+        if len({(request.start_date, request.end_date) for request in requests}) != 1:
+            raise ValueError("xingyao batch requests take exactly one window")
+        _require_credentials()
+        if on_attempt is not None:
+            on_attempt(len(symbols))
+        request_timestamp = _utc_timestamp()
+        # The lane guarantees a frozen batch pair; a direct caller falls back
+        # to the endpoint's own bound rather than crashing on an unset pair.
+        timeout_seconds = float(
+            self.config.batch_timeout_seconds or self.config.timeout_seconds
+        )
+        frames = run_isolated(
+            _fetch_kline_batch,
+            timeout_seconds=timeout_seconds,
+            client=self._client,
+            symbols=list(symbols),
+            start=requests[0].start_date,
+            end=requests[0].end_date,
+        )
+        response_timestamp = _utc_timestamp()
+        outcomes = tuple(
+            self._batch_outcome(request, frames, request_timestamp, response_timestamp)
+            for request in requests
+        )
+        parameters = batch_request_parameters(
+            "daily",
+            symbols,
+            requests[0].start_date,
+            requests[0].end_date,
+            dict(requests[0].params),
+        )
+        return BatchResult(
+            outcomes=outcomes,
+            transmissions=(
+                BatchTransmission(
+                    symbols=symbols,
+                    request_parameters=parameters,
+                    batch_id=batch_id_for(parameters),
+                    transport_id=TRANSPORT_ID,
+                    request_timestamp=request_timestamp,
+                    response_timestamp=response_timestamp,
+                ),
+            ),
+        )
+
+    def _fetch_result(
+        self,
+        request: DataRequest,
+        frame: pd.DataFrame,
+        requested_at: str,
+        answered_at: str,
+    ) -> FetchResult:
+        """The per-symbol evidence record, identical in both paths."""
         return FetchResult(
             source=self.name,
             endpoint=request.endpoint,
@@ -89,9 +224,47 @@ class XingyaoSource:
                 "xingyao.query_kline",
                 self._sdk_version,
                 transport_id=TRANSPORT_ID,
-                request_timestamp=request_timestamp,
-                response_timestamp=response_timestamp,
+                request_timestamp=requested_at,
+                response_timestamp=answered_at,
             ),
+        )
+
+    def _batch_outcome(
+        self,
+        request: DataRequest,
+        frames: Mapping[str, Any],
+        requested_at: str,
+        answered_at: str,
+    ) -> BatchOutcome:
+        """The parent's per-symbol verdict: ok, empty, or refused."""
+        symbol = request.symbols[0]
+        if symbol not in frames:
+            # Absent key: truncation, a silently dropped code and a supplier
+            # omission are indistinguishable here, so this is fail-closed.
+            return BatchOutcome(
+                symbol=symbol,
+                status="refused",
+                message="supplier answer carried no frame for this code",
+            )
+        value = frames[symbol]
+        if isinstance(value, UnreadableFrame):
+            return BatchOutcome(symbol=symbol, status="refused", message=value.message)
+        try:
+            frame = _to_frame(value)
+            validate_supplier_frame(
+                frame,
+                request,
+                symbol_columns=("code",),
+                date_columns=(DATE_COLUMN,),
+                allow_empty=True,
+            )
+        except ContractError as error:
+            return BatchOutcome(symbol=symbol, status="refused", message=str(error))
+        result = self._fetch_result(request, frame, requested_at, answered_at)
+        return BatchOutcome(
+            symbol=symbol,
+            status="empty" if frame.empty else "ok",
+            result=result,
         )
 
 
@@ -106,23 +279,28 @@ def _require_credentials() -> None:
         )
 
 
-def _fetch_kline(*, client: Any, symbol: str, start, end) -> pd.DataFrame:
-    """The worker body: login, one unadjusted daily window, logout.
+def _fetch_kline_batch(
+    *, client: Any, symbols: list[str], start, end
+) -> dict[str, Any]:
+    """The worker body: one login, one multi-code query, one logout.
 
-    The client (real wrapper or test fake) speaks a three-call surface:
-    ``login(**credentials)``, ``query_kline(symbol=..., begin_date=...,
-    end_date=...)`` and ``logout()``.  Raises typed failures so the parent
-    never has to read SDK text: a login refusal is permanent, everything else
-    is transient.  The frame is returned as the SDK produced it -- this
-    function never renames or filters columns.
+    Returns the supplier's answer in a transportable shape, keyed by code.
+    Nothing per-symbol is judged here: a multi-code call has no per-code
+    failure to report, and a shape that is not a mapping at all is a
+    *permanent* fault of the whole call (spec §4 layer 1: no retry, no
+    bisection), not a verdict about any code.
     """
     logged_in = False
     try:
         if not client.login(**_credentials()):
             raise AuthenticationError("xingyao rejected the credentials")
         logged_in = True
-        response = client.query_kline(symbol=symbol, begin_date=start, end_date=end)
-        return _to_frame(response)
+        response = client.query_kline(
+            symbols=list(symbols), begin_date=start, end_date=end
+        )
+        if not isinstance(response, Mapping):
+            raise ContractError("xingyao returned an unreadable kline response")
+        return {code: _transportable_frame(value) for code, value in response.items()}
     except (AuthenticationError, ContractError):
         raise
     except Exception as error:  # noqa: BLE001 - map, never leak SDK text upward
@@ -137,6 +315,37 @@ def _fetch_kline(*, client: Any, symbol: str, start, end) -> pd.DataFrame:
                 client.logout()
             except Exception:  # noqa: BLE001 - a logout failure costs nothing
                 pass
+
+
+def _transportable_frame(value: Any) -> Any:
+    """Turn one code's answer into something that can cross the process boundary.
+
+    A DataFrame travels as-is; anything with ``to_frame`` is converted and
+    otherwise the value is marked unreadable.  The columns are never touched:
+    what the parent validates must be what the supplier answered.
+    """
+    if isinstance(value, pd.DataFrame):
+        return value
+    to_frame = getattr(value, "to_frame", None)
+    if to_frame is None:
+        return UnreadableFrame("the supplier's answer for this code is not a frame")
+    try:
+        return to_frame()
+    except Exception as error:  # noqa: BLE001 - the parent decides what this means
+        return UnreadableFrame(
+            f"the supplier's answer could not be read as a frame "
+            f"({type(error).__name__})"
+        )
+
+
+def _frame_for(frames: Mapping[str, Any], symbol: str) -> pd.DataFrame:
+    """The one symbol's frame on the strict (single-request) path."""
+    if symbol not in frames:
+        raise ContractError(f"xingyao returned no kline frame for {symbol!r}")
+    value = frames[symbol]
+    if isinstance(value, UnreadableFrame):
+        raise ContractError(value.message)
+    return _to_frame(value)
 
 
 def _credentials() -> dict[str, str]:
@@ -209,21 +418,21 @@ class _RealClient:
             username=username, password=password, host=host, port=port_number
         )
 
-    def query_kline(self, *, symbol: str, begin_date, end_date) -> pd.DataFrame:
+    def query_kline(self, *, symbols, begin_date, end_date) -> dict[str, Any]:
         ad = self._ad
         if self._market is None:
             base = ad.BaseData()
             self._market = ad.MarketData(base.get_calendar())
         result = self._market.query_kline(
-            [symbol],
+            list(symbols),
             begin_date=int(begin_date.strftime("%Y%m%d")),
             end_date=int(end_date.strftime("%Y%m%d")),
             period=ad.constant.Period.day.value,
             is_local=False,
         )
-        if not isinstance(result, dict) or symbol not in result:
-            raise ContractError(f"xingyao returned no kline frame for {symbol!r}")
-        return result[symbol]
+        if not isinstance(result, dict):
+            raise ContractError("xingyao returned an unreadable kline response")
+        return result
 
     def logout(self) -> None:
         self._ad.logout()

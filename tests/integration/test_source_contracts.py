@@ -961,8 +961,10 @@ class _FakeXingyao:
     def logout(self) -> None:
         return None
 
-    def query_kline(self, **_):
-        return self._frame
+    def query_kline(self, *, symbols=None, **_):
+        # The batch worker speaks multi-code: one mapping keyed by code.  This
+        # fake serves one recorded frame, so every requested code maps to it.
+        return {code: self._frame for code in list(symbols or [])}
 
 
 def test_a_zero_row_frame_passes_when_empty_is_allowed():
