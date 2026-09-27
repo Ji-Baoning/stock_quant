@@ -42,7 +42,18 @@ A source-fetch failure blocks the update: no dataset version is published and
 daily), the raw store is asked for the newest stored answer to an exactly
 identical request; a candidate is served back only when its bytes still
 re-verify and it is not empty, and a stored-but-rejected candidate is a
-visible warning followed by the live request. The admitted channels are the
+visible warning followed by the live request. ADR-020 adds the batch shape on
+top of this: the xingyao validation lane chunks its misses into `fetch_batch`
+calls — one multi-code supplier call per chunk, falling back to per-symbol
+requests while the `batch_size`/`batch_timeout_seconds` pair is unset — the
+ADR-009 factor channel prefetches its candidate pool chunk by chunk, and the
+tdx arbiter asks the whole candidate pool in one session with lazy per-symbol
+fallback, while the primary daily, head-anchor and benchmark lanes stay
+per-request. The batched lanes keep the per-symbol evidence shape — every
+symbol still gets its own `request_key` and raw-snapshot path, because that is
+what a reuse match resolves against — and each real transmission is recorded
+once as content-addressed `BatchRequestEvidence` under `data/raw_batch_requests/`.
+The admitted channels are the
 `REUSABLE_CHANNELS` constant in `data_sources/raw_store.py`; corporate
 actions, the trading calendar, the security master and the lazy arbitration
 channels are always fetched live. A reused snapshot joins the round's

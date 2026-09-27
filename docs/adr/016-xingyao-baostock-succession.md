@@ -171,6 +171,9 @@ baostock's ADR-015 admission is substituted rather than retained.**
     themselves fetched 1000 symbols per batch — is the recorded enabling
     condition for `enabled: true`; enabling remains a config change only.
 
+    **注记（2026-09-27）**：批量通道前置已落地（ADR-020）。启用仍是单独动作，
+    decision 11 的门禁在启用动作上继续有效。
+
 ## What this does not change
 
 - **The ADR-013 arbitration chain** (TDX, then price observation) is untouched.

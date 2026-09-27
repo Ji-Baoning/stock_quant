@@ -216,6 +216,8 @@ baostock 数据服务不可用（owner 报告 2026-09-26；历史记录：2026-0
   `tools/xysz/xysz/xysz_tools/`，且已由提交 `10be36885` 明确排除出仓库，wheel 由操作者
   自备。前置 `tables`(PyTables)：缺失时复权因子等接口直接 ImportError。不进默认依赖。
 
+批量通道已落地，见 ADR-020。
+
 ### 3.2 批次 2：因子通道接替（ADR-009 邻域，独立开发验收、与批次 1 原子发布）
 
 **新增 `src/stock_quant/data_sources/xingyao_factor.py`**：

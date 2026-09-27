@@ -106,10 +106,15 @@ setsid nohup python -m stock_quant data update --start 2015-01-05 --root project
 
 ### 阶段 4b · 原始快照复用与恢复（ADR-015）
 
-四个逐符号车道（tushare/xingyao 日线、akshare 基准——准入表经 ADR-016 以
-xingyao 替换 baostock）在发请求前先查 raw 树：
+四个车道（tushare/xingyao 日线、akshare 基准——准入表经 ADR-016 以
+xingyao 替换 baostock）在发请求前先查 raw 树：tushare 日线、锚点探针与
+akshare 基准仍逐符号发请求；xingyao 校验车道按 ADR-020 分片批量补抓缺项
+（`batch_size` / `batch_timeout_seconds` 未成对配置时回退逐标的，见阶段 4c）。
 同请求（端点 × 标的 × 窗口 × 参数完全一致）且字节哈希复验通过的最新快照直接
-复用，不发网络调用；公司行为、交易日历、证券主档、懒仲裁通道**永远实时**。
+复用，不发网络调用；公司行为、交易日历、证券主档、懒仲裁通道**永远实时**——
+ADR-020 后 tdx 仲裁为一次会话的候选池预取 + 懒取兜底，xingyao 因子通道分片
+批量（`factor_batch_size` / `factor_batch_timeout_seconds` 未成对配置时回退
+逐标的），两者仍不走 raw 复用。
 复用情况在发布版本的 `build_config.raw_snapshot_reuse`（reused/fetched 计数）
 与 `data/runs/<run_id>/call_ledger.json` 的 `reused` 段可见。
 
@@ -182,10 +187,14 @@ F < 0.0025 单位/会话【界】、日 K 行线上成本 ≈170–390 B/行【�
   `docs/superpowers/specs/2026-09-25-raw-snapshot-reuse-design.md` §2.7），
   此处不重复。
 
-**xingyao 启用程序（前置：批量通道）**：
+**xingyao 启用程序（前置：批量通道——已落地，ADR-020）**：
 
-1. 先落地批量抓取通道并验收——SDK 的 `query_kline` 原生接受代码列表（Phase 0
-   探针即以 1000 只/批抓取）；在逐标的 worker 契约下全宇宙单轮成本
+1. 批量抓取通道已落地并验收（ADR-020）——SDK 的 `query_kline` 原生接受代码
+   列表（Phase 0 探针即以 1000 只/批抓取）；xingyao 校验车道与因子通道已切
+   分片批量，缺批量配置对时回退逐标的。批量常量（`batch_size` 等）仍待探针
+   实测冻结（`project/probe_batch_channel.py`，见
+   `docs/operations/2026-09-27-batched-channel-probes.md`，待 owner 授权
+   运行）；未配置批量对就启用会把车道退回逐标的 worker 契约，全宇宙单轮成本
    ≈0.8%–167% 周配额，最坏情形不可行（ADR-016 decision 11）。
 2. 把 `project/configs/sources.yml` 的 `xingyao.enabled` 改为 `true`（仅配置
    变更）；首轮小窗口核对 `validation_present` 翻转行为与调用账本
