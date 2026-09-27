@@ -418,6 +418,20 @@ def _reused_ledger_payload(
     }
 
 
+def _transport_ledger_payload(counts) -> dict[str, dict[str, dict[str, int]]]:
+    """Copy the attempted-operation counters into a plain, sortable payload."""
+    return {
+        name: {
+            endpoint: {
+                "sessions": int(row["sessions"]),
+                "code_queries": int(row["code_queries"]),
+            }
+            for endpoint, row in sorted(by_endpoint.items())
+        }
+        for name, by_endpoint in sorted(counts.items())
+    }
+
+
 def _recorded_fetch_spans(payload: object) -> dict[str, tuple[date, date]]:
     """The per-table span the baseline's fetch coverage recorded.
 
@@ -1385,20 +1399,6 @@ class DataPipeline:
                 statuses,
                 raw_snapshots,
             )
-        # Call ledger (spec D5.5): after a successful publish, persist the
-        # per-source endpoint x count accounting for this update run under
-        # ``data/runs/<run_id>/call_ledger.json``.  Only parameter shapes and
-        # endpoint names are ever recorded -- never credentials.  The
-        # ``reused`` section (ADR-015) lists the requests served from stored
-        # snapshots, which consumed no supplier quota.
-        write_call_ledger(
-            self._project_root,
-            run_id,
-            render_call_ledger(
-                self._active_sources(),
-                reused=_reused_ledger_payload(self._reuse_counts),
-            ),
-        )
         return self._result(
             issues,
             dataset_ref,
@@ -3182,17 +3182,32 @@ class DataPipeline:
         statuses,
         raw_snapshots,
     ) -> DataUpdateResult:
+        """The single exit of ``update``: every terminal path returns through here.
+
+        The call ledger is written here rather than only after a successful
+        publish (spec §4): a blocked publication, a failed required source and
+        an authentication refusal all consumed supplier quota, and an
+        accounting that only survives success cannot answer "what did this
+        failed attempt cost?".  ``run_id`` is absent only for paths that never
+        started a run, which have nothing to persist.
+        """
+        if run_id:
+            write_call_ledger(
+                self._project_root,
+                run_id,
+                render_call_ledger(
+                    self._active_sources(),
+                    reused=_reused_ledger_payload(self._reuse_counts),
+                    transport=_transport_ledger_payload(self._transport_counts),
+                ),
+            )
         return DataUpdateResult(
             quality_report=QualityReport(issues=tuple(issues)),
             dataset_ref=dataset_ref,
             run_id=run_id,
             resolved_end_date=resolved_end,
-            source_status=tuple(
-                statuses[name] for name in _CONFIGURED_SOURCES
-            ),
-            raw_snapshots=tuple(
-                snapshot.sha256 for snapshot in raw_snapshots
-            ),
+            source_status=tuple(statuses[name] for name in _CONFIGURED_SOURCES),
+            raw_snapshots=tuple(snapshot.sha256 for snapshot in raw_snapshots),
         )
 
 

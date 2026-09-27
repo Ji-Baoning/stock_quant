@@ -28,18 +28,25 @@ def _summarize_calls(calls: object) -> tuple[int, dict[str, int]]:
 def render_call_ledger(
     sources: Mapping[str, object],
     reused: Mapping[str, Mapping[str, int]] | None = None,
+    transport: Mapping[str, Mapping[str, Mapping[str, int]]] | None = None,
 ) -> dict[str, object]:
     """Normalized ledger rows: one entry per source.
 
     ``reused`` carries, per source x endpoint, how many requests were served
-    from stored raw snapshots instead of the supplier (ADR-015).  Every row
-    always carries the key -- empty when the source reused nothing -- so the
-    ledger shape is stable across rounds and quota accounting stays
-    comparable: reused requests consume no supplier quota.
+    from stored raw snapshots instead of the supplier (ADR-015).  ``transport``
+    carries the *attempted* transport operations per source x endpoint --
+    sessions established and code-bearing queries issued -- so retry and
+    bisection attempts stay visible instead of hiding behind a success count;
+    a batch call is one code-bearing query however many codes it carried.
+    A name that appears only in ``reused`` or ``transport`` -- a source the
+    run never got to record ``calls`` for -- still gets a row, so consumed
+    quota is never dropped from the accounting just because the source object
+    is missing; such a row renders ``calls`` 0 and empty ``endpoints``.
     """
     rows: dict[str, object] = {}
-    for name, source in sorted(sources.items()):
-        total, endpoints = _summarize_calls(getattr(source, "calls", 0))
+    names = set(sources) | set(reused or {}) | set(transport or {})
+    for name in sorted(names):
+        total, endpoints = _summarize_calls(getattr(sources.get(name), "calls", 0))
         reused_endpoints: dict[str, int] = {}
         reused_for_source = (reused or {}).get(name)
         if isinstance(reused_for_source, Mapping):
@@ -47,10 +54,21 @@ def render_call_ledger(
                 str(endpoint): int(count)
                 for endpoint, count in sorted(reused_for_source.items())
             }
+        transport_endpoints: dict[str, dict[str, int]] = {}
+        transport_for_source = (transport or {}).get(name)
+        if isinstance(transport_for_source, Mapping):
+            transport_endpoints = {
+                str(endpoint): {
+                    "sessions": int(counts.get("sessions", 0)),
+                    "code_queries": int(counts.get("code_queries", 0)),
+                }
+                for endpoint, counts in sorted(transport_for_source.items())
+            }
         rows[name] = {
             "calls": total,
             "endpoints": endpoints,
             "reused": reused_endpoints,
+            "transport": transport_endpoints,
         }
     return rows
 
