@@ -92,6 +92,7 @@ from stock_quant.data_model.corporate_action_coverage import (
 )
 from stock_quant.data_model.corporate_actions import (
     REASON_CROSS_SOURCE_CONFLICT,
+    REASON_COMPENSATORY_SHARE_TRANSFER,
     REASON_INCOMPLETE,
     REASON_NON_DISTRIBUTIVE_RESTRUCTURING,
     REASON_UNSUPPORTED_CORPORATE_ACTION,
@@ -147,6 +148,7 @@ from stock_quant.data_model.security_master import (
 )
 from stock_quant.data_model.suspensions import (
     canonicalize_supplier_suspensions,
+    interior_gap_rows,
     suspension_rows,
 )
 from stock_quant.data_model.trade_calendar_facts import (
@@ -206,6 +208,7 @@ from stock_quant.data_sources.raw_store import (
     RawSnapshotEvidence,
     RawStore,
 )
+from stock_quant.data_sources.price_basis import PriceBasisSettler
 from stock_quant.data_sources.price_observed import (
     DAILY_ENDPOINT,
     TUSHARE_SOURCE,
@@ -236,6 +239,7 @@ CODE_NO_CURRENT_DATASET = "no_current_dataset"
 CODE_CALENDAR_EMPTY_NO_END = "calendar_empty_requires_explicit_end"
 CODE_OPTIONAL_SOURCE_FAILURE = "optional_source_failure"
 CODE_PRICE_OBSERVED_SETTLEMENT = "price_observed_settlement"
+CODE_PRICE_BASIS_SETTLEMENT = "price_basis_settlement"
 CODE_UNIVERSE_MASTER_MISMATCH = "universe_master_mismatch"
 CODE_MASTER_SNAPSHOT_INCOMPLETE = "master_snapshot_incomplete"
 CODE_MASTER_BAR_BOUNDARY = "master_bar_boundary"
@@ -319,6 +323,12 @@ class DataUpdateRequest:
     start_date: date | None = None
     end_date: date | None = None
     sources: tuple[str, ...] | None = None
+    #: Operator's deep-reconcile override: widens only the disclosure-calendar
+    #: re-ask window (the corporate-action tables).  ``None`` keeps the 90-day
+    #: default; a large value re-reconciles the whole listed window, which a
+    #: verdict-changing rebuild needs -- carried coverage rows for history the
+    #: lookback never re-judges otherwise survive every ordinary update.
+    disclosure_lookback_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -511,6 +521,20 @@ def _merge_carried_coverage(
         return refreshed
     carried_end = pd.to_datetime(carried["window_end"])
     boundary = pd.Timestamp(fetch_start)
+    inverted = pd.Series(False, index=carried.index)
+    if "window_start" in carried.columns:
+        starts = pd.to_datetime(carried["window_start"], errors="coerce")
+        # A carried row whose window ends before it starts covers no day: the
+        # trust gate skips it as evidence of nothing, and carrying it forward
+        # republishes a dead verdict that only misleads a direct reader of the
+        # table.  Rows like this exist on published baselines -- produced by
+        # the clip this function once applied to a row lying wholly after the
+        # boundary -- so they are dropped here rather than carried into
+        # another version.  An unreadable start keeps the row: it is not
+        # proven inverted, and unproven supersession is the worse failure.
+        inverted = starts.notna() & (carried_end < starts)
+        carried = carried[~inverted]
+        carried_end = carried_end[~inverted]
     before = carried[carried_end < boundary]
     overlap = carried[carried_end >= boundary]
     if "window_start" in carried.columns:
@@ -968,6 +992,7 @@ class DataPipeline:
             request_end=request.end_date,
             anchor_start=start,
             latest_open_day=end,
+            disclosure_lookback_days=request.disclosure_lookback_days,
         )
 
         # ---- required trading-calendar refresh --------------------------- #
@@ -1069,6 +1094,7 @@ class DataPipeline:
                 statuses,
                 raw_snapshots,
                 raw_daily_frames,
+                fetch_start=daily_start,
             )
 
             # ---- required benchmark history ----------------------------- #
@@ -1177,12 +1203,39 @@ class DataPipeline:
             primary_dates,
             issues,
             ingested,
+            carried_daily=current_daily,
+            fetch_start=daily_start,
+        )
+        interior_rows = self._prove_interior_gaps(
+            current_daily,
+            equity_symbols,
+            master,
+            calendar_open,
+            start,
+            end,
+            daily_start,
+            corporate_action,
+            issues,
+            ingested,
+            pre_close_lookup=self._stored_pre_close_lookup(),
         )
         if daily_skipped:
             # Carried forward untouched: the fetch window was empty, so no
-            # baseline row inside the request window is replaced.
+            # baseline row inside the request window is replaced.  The one
+            # exception is the interior-gap proof (ADR-020): rows it adds
+            # fill holes the carried table itself provably has -- days with
+            # no carried row at all, so a plain concat replaces nothing --
+            # and without it a hole interior to the covered span would never
+            # heal: no round re-fetches a covered day.
             new_daily = current_daily
+            if interior_rows is not None and not interior_rows.empty:
+                new_daily = _coerce_daily(
+                    pd.concat([current_daily, interior_rows], ignore_index=True),
+                    ingested,
+                )
         else:
+            if interior_rows is not None and not interior_rows.empty:
+                primary_rows.append(interior_rows)
             new_daily = self._merge_daily(
                 current_daily,
                 primary_rows,
@@ -1788,17 +1841,27 @@ class DataPipeline:
         statuses,
         raw_snapshots,
         raw_daily_frames,
+        fetch_start=None,
     ) -> None:
         """Fetch a proof-only pre-window anchor for head-suspended symbols.
 
-        A suspension run that *opens* the window has no ``before`` bar inside
-        the requested range, so ``suspension_rows`` cannot prove it and the run
-        stays an unproven gap.  The bar that proves it exists -- it is simply
-        outside the range the primary fetch asked for.  For the symbols whose
-        window opens inside a run this walks backwards from ``start`` until it
-        finds a bar or reaches the symbol's own ``list_date``; the frame it
-        finds is appended to ``raw_daily_frames[symbol]``, which is
-        ``_materialize_suspensions``' proof input.
+        A suspension run that *opens* the proof grid has no ``before`` bar
+        inside the requested range, so ``suspension_rows`` cannot prove it and
+        the run stays an unproven gap.  The bar that proves it exists -- it is
+        simply outside the range the primary fetch asked for.  For the symbols
+        whose grid opens inside a run this walks backwards from the grid's
+        first open day until it finds a bar or reaches the symbol's own
+        ``list_date``; the frame it finds is appended to
+        ``raw_daily_frames[symbol]``, which is ``_materialize_suspensions``'
+        proof input.
+
+        The grid opens at ``fetch_start`` -- the daily plan's own window --
+        not at the validation window: a steady-state round fetches three days
+        while validating five years, and keying the probe to the validation
+        window sent every symbol probing back to its listing date (the
+        2026-09-27 rebuild spent half an hour in reuse-served probes and
+        recorded 659 unverified-run warnings that the fetch window's own
+        grid never needed).
 
         Proof input only: the deepened frame is never normalized, never enters
         ``primary_rows``/``primary_dates``, and so never reaches the published
@@ -1807,11 +1870,12 @@ class DataPipeline:
         """
         if "tushare" not in enabled or not raw_daily_frames:
             return
+        grid_start = fetch_start if fetch_start is not None else start
         first_open_day = next(
             (
                 day
                 for day in calendar_open
-                if isinstance(day, date) and start <= day <= end
+                if isinstance(day, date) and grid_start <= day <= end
             ),
             None,
         )
@@ -1865,6 +1929,8 @@ class DataPipeline:
         primary_dates,
         issues,
         ingested,
+        carried_daily=None,
+        fetch_start=None,
     ) -> None:
         """Append proven suspension bars for every equity symbol in place.
 
@@ -1873,6 +1939,19 @@ class DataPipeline:
         missing days were suspended, not lost.  See
         ``data_model/suspensions.py`` for the proof rules; chain frames from
         responses without ``pre_close`` (offline stubs) are skipped silently.
+
+        The proof grid is this round's fetch window plus the *seam* between
+        the carried table and it -- the open days after a symbol's last
+        carried bar -- with the carried bar itself prepended to the chain as
+        the before-anchor.  A supplier that omits a halted symbol's row on
+        one day inside an already-covered span (the 2026-09-22 gap) would
+        otherwise be unprovable forever: the recorded fetch span claims the
+        day covered, so no later round re-fetches it, and the acceptance
+        window check would fail on it indefinitely.  Proving the seam from
+        the same pre_close rule -- the fresh row's reference chaining to the
+        carried close -- heals exactly those single-day gaps while proving
+        nothing about the history the round did not fetch (the pre-fetch
+        window stays the carried table's and the acceptance gate's business).
         """
         listing = {
             str(row["symbol"]): (
@@ -1881,11 +1960,12 @@ class DataPipeline:
             )
             for row in master.to_dict("records")
         }
-        window = [
-            day
-            for day in calendar_open
-            if isinstance(day, date) and start <= day <= end
-        ]
+        carried_by_symbol: dict[str, pd.DataFrame] = {}
+        if carried_daily is not None and not carried_daily.empty:
+            carried = carried_daily.copy()
+            carried["trade_date"] = pd.to_datetime(carried["trade_date"])
+            for symbol, rows in carried.groupby("symbol"):
+                carried_by_symbol[str(symbol)] = rows.sort_values("trade_date")
         for symbol in equity_symbols:
             raw = raw_daily_frames.get(symbol)
             if raw is None or "pre_close" not in raw.columns:
@@ -1903,6 +1983,40 @@ class DataPipeline:
                     "pre_close": pd.to_numeric(raw["pre_close"]),
                 }
             )
+            grid_start = fetch_start if fetch_start is not None else start
+            if carried_daily is not None and not carried_daily.empty:
+                rows = carried_by_symbol.get(symbol)
+                boundary = None
+                if rows is not None:
+                    prior = rows[
+                        rows["trade_date"] < pd.Timestamp(grid_start)
+                    ]
+                    if not prior.empty:
+                        boundary = prior.iloc[-1]
+                if boundary is not None:
+                    boundary_day = boundary["trade_date"].date()
+                    chain = pd.concat(
+                        [
+                            pd.DataFrame(
+                                {
+                                    "trade_date": [boundary["trade_date"]],
+                                    "close": [pd.to_numeric(boundary["close"])],
+                                    "pre_close": [pd.NA],
+                                }
+                            ),
+                            chain,
+                        ],
+                        ignore_index=True,
+                    )
+                    # The seam: the open days the carried table leaves to this
+                    # round's fetch -- proved with the boundary as the before
+                    # anchor, exactly as an in-window run would be.
+                    grid_start = boundary_day + timedelta(days=1)
+            window = [
+                day
+                for day in calendar_open
+                if isinstance(day, date) and grid_start <= day <= end
+            ]
             list_date, delist_date = listing.get(symbol, (None, None))
             rows, suspension_issues = suspension_rows(
                 symbol,
@@ -1919,6 +2033,133 @@ class DataPipeline:
                     zip(rows["symbol"], rows["trade_date"].dt.date)
                 )
             issues.extend(suspension_issues)
+
+    def _stored_pre_close_lookup(self):
+        """The stored raw response's pre_close for one symbol-day (ADR-020).
+
+        The interior-gap proof's resumption shape needs the resumption day's
+        reference price -- stated by the supplier but not carried by the
+        published table.  It is read from the content-addressed raw store:
+        the snapshot whose request covers the day, newest response first, is
+        the same byte-for-byte answer the fetch recorded, so the proof
+        recomputes from stored evidence without touching the network.  A
+        symbol with no covering snapshot answers ``None`` -- the run stays
+        unproven, the fail-closed direction.
+        """
+
+        def lookup(symbol: str, day: date) -> float | None:
+            import json as _json
+
+            root = (
+                Path(self._project_root) / "data" / "raw" / "tushare" / "daily"
+            )
+            candidates: list[tuple[pd.Timestamp, Path]] = []
+            for manifest_path in root.glob("*/*/*/manifest.json"):
+                try:
+                    manifest = _json.loads(manifest_path.read_text())
+                except (OSError, ValueError):
+                    continue
+                parameters = manifest.get("request_parameters") or {}
+                symbols = parameters.get("symbols") or []
+                if symbols != [symbol]:
+                    continue
+                start = _as_date(parameters.get("start_date"))
+                end = _as_date(parameters.get("end_date"))
+                if start is None or end is None or not (start <= day <= end):
+                    continue
+                stamp = pd.to_datetime(
+                    manifest.get("response_timestamp"), errors="coerce"
+                )
+                candidates.append((stamp, manifest_path))
+            if not candidates:
+                return None
+            _, newest = max(candidates, key=lambda pair: pair[0])
+            frame = pd.read_parquet(newest.parent / "data.parquet")
+            date_column = next(
+                (name for name in ("trade_date", "date") if name in frame.columns),
+                None,
+            )
+            if date_column is None or "pre_close" not in frame.columns:
+                return None
+            target = day.strftime("%Y%m%d")
+            matching = frame[
+                frame[date_column].astype(str).str.startswith(target)
+            ]
+            if matching.empty:
+                return None
+            value = pd.to_numeric(matching.iloc[0]["pre_close"], errors="coerce")
+            return None if pd.isna(value) else float(value)
+
+        return lookup
+
+    def _prove_interior_gaps(
+        self,
+        carried_daily,
+        equity_symbols,
+        master,
+        calendar_open,
+        start,
+        end,
+        fetch_start,
+        corporate_action,
+        issues,
+        ingested,
+        pre_close_lookup=None,
+    ) -> pd.DataFrame | None:
+        """Prove interior absent-day runs of the carried table (ADR-020).
+
+        The carried rows are the supplier's published answers; a run of open
+        days with no row, bounded on both sides by the supplier's own
+        zero-volume bars at an unchanged close and at most
+        ``MAX_INTERIOR_PROOF_RUN_DAYS`` open days long, was suspended.  The
+        grid stops one day before the fetch window's start: days from there
+        on are the fresh chain's and the seam's jurisdiction, so the two
+        proof paths never claim the same day.  Returns the proven bars, or
+        ``None`` when there is nothing to prove.
+        """
+        if carried_daily is None or carried_daily.empty:
+            return None
+        grid_end = end
+        if fetch_start is not None:
+            grid_end = min(end, fetch_start - timedelta(days=1))
+        window = [
+            day
+            for day in calendar_open
+            if isinstance(day, date) and start <= day <= grid_end
+        ]
+        if not window:
+            return None
+        carried = carried_daily.copy()
+        carried["trade_date"] = pd.to_datetime(carried["trade_date"])
+        listing = {
+            str(row["symbol"]): (
+                _as_date(row.get("list_date")),
+                _as_date(row.get("delist_date")),
+            )
+            for row in master.to_dict("records")
+        }
+        frames: list[pd.DataFrame] = []
+        for symbol in equity_symbols:
+            rows = carried[carried["symbol"] == symbol]
+            if rows.empty:
+                continue
+            list_date, delist_date = listing.get(symbol, (None, None))
+            gap_rows, gap_issues = interior_gap_rows(
+                symbol,
+                rows,
+                window,
+                list_date=list_date,
+                delist_date=delist_date,
+                actions=corporate_action,
+                ingested_at=ingested,
+                pre_close_lookup=pre_close_lookup,
+            )
+            if not gap_rows.empty:
+                frames.append(gap_rows)
+            issues.extend(gap_issues)
+        if not frames:
+            return None
+        return _concat(frames)
 
     def _fetch_benchmarks(
         self,
@@ -2324,6 +2565,9 @@ class DataPipeline:
         factor_channel = self._build_factor_channel(
             end, issues, raw_snapshots, candidates
         )
+        price_basis = self._build_price_basis_settler(
+            arbiter, factor_channel, issues, raw_snapshots
+        )
         accepted_frames: list[pd.DataFrame] = []
         quarantined_frames: list[pd.DataFrame] = []
         for symbol in symbols:
@@ -2333,6 +2577,7 @@ class DataPipeline:
                 frames_by_symbol[symbol][RIGHTS_SOURCE],
                 issues,
                 arbiter,
+                price_basis=price_basis,
             )
             accepted_frames.append(accepted)
             quarantined_frames.append(quarantined)
@@ -2469,8 +2714,8 @@ class DataPipeline:
         The channel serves only the absent-ex-date classification and stays
         fail-closed: a disabled source asserts nothing rather than letting a
         window conclude an absence from silence.  The implementation is
-        xingyao's (ADR-016); baostock's module stays in the tree as the
-        dormant predecessor.
+        xingyao's (ADR-016); baostock's predecessor module is deleted, so this
+        lane has exactly one implementation and no dormant twin.
         """
         from stock_quant.data_sources.xingyao_factor import (
             factor_event_dates,
@@ -2529,6 +2774,22 @@ class DataPipeline:
             )
         return frames
 
+    def _tushare_daily_fetcher(self):
+        """The one-symbol daily fetch every price-evidence channel shares.
+
+        The arbitration lane (ADR-013) and the price-basis settler (ADR-019)
+        read the same endpoint through the same adapter, so a test override
+        replaces both with one substitution and the raw responses land in one
+        content-addressed store.
+        """
+
+        def fetch_daily(symbol, start, end):
+            return self._source(TUSHARE_SOURCE).fetch(
+                DataRequest(DAILY_ENDPOINT, (symbol,), start, end)
+            )
+
+        return fetch_daily
+
     def _build_price_channel(self, issues, raw_snapshots, open_days):
         """Build the ADR-013 reference-price lane, or ``None`` when it is off.
 
@@ -2563,20 +2824,68 @@ class DataPipeline:
         if config is None or not config.enabled:
             return None
 
-        def fetch_daily(symbol, start, ex_date):
-            return self._source(TUSHARE_SOURCE).fetch(
-                DataRequest(DAILY_ENDPOINT, (symbol,), start, ex_date)
-            )
-
         return (
             LazyDailyPriceChannel(
-                fetch_daily,
+                self._tushare_daily_fetcher(),
                 open_days,
                 on_failure=report_failure,
                 raw_snapshots=raw_snapshots,
                 record_raw=self._record_raw,
             ),
             report_settlement,
+        )
+
+    def _build_price_basis_settler(self, arbiter, factor_channel, issues, raw_snapshots):
+        """Build the ADR-019 settler, or ``None`` when its price leg is off.
+
+        The settler shares the arbitration lane's price fetch and the lazy TDX
+        arbiter's frame accessor, and corroborates -- never decides -- against
+        the ADR-009 factor channel when one is configured.  All three legs are
+        evidence paths: their responses land in the same content-addressed
+        store, and each fails closed.
+        """
+        config = self._project_config.sources.get(TUSHARE_SOURCE)
+        if config is None or not config.enabled:
+            return None
+        frame_for = getattr(arbiter, "frame_for", None) if arbiter is not None else None
+
+        factor_ratio = None
+        if factor_channel is not None:
+            from stock_quant.data_sources.xingyao_factor import factor_ratio_at
+
+            def read_factor_ratio(symbol, ex_date):
+                frame = factor_channel.frame_for(symbol)
+                if frame is None:
+                    return None
+                return factor_ratio_at(frame, symbol, ex_date)
+
+            factor_ratio = read_factor_ratio
+
+        def report_failure(symbol, error):
+            issues.append(
+                _issue(
+                    Severity.WARNING,
+                    CODE_OPTIONAL_SOURCE_FAILURE,
+                    details={
+                        "source": TUSHARE_SOURCE,
+                        "endpoint": DAILY_ENDPOINT,
+                        "symbol": symbol,
+                        "message": str(error),
+                    },
+                )
+            )
+
+        def report_settlement(settlement):
+            issues.append(_price_basis_settlement_issue(settlement))
+
+        return PriceBasisSettler(
+            fetch_daily=self._tushare_daily_fetcher(),
+            frame_for=frame_for,
+            factor_ratio=factor_ratio,
+            on_failure=report_failure,
+            raw_snapshots=raw_snapshots,
+            record_raw=self._record_raw,
+            on_settlement=report_settlement,
         )
 
     def _reconcile_action_frames(
@@ -2586,6 +2895,7 @@ class DataPipeline:
         allotment_frames,
         issues,
         arbiter=None,
+        price_basis=None,
     ):
         """Reconcile collected supplier frames; empty defaults on failure.
 
@@ -2596,11 +2906,16 @@ class DataPipeline:
         discard the symbol's subscriptions, and vice versa.
 
         ``arbiter`` (ADR-007) is consulted only on a cross-source disagreement.
-        It is passed already guarded: see ``_GuardedArbiter``.
+        It is passed already guarded: see ``_GuardedArbiter``.  ``price_basis``
+        (ADR-019) is consulted only for a type-refused restructuring row that
+        states an ex-date; it guards its own failures.
         """
         try:
             reconciled = normalize_corporate_actions(
-                _concat(cninfo_frames), _concat(eastmoney_frames), arbiter=arbiter
+                _concat(cninfo_frames),
+                _concat(eastmoney_frames),
+                arbiter=arbiter,
+                price_basis=price_basis,
             )
         except Exception as error:  # noqa: BLE001
             self._warn_action_lane_failure(issues, "dividend", error)
@@ -3486,6 +3801,10 @@ def _coverage_record_for(
 #: rather than an unaccounted gap.  A refused 重整转增 (ADR-008) says the
 #: supplier described a real, complete event that is not a price event, so it
 #: leaves the window as accounted-for as if no event had been reported at all.
+#: A refused 承诺补偿 says the same thing from the opposite ground: the shares
+#: reach holders, and the ex-date the price-event model requires is absent
+#: *as a fact* (ADR-009 row 1, measured bracketed-empty) -- the row is
+#: correctly reported and correctly refused, so it must not withhold trust.
 #: Every other reason -- and any reason not named here -- still withholds trust,
 #: so a reason added later fails closed.
 #:
@@ -3493,7 +3812,9 @@ def _coverage_record_for(
 #: event being no price event, so a row it would exempt stops exempting --
 #: demoted back to blocking for its symbol -- when an admissible ADR-009
 #: channel observes a market adjustment at the row's probe date.
-_NON_BLOCKING_QUARANTINE_REASONS = frozenset({REASON_NON_DISTRIBUTIVE_RESTRUCTURING})
+_NON_BLOCKING_QUARANTINE_REASONS = frozenset(
+    {REASON_NON_DISTRIBUTIVE_RESTRUCTURING, REASON_COMPENSATORY_SHARE_TRANSFER}
+)
 
 
 def _demoted_reasons_by_symbol(
@@ -3508,11 +3829,10 @@ def _demoted_reasons_by_symbol(
     is ``adjustment_observed`` on the market axis -- a stated supplier ex-date
     is probed there, an absent one at its announcement anchor -- read from
     the two admissible channels (TDX category-1 records, xingyao's factor
-    series -- the slot name spec §3.2 fixes even though the event rule is
-    baostock's, unchanged), both lazily fetched and cached.  A row whose
-    market axis reads bracketed-empty or unknown keeps the exemption:
-    absence asserted from silence is the old ADR-008 ground, and unknown
-    stays fail-closed.
+    series -- the slot name spec §3.2 fixes), both lazily fetched and cached.
+    A row whose market axis reads bracketed-empty or unknown keeps the
+    exemption: absence asserted from silence is the old ADR-008 ground, and
+    unknown stays fail-closed.
     """
     if relevant_quarantine is None or relevant_quarantine.empty:
         return {}
@@ -4110,6 +4430,24 @@ class _LazyActionArbiter:
             self._store_frame(symbol, frame)
         frame = self._frames[symbol]
         if frame is None or frame.empty:
+            # A reachable channel answering nothing for a symbol that holds a
+            # live conflict is a silent decline: the conflict keeps its
+            # quarantine with no trace of why.  Recording the empty answer
+            # keeps "zero completed comparisons" from reading as "nothing to
+            # compare" -- the same honesty the drift audit owes its channels.
+            self._issues.append(
+                _issue(
+                    Severity.WARNING,
+                    CODE_OPTIONAL_SOURCE_FAILURE,
+                    symbol=symbol,
+                    details={
+                        "source": ARBITER_NAME,
+                        "endpoint": XDXR_ENDPOINT,
+                        "symbol": symbol,
+                        "message": "channel answered an empty xdxr frame",
+                    },
+                )
+            )
             return None
         return frame
 
@@ -4133,8 +4471,9 @@ class _LazyFactorChannel:
     direction -- recorded as a warning and not retried within the run.
 
     The channel is source-agnostic since ADR-016 moved its wiring to xingyao:
-    the fetch, the event rule and the snapshot shape are injected (the rule
-    itself is baostock's, unchanged -- ADR-009 decision 3).  ``__call__``
+    the fetch, the event rule and the snapshot shape are injected (the event
+    rule reads where the cumulative factor changes, per ADR-009 decision 3).
+    ``__call__``
     keeps three failure domains apart on purpose: a single ``try`` would press
     "could not fetch the frame", "could not store the frame" and "could not
     interpret the frame" into one record, losing the raw answer exactly when
@@ -4166,6 +4505,7 @@ class _LazyFactorChannel:
         self._record_raw = record_raw
         self._fetch_frames = fetch_frames
         self._events: dict[str, list[date]] = {}
+        self._frames: dict[str, pd.DataFrame | None] = {}
         self._failed: set[str] = set()
 
     def __call__(self, symbol: str) -> list[date] | None:
@@ -4173,6 +4513,32 @@ class _LazyFactorChannel:
             return self._events[symbol]
         if symbol in self._failed:
             return None
+        frame = self.frame_for(symbol)
+        if frame is None:
+            return None
+        try:
+            events = self._extract_events(frame, symbol)
+        except Exception as error:  # noqa: BLE001 - best-effort evidence channel
+            self._report(symbol, error)
+            return None
+        self._events[symbol] = events
+        return events
+
+    def frame_for(self, symbol: str):
+        """The symbol's cached factor frame, fetching it on first need.
+
+        Shares the fetch/fail cache with :meth:`__call__`: a symbol whose
+        fetch already failed is not retried, and ``None`` means no frame is
+        available (an absent channel asserts nothing, ADR-009).  The raw
+        answer is captured before it is interpreted -- the same three failure
+        domains ``__call__`` keeps apart, for the ADR-019 settler's
+        corroboration leg, which needs the series' values rather than its
+        event dates.
+        """
+        if symbol in self._failed:
+            return None
+        if symbol in self._frames:
+            return self._frames[symbol]
         try:
             frame = self._fetch_frame(symbol)
         except Exception as error:  # noqa: BLE001 - best-effort evidence channel
@@ -4189,13 +4555,8 @@ class _LazyFactorChannel:
                 )
             except Exception:  # noqa: BLE001 - evidence capture is best effort
                 pass
-        try:
-            events = self._extract_events(frame, symbol)
-        except Exception as error:  # noqa: BLE001 - best-effort evidence channel
-            self._report(symbol, error)
-            return None
-        self._events[symbol] = events
-        return events
+        self._frames[symbol] = frame if frame is not None else None
+        return self._frames[symbol]
 
     def prefetch(self, symbols: Iterable[str]) -> None:
         """Warm the per-symbol cache from chunked multi-code reads.
@@ -4472,5 +4833,26 @@ def _price_settlement_issue(cninfo, settlement, observation) -> QualityIssue:
             "symbol": cninfo.symbol,
             "ex_date": cninfo.ex_date.isoformat(),
             "snapshot_sha256": observation.snapshot_sha256,
+        },
+    )
+
+
+def _price_basis_settlement_issue(settlement) -> QualityIssue:
+    """The INFO trace of one price-basis settlement (ADR-019).
+
+    It records the exchange reference the row booked from, the calibration
+    band that rejected the no-adjustment hypothesis, and the factor series'
+    corroboration when a channel supplied one -- every number an auditor
+    needs to recompute the booking from stored bytes.
+    """
+    return _issue(
+        Severity.INFO,
+        CODE_PRICE_BASIS_SETTLEMENT,
+        symbol=settlement.symbol,
+        trade_date=settlement.ex_date,
+        details={
+            **settlement.to_details(),
+            "symbol": settlement.symbol,
+            "ex_date": settlement.ex_date.isoformat(),
         },
     )

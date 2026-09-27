@@ -27,7 +27,7 @@ distinguishable from raw supplier responses everywhere downstream.
 from __future__ import annotations
 
 from datetime import date
-from typing import Sequence
+from typing import Callable, Sequence
 
 import pandas as pd
 
@@ -350,3 +350,166 @@ def _actions_in_run(
         if ex_date is not None and first <= ex_date <= through:
             matched.append(record)
     return matched
+
+
+#: The interior-gap proof's bound (ADR-020, owner ruling 2026-09-27): an
+#: interior absent-day run longer than this many open days stays unproven --
+#: past it, the zero-volume pattern no longer bounds what the hole could hide.
+MAX_INTERIOR_PROOF_RUN_DAYS = 5
+
+
+def interior_gap_rows(
+    symbol: str,
+    carried: pd.DataFrame,
+    open_days: Sequence[date],
+    *,
+    list_date: date | None,
+    delist_date: date | None,
+    actions: pd.DataFrame,
+    ingested_at: object,
+    pre_close_lookup: Callable[[str, date], float | None] | None = None,
+) -> tuple[pd.DataFrame, list[QualityIssue]]:
+    """Prove interior absent-day runs of the *carried* table from its edges.
+
+    ADR-020's bounded rule (owner ruling 2026-09-27): a run of open days with
+    no carried row, bounded on both sides by the supplier's own zero-volume
+    bars at an unchanged close (within the chain tolerance) and at most
+    :data:`MAX_INTERIOR_PROOF_RUN_DAYS` open days long, was suspended -- the
+    supplier's zero-volume pattern attests the halt across the hole.  This is
+    the weaker tier the pre_close chain rule does not reach: the published
+    table carries no ``pre_close``, so a supplier day-hole interior to an
+    already-covered span (2026-09-22 for four halted symbols) has no
+    reference price to chain to and no operator path re-fetches it.
+
+    Every weaker shape stays missing and is recorded as an unverified run for
+    the acceptance gate to fail on honestly: runs past the bound, runs whose
+    boundary bars traded, runs whose boundary closes differ beyond the
+    tolerance (an unexplained price event -- a distribution inside the run
+    needs the chain rule's stated reference, not this inference), and runs
+    with no carried bar on one side (the seam and the chain rule's business).
+    """
+    issues: list[QualityIssue] = []
+    if carried is None or carried.empty or not open_days:
+        return _empty_rows(), issues
+    carried = carried.sort_values("trade_date").reset_index(drop=True)
+    dates = [_as_date(value) for value in carried["trade_date"]]
+    position = {day: index for index, day in enumerate(dates) if day is not None}
+    grid = sorted(
+        day
+        for day in (_as_date(value) for value in open_days)
+        if day is not None
+        and (list_date is None or day >= list_date)
+        and (delist_date is None or day <= delist_date)
+    )
+    absent = [day for day in grid if day not in position]
+    if not absent:
+        return _empty_rows(), issues
+
+    grid_index = {day: index for index, day in enumerate(grid)}
+    runs: list[list[date]] = []
+    run: list[date] = []
+    for day in absent:
+        if run and grid_index[day] == grid_index[run[-1]] + 1:
+            run.append(day)
+        else:
+            if run:
+                runs.append(run)
+            run = [day]
+    if run:
+        runs.append(run)
+
+    records: list[dict[str, object]] = []
+    for days in runs:
+        first, last = days[0], days[-1]
+        before_index = max(
+            (index for day, index in position.items() if day < first), default=None
+        )
+        after_index = min(
+            (index for day, index in position.items() if day > last), default=None
+        )
+        if before_index is None or after_index is None:
+            continue  # head/tail of the carried table: the seam's business
+        before = carried.iloc[before_index]
+        after = carried.iloc[after_index]
+        reason = None
+        stored_reference: float | None = None
+        if len(days) > MAX_INTERIOR_PROOF_RUN_DAYS:
+            reason = f"run exceeds {MAX_INTERIOR_PROOF_RUN_DAYS} open days"
+        elif float(before["volume"]) != 0.0:
+            reason = "the before boundary bar traded"
+        elif float(after["volume"]) == 0.0:
+            if abs(float(after["close"]) - float(before["close"])) > _TOLERANCE:
+                reason = "boundary closes differ beyond the chain tolerance"
+        elif pre_close_lookup is None:
+            reason = "the after boundary traded and no stored reference is readable"
+        else:
+            # The resumption shape (601995.SH, 2026-09-23): the after bar
+            # traded, so the run's last day could have traded too -- unless
+            # the supplier's own stored response states the resumption day's
+            # reference price chaining to the halt close.  That stated
+            # reference is the exchange's ex-rights answer for the hole; a
+            # hole day that had really traded would have moved it.
+            stored_reference = pre_close_lookup(symbol, _as_date(after["trade_date"]))
+            if stored_reference is None:
+                reason = "the after boundary traded and no stored reference is readable"
+            elif abs(stored_reference - float(before["close"])) > _TOLERANCE:
+                reason = "the stored reference does not chain to the halt close"
+        if reason is not None:
+            issues.append(
+                QualityIssue(
+                    severity=Severity.WARNING,
+                    code=CODE_SUSPENSION_RUN_UNVERIFIED,
+                    table="daily_bar",
+                    symbol=symbol,
+                    trade_date=first,
+                    details={
+                        "run": f"{first.isoformat()}..{last.isoformat()}",
+                        "rule": "interior_bounded",
+                        "reason": reason,
+                    },
+                )
+            )
+            continue
+        price = float(before["close"])
+        run_actions = _actions_in_run(
+            actions, symbol, first, _as_date(after["trade_date"])
+        )
+        ex_dates = sorted(
+            ex
+            for ex in (_as_date(row.get("ex_date")) for row in run_actions)
+            if ex is not None
+        )
+        for day in days:
+            records.append(
+                {
+                    "trade_date": pd.Timestamp(day),
+                    "symbol": symbol,
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                    "volume": 0,
+                    "amount": 0.0,
+                    "adjustment": "unadjusted",
+                    "source": SUSPENSION_SOURCE,
+                    "ingested_at": ingested_at,
+                }
+            )
+        issues.append(
+            QualityIssue(
+                severity=Severity.INFO,
+                code=CODE_SUSPENSION_ROW,
+                table="daily_bar",
+                symbol=symbol,
+                trade_date=first,
+                details={
+                    "run": f"{first.isoformat()}..{last.isoformat()}",
+                    "days": len(days),
+                    "proof": "interior_bounded",
+                    "action_ex_dates": [ex.isoformat() for ex in ex_dates],
+                    "stored_reference": stored_reference,
+                },
+            )
+        )
+
+    return _frame_from_records(records), issues

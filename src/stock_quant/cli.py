@@ -316,6 +316,18 @@ def data_update(
     sources: str | None = typer.Option(
         None, "--sources", help="Comma-separated source subset."
     ),
+    disclosure_lookback_days: int | None = typer.Option(
+        None,
+        "--disclosure-lookback-days",
+        min=1,
+        help=(
+            "Operator deep-reconcile override: widens only the corporate-action "
+            "tables' disclosure re-ask window (default 90 days) so one round "
+            "can re-reconcile the whole listed window. Omit for ordinary "
+            "updates; combine with explicit --start/--end only if they match "
+            "every table's contract window, which they usually cannot."
+        ),
+    ),
     root: Path = typer.Option(".", "--root", help="Project root."),
 ) -> None:
     """Fetch one window into the raw-store and publish when the gate passes."""
@@ -325,6 +337,7 @@ def data_update(
         start_date=date.fromisoformat(start) if start else None,
         end_date=date.fromisoformat(end) if end else None,
         sources=tuple(s.strip() for s in sources.split(",")) if sources else None,
+        disclosure_lookback_days=disclosure_lookback_days,
     )
     try:
         result = DataPipeline(project_root).update(request)
@@ -335,7 +348,10 @@ def data_update(
     typer.echo(f"resolved_end_date={result.resolved_end_date or ''}")
     typer.echo(_report_summary(result.quality_report))
     for status in result.source_status:
-        state = "ok" if status.ok else "not_ok"
+        # "not_ok" alone would read as a failure for a source that simply had
+        # no lane to run this round (reason_code not_run); the code is what
+        # tells an operator whether the source failed or never ran.
+        state = "ok" if status.ok else f"not_ok({status.reason_code})"
         typer.echo(f"source {status.source}: {state}")
     if result.dataset_ref is not None:
         typer.echo(f"dataset_version={result.dataset_ref.version}")

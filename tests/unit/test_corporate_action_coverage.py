@@ -19,6 +19,7 @@ from stock_quant.data_model.corporate_action_coverage import (
     coverage_record,
 )
 from stock_quant.data_model.corporate_actions import (
+    REASON_COMPENSATORY_SHARE_TRANSFER,
     REASON_CROSS_SOURCE_CONFLICT,
     REASON_INCOMPLETE,
     REASON_NON_DISTRIBUTIVE_RESTRUCTURING,
@@ -56,6 +57,39 @@ def test_refused_non_distributive_event_does_not_untrust_the_window():
     )
     assert status is CoverageStatus.VERIFIED
     assert reason is None
+
+
+def test_refused_compensatory_transfer_does_not_untrust_the_window():
+    """A 承诺补偿 is the same shape of fact from the opposite ground (ADR-018).
+
+    The shares reach holders and the exchange schedules no price adjustment,
+    so the absent ex-date is the *correct* fact (ADR-009 row 1, measured
+    bracketed-empty).  002131 and 600733 each hold one such row beside a
+    correctly booked ordinary history; refusing it must not cost their windows
+    trust any more than a 重整转增 does.
+    """
+    status, reason = _coverage_verdict(
+        _FETCHED, has_accepted=True,
+        quarantine_reasons={REASON_COMPENSATORY_SHARE_TRANSFER},
+    )
+    assert status is CoverageStatus.VERIFIED
+    assert reason is None
+
+
+def test_an_observed_adjustment_demotes_the_compensatory_exemption_too():
+    """The ADR-012 conditionality binds every exempted reason, not one.
+
+    A market adjustment observed at a 承诺补偿's probe date would mean the
+    event did move the price after all, so the exemption must yield exactly as
+    the 重整转增 one does.
+    """
+    status, reason = _coverage_verdict(
+        _FETCHED, has_accepted=True,
+        quarantine_reasons={REASON_COMPENSATORY_SHARE_TRANSFER},
+        demoted_reasons={REASON_COMPENSATORY_SHARE_TRANSFER},
+    )
+    assert status is CoverageStatus.UNTRUSTED
+    assert reason is CoverageReason.FACTS_INCOMPLETE
 
 
 def test_unaccounted_quarantine_reasons_still_untrust_the_window():

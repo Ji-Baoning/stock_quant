@@ -145,3 +145,46 @@ def test_carried_row_straddling_the_boundary_is_clipped_and_kept():
     ].iloc[0]
     assert pd.Timestamp(carried_row["window_start"]).date() == date(2015, 1, 5)
     assert pd.Timestamp(carried_row["window_end"]).date() == date(2020, 12, 31)
+
+
+def test_an_already_inverted_carried_row_is_dropped_not_carried():
+    """A baseline row whose window ends before it starts is evidence of nothing.
+
+    The clip this merge once applied produced rows like ``[2026-06-20 →
+    2020-12-31]`` on published baselines; the creation side is fixed, but such
+    a dead row's ``window_end`` predates every later fetch boundary, so without
+    this purge it rides the carried history into every new version while a
+    direct reader of the published table counts its ``UNTRUSTED`` verdict as a
+    real problem (the 2026-09-25 ``e1db8328`` readback: 34 phantom symbols).
+    The trust gate skips it; the published table must not keep republishing it.
+    """
+    carried = coverage_frame(
+        [
+            coverage_record(
+                "000725.SZ",
+                date(2026, 6, 20),
+                date(2020, 12, 31),
+                CoverageStatus.UNTRUSTED,
+                CoverageReason.FACTS_INCOMPLETE,
+            )
+        ]
+    )
+    refreshed = coverage_frame(
+        [
+            coverage_record(
+                "000725.SZ",
+                date(2026, 6, 24),
+                date(2026, 9, 22),
+                CoverageStatus.VERIFIED,
+                None,
+            )
+        ]
+    )
+
+    merged = _merge_carried_coverage(
+        carried, refreshed, fetch_start=date(2026, 6, 24)
+    )
+
+    assert len(merged) == 1, merged.to_dict("records")
+    assert merged.iloc[0]["status"] == CoverageStatus.VERIFIED.value
+    assert pd.Timestamp(merged.iloc[0]["window_end"]).date() == date(2026, 9, 22)

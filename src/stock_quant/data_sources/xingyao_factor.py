@@ -77,6 +77,34 @@ def factor_event_dates(frame: pd.DataFrame | None, symbol: str) -> list[date]:
     return events
 
 
+def factor_ratio_at(
+    frame: pd.DataFrame | None, symbol: str, ex_date: date
+) -> float | None:
+    """The cumulative factor's step across ``ex_date``, or ``None``.
+
+    The ratio the last value at or before the ex-date carries against its
+    predecessor -- the same computation ADR-009's event rule performs, kept
+    as a value because the ADR-019 settler corroborates the exchange's
+    reference price against it.  A frame that cannot answer, a symbol the
+    frame does not carry, or an ex-date at the series' very start answers
+    ``None``: the corroboration leg is skipped, never guessed.
+    """
+    if frame is None or frame.empty:
+        return None
+    if symbol not in frame.columns:
+        return None
+    series = _ordered_series(frame[symbol])
+    deduplicated = _deduplicate(series)
+    at_or_before = [day for day in deduplicated if day <= ex_date]
+    if len(at_or_before) < 2:
+        return None
+    latest, previous = at_or_before[-1], at_or_before[-2]
+    base = deduplicated[previous]
+    if base == 0:
+        return None
+    return deduplicated[latest] / base
+
+
 def fetch_factor_frames(
     symbols: Sequence[str], *, timeout_seconds: float, end: date | None = None
 ) -> dict[str, pd.DataFrame]:

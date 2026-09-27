@@ -12,11 +12,12 @@ prove a bare tail, and an event row at the date is an observed adjustment
 that overrides any absence (decision 3).
 
 The admissible channels are named by ADR-009 decision 3: TDX category-1
-records and baostock's adjustment-factor series.  The factor channel is now
-wired (ADR-016) and served from xingyao's backward-factor series, though
-records published before the succession keep the ``"baostock"`` label; an
-absent channel asserts nothing, which is the fail-closed direction -- an
-unbracketed row reads ``unknown`` and stays blocking.
+records and an adjustment-factor series.  The factor channel is wired
+(ADR-016) and served from xingyao's backward-factor series -- baostock's
+predecessor module is deleted, though records published before the
+succession keep the ``"baostock"`` label; an absent channel asserts nothing,
+which is the fail-closed direction -- an unbracketed row reads ``unknown``
+and stays blocking.
 
 This module records classifications only: nothing here moves a verdict.
 Moving one is a separate decision (ADR-009 decision 4).

@@ -36,12 +36,21 @@ REASON_INCOMPLETE = "incomplete"
 #: A bankruptcy-reorganisation share transfer (重整转增) that holders never
 #: receive and that carries no exchange ex-date adjustment.
 REASON_NON_DISTRIBUTIVE_RESTRUCTURING = "non_distributive_restructuring"
+#: A compensatory share transfer (承诺补偿): shares the promisor already owns
+#: move to holders, no new shares are issued, and no exchange price
+#: adjustment exists -- so the ex-date the price-event model requires is absent
+#: *as a fact*, not as a missing field (ADR-009 row 1, measured bracketed-empty).
+REASON_COMPENSATORY_SHARE_TRANSFER = "compensatory_share_transfer"
 
-#: CNINFO's 分红类型 value naming a reorganisation share transfer.  It is the
-#: only type of a bookable event that is refused as a matter of its nature
-#: (see ``_reject_reason``); 承诺补偿 and 股改分红 are deliberately *not* listed
-#: here, because 股改分红 can carry a real ex-date.
+#: CNINFO's 分红类型 value naming a reorganisation share transfer.  It is a
+#: type of a bookable event that is refused as a matter of its nature
+#: (see ``_reject_reason``); 股改分红 is deliberately *not* refused by type,
+#: because 股改分红 can carry a real ex-date.
 _CNINFO_TYPE_RESTRUCTURING = "重整转增"
+#: CNINFO's 分红类型 value naming a compensatory share transfer.  Refused by
+#: nature like 重整转增, but with the opposite ground: the shares *are*
+#: received, and the absence of an ex-date is the correct fact.
+_CNINFO_TYPE_COMPENSATION = "承诺补偿"
 
 STATUS_IMPLEMENTED = "implemented"
 STATUS_NOT_IMPLEMENTED = "not_implemented"
@@ -71,6 +80,11 @@ _UNSUPPORTED_KEYWORDS = ("配股", "配售", "吸收合并", "换股")
 _RIGHTS_KEYWORDS = ("配股", "配售")
 _IMPLEMENTED_MARKER = "实施"
 _BOTH_SOURCES = "cninfo+eastmoney"
+#: The two sources stated one *economics* in two 送股/转增 splits.  Unlike
+#: ``_BOTH_SOURCES`` this label does not claim the sides corroborated each
+#: other's split -- only that ``1 + bonus + capitalization`` is identical, which
+#: is everything any downstream computation reads.
+_BOTH_SOURCES_SPLIT_EQUIV = "cninfo+eastmoney(split_equiv)"
 
 #: The two sides a cross-source conflict is between.  A third-party arbiter
 #: (ADR-007) names one of them, and the booked value becomes
@@ -78,6 +92,13 @@ _BOTH_SOURCES = "cninfo+eastmoney"
 #: ``apply_corporate_action_reviews`` already writes as ``<side>+reviewed``.
 CONFLICT_SIDE_CNINFO = "cninfo"
 CONFLICT_SIDE_EASTMONEY = "eastmoney"
+
+#: The price-basis settler's authority name (ADR-019): a refused 重整转增 row
+#: whose holder adjustment the exchange's own reference price attests books as
+#: ``<origin>+price_basis``, carrying the reference-implied ratio -- never the
+#: announcement's capital expansion, which the price model must not read as a
+#: holder distribution.
+PRICE_BASIS_AUTHORITY = "price_basis"
 
 #: The one source of rights-issue facts: CNINFO's allotment endpoint, reached
 #: through ``stock_allotment_cninfo``.  There is no second source to
@@ -190,6 +211,25 @@ class CorporateActionArbiter(Protocol):
     def arbitrate(
         self, cninfo: ConflictTerms, eastmoney: ConflictTerms
     ) -> str | None: ...
+
+
+class PriceBasisSettlementLike(Protocol):
+    """What a settler's settlement exposes to the reconciliation (ADR-019)."""
+
+    factor_ratio: float
+
+
+class PriceBasisSettlerLike(Protocol):
+    """The ADR-019 settler's boundary as the reconciliation reads it.
+
+    Asked only for a row refused as ``non_distributive_restructuring`` that
+    states an ex-date.  ``None`` -- every absent, unmodelled or disputed
+    shape -- keeps the row quarantined exactly as ADR-008 refused it.
+    """
+
+    def settle(
+        self, symbol: str, ex_date: date
+    ) -> PriceBasisSettlementLike | None: ...
 
 
 @dataclass(frozen=True)
@@ -425,6 +465,7 @@ def normalize_corporate_actions(
     eastmoney: pd.DataFrame | None,
     *,
     arbiter: CorporateActionArbiter | None = None,
+    price_basis: PriceBasisSettlerLike | None = None,
 ) -> CorporateActionResult:
     """Reconcile the CNINFO and Eastmoney corporate-action frames.
 
@@ -436,8 +477,21 @@ def normalize_corporate_actions(
     Only when no arbiter can name a side does ``_merged_within_representation_
     floor`` get a turn: a pair whose every field agrees to within float32's own
     grid is one stated ratio in two renderings, and books as ``_BOTH_SOURCES``
-    carrying the longer rendering.  Anything further apart than that -- a real
-    disagreement no channel could settle -- is quarantined exactly as before.
+    carrying the longer rendering.  A pair that survives both and disagrees
+    *only* in how it splits one total between 送股 and 转增 books through
+    ``_economically_equivalent_split`` under a label that says the sides
+    corroborated the economics, not the split -- every downstream computation
+    reads ``1 + bonus + capitalization``, which is identical.  Anything further
+    apart than that -- a real disagreement no channel could settle -- is
+    quarantined exactly as before.
+
+    ``price_basis`` (ADR-019) is consulted **only** for a row the type rule
+    refused as ``non_distributive_restructuring`` that states an ex-date: when
+    the exchange's own reference price attests the holder adjustment the
+    evidence demands, the row books the reference-implied ratio under
+    ``<origin>+price_basis`` -- never the announcement's capital expansion --
+    and the refusal is consumed for this round.  ``None`` (the channel absent,
+    or it declining) keeps the refusal exactly as ADR-008/012 left it.
     """
     cn_candidates, cn_quarantine = _standardize_source(cninfo, "cninfo")
     em_candidates, em_quarantine = _standardize_source(eastmoney, "eastmoney")
@@ -461,6 +515,12 @@ def normalize_corporate_actions(
                 if merged is not None:
                     accepted.append(_row(merged, confirmed_by=_BOTH_SOURCES))
                     continue
+                equivalent = _economically_equivalent_split(cn_event, em_event)
+                if equivalent is not None:
+                    accepted.append(
+                        _row(equivalent, confirmed_by=_BOTH_SOURCES_SPLIT_EQUIV)
+                    )
+                    continue
                 quarantined.append(
                     _row(
                         cn_event,
@@ -480,10 +540,61 @@ def normalize_corporate_actions(
         elif em_event is not None:
             accepted.append(_row(em_event, confirmed_by=CONFLICT_SIDE_EASTMONEY))
 
+    if price_basis is not None:
+        booked, kept = [], []
+        for row in quarantined:
+            settlement = None
+            if (
+                row.get("reason") == REASON_NON_DISTRIBUTIVE_RESTRUCTURING
+                and row.get("ex_date") is not None
+            ):
+                try:
+                    settlement = price_basis.settle(
+                        str(row["symbol"]), row["ex_date"]
+                    )
+                except Exception:  # noqa: BLE001 - best-effort evidence path
+                    settlement = None
+            if settlement is not None:
+                booked.append(
+                    _price_basis_booked_row(row, settlement.factor_ratio)
+                )
+                continue
+            kept.append(row)
+        if booked:
+            accepted.extend(booked)
+            quarantined = kept
+
     return CorporateActionResult(
         accepted=_finalize(accepted, RECONCILED_COLUMNS),
         quarantined=_finalize(quarantined, QUARANTINE_COLUMNS),
     )
+
+
+def _price_basis_booked_row(
+    row: dict[str, Any], factor_ratio: float
+) -> dict[str, Any]:
+    """The row a price-basis settlement books, from the refused row's dates.
+
+    The booked facts are the exchange's, not the announcement's: the ratios
+    the announcement states stay out (they describe the share expansion,
+    which holders did not receive), and the one ratio the price model reads
+    is the reference-implied holder adjustment.  The origin keeps its place
+    in the confirmation set -- ``<origin>+price_basis`` -- so the label names
+    both whose announcement anchored the row and what authority priced it.
+    """
+    return {
+        "symbol": row["symbol"],
+        "announcement_date": row.get("announcement_date"),
+        "record_date": row.get("record_date"),
+        "ex_date": row.get("ex_date"),
+        "cash_dividend_per_share": None,
+        "bonus_share_ratio": None,
+        "capitalization_ratio": _to_float(factor_ratio - 1.0),
+        "rights_issue_ratio": None,
+        "rights_issue_price": None,
+        "status": row.get("status", STATUS_IMPLEMENTED),
+        "confirmed_by": f"{row['confirmed_by']}+{PRICE_BASIS_AUTHORITY}",
+    }
 
 
 def _arbitrated_event(
@@ -743,6 +854,13 @@ def _reject_reason(event: dict[str, Any]) -> str | None:
     # symbol/window as an incomplete record.
     if event["distribution_type"] == _CNINFO_TYPE_RESTRUCTURING:
         return REASON_NON_DISTRIBUTIVE_RESTRUCTURING
+    # Same gate position, opposite ground: a 承诺补偿's shares reach holders
+    # through a transfer of existing stock, so the market has no price event
+    # and the model's ex-date requirement is unmeetable *as a fact*.  Falling
+    # through would quarantine a correctly reported row as ``incomplete``
+    # forever; refusing it here names what it is instead.
+    if event["distribution_type"] == _CNINFO_TYPE_COMPENSATION:
+        return REASON_COMPENSATORY_SHARE_TRANSFER
     if (
         event["announcement_date"] is None
         or event["record_date"] is None
@@ -844,6 +962,40 @@ def _merged_within_representation_floor(
             return None
         merged[field] = _more_precise(left, right)
     return merged
+
+
+def _economically_equivalent_split(
+    cn_event: dict[str, Any], em_event: dict[str, Any]
+) -> dict[str, Any] | None:
+    """One event whose sides disagree only in the 送股/转增 split.
+
+    ``None`` unless the record date, cash, rights and subscription price are
+    *identically* equal (the same exactness ``_same_facts`` applies) **and** the
+    two sides' ``bonus + capitalization`` sums are exactly equal while the
+    individual fields differ.  The ex-date price factor -- and every downstream
+    computation derived from it, including ``adjusted_bar`` -- reads
+    ``1 + bonus + capitalization`` alone (ADR-013's ``expected_factor``), so a
+    pair meeting this test is one economics stated two ways, and the split
+    difference is not evidence any consumer of this table reads.
+
+    A pair this accepts is a *narrower* statement than ``_BOTH_SOURCES``: the
+    sides corroborated the economics, not each other's split, so the row is
+    booked under ``_BOTH_SOURCES_SPLIT_EQUIV`` carrying the official filer's
+    (CNINFO's) rendering.  Any disagreement outside the two ratio fields --
+    a different cash amount, a different total, an omitted same-day event --
+    fails the exactness or the sum test and keeps its quarantine, so this can
+    never widen into a general tolerance.
+    """
+    if cn_event["record_date"] != em_event["record_date"]:
+        return None
+    for field in ("cash", "rights", "rights_price"):
+        if _zeroed(cn_event[field]) != _zeroed(em_event[field]):
+            return None
+    cn_total = _zeroed(cn_event["bonus"]) + _zeroed(cn_event["capitalization"])
+    em_total = _zeroed(em_event["bonus"]) + _zeroed(em_event["capitalization"])
+    if cn_total != em_total:
+        return None
+    return dict(cn_event)
 
 
 def _combine_same_day_events(

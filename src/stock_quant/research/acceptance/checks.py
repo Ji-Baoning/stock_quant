@@ -492,6 +492,15 @@ def _check_source_roles(value: AcceptanceCheckInput) -> CheckResult:
             continue
         source = str(row.get("source"))
         if row.get("ok") is not True:
+            # ``not_run`` is the state a source whose every lane legitimately
+            # skipped this round is left in -- a steady-state round fetches
+            # only uncovered tails, so the calendar and daily lanes can have
+            # nothing to do while the dataset itself is complete (its table
+            # coverage is ``table_fetch_coverage_evidence``'s separate
+            # verdict).  A source that was exercised and failed carries its
+            # own reason code and still fails here.
+            if row.get("reason_code") == "not_run":
+                continue
             failures.append(["required_source_not_ok", source])
         elif row.get("reason_code") != "ok":
             failures.append(["required_reason_code_not_ok", source])

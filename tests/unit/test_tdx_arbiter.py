@@ -341,10 +341,13 @@ def test_no_arbitration_leaves_both_sides_quarantined(frame):
 
 
 def test_no_arbitration_when_the_total_matches_both_sides():
-    """An identical total split differently is confirmed by neither a nor b.
+    """An identical total split differently is confirmed by neither side's channel.
 
     TDX states 送转 as one number, so it agrees with both sides of such a
-    conflict and therefore separates neither.
+    conflict and therefore separates neither.  The pair still books: the
+    economic-equivalence merge (ADR-017) accepts the economics both sides
+    corroborate under its own label, and the arbiter's refusal is exactly why
+    that merge -- not the channel -- carries the row.
     """
     result = normalize_corporate_actions(
         _cninfo(bonus_per_10=6.0, cap_per_10=9.0),
@@ -352,8 +355,9 @@ def test_no_arbitration_when_the_total_matches_both_sides():
         arbiter=_arbiter(_xdxr(songzhuangu=_tdx_sends(15.0))),
     )
 
-    assert result.accepted.empty
-    assert len(result.quarantined) == 2
+    assert result.quarantined.empty
+    assert len(result.accepted) == 1
+    assert result.accepted.iloc[0]["confirmed_by"] == "cninfo+eastmoney(split_equiv)"
 
 
 def test_a_repeated_ex_date_is_not_arbitrated():
@@ -442,6 +446,66 @@ def test_a_missing_package_is_an_unavailable_arbiter(monkeypatch):
 
     with pytest.raises(TdxUnavailableError):
         fetch_xdxr_frames(["600519.SH"])
+
+
+def test_the_xdxr_getter_matches_the_installed_signature():
+    """0.5.0 takes (Market, code); 0.6.0 takes one prefixed string.
+
+    The env may hold either version; the getter must call the shape the
+    installed package defines.  A mismatch surfaced as 31 identical
+    ``missing 1 required positional argument`` arbiter failures on the
+    2026-09-27 deep rebuild -- every TDX opinion lost to a TypeError.
+    """
+    import asyncio
+    import inspect
+
+    from stock_quant.data_sources.tdx import _xdxr_getter
+
+    calls: list[tuple] = []
+
+    class _Client050:
+        async def get_xdxr(self, market, code):  # noqa: ANN001 - signature IS the test
+            calls.append((market, code))
+            return []
+
+    class _Client060:
+        async def get_xdxr(self, prefixed):  # noqa: ANN001 - signature IS the test
+            calls.append((prefixed,))
+            return []
+
+    asyncio.run(_xdxr_getter(_Client050())("300124.SZ"))
+    assert calls[-1][0].name == "SZ"
+    assert calls[-1][1] == "300124"
+
+    asyncio.run(_xdxr_getter(_Client060())("300124.SZ"))
+    assert calls[-1] == ("sz300124",)
+
+    # The selector reads the bound signature, never the class name.
+    assert len(
+        [
+            p
+            for p in inspect.signature(
+                _Client050().get_xdxr
+            ).parameters.values()
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+    ) == 2
+
+
+def test_the_xdxr_getter_refuses_unknowable_markets_on_both_shapes():
+    """No market for the suffix is the same refusal on either signature."""
+    import pytest
+
+    from stock_quant.data_sources.tdx import (
+        TdxUnavailableError,
+        _tdx_market_code,
+        _tdx_symbol,
+    )
+
+    with pytest.raises(TdxUnavailableError):
+        _tdx_symbol("830001.BJ")
+    with pytest.raises(TdxUnavailableError):
+        _tdx_market_code("830001.BJ")
 
 
 def test_the_shipped_config_ships_the_arbiter_on():
@@ -694,24 +758,21 @@ def test_classification_without_an_arbiter_records_nothing():
 
 
 # --------------------------------------------------------------------------- #
-# baostock's adjustment-factor series as the second classification channel
+# xingyao's adjustment-factor series as the second classification channel
 # --------------------------------------------------------------------------- #
 
 
 def _factor_frame(rows):
+    """A native-shape xingyao factor series: wide, symbol columns, dates indexed."""
     import pandas as pd
 
     return pd.DataFrame(
-        [
-            {
-                "code": "sz.600519",
-                "dividOperateDate": day,
-                "foreAdjustFactor": value,
-                "backAdjustFactor": value,
-                "adjustFactor": value,
-            }
-            for day, value in rows
-        ]
+        {
+            "600519.SH": pd.Series(
+                [value for _, value in rows],
+                index=[day for day, _ in rows],
+            )
+        }
     )
 
 
@@ -719,13 +780,12 @@ def _factor_channel(outcome, calls, raw_snapshots, issues=None):
     """A ``_LazyFactorChannel`` over a scripted factor-frame fetch.
 
     The channel is source-agnostic since ADR-016 moved its wiring to xingyao,
-    so the rule these tests pin -- baostock's (ADR-009 decision 3, unchanged):
-    the first valid value is the baseline and an event is a change against it
-    -- is injected explicitly from baostock's module, the rule's reference
-    implementation that stays in the tree as the dormant predecessor.
+    so the rule these tests pin -- the first valid value is the baseline and
+    an event is a change against it (ADR-009 decision 3) -- is injected
+    explicitly from xingyao's module, the lane's one implementation.
     """
     from stock_quant import data_pipeline
-    from stock_quant.data_sources import baostock_factor
+    from stock_quant.data_sources import xingyao_factor
 
     def fake_fetch(symbol):
         calls.append(symbol)
@@ -735,10 +795,10 @@ def _factor_channel(outcome, calls, raw_snapshots, issues=None):
 
     end = date(2026, 9, 18)
     return data_pipeline._LazyFactorChannel(
-        "baostock",
+        "xingyao",
         fake_fetch,
-        lambda frame, symbol: baostock_factor.factor_event_dates(frame),
-        lambda symbol, frame: baostock_factor.snapshot_result(symbol, frame, end=end),
+        lambda frame, symbol: xingyao_factor.factor_event_dates(frame, symbol),
+        lambda symbol, frame: xingyao_factor.snapshot_result(symbol, frame, end=end),
         end,
         issues=issues if issues is not None else [],
         raw_snapshots=raw_snapshots,
@@ -755,7 +815,7 @@ _ABSENT_ROW = {
 
 
 def test_a_bracketing_factor_series_asserts_absence_without_tdx(monkeypatch):
-    """baostock alone can carry the market axis; TDX is not required."""
+    """The factor series alone can carry the market axis; TDX is not required."""
     calls: list[str] = []
     channel = _factor_channel(
         {
@@ -831,12 +891,12 @@ def test_a_factor_series_is_recorded_as_a_raw_snapshot(monkeypatch):
     channel("600519.SH")
 
     assert len(raw) == 1
-    assert raw[0].endpoint == "adjust_factor"
-    assert raw[0].source == "baostock"
+    assert raw[0].endpoint == "backward_factor"
+    assert raw[0].source == "xingyao"
 
 
 def test_a_failing_factor_channel_degrades_to_unknown_with_a_warning(monkeypatch):
-    """The fail-closed direction: a dead baostock asserts nothing, once."""
+    """The fail-closed direction: a dead channel asserts nothing, once."""
     calls: list[str] = []
     issues: list = []
     channel = _factor_channel(

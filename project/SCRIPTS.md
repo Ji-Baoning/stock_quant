@@ -22,6 +22,7 @@
 | `project/extend_history_offline.py` | migration | 用既有证据进行离线历史回补 | 无替代项 |
 | `project/extend_master_to_membership.py` | migration | 扩展证券主数据以覆盖冻结成员 | 无替代项 |
 | `project/probe_dataset_gates.py` | diagnostic | 预览真实更新必须通过的硬门禁 | 无替代项 |
+| `project/probe_batch_channel.py` | diagnostic | 探测星耀批量日线通道的配额与耗时，作为默认启用的前提 | 无替代项 |
 | `project/probe_expansion_gap_risk.py` | diagnostic | 抽样衡量扩容前的缺口风险 | 无替代项 |
 | `project/probe_relay_substitution.py` | diagnostic | 检测 relay 的静默数据替代 | 无替代项 |
 | `project/probe_tushare_proxy.py` | diagnostic | 只读探测 Tushare 兼容代理能力 | 无替代项 |

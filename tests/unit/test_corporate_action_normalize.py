@@ -15,6 +15,7 @@ from stock_quant.data_model.corporate_actions import (
     EXCLUSION_ANNOUNCEMENT_PRE_WINDOW_IMPLEMENTED,
     EXCLUSION_EX_DATE_OUT_OF_WINDOW,
     EXCLUSION_RECORD_DATE_OUT_OF_WINDOW,
+    REASON_COMPENSATORY_SHARE_TRANSFER,
     REASON_CROSS_SOURCE_CONFLICT,
     REASON_INCOMPLETE,
     REASON_NON_DISTRIBUTIVE_RESTRUCTURING,
@@ -540,24 +541,26 @@ def test_plan_column_absent_second_supplier_never_reads_empty_plan():
 
 
 # --------------------------------------------------------------------------- #
-# Non-distributive events (ADR-008)
+# Non-distributive events (ADR-008, ADR-018)
 # --------------------------------------------------------------------------- #
 #
 # CNINFO types every 分红 row with 分红类型.  Three of those types describe a
-# share transfer that never reaches a pre-event holder: 重整转增 moves shares
-# to bankruptcy-reorganisation creditors (深交所自律监管指引第14号 §39: 重整
-# 转增不向原股东分配), while 承诺补偿 and 股改分红 shift shares between existing
-# holders without changing total share capital.  None of them is a price event,
-# so booking one invents an ex-date adjustment and -- because the supplier
-# reports no 除权日 for them -- an absent ex-date that only looks like a data
-# gap.  Only 重整转增 is refused here: 股改分红 can carry a real, exchange-
-# published ex-date (600733's 10转25) and must keep being booked.
+# share transfer that never reaches a pre-event holder as a *price event*:
+# 重整转增 moves shares to bankruptcy-reorganisation creditors (深交所自律监
+# 管指引第14号 §39: 重整转增不向原股东分配), while 承诺补偿 and 股改分红
+# shift shares between existing holders without changing total share capital.
+# None of them is a price event, so booking one invents an ex-date adjustment
+# and -- because the supplier reports no 除权日 for them -- an absent ex-date
+# that only looks like a data gap.  重整转增 and 承诺补偿 are refused by
+# type; 股改分红 is not, because it can carry a real, exchange-published
+# ex-date (600733's 10转25) and must keep being booked.
 
 
 def _cninfo_typed(
     distribution_type: str | None,
     *,
     cap_per_10: float = 19.24,
+    bonus_per_10: float = 0.0,
     ex: str | None = None,
     record: str | None = "2021-12-21",
     plan: str = "重整计划转增股票",
@@ -572,7 +575,7 @@ def _cninfo_typed(
                 "股权登记日": record,
                 "除权日": ex,
                 "派息比例": 0.0,
-                "送股比例": 0.0,
+                "送股比例": bonus_per_10,
                 "转增比例": cap_per_10,
                 "方案进度": "实施",
                 "实施方案分红说明": plan,
@@ -658,6 +661,274 @@ def test_absent_type_column_is_treated_as_an_ordinary_distribution():
     result = normalize_corporate_actions(_cninfo_plan(cash_per_10=1.0), None)
     assert result.quarantined.empty
     assert len(result.accepted) == 1
+
+
+def test_compensatory_transfer_is_refused_by_type_not_incomplete():
+    """002131's 承诺补偿 reports no 除权日 because there is none to report.
+
+    The shares reach holders through a transfer of existing stock: no new
+    shares are issued, no value leaves the company, and the exchange
+    schedules no price adjustment (ADR-009 row 1, measured bracketed-empty
+    on both channels).  The row is correctly reported, so refusing it by its
+    declared type names the fact; letting it fall to the date gate would
+    quarantine it as ``incomplete`` forever and withhold coverage trust from
+    every unrelated holding of the symbol.
+    """
+    result = normalize_corporate_actions(
+        _cninfo_typed(
+            "承诺补偿",
+            cap_per_10=0.0,
+            bonus_per_10=0.039859,
+            record="2017-12-13",
+            plan="10送0.03985947股",
+        ),
+        None,
+    )
+    assert result.accepted.empty
+    quarantined = result.quarantined.iloc[0]
+    assert quarantined["reason"] == REASON_COMPENSATORY_SHARE_TRANSFER
+    assert quarantined["reason"] != REASON_INCOMPLETE
+
+
+def test_compensatory_transfer_with_a_stated_ex_date_is_still_refused():
+    """The refusal reads the declared type, not the ex-date's presence.
+
+    A supplier that publishes a spurious 除权日 for a 承诺补偿 would otherwise
+    book a price adjustment no exchange applied -- the same phantom ADR-008
+    refused for 重整转增.
+    """
+    result = normalize_corporate_actions(
+        _cninfo_typed("承诺补偿", cap_per_10=0.0, bonus_per_10=0.039859, ex="2017-12-14"),
+        None,
+    )
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == REASON_COMPENSATORY_SHARE_TRANSFER
+
+
+# --------------------------------------------------------------------------- #
+# The price-basis representation for refused restructuring rows (ADR-019)
+# --------------------------------------------------------------------------- #
+
+
+class _SettlesAt:
+    """A stub settler booking one (symbol, ex_date) at a fixed ratio."""
+
+    def __init__(self, symbol: str, ex_date, factor_ratio: float):
+        self.symbol = symbol
+        self.ex_date = ex_date
+        self.factor_ratio = factor_ratio
+        self.asked: list[tuple[str, object]] = []
+
+    def settle(self, symbol, ex_date):
+        self.asked.append((symbol, ex_date))
+        if symbol != self.symbol or ex_date != self.ex_date:
+            return None
+
+        class _Settlement:
+            pass
+
+        settlement = _Settlement()
+        settlement.factor_ratio = self.factor_ratio
+        return settlement
+
+
+def test_price_basis_books_the_reference_implied_holder_ratio():
+    """600518's refused row books the exchange's 1.065116 -- never the 2.8.
+
+    The announcement's capital expansion stays out of the price table: the
+    booked ratio is the one the exchange's own reference price implies, under
+    a label naming whose announcement anchored the row and what authority
+    priced it.
+    """
+    settler = _SettlesAt("600515.SH", datetime.date(2021, 12, 22), 1.477002)
+    result = normalize_corporate_actions(
+        _cninfo_typed("重整转增", ex="2021-12-22"), None, price_basis=settler
+    )
+    assert result.quarantined.empty
+    row = result.accepted.iloc[0]
+    assert row["confirmed_by"] == "cninfo+price_basis"
+    assert row["capitalization_ratio"] == pytest.approx(0.477002)
+    assert row["bonus_share_ratio"] is None or pd.isna(row["bonus_share_ratio"])
+    assert row["cash_dividend_per_share"] is None or pd.isna(
+        row["cash_dividend_per_share"]
+    )
+    assert row["ex_date"] == datetime.date(2021, 12, 22)
+
+
+def test_price_basis_is_asked_only_for_typed_refusals_with_an_ex_date():
+    """The settler sees refused restructuring rows with an ex-date, alone.
+
+    An incomplete row, a conflict, and an ex-date-less refusal keep their
+    shapes and never reach the settler -- it prices one refused event, it
+    does not review quarantines.
+    """
+    settler = _SettlesAt("600515.SH", datetime.date(2021, 12, 22), 1.477002)
+    result = normalize_corporate_actions(
+        _cninfo_typed("重整转增"), None, price_basis=settler
+    )
+    assert settler.asked == []  # no ex-date: never asked
+
+    conflicting = normalize_corporate_actions(
+        cninfo_cash(0.1), eastmoney_cash(0.2), price_basis=settler
+    )
+    assert conflicting.accepted.empty
+    assert settler.asked == []  # conflicts are the arbiters' business
+
+
+def test_price_basis_declining_keeps_the_refusal_exactly():
+    """A ``None`` from the settler is ADR-008's refusal, untouched."""
+
+    class _Declines:
+        def settle(self, symbol, ex_date):
+            return None
+
+    result = normalize_corporate_actions(
+        _cninfo_typed("重整转增", ex="2021-12-22"), None, price_basis=_Declines()
+    )
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == (
+        REASON_NON_DISTRIBUTIVE_RESTRUCTURING
+    )
+
+
+def test_no_price_basis_settler_changes_nothing():
+    """The ADR-018-era behaviour is the ``None``-settler behaviour."""
+    result = normalize_corporate_actions(_cninfo_typed("重整转增", ex="2021-12-22"), None)
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == (
+        REASON_NON_DISTRIBUTIVE_RESTRUCTURING
+    )
+
+
+def test_a_raising_settler_degrades_to_the_refusal():
+    """A broken evidence path costs nothing: the refusal stands."""
+    class _Broken:
+        def settle(self, symbol, ex_date):
+            raise RuntimeError("relay down")
+
+    result = normalize_corporate_actions(
+        _cninfo_typed("重整转增", ex="2021-12-22"), None, price_basis=_Broken()
+    )
+    assert result.accepted.empty
+    assert result.quarantined.iloc[0]["reason"] == (
+        REASON_NON_DISTRIBUTIVE_RESTRUCTURING
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Economically-equivalent 送股/转增 splits (ADR-017)
+# --------------------------------------------------------------------------- #
+
+
+def _eastmoney_split(
+    cash_per_10: float,
+    bonus_per_10: float,
+    cap_per_10: float,
+    *,
+    record: str = "2020-06-10",
+    ex: str = "2020-06-11",
+) -> pd.DataFrame:
+    """An Eastmoney dividend row in the documented native layout."""
+    return pd.DataFrame(
+        [
+            {
+                "代码": "600519",
+                "名称": "placeholder",
+                "最新公告日期": "2020-05-20",
+                "股权登记日": record,
+                "除权除息日": ex,
+                "现金分红-现金分红比例": cash_per_10,
+                "送转股份-送股比例": bonus_per_10,
+                "送转股份-转股比例": cap_per_10,
+                "方案进度": "实施",
+                "方案": f"10送{bonus_per_10}转{cap_per_10}",
+            }
+        ],
+        columns=_EASTMONEY_COLUMNS,
+    )
+
+
+def test_split_equivalent_conflict_books_one_economics():
+    """002269's 丙 class: 送6转9 vs 送5转10 is one economics, two splits.
+
+    Every downstream computation reads ``1 + bonus + capitalization`` alone
+    (ADR-013's ``expected_factor``), so with cash, record date and the sum
+    identical the pair books under a label that claims the economics was
+    corroborated -- not the split.  The official filer's rendering carries.
+    """
+    cninfo = _cninfo_plan(
+        cash_per_10=0.5, bonus_per_10=6.0, cap_per_10=9.0, plan="10派0.5送6转9"
+    )
+    eastmoney = _eastmoney_split(0.5, 5.0, 10.0)
+
+    result = normalize_corporate_actions(cninfo, eastmoney)
+
+    assert result.quarantined.empty, result.quarantined.to_dict("records")
+    assert len(result.accepted) == 1
+    row = result.accepted.iloc[0]
+    assert row["confirmed_by"] == "cninfo+eastmoney(split_equiv)"
+    assert row["bonus_share_ratio"] == pytest.approx(0.6)
+    assert row["capitalization_ratio"] == pytest.approx(0.9)
+
+
+def test_split_equivalent_merge_runs_only_after_the_channels_decline():
+    """ADR-014 ordering: an arbiter's verdict outranks the equivalence merge.
+
+    A pair the arbiter names books the arbiter's side and label even when the
+    sums happen to be equal -- the merge is the last resort before quarantine,
+    never a pre-emption of a channel.
+    """
+
+    class _PicksCninfo:
+        name = "tdx"
+
+        def arbitrate(self, cninfo, eastmoney):
+            return "cninfo"
+
+    cninfo = _cninfo_plan(
+        cash_per_10=0.5, bonus_per_10=6.0, cap_per_10=9.0, plan="10派0.5送6转9"
+    )
+    eastmoney = _eastmoney_split(0.5, 5.0, 10.0)
+
+    result = normalize_corporate_actions(cninfo, eastmoney, arbiter=_PicksCninfo())
+
+    assert result.quarantined.empty
+    assert result.accepted.iloc[0]["confirmed_by"] == "cninfo+tdx"
+
+
+def test_split_equivalent_requires_identical_cash_and_record_date():
+    """A different cash amount or record date is a real disagreement.
+
+    甲 class (an omitted same-day event) changes the combined cash or the
+    total; either failure must keep the pair quarantined as a conflict.
+    """
+    different_cash = normalize_corporate_actions(
+        _cninfo_plan(cash_per_10=0.5, bonus_per_10=6.0, cap_per_10=9.0),
+        _eastmoney_split(0.6, 5.0, 10.0),
+    )
+    assert different_cash.quarantined["reason"].eq(
+        REASON_CROSS_SOURCE_CONFLICT
+    ).all()
+    assert different_cash.accepted.empty
+
+    different_record = normalize_corporate_actions(
+        _cninfo_plan(cash_per_10=0.5, bonus_per_10=6.0, cap_per_10=9.0),
+        _eastmoney_split(0.5, 5.0, 10.0, record="2020-06-09"),
+    )
+    assert different_record.quarantined["reason"].eq(
+        REASON_CROSS_SOURCE_CONFLICT
+    ).all()
+    assert different_record.accepted.empty
+
+
+def test_split_equivalent_requires_an_equal_total():
+    """送6转9 vs 送5转8 sums differ; no rule may average them."""
+    result = normalize_corporate_actions(
+        _cninfo_plan(cash_per_10=0.5, bonus_per_10=6.0, cap_per_10=9.0),
+        _eastmoney_split(0.5, 5.0, 8.0),
+    )
+    assert result.quarantined["reason"].eq(REASON_CROSS_SOURCE_CONFLICT).all()
+    assert result.accepted.empty
 
 
 # --------------------------------------------------------------------------- #

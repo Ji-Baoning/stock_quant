@@ -44,14 +44,11 @@ baostock:
 # in a killable child process (`timeout_seconds` bounds the process, not the
 # socket).  Volume/amount units are measured shares/yuan -- (1, 1) (Phase 0
 # probe 6, docs/operations/2026-09-26-xingyao-phase0-probes.md §七).
-# Shipped DISABLED (ADR-016 decision 11, owner ruling 2026-09-26): the
-# validation lane dispatches per symbol, so a round costs one login+calendar
-# session per symbol -- measured bound F < 0.0025 quota units/session,
-# 661 symbols ≈ 45-60 min/round and ≈0.8%-167% of the weekly quota depending
-# on the unmeasurable F.  A batch channel (the SDK's `query_kline` accepts a
-# code list) is the recorded enabling condition for `enabled: true`; until
-# then the disabled source fails closed exactly like the baostock outage it
-# succeeds.  Enabling is a config change only.
+# Shipped ENABLED (owner ruling 2026-09-27): the batch channel the 09-26
+# ruling waited for is measured and frozen (see the segment comment below),
+# so the per-symbol quota bound no longer holds -- the daily lane dispatches
+# in frozen batches.  Disabling again is a config change; the record lives in
+# the owner's ADR edit.
 xingyao:
   # 批量通道（ADR-020）：daily 对已按实测冻结（2026-09-27 探针，见
   # docs/operations/2026-09-27-batched-channel-probes.md：329-code 片实测
@@ -63,7 +60,7 @@ xingyao:
   batch_timeout_seconds: 20
   # factor_batch_size: 200
   # factor_batch_timeout_seconds: 300
-  enabled: false
+  enabled: true
   timeout_seconds: 30
   max_retries: 2
 # TDX (通达信) is the corporate-action *conflict arbiter* of ADR-007 - not a

@@ -45,6 +45,7 @@ def _contract_start(
     anchor_start: date,
     latest_open_day: date,
     lookback_days: int,
+    disclosure_lookback_days: int | None = None,
 ) -> date:
     """The planned fetch start for one table's ``incremental`` strategy."""
     strategy = contract.incremental
@@ -53,7 +54,24 @@ def _contract_start(
             return anchor_start
         return baseline_covered[1] + timedelta(days=1)
     if strategy == INCREMENTAL_DISCLOSURE_CALENDAR:
-        return max(anchor_start, latest_open_day - timedelta(days=lookback_days))
+        lookback = (
+            lookback_days
+            if disclosure_lookback_days is None
+            else disclosure_lookback_days
+        )
+        planned = latest_open_day - timedelta(days=lookback)
+        if disclosure_lookback_days is None:
+            return max(anchor_start, planned)
+        # Operator deep reconcile: the re-ask may reach back to the span the
+        # baseline itself already covers -- "re-judge everything you publish,
+        # nothing you do not" -- never before it.  The config start_date alone
+        # would cap the re-ask at the default update anchor and leave every
+        # carried verdict older than it standing (the 2026-09-27 deep run
+        # re-judged only [2021-01-01 → …] for exactly this reason).
+        floor = anchor_start
+        if baseline_covered is not None:
+            floor = min(floor, baseline_covered[0])
+        return max(floor, planned)
     if strategy == INCREMENTAL_CHANGE_DRIVEN_FULL:
         return anchor_start
     raise ValueError(f"unknown incremental strategy {strategy!r}")
@@ -68,8 +86,18 @@ def plan_table_fetch_windows(
     anchor_start: date,
     latest_open_day: date,
     lookback_days: int = 90,
+    disclosure_lookback_days: int | None = None,
 ) -> dict[str, FetchWindowPlan]:
-    """Fetch plans for every declared table under the current CLI window."""
+    """Fetch plans for every declared table under the current CLI window.
+
+    ``disclosure_lookback_days`` is the operator's deep-reconcile override:
+    it widens only the ``disclosure_calendar`` strategy's re-ask window (the
+    corporate-action tables), leaving every other strategy untouched.  A large
+    value makes the round re-reconcile the whole listed window -- the path a
+    verdict-changing rebuild needs, because a carried coverage row for
+    history the 90-day lookback never re-judges would otherwise survive every
+    ordinary update.
+    """
     plans: dict[str, FetchWindowPlan] = {}
     for table, contract in sorted(contracts.items()):
         start = _contract_start(
@@ -78,6 +106,7 @@ def plan_table_fetch_windows(
             anchor_start=anchor_start,
             latest_open_day=latest_open_day,
             lookback_days=lookback_days,
+            disclosure_lookback_days=disclosure_lookback_days,
         )
         if request_start is not None and request_start != start:
             # Earlier than the contract start = the explicit window "overrides"

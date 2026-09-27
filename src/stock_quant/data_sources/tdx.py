@@ -190,10 +190,54 @@ async def _fetch_xdxr(
     if servers:
         kwargs["standard_servers"] = list(servers)
     async with client_type(**kwargs) as client:
+        getter = _xdxr_getter(client)
         for symbol in symbols:
-            records = await client.get_xdxr(_tdx_symbol(symbol))
+            records = await getter(symbol)
             frames[symbol] = build_xdxr_frame(symbol, records)
     return frames
+
+
+def _xdxr_getter(client: Any) -> Any:
+    """One symbol → its xdxr records, on the installed package's signature.
+
+    pytdxdata 0.6.0 takes one prefixed string; 0.5.0 takes ``(Market, code)``.
+    The adapter supports both: the environment may hold either, and a
+    signature mismatch must not surface as a per-symbol arbiter failure (the
+    2026-09-27 deep rebuild recorded 31 of them) but as the call the installed
+    package actually defines.  The record surface is the same across both
+    versions, so ``build_xdxr_frame`` reads either unchanged.
+    """
+    import inspect
+
+    async def get_prefixed(symbol: str):
+        return await client.get_xdxr(_tdx_symbol(symbol))
+
+    async def get_market_code(symbol: str):
+        market, code = _tdx_market_code(symbol)
+        return await client.get_xdxr(market, code)
+
+    positional = [
+        parameter
+        for parameter in inspect.signature(client.get_xdxr).parameters.values()
+        if parameter.kind
+        in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return get_market_code if len(positional) >= 2 else get_prefixed
+
+
+def _tdx_market_code(symbol: str) -> tuple[Any, str]:
+    """The 0.5.0 call shape: the ``Market`` member and the bare code.
+
+    Same market scope ``_tdx_symbol`` enforces: SH and SZ only, anything else
+    refused rather than guessed onto a market.
+    """
+    from pytdxdata import Market
+
+    code, _, suffix = symbol.rpartition(".")
+    market_name = _MARKET_BY_SUFFIX.get(suffix.upper())
+    if not code or market_name is None:
+        raise TdxUnavailableError(f"TDX has no market for {symbol!r}")
+    return getattr(Market, market_name), code
 
 
 def _load_pytdxdata():

@@ -768,3 +768,324 @@ def test_update_leaves_a_head_run_with_no_pre_window_history_unproven(tmp_path):
     assert [call[1] for call in probes] == [_BARE_HEAD_GAP_SYMBOL] * len(probes)
     assert len(probes) >= 2
     assert min(call[2] for call in probes) == _STUB_LIST_DATE
+
+
+# ------------------------------------------------------------------------- #
+# The carried/fresh seam (the steady-state materialization grid, ADR-020)
+# ------------------------------------------------------------------------- #
+
+
+def _seam_materialize(carried, fresh, calendar_open, *, fetch_start):
+    """Run the pipeline's materialization over a carried table + fresh frames."""
+    issues: list[QualityIssue] = []
+    primary_rows: list[pd.DataFrame] = []
+    master = pd.DataFrame(
+        [{"symbol": "600000.SH", "list_date": pd.Timestamp("1990-01-01"),
+          "delist_date": pd.NaT}]
+    )
+    pipeline = object.__new__(DataPipeline)
+    pipeline._materialize_suspensions(
+        {"600000.SH": fresh},
+        ["600000.SH"],
+        master,
+        calendar_open,
+        fetch_start,
+        max(day for day in calendar_open),
+        pd.DataFrame(columns=["symbol", "ex_date"]),
+        primary_rows,
+        set(),
+        issues,
+        pd.Timestamp.now(tz="UTC"),
+        carried_daily=carried,
+        fetch_start=fetch_start,
+    )
+    rows = pd.concat(primary_rows, ignore_index=True) if primary_rows else pd.DataFrame()
+    return rows, issues
+
+
+def test_the_seam_between_carried_and_fresh_is_proven():
+    """A supplier day-gap at the carried/fresh seam heals from both anchors.
+
+    The carried table ends 09-21 (the halt's last published bar), the fresh
+    fetch starts 09-23 with a zero-volume row whose pre_close chains to the
+    carried close -- the 2026-09-22 supplier gap.  The seam day materializes;
+    nothing else is invented.
+    """
+    carried = pd.DataFrame(
+        [
+            {"trade_date": pd.Timestamp("2026-09-21"), "symbol": "600000.SH",
+             "close": 15.56, "volume": 0},
+        ]
+    )
+    fresh = pd.DataFrame(
+        {
+            "trade_date": ["2026-09-23", "2026-09-24", "2026-09-25"],
+            "close": [15.56, 15.56, 15.56],
+            "pre_close": [15.56, 15.56, 15.56],
+            "vol": [0.0, 0.0, 0.0],
+        }
+    )
+    calendar = [date(2026, 9, 21), date(2026, 9, 22), date(2026, 9, 23),
+                date(2026, 9, 24), date(2026, 9, 25)]
+
+    rows, issues = _seam_materialize(
+        carried, fresh, calendar, fetch_start=date(2026, 9, 23)
+    )
+
+    materialized = rows[rows["trade_date"] == pd.Timestamp("2026-09-22")]
+    assert len(materialized) == 1, rows.to_dict("records")
+    unverified = [i for i in issues if i.code == CODE_SUSPENSION_RUN_UNVERIFIED]
+    assert unverified == []
+
+
+def test_a_normally_trading_symbol_has_no_seam_and_no_warnings():
+    """Carried 09-22 + fresh 09-23..25: grid and chain tile, nothing to prove."""
+    carried = pd.DataFrame(
+        [
+            {"trade_date": pd.Timestamp("2026-09-22"), "symbol": "600000.SH",
+             "close": 10.0, "volume": 5_000.0},
+        ]
+    )
+    fresh = pd.DataFrame(
+        {
+            "trade_date": ["2026-09-23", "2026-09-24", "2026-09-25"],
+            "close": [10.1, 10.2, 10.1],
+            "pre_close": [10.0, 10.1, 10.2],
+            "vol": [1_000.0, 1_000.0, 1_000.0],
+        }
+    )
+    calendar = [date(2026, 9, 22), date(2026, 9, 23), date(2026, 9, 24),
+                date(2026, 9, 25)]
+
+    rows, issues = _seam_materialize(
+        carried, fresh, calendar, fetch_start=date(2026, 9, 23)
+    )
+
+    assert rows.empty
+    assert issues == []
+
+
+def test_a_still_halted_tail_without_fresh_rows_stays_unverified():
+    """No fresh row after the seam: the run has no after-anchor, fails honest.
+
+    The seam rule proves a gap only when the fresh fetch anchors its far side
+    (the 2026-09-27 deep-reconcile lesson: the 09-22 rows needed 09-23's
+    pre_close).  A halt whose rows the supplier has not resumed stays the
+    acceptance gate's business.
+    """
+    carried = pd.DataFrame(
+        [
+            {"trade_date": pd.Timestamp("2026-09-21"), "symbol": "600000.SH",
+             "close": 15.56, "volume": 0},
+        ]
+    )
+    fresh = pd.DataFrame(columns=["trade_date", "close", "pre_close", "vol"])
+    calendar = [date(2026, 9, 22), date(2026, 9, 23), date(2026, 9, 24),
+                date(2026, 9, 25)]
+
+    rows, issues = _seam_materialize(
+        carried, fresh, calendar, fetch_start=date(2026, 9, 23)
+    )
+
+    assert rows.empty
+    assert [i.code for i in issues] == [CODE_SUSPENSION_RUN_UNVERIFIED]
+
+
+# ------------------------------------------------------------------------- #
+# The interior-gap proof (ADR-020, owner ruling: bounded zero-volume runs)
+# ------------------------------------------------------------------------- #
+
+
+def _carried_frame(rows):
+    return pd.DataFrame(
+        [
+            {
+                "trade_date": pd.Timestamp(day),
+                "symbol": "601238.SH",
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": volume,
+                "amount": 0.0,
+                "adjustment": "unadjusted",
+                "source": "tushare",
+                "ingested_at": pd.Timestamp.now(tz="UTC"),
+            }
+            for day, close, volume in rows
+        ]
+    )
+
+
+def _prove_interior(carried, calendar, *, fetch_start, lookup=None):
+    """Run the pipeline's interior-gap proof over a carried table."""
+    issues: list[QualityIssue] = []
+    master = pd.DataFrame(
+        [{"symbol": "601238.SH", "list_date": pd.Timestamp("1990-01-01"),
+          "delist_date": pd.NaT}]
+    )
+    pipeline = object.__new__(DataPipeline)
+    rows = pipeline._prove_interior_gaps(
+        carried,
+        ["601238.SH"],
+        master,
+        calendar,
+        date(2015, 1, 5),
+        max(day for day in calendar),
+        fetch_start,
+        pd.DataFrame(columns=["symbol", "ex_date"]),
+        issues,
+        pd.Timestamp.now(tz="UTC"),
+        pre_close_lookup=lookup,
+    )
+    return rows, issues
+
+
+_CAL = [date(2026, 9, d) for d in (18, 21, 22, 23, 24)]
+
+
+def test_a_one_day_interior_hole_backfills_with_the_proof_marker():
+    """The 2026-09-22 shape: zero-volume bars both sides, one missing day.
+
+    The carried table is the only place the hole can be seen (the span is
+    already covered, no round re-fetches it) and the only place it can be
+    proved (both boundaries are the supplier's own zero-volume bars at an
+    unchanged close).
+    """
+    carried = _carried_frame(
+        [
+            (date(2026, 9, 18), 5.09, 22_671_939),
+            (date(2026, 9, 21), 5.09, 0),
+            (date(2026, 9, 23), 5.09, 0),
+            (date(2026, 9, 24), 5.09, 0),
+        ]
+    )
+    rows, issues = _prove_interior(
+        carried, _CAL, fetch_start=date(2026, 9, 23)
+    )
+
+    assert rows is not None and len(rows) == 1
+    filled = rows.iloc[0]
+    assert filled["trade_date"] == pd.Timestamp("2026-09-22")
+    assert filled["close"] == 5.09
+    assert filled["volume"] == 0
+    assert filled["source"] == "tushare_suspend"
+    marked = [i for i in issues if i.code == CODE_SUSPENSION_ROW]
+    assert len(marked) == 1
+    assert marked[0].details["proof"] == "interior_bounded"
+    assert marked[0].details["run"] == "2026-09-22..2026-09-22"
+
+
+def test_an_interior_hole_past_the_five_day_bound_stays_missing():
+    """Six open days of hole: the pattern no longer bounds what it hides."""
+    hole_days = [date(2026, 9, d) for d in (15, 16, 17, 18, 21, 22)]
+    carried = _carried_frame(
+        [(date(2026, 9, 14), 5.09, 0), (date(2026, 9, 23), 5.09, 0)]
+    )
+    calendar = hole_days + [date(2026, 9, 14), date(2026, 9, 23)]
+    rows, issues = _prove_interior(
+        carried, calendar, fetch_start=date(2026, 9, 23)
+    )
+
+    assert rows is None
+    unverified = [i for i in issues if i.code == CODE_SUSPENSION_RUN_UNVERIFIED]
+    assert len(unverified) == 1
+    assert "5 open days" in unverified[0].details["reason"]
+
+
+def test_interior_proof_needs_zero_volume_boundaries():
+    """A boundary bar that traded refuses the inference."""
+    carried = _carried_frame(
+        [
+            (date(2026, 9, 21), 5.09, 27_272_415),  # traded
+            (date(2026, 9, 23), 5.09, 0),
+        ]
+    )
+    rows, issues = _prove_interior(
+        carried, _CAL, fetch_start=date(2026, 9, 23)
+    )
+    assert rows is None
+    assert [i.code for i in issues] == [CODE_SUSPENSION_RUN_UNVERIFIED]
+
+
+def test_interior_proof_needs_unchanged_boundary_closes():
+    """Differing boundary closes are an unexplained price event, not a halt."""
+    carried = _carried_frame(
+        [
+            (date(2026, 9, 21), 5.09, 0),
+            (date(2026, 9, 23), 5.55, 0),  # price moved across the hole
+        ]
+    )
+    rows, issues = _prove_interior(
+        carried, _CAL, fetch_start=date(2026, 9, 23)
+    )
+    assert rows is None
+    assert [i.code for i in issues] == [CODE_SUSPENSION_RUN_UNVERIFIED]
+
+
+def test_a_resumption_hole_is_proved_by_the_stored_reference():
+    """601995's shape: the after boundary traded, the stored pre_close chains.
+
+    The resumption day's own reference price (the supplier's stored
+    ``pre_close`` = the halt close) is the exchange's answer that the hole
+    days were suspended; a hole day that had really traded would have moved
+    it.  The bar materializes at the halt close with the stored value in the
+    evidence record.
+    """
+    carried = _carried_frame(
+        [
+            (date(2026, 9, 21), 31.8, 0),
+            (date(2026, 9, 23), 32.65, 472_137),  # resumption, traded
+            (date(2026, 9, 24), 31.02, 349_697),
+        ]
+    )
+    lookups: list[tuple[str, date]] = []
+
+    def lookup(symbol, day):
+        lookups.append((symbol, day))
+        return 31.8
+
+    rows, issues = _prove_interior(
+        carried, _CAL, fetch_start=date(2026, 9, 23), lookup=lookup
+    )
+
+    assert rows is not None and len(rows) == 1
+    filled = rows.iloc[0]
+    assert filled["trade_date"] == pd.Timestamp("2026-09-22")
+    assert filled["close"] == 31.8
+    assert filled["source"] == "tushare_suspend"
+    assert lookups == [("601238.SH", date(2026, 9, 23))]
+    marked = [i for i in issues if i.code == CODE_SUSPENSION_ROW]
+    assert marked[0].details["stored_reference"] == 31.8
+
+
+def test_a_resumption_hole_without_a_stored_reference_stays_missing():
+    """No covering snapshot: the inference is refused, not guessed."""
+    carried = _carried_frame(
+        [
+            (date(2026, 9, 21), 31.8, 0),
+            (date(2026, 9, 23), 32.65, 472_137),
+        ]
+    )
+    rows, issues = _prove_interior(
+        carried, _CAL, fetch_start=date(2026, 9, 23), lookup=lambda s, d: None
+    )
+    assert rows is None
+    unverified = [i for i in issues if i.code == CODE_SUSPENSION_RUN_UNVERIFIED]
+    assert "no stored reference" in unverified[0].details["reason"]
+
+
+def test_a_resumption_hole_whose_reference_does_not_chain_stays_missing():
+    """A stored reference off the halt close means the hole day moved."""
+    carried = _carried_frame(
+        [
+            (date(2026, 9, 21), 31.8, 0),
+            (date(2026, 9, 23), 32.65, 472_137),
+        ]
+    )
+    rows, issues = _prove_interior(
+        carried, _CAL, fetch_start=date(2026, 9, 23), lookup=lambda s, d: 29.4
+    )
+    assert rows is None
+    unverified = [i for i in issues if i.code == CODE_SUSPENSION_RUN_UNVERIFIED]
+    assert "does not chain" in unverified[0].details["reason"]

@@ -17,9 +17,8 @@ baostock:
   max_retries: 3
 xingyao:
   # The validation daily source and the ADR-009 factor channel (ADR-016);
-  # ships disabled pending a batch fetch channel (the per-symbol lane costs
-  # one login session per symbol per round).  See
-  # project/configs/sources.yml.
+  # shipped ENABLED (owner ruling 2026-09-27) now that the batch channel is
+  # measured and frozen.  See project/configs/sources.yml.
   # 批量通道（ADR-020）：daily 对已按实测冻结（2026-09-27 探针，见
   # docs/operations/2026-09-27-batched-channel-probes.md：329-code 片实测
   # 可接受，整片墙钟最大 6.5s）。成对配置：只给 size 或只给 timeout 会被
@@ -30,7 +29,7 @@ xingyao:
   batch_timeout_seconds: 20
   # factor_batch_size: 200
   # factor_batch_timeout_seconds: 300
-  enabled: false
+  enabled: true
   timeout_seconds: 30
   max_retries: 2
 # Corporate-action conflict arbiter, not a source (ADR-007).  Shipped on

@@ -322,6 +322,22 @@ def test_healthy_dataset_passes_every_check_in_policy_order(project):
     assert failed == []
 
 
+def test_a_required_source_with_no_lane_to_run_passes(project, mutated_project):
+    """``not_run`` is "nothing to do this round", not a broken source.
+
+    A steady-state round fetches only uncovered tails: the calendar and daily
+    lanes can legitimately have nothing to do while every table's coverage is
+    complete (``table_fetch_coverage_evidence``'s separate verdict).  The
+    2026-09-27 deep reconciles could never reach a clean acceptance otherwise
+    -- every publish after the spans settled recorded ``not_run`` for both
+    required sources.  A source that ran and failed still carries its own
+    reason code and still fails (``fail_required_source``).
+    """
+    mutated = mutated_project("not_run_required_source")
+    checks = _checks_by_code(run_automated_checks(_input(mutated)))
+    assert checks["source_role_health"].status is CheckStatus.PASS
+
+
 def test_runner_output_is_deterministic_and_redacted(project):
     first = run_automated_checks(_input(project))
     second = run_automated_checks(_input(project))
@@ -364,6 +380,11 @@ def _apply_mutation(
             if row["source"] == "tushare":
                 row["ok"] = False
                 row["reason_code"] = "source_fetch_failed"
+    elif mutation == "not_run_required_source":
+        for row in build_config["source_status"]:
+            if row["source"] == "tushare":
+                row["ok"] = False
+                row["reason_code"] = "not_run"
     elif mutation == "mark_bootstrap_origin":
         build_config["origin"] = "bootstrap"
     elif mutation == "strip_calendar_coverage":

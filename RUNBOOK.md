@@ -86,6 +86,20 @@ setsid nohup python -m stock_quant data update --start 2015-01-05 --root project
 - **窗口越界会先失败再拉数**：`configs/universes/` 若是坏的（例如两个文件声明同一
   `universe_id`），判据在**任何 fetch 之前**读取，几秒内即以 FATAL
   `universe_definition_invalid` 退出；修好前不要重跑长窗口。
+- **深对账（判决变更型重建）用 `--disclosure-lookback-days`**：公司行为表的契约窗口
+  是"最新开市日回看 90 天"，普通更新永远不会重判更早历史，携带的覆盖判决（含
+  冲突/隔离）会原样活下去。要让一轮重对账**整个上市窗口**（例如启用裁决器、或
+  ADR-017/018 这类改变判决的规则上线后），运行：
+
+  ```bash
+  set -a; . ./.env; set +a
+  export TUSHARE_TRANSPORT=relay
+  python -m stock_quant data update --disclosure-lookback-days 5000 --root project
+  ```
+
+  只加这一个参数、**不要**同时给 `--start/--end`（F1 会因偏离契约窗口把表整表跳过；
+  2026-09-27 实例：`--start 2015-01-05` 导致四个源全部 `not_run`，发布的是纯携带
+  版本）。旋钮只加宽披露日历策略（公司行为三表）的取数窗，其余表不受影响。
 - **运行期间不要改 `configs/` 与 `src/`**：判据在发布前才用于写 `build_config`，
   运行途中落进被扫描目录的文件会毒化这一轮的收尾（2026-09-14 实例见
   [根因报告 D6](docs/operations/2026-09-14-blocking-gap-root-cause.md)）。
