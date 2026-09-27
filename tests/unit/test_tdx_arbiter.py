@@ -21,7 +21,7 @@ from stock_quant.data_model.corporate_actions import (
     REASON_CROSS_SOURCE_CONFLICT,
     normalize_corporate_actions,
 )
-from stock_quant.data_pipeline import _GuardedArbiter
+from stock_quant.data_pipeline import ARBITER_NAME, _GuardedArbiter
 from stock_quant.data_sources.tdx import (
     XDXR_COLUMNS,
     TdxUnavailableError,
@@ -981,4 +981,196 @@ def test_demotion_ignores_non_exempted_reasons(monkeypatch):
         None,
     )
     assert demoted == {}
+
+
+# --------------------------------------------------------------------------- #
+# ADR-020 D5: the channel is warmed from the reconcile input's candidate pool
+# --------------------------------------------------------------------------- #
+
+
+def test_a_prefetch_asks_for_the_whole_candidate_pool_in_one_channel_call(monkeypatch):
+    """One session for the round, not one per symbol (ADR-020 D5).
+
+    The pool is a superset of the symbols that end up arbitrated, so this
+    genuinely asks the channel about more codes than the lazy path would --
+    the win is session count, and it is the only win.
+    """
+    calls: list[list[str]] = []
+
+    def fake_fetch(symbols, *, timeout=30.0, servers=None):
+        calls.append(list(symbols))
+        return {symbol: _xdxr() for symbol in symbols}
+
+    from stock_quant import data_pipeline
+
+    monkeypatch.setattr(data_pipeline, "fetch_xdxr_frames", fake_fetch)
+    lazy = data_pipeline._LazyActionArbiter(
+        _StubConfig(),
+        date(2020, 1, 1),
+        date(2020, 12, 31),
+        issues=[],
+        raw_snapshots=[],
+        record_raw=lambda result: result,
+    )
+
+    lazy.prefetch(["600519.SH", "000001.SZ"])
+
+    assert calls == [["600519.SH", "000001.SZ"]]
+    # A prefetched symbol is answered from cache: no second channel call.
+    assert lazy.frame_for("600519.SH") is not None
+    assert calls == [["600519.SH", "000001.SZ"]]
+
+
+def test_a_prefetch_failure_degrades_to_the_lazy_path(monkeypatch):
+    """An unreachable channel must not fail the run; it must stay fail-closed."""
+    calls: list[list[str]] = []
+
+    def fake_fetch(symbols, *, timeout=30.0, servers=None):
+        calls.append(list(symbols))
+        raise TdxUnavailableError("channel down")
+
+    from stock_quant import data_pipeline
+
+    monkeypatch.setattr(data_pipeline, "fetch_xdxr_frames", fake_fetch)
+    issues: list = []
+    lazy = data_pipeline._LazyActionArbiter(
+        _StubConfig(),
+        date(2020, 1, 1),
+        date(2020, 12, 31),
+        issues=issues,
+        raw_snapshots=[],
+        record_raw=lambda result: result,
+    )
+
+    lazy.prefetch(["600519.SH"])
+
+    # The failure is remembered, exactly as ``frame_for``'s own failure is: the
+    # symbol is not asked again within the run, and it still counts as an
+    # absent channel (which asserts nothing, ADR-009).
+    assert lazy.frame_for("600519.SH") is None
+    assert calls == [["600519.SH"]]
+    assert [i for i in issues if i.details.get("source") == data_pipeline.ARBITER_NAME]
+
+
+def test_a_prefetched_symbol_is_never_re_asked(monkeypatch):
+    """The cache must answer, not fall through to a second channel call."""
+    calls: list[list[str]] = []
+
+    def fake_fetch(symbols, *, timeout=30.0, servers=None):  # pragma: no cover
+        calls.append(list(symbols))
+        return {symbol: _xdxr() for symbol in symbols}
+
+    from stock_quant import data_pipeline
+
+    monkeypatch.setattr(data_pipeline, "fetch_xdxr_frames", fake_fetch)
+    lazy = data_pipeline._LazyActionArbiter(
+        _StubConfig(),
+        date(2020, 1, 1),
+        date(2020, 12, 31),
+        issues=[],
+        raw_snapshots=[],
+        record_raw=lambda result: result,
+    )
+
+    lazy.prefetch(["600519.SH"])
+    calls.clear()
+    lazy.prefetch(["600519.SH"])
+
+    assert calls == []
+
+
+def test_an_empty_prefetch_builds_no_session(monkeypatch):
+    """A round with no disputed symbol makes none -- the sources.yml comment."""
+    calls: list[list[str]] = []
+
+    def fake_fetch(symbols, *, timeout=30.0, servers=None):  # pragma: no cover
+        calls.append(list(symbols))
+        return {}
+
+    from stock_quant import data_pipeline
+
+    monkeypatch.setattr(data_pipeline, "fetch_xdxr_frames", fake_fetch)
+    lazy = data_pipeline._LazyActionArbiter(
+        _StubConfig(),
+        date(2020, 1, 1),
+        date(2020, 12, 31),
+        issues=[],
+        raw_snapshots=[],
+        record_raw=lambda result: result,
+    )
+
+    lazy.prefetch([])
+
+    assert calls == []
+
+
+def test_the_candidate_pool_is_the_symbols_with_action_rows():
+    from stock_quant import data_pipeline
+
+    frames = {
+        "600519.SH": {"cninfo": [_xdxr()], "eastmoney": [], ARBITER_NAME: []},
+        "000001.SZ": {"cninfo": [], "eastmoney": [], ARBITER_NAME: []},
+    }
+    assert data_pipeline._candidate_symbols(frames) == ["600519.SH"]
+    assert data_pipeline._candidate_symbols({}) == []
+
+
+def test_the_candidate_pool_reaches_the_lazy_arbiter_through_its_wrappers(
+    tmp_path, monkeypatch
+):
+    """``_build_action_arbiter`` returns
+    ``_GuardedArbiter(FirstAnsweringArbiter(...))``.
+
+    The lazy arbiter is two layers inside that, and the wrapper exposes
+    ``frame_for`` but not ``prefetch`` -- so a prefetch wired at the call site
+    would silently do nothing at all.  It has to happen where the concrete
+    object is built, and this test is what says so.
+    """
+    import shutil
+
+    from stock_quant import data_pipeline
+    from stock_quant.bootstrap import bootstrap_dataset
+    from stock_quant.config import SourceConfig
+    from stock_quant.data_pipeline import DataPipeline
+
+    repo_root = Path(__file__).resolve().parents[2]
+    root = tmp_path / "project"
+    configs = root / "configs"
+    configs.mkdir(parents=True)
+    for name in (
+        "project.yml",
+        "sources.yml",
+        "costs.yml",
+        "trading_rules.yml",
+        "universe.yml",
+    ):
+        shutil.copy(repo_root / "templates" / "project-config" / name, configs / name)
+    bootstrap_dataset(root)
+
+    calls: list[list[str]] = []
+
+    def fake_fetch(symbols, *, timeout=30.0, servers=None):
+        calls.append(list(symbols))
+        return {symbol: _xdxr() for symbol in symbols}
+
+    monkeypatch.setattr(data_pipeline, "fetch_xdxr_frames", fake_fetch)
+    pipeline = DataPipeline(root, sources={})
+    pipeline._project_config = pipeline._project_config.model_copy(
+        update={
+            "sources": {
+                **pipeline._project_config.sources,
+                data_pipeline.ARBITER_NAME: SourceConfig(enabled=True),
+            }
+        }
+    )
+    # Isolate the tdx lane: the price lane's open_days needs are not this test's.
+    monkeypatch.setattr(pipeline, "_build_price_channel", lambda *a, **k: None)
+
+    # The 7th argument is the candidate pool, the same positional slot the
+    # production ``update()`` call site passes it in.
+    pipeline._build_action_arbiter(
+        ["600519.SH"], date(2020, 1, 1), date(2020, 12, 31), [], [], [], ["600519.SH"]
+    )
+
+    assert calls == [["600519.SH"]]
 

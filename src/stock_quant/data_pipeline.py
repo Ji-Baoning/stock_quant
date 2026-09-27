@@ -46,7 +46,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
@@ -656,6 +656,21 @@ def master_bar_boundary_issues(
             )
         )
     return issues
+
+
+def _candidate_symbols(
+    frames_by_symbol: Mapping[str, Mapping[str, list[pd.DataFrame]]],
+) -> list[str]:
+    """Symbols with at least one corporate-action row in the window.
+
+    Ordered by the input mapping (which follows the requested symbol order),
+    so the batch request is reproducible run over run.
+    """
+    return [
+        symbol
+        for symbol, by_endpoint in frames_by_symbol.items()
+        if any(frames for frames in by_endpoint.values())
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -2267,8 +2282,14 @@ class DataPipeline:
             outcomes_by_symbol[symbol] = symbol_outcomes
             if "akshare" not in self._overrides:
                 self._sleeper(1)
+        # Candidate pool for the two lazily-consulted channels (ADR-020 D5):
+        # derived from the reconcile *input* frames, so it exists before the
+        # arbiter that consumes it is built -- deriving it from reconcile
+        # output would be circular.  It is a conservative superset: which
+        # symbols are actually disputed is only known after reconciling.
+        candidates = _candidate_symbols(frames_by_symbol)
         arbiter = self._build_action_arbiter(
-            symbols, start, end, issues, raw_snapshots, open_days
+            symbols, start, end, issues, raw_snapshots, open_days, candidates
         )
         factor_channel = self._build_factor_channel(end, issues, raw_snapshots)
         accepted_frames: list[pd.DataFrame] = []
@@ -2343,7 +2364,8 @@ class DataPipeline:
         )
 
     def _build_action_arbiter(
-        self, symbols, start, end, issues, raw_snapshots, open_days
+        self, symbols, start, end, issues, raw_snapshots, open_days,
+        candidates: Sequence[str] = (),
     ):
         """Build the ADR-007 conflict arbiter, or ``None`` when none is on.
 
@@ -2381,16 +2403,20 @@ class DataPipeline:
         arbiters: list[object] = []
         config = self._project_config.sources.get(ARBITER_NAME)
         if config is not None and config.enabled:
-            arbiters.append(
-                _LazyActionArbiter(
-                    config,
-                    start,
-                    end,
-                    issues=issues,
-                    raw_snapshots=raw_snapshots,
-                    record_raw=self._record_raw,
-                )
+            lazy = _LazyActionArbiter(
+                config,
+                start,
+                end,
+                issues=issues,
+                raw_snapshots=raw_snapshots,
+                record_raw=self._record_raw,
             )
+            # Here, not at the call site: this method returns a
+            # ``_GuardedArbiter(FirstAnsweringArbiter(...))``, which delegates
+            # ``frame_for`` but has no ``prefetch`` -- delivering the pool
+            # through the returned object would silently prefetch nothing.
+            lazy.prefetch(candidates)
+            arbiters.append(lazy)
         price = self._build_price_channel(issues, raw_snapshots, open_days)
         if price is not None:
             channel, report_settlement = price
@@ -3655,6 +3681,57 @@ class _LazyActionArbiter:
         self._failed: set[str] = set()
         self.name = ARBITER_NAME
 
+    def prefetch(self, symbols: Iterable[str]) -> None:
+        """Ask the channel about a whole candidate pool in one session.
+
+        The pool is a conservative superset of the symbols that will actually
+        be arbitrated (it comes from the reconcile input frames), so this can
+        only ever warm the cache -- it decides nothing.  A failed read is
+        remembered exactly as ``frame_for``'s own failure is: the symbol is
+        not asked again within the run, and an absent channel asserts nothing
+        (ADR-009).
+        """
+        pending = [
+            symbol
+            for symbol in dict.fromkeys(symbols)
+            if symbol not in self._frames and symbol not in self._failed
+        ]
+        if not pending:
+            return
+        try:
+            frames = fetch_xdxr_frames(
+                pending, timeout=float(self._config.timeout_seconds)
+            )
+        except Exception as error:  # noqa: BLE001 - best-effort third opinion
+            for symbol in pending:
+                _warn_arbiter_failure(self._issues, symbol, error)
+                self._failed.add(symbol)
+            return
+        for symbol in pending:
+            frame = frames.get(symbol)
+            if frame is not None and not frame.empty:
+                self._frames[symbol] = frame
+                self._store_frame(symbol, frame)
+            else:
+                # Same cache shape the lazy path stores for a missing frame.
+                self._frames[symbol] = pd.DataFrame()
+
+    def _store_frame(self, symbol: str, frame: pd.DataFrame) -> None:
+        """Record the channel's answer as the raw evidence the lazy path records."""
+        self._raw_snapshots.append(
+            self._record_raw(
+                FetchResult(
+                    source=ARBITER_NAME,
+                    endpoint=XDXR_ENDPOINT,
+                    request_key=request_key(
+                        DataRequest(XDXR_ENDPOINT, (symbol,), self._start, self._end)
+                    ),
+                    frame=frame,
+                    metadata={"transport_id": ARBITER_NAME},
+                )
+            )
+        )
+
     def frame_for(self, symbol: str) -> pd.DataFrame | None:
         """The symbol's cached xdxr frame, fetching it on first need.
 
@@ -3680,21 +3757,7 @@ class _LazyActionArbiter:
         frame = frames.get(symbol)
         self._frames[symbol] = frame if frame is not None else pd.DataFrame()
         if frame is not None and not frame.empty:
-            self._raw_snapshots.append(
-                self._record_raw(
-                    FetchResult(
-                        source=ARBITER_NAME,
-                        endpoint=XDXR_ENDPOINT,
-                        request_key=request_key(
-                            DataRequest(
-                                XDXR_ENDPOINT, (symbol,), self._start, self._end
-                            )
-                        ),
-                        frame=frame,
-                        metadata={"transport_id": ARBITER_NAME},
-                    )
-                )
-            )
+            self._store_frame(symbol, frame)
         frame = self._frames[symbol]
         if frame is None or frame.empty:
             return None
