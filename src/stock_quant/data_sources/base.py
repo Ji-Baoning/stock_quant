@@ -223,9 +223,23 @@ def validate_supplier_frame(
         raise ContractError("supplier marked its response as truncated")
 
     symbol_column = _first_present(frame, symbol_columns)
+    if require_symbol and symbol_column is None:
+        raise ContractError("supplier response has no symbol column")
+
+    date_column = _first_present(frame, date_columns)
+    if require_date and date_column is None:
+        raise ContractError("supplier response has no date column")
+
+    if frame.empty:
+        # A zero-row frame the caller allowed is an answer with no values in
+        # it (ADR-020 D7): the column *presence* checks above are all that can
+        # be checked.  Comparing the requested symbol set against a frame with
+        # no rows would compare it against the empty set, and there are no
+        # dates to range-check -- ``allow_empty`` alone never reached this
+        # point, because the set comparison below raised first.
+        return
+
     if require_symbol:
-        if symbol_column is None:
-            raise ContractError("supplier response has no symbol column")
         returned_symbols = {
             _comparison_symbol(value) for value in frame[symbol_column].dropna()
         }
@@ -235,9 +249,6 @@ def validate_supplier_frame(
                 "supplier response does not contain each requested symbol"
             )
 
-    date_column = _first_present(frame, date_columns)
-    if require_date and date_column is None:
-        raise ContractError("supplier response has no date column")
     if date_column is not None:
         raw_dates = frame[date_column].astype(str)
         if raw_dates.str.fullmatch(r"\d{8}").all():

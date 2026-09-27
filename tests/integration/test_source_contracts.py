@@ -18,6 +18,7 @@ from stock_quant.data_sources.base import (
     ContractError,
     DataRequest,
     ServerError,
+    validate_supplier_frame,
 )
 from stock_quant.data_sources.tushare import TushareSource
 from stock_quant.data_sources.xingyao import XingyaoSource
@@ -962,3 +963,61 @@ class _FakeXingyao:
 
     def query_kline(self, **_):
         return self._frame
+
+
+def test_a_zero_row_frame_passes_when_empty_is_allowed():
+    """A supplier that answered a zero-row object answered (ADR-020 D7).
+
+    The columns are the supplier's; there are no values, so neither the
+    requested-symbol set nor the requested window can be checked against
+    anything.  The presence checks still run: a zero-row frame without the
+    symbol or date column is still a contract break.
+    """
+    request = DataRequest("daily", ("000001.SZ",), date(2024, 1, 2), date(2024, 1, 5))
+    empty = pd.DataFrame(columns=["code", "kline_time", "close"])
+    validate_supplier_frame(
+        empty,
+        request,
+        symbol_columns=("code",),
+        date_columns=("kline_time",),
+        allow_empty=True,
+    )
+
+
+def test_a_zero_row_frame_still_needs_its_required_columns():
+    request = DataRequest("daily", ("000001.SZ",), date(2024, 1, 2), date(2024, 1, 5))
+    with pytest.raises(ContractError, match="date column"):
+        validate_supplier_frame(
+            pd.DataFrame(columns=["code", "close"]),
+            request,
+            symbol_columns=("code",),
+            date_columns=("kline_time",),
+            allow_empty=True,
+        )
+
+
+def test_an_empty_frame_is_still_refused_without_allow_empty():
+    request = DataRequest("daily", ("000001.SZ",), date(2024, 1, 2), date(2024, 1, 5))
+    with pytest.raises(ContractError, match="empty response"):
+        validate_supplier_frame(
+            pd.DataFrame(columns=["code", "kline_time"]),
+            request,
+            symbol_columns=("code",),
+            date_columns=("kline_time",),
+        )
+
+
+def test_a_non_empty_frame_keeps_the_symbol_set_check():
+    """The relaxed rule must not leak into the ordinary path."""
+    request = DataRequest("daily", ("000001.SZ",), date(2024, 1, 2), date(2024, 1, 5))
+    wrong = pd.DataFrame(
+        [{"code": "600000.SH", "kline_time": "2024-01-02", "close": 1.0}]
+    )
+    with pytest.raises(ContractError, match="each requested symbol"):
+        validate_supplier_frame(
+            wrong,
+            request,
+            symbol_columns=("code",),
+            date_columns=("kline_time",),
+            allow_empty=True,
+        )
