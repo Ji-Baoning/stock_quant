@@ -6,9 +6,11 @@ An audit that could not compare two thirds of its targets must not exit 0.
 from __future__ import annotations
 
 import importlib.util
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from stock_quant.config import SourceConfig
@@ -148,3 +150,129 @@ def test_a_fully_compared_audit_still_exits_zero(monkeypatch):
     with pytest.raises(SystemExit) as excinfo:
         drift_audit.main([])
     assert excinfo.value.code == 0
+
+
+def _frame(symbol: str) -> pd.DataFrame:
+    return pd.DataFrame({"code": [symbol], "kline_time": ["2024-01-02"]})
+
+
+def _batch_evidence(symbols=("000001.SZ", "600000.SH")):
+    from stock_quant.data_model.batch_evidence import (
+        BatchOutcomeRecord,
+        BatchRequestEvidence,
+        batch_id_for,
+        batch_request_parameters,
+    )
+
+    parameters = batch_request_parameters(
+        "daily",
+        symbols,
+        date(2024, 1, 2),
+        date(2024, 1, 5),
+        {"adjustment": "unadjusted"},
+    )
+    return BatchRequestEvidence(
+        source="xingyao",
+        endpoint="daily",
+        transport_id="xingyao-broker-tcp",
+        batch_id=batch_id_for(parameters),
+        batch_request_parameters=parameters,
+        request_timestamp="2024-01-05T09:00:00+00:00",
+        response_timestamp="2024-01-05T09:00:07+00:00",
+        outcomes=tuple(
+            BatchOutcomeRecord(symbol, symbol, "ok", "a" * 64) for symbol in symbols
+        ),
+    )
+
+
+def _batch_result(symbols):
+    from stock_quant.data_sources.xingyao import BatchOutcome, BatchResult
+
+    return BatchResult(
+        outcomes=tuple(
+            BatchOutcome(symbol, "ok", _frame(symbol)) for symbol in symbols
+        ),
+        transmissions=(),
+    )
+
+
+def test_a_batch_record_replays_the_whole_chunk_once():
+    """A per-symbol re-ask cannot reproduce a batch answer (ADR-020 D8)."""
+    from project.drift_audit import replay_batch
+
+    asked: list[list[str]] = []
+
+    class _Source:
+        def fetch_batch(self, requests, **_):
+            asked.append([r.symbols[0] for r in requests])
+            return _batch_result([r.symbols[0] for r in requests])
+
+    frames = replay_batch(_Source(), _batch_evidence())
+
+    assert asked == [["000001.SZ", "600000.SH"]]
+    assert set(frames) == {"000001.SZ", "600000.SH"}
+
+
+def test_a_code_the_replay_did_not_answer_is_absent_not_invented():
+    from project.drift_audit import replay_batch
+
+    class _Source:
+        def fetch_batch(self, requests, **_):
+            return _batch_result([requests[0].symbols[0]])
+
+    frames = replay_batch(_Source(), _batch_evidence())
+
+    assert set(frames) == {"000001.SZ"}
+
+
+def test_a_refused_code_contributes_no_frame():
+    """An outcome with no result must not become a frame-shaped hole."""
+    from project.drift_audit import replay_batch
+    from stock_quant.data_sources.xingyao import BatchOutcome, BatchResult
+
+    class _Source:
+        def fetch_batch(self, requests, **_):
+            return BatchResult(
+                outcomes=(
+                    BatchOutcome("000001.SZ", "ok", _frame("000001.SZ")),
+                    BatchOutcome("600000.SH", "refused", None, "no key"),
+                ),
+                transmissions=(),
+            )
+
+    assert set(replay_batch(_Source(), _batch_evidence())) == {"000001.SZ"}
+
+
+def test_every_recorded_batch_is_replayed_once(tmp_path):
+    from project.drift_audit import replay_recorded_batches
+    from stock_quant.data_sources.batch_evidence_store import BatchEvidenceStore
+
+    store = BatchEvidenceStore(tmp_path)
+    evidence = _batch_evidence()
+    store.save(evidence)
+    asked: list[list[str]] = []
+
+    class _Source:
+        def fetch_batch(self, requests, **_):
+            asked.append([r.symbols[0] for r in requests])
+            return _batch_result([r.symbols[0] for r in requests])
+
+    frames = replay_recorded_batches(_Source(), store, [evidence.sha256])
+
+    assert asked == [["000001.SZ", "600000.SH"]]
+    assert set(frames) == {"000001.SZ", "600000.SH"}
+
+
+def test_an_unresolvable_evidence_hash_is_skipped_not_guessed(tmp_path):
+    from project.drift_audit import replay_recorded_batches
+    from stock_quant.data_sources.batch_evidence_store import BatchEvidenceStore
+
+    class _Source:
+        def fetch_batch(self, requests, **_):  # pragma: no cover
+            raise AssertionError("nothing should be replayed")
+
+    frames = replay_recorded_batches(
+        _Source(), BatchEvidenceStore(tmp_path), ["f" * 64]
+    )
+
+    assert frames == {}

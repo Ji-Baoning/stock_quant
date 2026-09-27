@@ -17,16 +17,21 @@ Run with an explicit project root:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import date
 from pathlib import Path
 from typing import Mapping, NoReturn, Sequence
 
+import pandas as pd
+
 from stock_quant.config import ProjectConfig, load_project_config
+from stock_quant.data_model.batch_evidence import BatchRequestEvidence
 from stock_quant.data_model.dataset import DatasetPublisher
 from stock_quant.data_sources.akshare import AkShareSource
 from stock_quant.data_sources.baostock import BaoStockSource
-from stock_quant.data_sources.base import DataRequest
+from stock_quant.data_sources.base import DataRequest, FetchResult
+from stock_quant.data_sources.batch_evidence_store import BatchEvidenceStore
 from stock_quant.data_sources.raw_store import (
     RawSnapshotEvidence,
     RawStore,
@@ -88,17 +93,85 @@ def count_audit_failures(rows: Sequence[Mapping[str, object]]) -> int:
     )
 
 
-def load_targets(project_root: Path, version: str) -> list[RawSnapshotEvidence]:
-    """The pinned version's bound raw-snapshot evidence rows."""
-    import json
-
+def _read_build_config(project_root: Path, version: str) -> Mapping[str, object]:
+    """The pinned version's recorded build configuration."""
     manifest_path = (
         project_root / "data" / "standardized" / version / "dataset_manifest.json"
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    build = manifest.get("build_config", {})
-    rows = build.get("raw_snapshots", [])
-    return [RawSnapshotEvidence(**row) for row in rows]
+    return manifest.get("build_config", {})
+
+
+def _targets_from_build(build: Mapping[str, object]) -> list[RawSnapshotEvidence]:
+    return [RawSnapshotEvidence(**row) for row in build.get("raw_snapshots", [])]
+
+
+def _batch_hashes_from_build(build: Mapping[str, object]) -> list[str]:
+    return [str(sha) for sha in (build.get("batch_request_evidence") or [])]
+
+
+def load_targets(project_root: Path, version: str) -> list[RawSnapshotEvidence]:
+    """The pinned version's bound raw-snapshot evidence rows."""
+    return _targets_from_build(_read_build_config(project_root, version))
+
+
+def load_batch_request_evidence(project_root: Path, version: str) -> list[str]:
+    """The batch transmissions the version bound, as evidence hashes.
+
+    A version built before the batch channel bound none: the absent key is
+    an empty list, not an error.
+    """
+    return _batch_hashes_from_build(_read_build_config(project_root, version))
+
+
+def replay_batch(
+    source: object, evidence: BatchRequestEvidence
+) -> dict[str, pd.DataFrame]:
+    """Re-ask exactly the recorded batch, once, and split it back per code.
+
+    Degrading a batch record into per-symbol re-asks would change the
+    question: an absent key, a truncation or a different answer shape can
+    depend on which codes travelled together, so the comparison would no
+    longer be like-for-like.  A code the replay did not answer is simply
+    absent -- never synthesised.
+    """
+    parameters = json.loads(evidence.batch_request_parameters)
+    requests = [
+        DataRequest(
+            str(parameters["endpoint"]),
+            (str(symbol),),
+            date.fromisoformat(str(parameters["start_date"])),
+            date.fromisoformat(str(parameters["end_date"])),
+            dict(parameters.get("params") or {}),
+        )
+        for symbol in parameters["symbols"]
+    ]
+    result = source.fetch_batch(requests)
+    # Production outcomes carry the adapter's FetchResult; a fake source may
+    # hand back the bare frame.  Either way it is the answer that code got.
+    return {
+        outcome.symbol: getattr(outcome.result, "frame", outcome.result)
+        for outcome in result.outcomes
+        if outcome.result is not None
+    }
+
+
+def replay_recorded_batches(
+    source: object, store: BatchEvidenceStore, shas: Sequence[str]
+) -> dict[str, pd.DataFrame]:
+    """Replay every batch the version bound to, and return frames by symbol.
+
+    ``build_config.batch_request_evidence`` records hashes, so the resolution
+    starts from the hash: an unresolvable one is skipped rather than turned
+    into a guessed single-symbol re-ask.
+    """
+    frames: dict[str, pd.DataFrame] = {}
+    for sha in shas:
+        evidence = store.load_by_sha(sha)
+        if evidence is None:
+            continue
+        frames.update(replay_batch(source, evidence))
+    return frames
 
 
 def _xingyao_daily_source(config):
@@ -140,6 +213,59 @@ def _source_for(name: str, endpoint: str, config: ProjectConfig):
     )
 
 
+def _batch_replay_coverage(
+    config: ProjectConfig,
+    store_batch: BatchEvidenceStore,
+    shas: Sequence[str],
+) -> dict[tuple[str, str, str, str], pd.DataFrame]:
+    """Map each snapshot a recorded batch produced to its replayed frame.
+
+    Keyed the way ``run``'s evidence rows are keyed: ``(source, endpoint,
+    request_key, file_sha256)``.  Each ``(source, endpoint)`` group is
+    resolved and replayed once; a group whose replay source has no
+    ``fetch_batch`` -- or whose resolution or replay raised -- stays
+    uncovered, so its targets fall back to the per-symbol re-ask path and
+    the audit keeps reporting instead of crashing.
+    """
+    resolved: dict[tuple[str, str], list[BatchRequestEvidence]] = {}
+    for sha in shas:
+        try:
+            evidence = store_batch.load_by_sha(sha)
+        except Exception:  # noqa: BLE001 - an unreadable record is not a crash
+            continue
+        if evidence is None:
+            continue
+        resolved.setdefault((evidence.source, evidence.endpoint), []).append(evidence)
+    coverage: dict[tuple[str, str, str, str], pd.DataFrame] = {}
+    for (name, endpoint), records in resolved.items():
+        try:
+            source = _source_for(name, endpoint, config)
+        except Exception:  # noqa: BLE001 - an unresolvable group stays uncovered
+            continue
+        if getattr(source, "fetch_batch", None) is None:
+            continue
+        try:
+            frames = replay_recorded_batches(
+                source, store_batch, [record.sha256 for record in records]
+            )
+        except Exception:  # noqa: BLE001 - a failed replay leaves the group uncovered
+            continue
+        for record in records:
+            for outcome in record.outcomes:
+                frame = frames.get(outcome.symbol)
+                if outcome.snapshot_file_sha256 is None or frame is None:
+                    continue
+                coverage[
+                    (
+                        record.source,
+                        record.endpoint,
+                        outcome.request_key,
+                        outcome.snapshot_file_sha256,
+                    )
+                ] = frame
+    return coverage
+
+
 def run(
     root: Path,
     config: ProjectConfig,
@@ -156,7 +282,11 @@ def run(
     pinned = version or publisher.current().version
     print(f"drift audit: dataset={pinned}")
     store = RawStore(root)
-    targets = load_targets(root, pinned)
+    build = _read_build_config(root, pinned)
+    targets = _targets_from_build(build)
+    coverage = _batch_replay_coverage(
+        config, BatchEvidenceStore(root), _batch_hashes_from_build(build)
+    )
     rows: list[dict[str, object]] = []
     drifted = 0
     for evidence in targets:
@@ -171,6 +301,54 @@ def run(
                     "stored_sha256": evidence.file_sha256,
                     "fetched_sha256": "unverifiable",
                     "note": type(error).__name__,
+                }
+            )
+            continue
+        replayed = coverage.get(
+            (
+                evidence.source,
+                evidence.endpoint,
+                evidence.request_key,
+                evidence.file_sha256,
+            )
+        )
+        if replayed is not None:
+            # The snapshot was produced by a recorded batch: compare against
+            # the batch replay instead of degrading it to a per-symbol ask.
+            # The metadata comes from the STORED manifest, so the re-saved
+            # bytes differ from the audited ones only when the frame differs.
+            try:
+                fetched = store.save(
+                    FetchResult(
+                        source=evidence.source,
+                        endpoint=evidence.endpoint,
+                        request_key=evidence.request_key,
+                        frame=replayed,
+                        metadata=dict(snapshot.manifest.get("metadata") or {}),
+                    )
+                )
+            except Exception as error:  # noqa: BLE001 - audit reports, never raises
+                rows.append(
+                    {
+                        "source": evidence.source,
+                        "endpoint": evidence.endpoint,
+                        "request_key": evidence.request_key,
+                        "stored_sha256": evidence.file_sha256,
+                        "fetched_sha256": "fetch_failed",
+                        "note": type(error).__name__,
+                    }
+                )
+                continue
+            verdict, _ = classify_drift(evidence.file_sha256, fetched.sha256)
+            drifted += int(verdict == "drifted")
+            rows.append(
+                {
+                    "source": evidence.source,
+                    "endpoint": evidence.endpoint,
+                    "request_key": evidence.request_key,
+                    "stored_sha256": evidence.file_sha256,
+                    "fetched_sha256": fetched.sha256,
+                    "note": f"{verdict} batch_replayed",
                 }
             )
             continue
