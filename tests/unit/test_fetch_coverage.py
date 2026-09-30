@@ -146,3 +146,189 @@ def test_an_unknown_reason_is_still_rejected():
             date(2026, 8, 28),
             reason="supplier_mood",
         )
+
+
+def _zoned_payload(prefix_end, middle_kind, middle_start, tail=None):
+    from stock_quant.data_model.fetch_coverage import (
+        NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+    )
+
+    segments = [
+        FetchSegment(
+            "basic_factor", KIND_NOT_FETCHED, ANCHOR, prefix_end,
+            reason=NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+        ),
+        FetchSegment("basic_factor", middle_kind, middle_start, END),
+    ]
+    if tail is not None:
+        segments.append(tail)
+    return to_build_config_payload({"basic_factor": segments})
+
+
+def test_history_prefix_then_fetched_passes():
+    payload = _zoned_payload(
+        date(2023, 12, 29), KIND_FETCHED, date(2023, 12, 30)
+    )
+    assert validate_table_fetch_coverage(
+        payload, anchor_start=ANCHOR, published_end=END
+    ) == []
+
+
+def test_history_prefix_must_start_at_the_anchor():
+    payload = to_build_config_payload(
+        {
+            "basic_factor": [
+                FetchSegment(
+                    "basic_factor", KIND_NOT_FETCHED,
+                    date(2021, 6, 1), date(2023, 12, 29),
+                    reason="history_begins_after_anchor",
+                ),
+                FetchSegment("basic_factor", KIND_FETCHED, date(2023, 12, 30), END),
+            ]
+        }
+    )
+    codes = [
+        code
+        for code, _ in validate_table_fetch_coverage(
+            payload, anchor_start=ANCHOR, published_end=END
+        )
+    ]
+    assert "not_fetched_prefix_misaligned" in codes
+
+
+def test_history_reason_in_the_middle_is_rejected():
+    payload = to_build_config_payload(
+        {
+            "basic_factor": [
+                FetchSegment("basic_factor", KIND_FETCHED, ANCHOR, date(2024, 1, 5)),
+                FetchSegment(
+                    "basic_factor", KIND_NOT_FETCHED,
+                    date(2024, 1, 8), date(2024, 1, 12),
+                    reason="history_begins_after_anchor",
+                ),
+                FetchSegment("basic_factor", KIND_FETCHED, date(2024, 1, 15), END),
+            ]
+        }
+    )
+    codes = [
+        code
+        for code, _ in validate_table_fetch_coverage(
+            payload, anchor_start=ANCHOR, published_end=END
+        )
+    ]
+    assert "not_fetched_mixed_with_fetch" in codes
+
+
+def test_history_reason_in_the_tail_is_rejected():
+    payload = to_build_config_payload(
+        {
+            "basic_factor": [
+                FetchSegment("basic_factor", KIND_FETCHED, ANCHOR, date(2024, 1, 5)),
+                FetchSegment(
+                    "basic_factor", KIND_NOT_FETCHED,
+                    date(2024, 1, 8), END,
+                    reason="history_begins_after_anchor",
+                ),
+            ]
+        }
+    )
+    codes = [
+        code
+        for code, _ in validate_table_fetch_coverage(
+            payload, anchor_start=ANCHOR, published_end=END
+        )
+    ]
+    assert "not_fetched_mixed_with_fetch" in codes
+
+
+def test_source_unavailable_tail_after_carried_passes():
+    from stock_quant.data_model.fetch_coverage import (
+        NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+        NOT_FETCHED_SOURCE_UNAVAILABLE,
+    )
+
+    payload = to_build_config_payload(
+        {
+            "basic_factor": [
+                FetchSegment(
+                    "basic_factor", KIND_NOT_FETCHED, ANCHOR, date(2023, 12, 29),
+                    reason=NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+                ),
+                FetchSegment(
+                    "basic_factor", KIND_CARRIED, date(2023, 12, 30), END
+                ),
+            ],
+            "daily_bar": [
+                FetchSegment(
+                    "daily_bar", KIND_CARRIED, ANCHOR, date(2026, 8, 27)
+                ),
+                FetchSegment(
+                    "daily_bar", KIND_NOT_FETCHED, END, END,
+                    reason=NOT_FETCHED_SOURCE_UNAVAILABLE,
+                ),
+            ],
+        }
+    )
+    assert validate_table_fetch_coverage(
+        payload, anchor_start=ANCHOR, published_end=END
+    ) == []
+
+
+def test_source_unavailable_in_the_middle_is_rejected():
+    from stock_quant.data_model.fetch_coverage import (
+        NOT_FETCHED_SOURCE_UNAVAILABLE,
+    )
+
+    payload = to_build_config_payload(
+        {
+            "daily_bar": [
+                FetchSegment("daily_bar", KIND_FETCHED, ANCHOR, date(2024, 1, 5)),
+                FetchSegment(
+                    "daily_bar", KIND_NOT_FETCHED,
+                    date(2024, 1, 8), date(2024, 1, 12),
+                    reason=NOT_FETCHED_SOURCE_UNAVAILABLE,
+                ),
+                FetchSegment("daily_bar", KIND_FETCHED, date(2024, 1, 15), END),
+            ]
+        }
+    )
+    codes = [
+        code
+        for code, _ in validate_table_fetch_coverage(
+            payload, anchor_start=ANCHOR, published_end=END
+        )
+    ]
+    assert "not_fetched_mixed_with_fetch" in codes
+
+
+def test_operator_window_stays_whole_table():
+    payload = to_build_config_payload(
+        {
+            "daily_bar": [
+                FetchSegment(
+                    "daily_bar", KIND_NOT_FETCHED, ANCHOR, END,
+                    reason="operator_explicit_window",
+                ),
+            ]
+        }
+    )
+    assert validate_table_fetch_coverage(
+        payload, anchor_start=ANCHOR, published_end=END
+    ) == []
+
+
+def test_a_table_starting_late_without_a_prefix_is_still_a_gap():
+    payload = to_build_config_payload(
+        {
+            "daily_bar": [
+                FetchSegment("daily_bar", KIND_FETCHED, date(2021, 4, 14), END)
+            ]
+        }
+    )
+    codes = [
+        code
+        for code, _ in validate_table_fetch_coverage(
+            payload, anchor_start=ANCHOR, published_end=END
+        )
+    ]
+    assert "fetch_coverage_gap" in codes

@@ -124,11 +124,28 @@ def validate_table_fetch_coverage(
 ) -> list[tuple[str, dict]]:
     """Structural violations of a recorded ``table_fetch_coverage`` payload.
 
-    Rules: at least one table recorded; segments parse and sit inside
-    [anchor_start, published_end]; ``fetched``/``carried`` segments cover the
-    whole span contiguously; ``not_fetched`` only with the operator-window
-    reason (an explicit window made every segment skip -- the empty-run case,
-    a skipped table covers nothing by design).
+    Rules (spec §7.5.1/2/4): at least one table recorded; segments parse and
+    sit inside [anchor_start, published_end].  A table with no ``not_fetched``
+    segment must cover the whole span contiguously (calendar days).
+    ``not_fetched`` layouts, by reason:
+
+    - ``operator_explicit_window``: whole-table skip, nothing else mixes in
+      (spec D5.2, unchanged).
+    - ``history_begins_after_anchor``: the unique prefix -- exactly one
+      segment, starting at ``anchor_start`` and ending the day before the
+      first fetched/carried segment.
+    - ``source_disabled`` / ``source_unavailable``: tail segments -- after
+      every fetched/carried (or history-prefix) segment, running to
+      ``published_end``.
+
+    Placement is judged before alignment: a ``not_fetched`` segment in the
+    wrong zone (a second history segment, a history segment that is not first,
+    or an unavailable segment that does not form a contiguous run reaching
+    ``published_end``) is ``not_fetched_mixed_with_fetch``.  A correctly placed
+    history prefix whose ``window_start`` is not ``anchor_start`` is
+    ``not_fetched_prefix_misaligned``.  The fetched/carried segments must still
+    tile ``[anchor_start, published_end]`` contiguously, with the prefix and
+    tail zones excluded from that coverage.
     """
     if not isinstance(payload, dict) or not payload:
         return [("table_fetch_coverage_missing", {})]
@@ -168,18 +185,70 @@ def validate_table_fetch_coverage(
         ):
             violations.append(("fetch_coverage_out_of_window", {"table": table}))
         not_fetched = [s for s in ordered if s.kind == KIND_NOT_FETCHED]
-        if not_fetched:
+        if any(s.reason is None for s in not_fetched):
+            violations.append(("not_fetched_reason_missing", {"table": table}))
+            continue
+        if not not_fetched:
+            violations.extend(
+                _contiguity_violations(table, ordered, anchor_start, published_end)
+            )
+            continue
+        reasons = {s.reason for s in not_fetched}
+        if reasons == {NOT_FETCHED_OPERATOR_EXPLICIT_WINDOW}:
             if any(s.kind != KIND_NOT_FETCHED for s in ordered):
                 violations.append(
                     ("not_fetched_mixed_with_fetch", {"table": table})
                 )
-            if any(s.reason not in _REASONS for s in not_fetched):
-                violations.append(
-                    ("not_fetched_reason_missing", {"table": table})
-                )
             continue  # a skipped table covers nothing by design
+        if any(
+            s.reason == NOT_FETCHED_OPERATOR_EXPLICIT_WINDOW for s in not_fetched
+        ):
+            violations.append(("not_fetched_mixed_with_fetch", {"table": table}))
+            continue
+        history = [
+            s
+            for s in not_fetched
+            if s.reason == NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR
+        ]
+        unavailable = [
+            s
+            for s in not_fetched
+            if s.reason in (NOT_FETCHED_SOURCE_DISABLED, NOT_FETCHED_SOURCE_UNAVAILABLE)
+        ]
+        # Zone placement first (spec §7.5.1/2): at most one history segment,
+        # and it must sit in first position; the unavailable segments must form
+        # a contiguous run that reaches published_end.  Anything else is an
+        # interleaving, not a history prefix.
+        if len(history) > 1 or (history and ordered[0] is not history[0]):
+            violations.append(("not_fetched_mixed_with_fetch", {"table": table}))
+            continue
+        if unavailable:
+            zone_start = next(
+                index
+                for index, segment in enumerate(ordered)
+                if segment is unavailable[0]
+            )
+            zone = ordered[zone_start:]
+            if any(segment.kind != KIND_NOT_FETCHED for segment in zone) or (
+                zone[-1].window_end != published_end
+            ):
+                violations.append(
+                    ("not_fetched_mixed_with_fetch", {"table": table})
+                )
+                continue
+        # Anchor alignment comes second: a correctly placed prefix must still
+        # start exactly at the acceptance anchor (spec §7.5.1).
+        if history and history[0].window_start != anchor_start:
+            violations.append(("not_fetched_prefix_misaligned", {"table": table}))
+            continue
+        # The fetched/carried middle must still be contiguous from the anchor;
+        # the prefix/tail not_fetched segments advance the cursor but are never
+        # themselves coverage.
         cursor = anchor_start
         for segment in ordered:
+            if segment.kind == KIND_NOT_FETCHED:
+                cursor = max(cursor, segment.window_end + timedelta(days=1))
+                continue
             if segment.window_start > cursor:
                 violations.append(
                     (
@@ -188,11 +257,40 @@ def validate_table_fetch_coverage(
                     )
                 )
             cursor = max(cursor, segment.window_end + timedelta(days=1))
-        if cursor <= published_end:
+        if cursor <= published_end and not unavailable:
             violations.append(
                 (
                     "fetch_coverage_gap",
                     {"table": table, "gap_start": cursor.isoformat()},
                 )
             )
+    return violations
+
+
+def _contiguity_violations(
+    table: str,
+    ordered: Sequence[FetchSegment],
+    anchor_start: date,
+    published_end: date,
+) -> list[tuple[str, dict]]:
+    """The legacy whole-span walk for tables without not_fetched segments.
+
+    The cursor starts at ``anchor_start``, not at the first segment's own
+    start: a table that simply begins late, without declaring a
+    ``history_begins_after_anchor`` prefix, must still fail with
+    ``fetch_coverage_gap`` (spec §7.5.1; ``fetch_coverage.py``'s pre-change
+    semantics).
+    """
+    violations: list[tuple[str, dict]] = []
+    cursor = anchor_start
+    for segment in ordered:
+        if segment.window_start > cursor:
+            violations.append(
+                ("fetch_coverage_gap", {"table": table, "gap_start": cursor.isoformat()})
+            )
+        cursor = max(cursor, segment.window_end + timedelta(days=1))
+    if cursor <= published_end:
+        violations.append(
+            ("fetch_coverage_gap", {"table": table, "gap_start": cursor.isoformat()})
+        )
     return violations
