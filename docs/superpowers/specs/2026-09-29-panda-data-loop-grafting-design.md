@@ -35,8 +35,9 @@ PIT 成分事实 ──────┼─> Stock 原始证据 → 规范化 → 
    唯一数据底座；不引入 MongoDB，不实现双写。
 2. Panda 代码不进入 Stock。只吸收端点、字段和单位等事实性知识，所有实现均在
    Stock 的接口和测试约束下 clean-room 重写。
-3. RiceQuant 首批只承担可替换的供应通道：日线交叉验证、基础因子和候选 PIT
-   成分事实；不在首批替换 Tushare 主日线，也不自动覆盖既有 CSI 官方事实。
+3. RiceQuant 首批只承担基础因子和候选 PIT 成分事实的供应；日线只用于显式离线
+   drift audit，不加入星耀验证 lane 或公司行为仲裁链，不替换 Tushare 主日线，也不
+   自动覆盖既有 CSI 官方事实。
 4. `basic_factor` 只存 Stock 尚无唯一事实来源的字段。OHLCV 和 `amount` 继续只由
    `daily_bar` 提供；Panda 的十列宽表通过版本内联接视图获得，避免两份行情真相。
 5. 常驻查询面全部为 GET。更新触发属于独立操作面，默认关闭且只允许环回地址；
@@ -79,13 +80,35 @@ PIT 成分事实 ──────┼─> Stock 原始证据 → 规范化 → 
 | 混淆后的 Vite dist | 不复制、不反编译复用，只保留功能需求 |
 | xtquant、分钟/tick、panda_factor、AI 助手 | 本轮明确排除 |
 
+### 1.3 Panda 侧一手核验结论
+
+本规格复核了 Panda 的 RiceQuant cleaner、工具函数、因子 cleaner 和调度器，而非只
+依赖上游报告。影响设计的事实是：
+
+- `index_components` 在 Panda 中只被当作“日期 -> 当日成员集合”读取，没有公告日、
+  发布日或其他可得性元数据。
+- 成分请求失败时，Panda 的异常分支写入无关的 `self.components`，三个实际成员集合
+  仍为 `None`，随后全部证券被标成 `000` 并可继续 upsert。这是本规格禁止把空响应
+  当成功的直接反例。
+- Panda 所谓多源是 `DATAHUBSOURCE` 在 RiceQuant/Tushare 间单选，不存在多源并发
+  验证或投票。因此 RiceQuant 与 Stock 既有星耀验证 lane 的关系必须由 Stock 自己
+  裁决，不能声称沿用 Panda 行为。
+- RiceQuant `factor_base` 复制 OHLCV、把市值/换手率缺失填 0，并对 RiceQuant 原值
+  不做单位换算；Tushare cleaner 则分别对成交额和市值乘 1,000/10,000。Panda 的同一
+  collection 因而没有单一可证明的跨源单位语义。
+- Panda scheduler 使用日期化 job id、`replace_existing=True`，但没有
+  `max_instances` 防重入；失败只记日志。Stock 不继承这些语义。
+- Panda 的代码转换以数字前缀推断市场，未知值返回 `UNKNOWN` 继续流转；Stock 必须
+  从 RiceQuant `order_book_id` 的完整后缀映射并对未知后缀失败关闭。
+
 ## 2. 目标、成功判据与非目标
 
 ### 2.1 目标
 
 1. RiceQuant 能以可审计、可超时、凭据不落盘的方式进入 Stock 原始证据链。
-2. CSI300/500/1000 的 RiceQuant 日期化成分可生成证据绑定的候选 PIT 事实，并经
-   显式审核后进入 `universe_membership`。
+2. CSI300/500/1000 的 RiceQuant 日期化成分可生成证据绑定的候选事实；从采集日起
+   向前积累的快照可形成 PIT 区间，历史回填只有在补足当时可得性证据后才能进入正式
+   `universe_membership`。
 3. `basic_factor` 作为新 canonical 表发布，且不会复制 `daily_bar` 已拥有的事实。
 4. 用户能从 Web 查看版本、表、质量报告、验收状态和已生成报告，所有数据展示都
    明确绑定版本哈希。
@@ -167,8 +190,10 @@ MongoDB 与 Parquet 会形成两套 latest、两套修正历史和两套读取�
 
 - ADR-021：允许本地常驻查询面和调度触发器，确认它们不拥有数据写语义，并规定
   环回绑定、版本钉住与人工验收边界。
-- ADR-022：记录 RiceQuant 的角色、`basic_factor` 初始 tier、成员事实的审核路径，
-  以及不复制 OHLCV 的单一真相决策。
+- ADR-022：记录 RiceQuant 的角色、`basic_factor` 初始 tier、成员事实的双路径审核、
+  `announcement_date`/`raw_effective_from` 语义、snapshot 差分 reason，以及不复制
+  OHLCV 的单一真相决策；同时明确 RiceQuant 日线不加入星耀验证 lane 或 ADR-013/014
+  仲裁排序。
 - 落 ADR 时先检查编号是否仍空闲；若发生并行占用，以索引中的下一个空闲编号替代，
   不改已有 ADR。
 
@@ -189,11 +214,16 @@ MongoDB 与 Parquet 会形成两套 latest、两套修正历史和两套读取�
 
 注册源名为 `ricequant`，首批 `required=false`：
 
-- `daily`：作为未复权日线验证源，不替换主日线；
 - `basic_factor`：提供市值和换手率原始字段；
 - `index_components`：提供 CSI300/500/1000 日期化候选事实；
+- `daily`：仅供显式离线 drift audit 和单位/覆盖能力探针，不进入 `data update` 的
+  生产验证 lane，不参与投票或仲裁；
 - `security_master` 只在为符号规范化或请求覆盖提供必要元数据时调用，不成为 Stock
   security master 的自动替换源。
+
+这一角色划分不修改 ADR-016 的星耀验证职责，也不修改 ADR-013/014 的仲裁顺序。
+未来若要把 RiceQuant 日线加入生产验证，必须另立 ADR，并定义三源冲突、缺源和票数
+不足时的确定性裁决；ADR-022 不预留隐式入口。
 
 ### 6.2 Adapter 合同
 
@@ -211,8 +241,9 @@ MongoDB 与 Parquet 会形成两套 latest、两套修正历史和两套读取�
 
 ### 6.3 规范化
 
-- RiceQuant `XSHG/XSHE` 标识转 Stock 的 `SH/SZ` canonical symbol；未知市场失败关闭，
-  不静默过滤，北京市场必须通过能力探针后才声明支持。
+- RiceQuant `XSHG/XSHE` 标识转 Stock 的 `SH/SZ` canonical symbol；只能按完整
+  `order_book_id` 后缀映射，禁止按六位代码前缀猜交易所。未知市场失败关闭，不返回
+  `UNKNOWN` 占位继续流转；北京市场必须通过能力探针后才声明支持。
 - 日线单位统一到现有 `DAILY_SCHEMA`：成交量为股、成交额为人民币元、日期为
   `date32`，并保留 source/ingested_at。
 - `limit_up`、`limit_down` 和名称变化不在本阶段扩充 `daily_bar` schema；需要使用时
@@ -224,36 +255,59 @@ MongoDB 与 Parquet 会形成两套 latest、两套修正历史和两套读取�
   转换、凭据脱敏和原始快照绑定。
 - 集成测试证明禁用/不可用 RiceQuant 不阻断既有必选源；启用且返回错误时其 lane
   状态可见，不制造可信行。
-- 一次小窗口外部 smoke 记录调用量、墙钟、返回上限、北京市场覆盖和单位实测；这些
-  数值进入 dated operations evidence，不写成永久架构事实。
+- 一次小窗口外部 smoke 记录调用量、墙钟、返回上限、北京市场覆盖，并分别实测
+  `get_factor(market_cap)` 与 `get_turnover_rate(today)` 的原生单位和空值形态；转换
+  后以已知证券/日期的数量级断言单位。这些数值进入 dated operations evidence，不
+  写成永久架构事实。
+- 契约测试必须注入 `index_components` 整体异常、单指数缺键、日期缺键和空成员集合，
+  并断言不会产生“全市场均非成员”的成功结果。
 
 ## 7. Phase 2：PIT 成分与 `basic_factor`
 
 ### 7.1 成分事实路径
 
-RiceQuant `index_components` 不直接进入每日行情更新。流程为：
+RiceQuant `index_components` 不直接进入每日行情更新。它只有每日成员集合，没有公告
+元数据，因此分成两条证据强度不同的路径：
 
 ```text
 raw RiceQuant response
-  -> offline prepare（代码、日期、区间、来源规范化）
-  -> membership candidate + evidence manifest
-  -> 重叠日抽样/冲突报告
-  -> operator 显式 publish
-  -> 新 dataset version 携带 universe_membership
+  -> offline prepare（代码、snapshot_date、collection_date、来源规范化）
+  -> historical candidate ──缺当时可得性证据──> 差异/诊断用途，不可正式发布
+  -> forward snapshot ──从 collection_date 起积累──> PIT interval candidate
+       -> 重叠日抽样/冲突报告 -> operator 显式 publish
+       -> 新 dataset version 携带 universe_membership
 ```
 
 规则：
 
 - 映射固定为 `000300.XSHG -> csi300`、`000905.XSHG -> csi500`、
   `000852.XSHG -> csi1000`。
-- 每条事实必须符合现有 `MembershipFact`，保留原始有效区间、公告/可得日期、source、
+- 每条事实必须符合现有 `MembershipFact`，保留原始有效区间、可得日期、source、
   无凭据 URL、snapshot SHA-256 和 source-document SHA-256。
-- API 只给每日集合而不给事件公告时，`announcement_date` 只能取“供应商声明该集合
-  对外可得的日期”，不能倒填指数生效日；二者无法证明时该批候选拒绝发布。
+- RiceQuant 没有指数公司的独立公告文档时，`source_document_sha256` 绑定本次采集的
+  canonical evidence manifest（请求参数、SDK 版本、collection time、response hash），
+  不得伪装成官方公告哈希；该 manifest 只证明“何时采到什么”，不提高来源权威等级。
+- **向前采集路径**：`announcement_date = collection_date`；首次见到成员时
+  `raw_effective_from = collection_date`，首次见到移除时上一区间结束于前一交易日。
+  不得用供应商返回的更早 `snapshot_date` 回填 `raw_effective_from`，否则会触发且理应
+  触发 `UNIVERSE_ANNOUNCEMENT_AFTER_USE`。这条路径从系统开始采集之日起积累可用 PIT，
+  不承诺补出此前历史。
+- **历史回填路径**：过去日期的每日成员集合可以生成带 raw snapshot 的 candidate 和
+  差异报告，但 collection date 晚于 effective date 时不得进入正式 membership 表。
+  只有补到能证明该成员集合在当时已经公开可得的独立材料，才能把材料日期写为
+  `announcement_date` 并进入 operator publish。
+- 禁止为了让历史候选通过门禁而把 `announcement_date` 伪造为 effective date；
+  collection date 是采集时点证据，不是历史公告证据。
+- 由相邻快照差分生成的加入/退出不能伪称 `regular_rebalance`、`correction` 或
+  `delisting`。ADR-022 新增严格 reason `snapshot_observed_change`，表示“变化由相邻
+  供应商快照观测得到，经济原因未知”；初始采集日的开放区间使用
+  `initial_constituent`，该区间以后被观测为结束时，新数据集中的闭合事实改记
+  `snapshot_observed_change`，以满足既有“initial 必须 active”的模型约束。
 - CSI300 与既有官方事实重叠时生成差异报告，不自动选边、不覆盖原行。冲突需 operator
   处理并留下新证据；没有“优先 RiceQuant”的隐式规则。
-- CSI500/1000 在首次正式使用前仍须通过现有 universe preflight 和 real-data
-  acceptance。PIT 能力不等于官方权威，UI 必须显示实际 `source`。
+- CSI500/1000 只有在 requested research window 完全落入其可证明的 coverage window
+  后才可用于正式研究，并仍须通过现有 universe preflight 和 real-data acceptance。
+  PIT 能力不等于官方权威，UI 必须显示实际 `source` 与 coverage start。
 
 ### 7.2 `basic_factor` canonical schema
 
@@ -292,7 +346,8 @@ raw RiceQuant response
 - 真实小窗口从 raw snapshot 走到新 dataset version，`data validate` 通过。
 - 相同输入重跑版本哈希不变；单个源事实变化产生新版本，旧版本未修改。
 - `basic_factor` 缺失保留 null 并降级/阻断于声明的门禁，不出现 Panda 的 fill-zero。
-- 候选成员事实存在冲突或无法证明可得日期时不发布，失败报告保留。
+- 历史候选无法证明当时可得日期时只保留为诊断证据；向前采集事实用采集日作
+  announcement/effective 下界。任何冲突都不静默发布，失败报告保留。
 
 ## 8. Phase 3：只读 FastAPI 查询面
 
@@ -380,7 +435,9 @@ disclosure-lookback-days，且按 CLI 同一类型约束验证。
   选择必须在 ADR-021 落一项，不得同时维护两套生产调度。
 - 若采用仓库内调度器，配置只有时区、cron、enabled 和允许的 update 参数；时区固定
   默认 `Asia/Shanghai`，配置校验失败则进程不启动。
-- `max_instances=1`，missed run 只记录一次 MISSED，不补跑成任务风暴。
+- 若采用 APScheduler，job id 固定为 `stock-data-update`，不得包含日期或启动时刻；
+  `replace_existing=True`、`max_instances=1`、`coalesce=True`，missed run 只记录一次
+  MISSED，不补跑成任务风暴。project-local CLI 锁仍是跨进程的最终防线。
 - 调度失败通知读取 job 的最终状态，不解析质量问题来决定“忽略后继续”。
 - 调度器不得调用 acceptance、research、report build 或清理命令。
 
