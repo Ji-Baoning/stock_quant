@@ -92,3 +92,57 @@ def test_not_fetched_with_operator_reason_passes():
 def test_unknown_kind_fails():
     with pytest.raises(ValueError):
         FetchSegment("daily_bar", "fetched_sometimes", date(2021, 1, 4), date(2026, 8, 28))
+
+
+def test_history_begins_after_anchor_is_a_valid_reason():
+    from stock_quant.data_model.fetch_coverage import (
+        NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+    )
+
+    segment = FetchSegment(
+        "basic_factor",
+        KIND_NOT_FETCHED,
+        date(2021, 1, 4),
+        date(2023, 12, 29),
+        reason=NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+    )
+    assert segment.reason == "history_begins_after_anchor"
+
+
+def test_source_unavailable_is_a_valid_reason():
+    from stock_quant.data_model.fetch_coverage import (
+        NOT_FETCHED_SOURCE_UNAVAILABLE,
+    )
+
+    segment = FetchSegment(
+        "daily_bar",
+        KIND_NOT_FETCHED,
+        date(2026, 8, 28),
+        date(2026, 8, 28),
+        reason=NOT_FETCHED_SOURCE_UNAVAILABLE,
+    )
+    assert segment.reason == "source_unavailable"
+
+
+def test_source_disabled_is_a_valid_reason():
+    from stock_quant.data_model.fetch_coverage import NOT_FETCHED_SOURCE_DISABLED
+
+    segment = FetchSegment(
+        "daily_bar",
+        KIND_NOT_FETCHED,
+        date(2026, 8, 28),
+        date(2026, 8, 28),
+        reason=NOT_FETCHED_SOURCE_DISABLED,
+    )
+    assert segment.reason == "source_disabled"
+
+
+def test_an_unknown_reason_is_still_rejected():
+    with pytest.raises(ValueError, match="unknown not_fetched reason"):
+        FetchSegment(
+            "daily_bar",
+            KIND_NOT_FETCHED,
+            date(2026, 8, 28),
+            date(2026, 8, 28),
+            reason="supplier_mood",
+        )

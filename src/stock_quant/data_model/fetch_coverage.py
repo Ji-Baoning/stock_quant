@@ -17,11 +17,30 @@ KIND_CARRIED = "carried"
 KIND_NOT_FETCHED = "not_fetched"
 _KINDS = frozenset({KIND_FETCHED, KIND_CARRIED, KIND_NOT_FETCHED})
 
-#: The only accepted NOT_FETCHED reason (spec D5.2): an explicit --start/--end
-#: window deviated from the table's contract fetch window, so the table
-#: skipped fetching this round and the baseline was carried instead.
+#: An explicit --start/--end window deviated from the table's contract fetch
+#: window (spec D5.2): the table skipped fetching this round, whole-table.
 NOT_FETCHED_OPERATOR_EXPLICIT_WINDOW = "operator_explicit_window"
-_REASONS = frozenset({NOT_FETCHED_OPERATOR_EXPLICIT_WINDOW})
+
+#: The table's own history starts later than the acceptance anchor (spec
+#: §7.5.1): the ONLY legal prefix shape, spanning exactly
+#: [acceptance_start, supported_start - 1].
+NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR = "history_begins_after_anchor"
+
+#: The source was not enabled this round (spec §7.5.2) -- a tail segment.
+NOT_FETCHED_SOURCE_DISABLED = "source_disabled"
+
+#: The source was enabled but unreachable this round (spec §7.5.2) -- a tail
+#: segment; the carried baseline keeps every fact before it (spec §7.5.4).
+NOT_FETCHED_SOURCE_UNAVAILABLE = "source_unavailable"
+
+_REASONS = frozenset(
+    {
+        NOT_FETCHED_OPERATOR_EXPLICIT_WINDOW,
+        NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+        NOT_FETCHED_SOURCE_DISABLED,
+        NOT_FETCHED_SOURCE_UNAVAILABLE,
+    }
+)
 
 
 @dataclass(frozen=True)
