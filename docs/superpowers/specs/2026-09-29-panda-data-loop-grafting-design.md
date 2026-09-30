@@ -1,6 +1,7 @@
 # Panda 数据闭环能力嫁接 Stock · 架构设计
 
 - 日期：2026-09-29
+- 最近修订：2026-09-30
 - 状态：**待 owner 复核**
 - 上游分析：`/home/ji/work/program/pandaAI/docs/panda数据闭环迁移stock可行性分析.md`
 - 目标：在不引入第二套数据真相、不削弱 Stock 治理边界的前提下，吸收
@@ -35,22 +36,26 @@ PIT 成分事实 ──────┼─> Stock 原始证据 → 规范化 → 
    唯一数据底座；不引入 MongoDB，不实现双写。
 2. Panda 代码不进入 Stock。只吸收端点、字段和单位等事实性知识，所有实现均在
    Stock 的接口和测试约束下 clean-room 重写。
-3. RiceQuant 首批只承担基础因子和候选 PIT 成分事实的供应；日线只用于显式离线
-   drift audit，不加入星耀验证 lane 或公司行为仲裁链，不替换 Tushare 主日线，也不
-   自动覆盖既有 CSI 官方事实。
+3. RiceQuant 首批承担候选 PIT 成分事实，并作为 `basic_factor` 主源候选；主源必须与
+   现有 Tushare `daily_basic` 通道完成可达性、溯源、单位和成本比较后按 §7.3 的规则
+   选定。RiceQuant 日线只用于显式离线 drift audit，不加入星耀验证 lane 或公司行为
+   仲裁链，不替换 Tushare 主日线，也不自动覆盖既有 CSI 官方事实。
 4. `basic_factor` 只存 Stock 尚无唯一事实来源的字段。OHLCV 和 `amount` 继续只由
    `daily_bar` 提供；Panda 的十列宽表通过版本内联接视图获得，避免两份行情真相。
-5. 常驻查询面全部为 GET。更新触发属于独立操作面，默认关闭且只允许环回地址；
+5. `universe_membership` 在进入多指数并存前升级为按 `universe_id` 切片钉哈希；旧的
+   schema-v1 整表哈希语义保持可重放，不静默改判。
+6. 常驻查询面全部为 GET。更新触发属于独立操作面，默认关闭且只允许环回地址；
    查询面和调度器都不能直接写数据集。
-6. 自动化止于“发布一个通过门禁的新数据集版本”。人工验收、正式研究解锁和失败
+7. 自动化止于“发布一个通过门禁的新数据集版本”。人工验收、正式研究解锁和失败
    证据清理永不自动化。
 
 ## 1. 背景与已经核实的仓库事实
 
 ### 1.1 Stock 当前边界
 
-- `DataSource` 协议只有 `name` 和 `fetch(request) -> FetchResult`，但运行时源注册、
-  必选角色和 lane 装配仍由 `data_pipeline.py` 的封闭结构控制。
+- `DataSource` 正式协议只有 `name` 和 `fetch(request) -> FetchResult`；ADR-020 另以
+  可选鸭子类型定义 `fetch_batch`。运行时源注册、必选角色和 lane 装配仍由
+  `data_pipeline.py` 的封闭结构控制。
 - `data update` 已是幂等入口；取数失败或质量门禁拒绝时不改 `CURRENT`。
 - `DatasetPublisher` 是唯一发布器。版本由表记录和规范化 `build_config` 共同哈希，
   发布目录不可变，`CURRENT` 原子替换。
@@ -60,7 +65,8 @@ PIT 成分事实 ──────┼─> Stock 原始证据 → 规范化 → 
   transport、冲突语义、PIT、coverage 和增量策略；未声明表以
   `unregistered_table` 失败关闭。
 - `universe_membership` 已有不可变事实模型、快照/文档哈希和研究前置门禁，不需要
-  另造指数成分字符串列。
+  另造指数成分字符串列；但 schema-v1 的定义钉住整张表哈希，当前一次只能让与整表
+  完全一致的一条 lineage 通过研究门禁，多 `universe_id` 并存必须先升级哈希作用域。
 - 正式研究验收包含 10 项自动检查和 9 项人工检查。9 项人工结果必须由 operator
   签署并绑定证据；调度进程无权生成 PASS。
 - `overview.md` 的 “no server, no scheduler, no database” 是当前架构事实，而非
@@ -96,8 +102,9 @@ PIT 成分事实 ──────┼─> Stock 原始证据 → 规范化 → 
 - RiceQuant `factor_base` 复制 OHLCV、把市值/换手率缺失填 0，并对 RiceQuant 原值
   不做单位换算；Tushare cleaner 则分别对成交额和市值乘 1,000/10,000。Panda 的同一
   collection 因而没有单一可证明的跨源单位语义。
-- Panda scheduler 使用日期化 job id、`replace_existing=True`，但没有
-  `max_instances` 防重入；失败只记日志。Stock 不继承这些语义。
+- Panda scheduler 使用日期化 job id、`replace_existing=True`，失败只记日志且没有
+  跨进程单飞或持久任务状态。APScheduler 3.x 的单进程默认 `max_instances=1` 不能解决
+  多进程/重启边界；Stock 不继承这些语义。
 - Panda 的代码转换以数字前缀推断市场，未知值返回 `UNKNOWN` 继续流转；Stock 必须
   从 RiceQuant `order_book_id` 的完整后缀映射并对未知后缀失败关闭。
 
@@ -135,7 +142,8 @@ PIT 成分事实 ──────┼─> Stock 原始证据 → 规范化 → 
 - 不在 UI 中编辑因子、配置、验收结论或研究规格。
 - 不接入 xtquant，不引入分钟/tick，不迁移 Panda 因子引擎或 AI 功能。
 - 不借本项目重构整个 `data_pipeline.py`；仅提取新 lane 所需的窄接口。
-- 不改变已发布数据集、验收记录或实验的身份算法。
+- 不回算、改写或重新解释已发布数据集、验收记录、schema-v1 universe definition 或
+  实验的身份；schema-v2 只为新 definition 产生新身份。
 
 ## 3. 方案选择
 
@@ -177,10 +185,12 @@ MongoDB 与 Parquet 会形成两套 latest、两套修正历史和两套读取�
 实施前保存一次带 commit/hash 的许可证核验记录：
 
 - PandaAI 根仓与 panda_quantflow 当前可见许可证为 AGPL-3.0；
-- panda-data 子目录未发现可授予复制权的许可证；
+- panda-data 子目录未发现可授予复制权的许可证；独立带 `.git` 的
+  `panda-data-skill` 同样未发现许可证；
 - 选择 **clean-room 重写**；
 - 允许记录端点名、字段名、单位、输入输出样例和观察到的行为；
 - 禁止复制函数体、注释、异常文案、前端 bundle、模板和测试 fixture；
+- 行为与字段语义优先引用供应商公开文档；Panda 代码只用于验证已观察到的兼容行为。
 - 新实现的评审必须能仅凭本规格、供应商公开文档和 Stock 测试解释其来源。
 
 若 owner 改选 AGPL 或“仅内部使用”，必须先形成单独书面决策；本规格其余部分不自动
@@ -193,7 +203,11 @@ MongoDB 与 Parquet 会形成两套 latest、两套修正历史和两套读取�
 - ADR-022：记录 RiceQuant 的角色、`basic_factor` 初始 tier、成员事实的双路径审核、
   `announcement_date`/`raw_effective_from` 语义、snapshot 差分 reason，以及不复制
   OHLCV 的单一真相决策；同时明确 RiceQuant 日线不加入星耀验证 lane 或 ADR-013/014
-  仲裁排序。
+  仲裁排序。它还必须记录 RiceQuant 与当前 Tushare transport 的基础因子比较及最终
+  主源/锚点裁决。
+- 独立的 membership-hash ADR：引入 schema-v2 的 `universe_id` 切片哈希、旧 v1
+  兼容读取、不可变定义版本注册表，以及 mixed-lineage 发布的迁移顺序。这是 G2 的
+  硬前置，不塞入 ADR-022 的附带段落。
 - 落 ADR 时先检查编号是否仍空闲；若发生并行占用，以索引中的下一个空闲编号替代，
   不改已有 ADR。
 
@@ -208,13 +222,24 @@ MongoDB 与 Parquet 会形成两套 latest、两套修正历史和两套读取�
 - `docs/architecture/data-flow.md`：加入服务读路径和自动更新路径，明确验收不自动化。
 - `RUNBOOK.md`：加入启动、停止、锁冲突、失败检查和恢复步骤。
 
+### 5.4 依赖边界
+
+- `duckdb` 从仅存在于 `environment.yml` 改为 `pyproject.toml` 核心依赖，因为
+  `DatasetReader` 在正常运行路径直接 import 它。
+- `fastapi`、`uvicorn` 放入 `service` optional extra；核心 CLI 安装不被迫安装服务栈。
+- Vue/Vite 依赖只存在于独立前端 `package.json`，不进入 Python 依赖。
+- 首版选择 systemd timer，不引入 `apscheduler`。
+- `rqdatac` 先在 Phase 1 探针中核实可安装来源与再分发条件：若可从允许的包索引安装，
+  放入 `ricequant` optional extra；否则沿用 tgw 的 operator-installed 模式，在 RUNBOOK
+  固定版本与完整性核验方法，核心安装不得因缺包失败。
+
 ## 6. Phase 1：RiceQuant adapter 与 lane
 
 ### 6.1 角色
 
 注册源名为 `ricequant`，首批 `required=false`：
 
-- `basic_factor`：提供市值和换手率原始字段；
+- `basic_factor`：提供市值和换手率原始字段，作为主源候选或独立锚点；
 - `index_components`：提供 CSI300/500/1000 日期化候选事实；
 - `daily`：仅供显式离线 drift audit 和单位/覆盖能力探针，不进入 `data update` 的
   生产验证 lane，不参与投票或仲裁；
@@ -227,9 +252,12 @@ MongoDB 与 Parquet 会形成两套 latest、两套修正历史和两套读取�
 
 ### 6.2 Adapter 合同
 
-- 实现既有 `DataSource`，可选实现 `fetch_batch`；请求 endpoint 必须是上述固定词汇。
-- SDK 初始化和每次外部调用均在可终止子进程中执行；超时终止整个子进程，不留下
-  后台线程或半份成功帧。
+- 实现既有 `DataSource`；首版**不实现** ADR-020 的可选 `fetch_batch`。若能力探针证明
+  必须批量化，另按 ADR-020 的 BatchResult、逐 symbol evidence、部分失败与二分规则
+  扩展，不以 RiceQuant 特例另造批量语义。请求 endpoint 必须是上述固定词汇。
+- SDK 初始化和每次外部调用复用 `stock_quant.data_sources._isolated.run_isolated`；同步
+  把该通用模块中仅描述 tgw/`AD_*` 的 docstring 改成供应商中立表述。超时终止整个
+  子进程，不留下后台线程或半份成功帧，不复制一份 RiceQuant 专属隔离器。
 - 凭据环境名固定为 `RQDATAC_USERNAME`、`RQDATAC_PASSWORD`；缺一即
   `optional_source_unavailable`，且错误文本不得包含值。
 - 日线必须请求未复权口径；调整后价格不得进入 `daily_bar`。
@@ -259,10 +287,50 @@ MongoDB 与 Parquet 会形成两套 latest、两套修正历史和两套读取�
   `get_factor(market_cap)` 与 `get_turnover_rate(today)` 的原生单位和空值形态；转换
   后以已知证券/日期的数量级断言单位。这些数值进入 dated operations evidence，不
   写成永久架构事实。
+- 同一 smoke 对当前配置的 Tushare transport 调用 `daily_basic`，记录可达性、真实
+  transport/upstream 可归因性、配额、历史窗口、`total_mv`/`turnover_rate` 单位、空值
+  和与 RiceQuant 同日同证券差异。两个入口若不能证明上游独立，不得计作互相锚定。
+- 成分能力探针必须查明：供应商公开文档或其他端点是否提供公告日/调整生效日；
+  `index_components(start,end)` 的键是每个交易日、每次变更日还是其他稀疏节奏。只有
+  探针和公开文档都没有更强元数据时，§7.1 才采用 collection-date 向前积累语义。
 - 契约测试必须注入 `index_components` 整体异常、单指数缺键、日期缺键和空成员集合，
   并断言不会产生“全市场均非成员”的成功结果。
+- 契约测试增加漏采：按探针确定的应有观测节奏缺任一期时，不得静默跨 gap 推导精确
+  加入或移除边界。
 
 ## 7. Phase 2：PIT 成分与 `basic_factor`
+
+### 7.0 多 lineage 的硬前置
+
+当前 schema-v1 `UniverseDefinition.membership_table_sha256` 钉住整张
+`universe_membership` 表，acceptance 和 runner 都不按 `universe_id` 过滤；因此把
+csi300/500/1000 混入同一表会让所有现有定义发生 hash mismatch。Phase 2 在写入第二个
+`universe_id` 前必须先完成独立 ADR 和以下兼容迁移：
+
+1. `UniverseDefinition` 新增 schema-v2，固定
+   `membership_hash_scope: universe_id`；`membership_table_sha256` 只哈希
+   `frame[frame.universe_id == definition.universe_id]` 的 canonical facts。
+2. `evaluate_index_membership_evidence` 在 schema-v2 下先选择目标 slice，再对该 slice
+   做 schema、事实、coverage、cardinality 和 hash 检查；空 slice 明确失败。runner
+   传给 `_facts_from_membership_frame`、`resolve_memberships` 和 `UniverseResolver` 的也
+   必须是同一 slice。不得出现“按 slice 验收、按整表运行”的分叉。
+3. schema-v1 保持原有整表哈希行为，只用于旧 dataset/definition 重放；不得把 v1
+   悄悄解释成 slice hash。
+4. 建立 `configs/universes/versions/<definition_version>.yml` 不可变注册表。正式 spec
+   使用显式 `universe_version` 时从注册表解析并复核内容哈希；`CURRENT` 才读取顶层
+   可变指针文件。迁移前先把现有 v1 定义按版本归档，保证旧冻结运行可解析。
+5. mixed-lineage 首次发布前，所有仍启用且需要在新数据集上运行的顶层定义一次性升级
+   到 v2 并重算各自 slice hash。定义 version 必然变化；已发布实验保持不变，使用
+   `CURRENT` 的源规格下一次冻结新版本，显式旧 version 继续走注册表。
+6. `data update` 仍只 carry 已发布 membership 整表。新增/替换 lineage 只能走显式
+   membership refresh：本阶段补充正式
+   `python -m stock_quant data index-membership publish`，它读取 prepare 产物、按
+   `universe_id` 替换目标 slice、保留其他 slice、重跑全部门禁并发布新 dataset。
+   不再依赖 `project/collect_*.py` 脚本作为长期正式入口。
+7. `configs/universes/*.yml` 仍非递归扫描且禁止重复 `universe_id`。新增定义的
+   `coverage_start` 不得早于当前 `acceptance_start`；若确需提前，必须在同一发布补齐
+   从新起点开始的 calendar、行情、主数据、coverage 和人工验收义务，不能仅靠一张
+   membership 表悄悄加宽全局窗口。
 
 ### 7.1 成分事实路径
 
@@ -288,10 +356,15 @@ raw RiceQuant response
   canonical evidence manifest（请求参数、SDK 版本、collection time、response hash），
   不得伪装成官方公告哈希；该 manifest 只证明“何时采到什么”，不提高来源权威等级。
 - **向前采集路径**：`announcement_date = collection_date`；首次见到成员时
-  `raw_effective_from = collection_date`，首次见到移除时上一区间结束于前一交易日。
-  不得用供应商返回的更早 `snapshot_date` 回填 `raw_effective_from`，否则会触发且理应
-  触发 `UNIVERSE_ANNOUNCEMENT_AFTER_USE`。这条路径从系统开始采集之日起积累可用 PIT，
-  不承诺补出此前历史。
+  `raw_effective_from = collection_date`。只有按 Phase 1 探针确认的应有节奏连续取得
+  相邻观测，才能用后一观测推导变化；不得用供应商返回的更早 `snapshot_date` 回填
+  `raw_effective_from`，否则会触发且理应触发 `UNIVERSE_ANNOUNCEMENT_AFTER_USE`。
+  这条路径从系统开始采集之日起积累可用 PIT，不承诺补出此前历史。
+- **漏采规则**：任一应有观测缺失、异常、缺日期键或空集合，都写
+  `membership_observation_gap` 证据并中断该 universe 的连续 coverage。gap 两端集合
+  不得直接差分，不猜“前一交易日”或“采集日”是精确移除日；下一次成功观测只可开启
+  新候选 coverage segment。研究窗口跨越 gap 时 preflight 必须失败，除非另有日期化
+  外部证据闭合该 gap。
 - **历史回填路径**：过去日期的每日成员集合可以生成带 raw snapshot 的 candidate 和
   差异报告，但 collection date 晚于 effective date 时不得进入正式 membership 表。
   只有补到能证明该成员集合在当时已经公开可得的独立材料，才能把材料日期写为
@@ -319,23 +392,48 @@ raw RiceQuant response
 | `symbol` | string, non-null | Stock canonical symbol |
 | `market_cap` | float64, nullable | 当日总市值，人民币元；源缺失保持 null，禁止填 0 |
 | `turnover_rate` | float64, nullable | 无量纲比例，`0.01` 表示 1%；源值按实测单位显式换算 |
-| `source` | string, non-null | `ricequant` |
+| `source` | string, non-null | ADR-022 选定的唯一主源：`tushare` 或 `ricequant` |
 | `ingested_at` | UTC timestamp, non-null | 采集时刻，不参与业务时点 |
 
 不存 `open/high/low/close/volume/amount`。兼容 Panda 的十列视图由同一 dataset version
 中的 `daily_bar` 与 `basic_factor` 按 `(trade_date, symbol)` 一对一联接得到；任一侧重复
 或联接扩行均为质量错误。
 
-### 7.3 契约与门禁
+### 7.3 主源裁决、契约与门禁
+
+`basic_factor` 不预设 RiceQuant 必然胜出。ADR-022 读取 Phase 1 的同窗探针，并按以下
+确定性规则选择：
+
+1. 候选必须能绑定真实 transport/upstream、覆盖目标历史窗口、在可接受配额内稳定
+   返回，并已实测市值/换手率单位与空值语义；任一项失败即无资格作主源。
+2. 当前配置的 Tushare transport 与 RiceQuant 都合格时，优先 Tushare 作主源以复用
+   既有 adapter、凭据与调用账本；只有能证明上游 lineage 独立时，RiceQuant 才作为
+   anchor。仅“两个入口数值相同”不构成独立性。
+3. 只有 RiceQuant 合格时，RiceQuant 作主源且表保持 `research_only`；只有 Tushare
+   合格时同理。两者都不合格则本阶段不发布 `basic_factor`，不得降级单位或 provenance
+   要求来凑表。
+4. 主源在一个 dataset version 内唯一；anchor 只产生比较/coverage 证据，不把自己的
+   行混入 canonical 表。换主源是新 ADR、新 raw lineage 和新 dataset version。
 
 - `STANDARDIZED_SCHEMAS` 注册 `basic_factor`，`tables` 装配、fixture、manifest 和
   validate 路径同步更新。
-- 初始 `data_contracts` tier 固定为 `research_only`：市值和换手率在首批没有独立
-  锚点，不能靠单源自证为正式研究输入。
-- `primary_transport=ricequant:official` 仅表示直连 RiceQuant SDK 的 transport 类别，
-  不表示交易所/指数公司官方背书；ADR-022 必须写清这一词义。
-- `conflict=downgrade`、`coverage_shape=per_symbol_window`、
-  `incremental=last_covered_plus_1`。
+- 无可证明独立 anchor 时 tier 为 `research_only`；有独立 anchor 且比较规则通过专项
+  验证时才可在 ADR-022 中定为 `anchored`，不允许单源自证。
+- `primary_transport` 写入实际胜出的 transport，例如 `ricequant:official` 或
+  `tushare:relay`。这里的 `official` 只表示直连供应商 SDK，不表示交易所/指数公司
+  官方背书。
+- `incremental=last_covered_plus_1`。有 anchor 时 `conflict=downgrade`；无 anchor 时
+  `conflict=block`。`coverage_shape=per_symbol_window`，并新增
+  `basic_factor_coverage` canonical 表记录每个 symbol/window 的 fetched、missing、
+  failed 与 anchor-conflict 状态。
+- `basic_factor_coverage` 自身声明为 `core`、`coverage_shape=none`，primary transport
+  与 `basic_factor` 相同；缺少 coverage 表或 coverage 与事实表不一致时整轮阻断，避免
+  用缺失的“证明表”给业务表降级放行。
+- 当前运行时只真正消费 `tier`、`incremental` 和 `pit`；`primary_transport`、
+  `anchors`、`conflict`、`coverage_shape` 目前主要是解析期声明。本阶段不得把声明当成
+  已有保障，必须补齐：发布时核对 `build_config.table_lineage.basic_factor` 与
+  `primary_transport`/raw bindings；按 `coverage_shape` 要求 coverage 表；按
+  `conflict` 把独立 anchor 冲突写成 `coverage_downgraded`。这些检查必须有失败测试。
 - 新增表级检查至少覆盖 schema、主键唯一、有限非负市值、有限非负换手率、日历内日期、
   security master 符号、请求覆盖和联接一对一。
 - 将 tier 升为 `anchored` 或 `core` 必须另有独立锚点证据和新 ADR；不得在 UI 或运行
@@ -346,6 +444,10 @@ raw RiceQuant response
 - 真实小窗口从 raw snapshot 走到新 dataset version，`data validate` 通过。
 - 相同输入重跑版本哈希不变；单个源事实变化产生新版本，旧版本未修改。
 - `basic_factor` 缺失保留 null 并降级/阻断于声明的门禁，不出现 Panda 的 fill-zero。
+- 一个含至少两个 `universe_id` 的 fixture 能让各自 schema-v2 definition 通过 slice
+  hash/preflight；schema-v1 仍按整表语义重放，二者没有隐式 fallback。
+- 使用显式旧 `universe_version` 的 fixture 能从 definitions registry 重放；使用
+  `CURRENT` 的规格明确冻结到新的 v2 definition version。
 - 历史候选无法证明当时可得日期时只保留为诊断证据；向前采集事实用采集日作
   announcement/effective 下界。任何冲突都不静默发布，失败报告保留。
 
@@ -404,6 +506,17 @@ python -m stock_quant data update --root <resolved-root> [--start ...] [--end ..
 不得使用 shell 字符串拼接。允许参数只有 start、end、sources 和
 disclosure-lookback-days，且按 CLI 同一类型约束验证。
 
+新增正式入口：
+
+```text
+python -m stock_quant operations update --root <resolved-root> [允许的 update 参数]
+```
+
+该命令同步调用 UpdateRunner、创建 job 目录、等待内部 `data update` 子进程结束并以
+同一成功/失败码退出。systemd timer 只调用这个外层入口；不得直接调用 `data update`，
+否则 Web 看不到定时任务记录。手工诊断仍可直接调用 `data update`，但同样受 project
+lock 保护。
+
 ### 9.2 单飞与持久化状态
 
 - `data update` CLI 自身取得 project-local advisory lock，覆盖手工 CLI、Web 与调度
@@ -431,13 +544,14 @@ disclosure-lookback-days，且按 CLI 同一类型约束验证。
 
 ### 9.4 调度
 
-- 首版采用 APScheduler 或 systemd timer 均可，但调度层只负责调用 UpdateRunner；
-  选择必须在 ADR-021 落一项，不得同时维护两套生产调度。
-- 若采用仓库内调度器，配置只有时区、cron、enabled 和允许的 update 参数；时区固定
-  默认 `Asia/Shanghai`，配置校验失败则进程不启动。
-- 若采用 APScheduler，job id 固定为 `stock-data-update`，不得包含日期或启动时刻；
-  `replace_existing=True`、`max_instances=1`、`coalesce=True`，missed run 只记录一次
-  MISSED，不补跑成任务风暴。project-local CLI 锁仍是跨进程的最终防线。
+- 首版固定采用 **systemd timer**，不同时维护 APScheduler。timer 的
+  `ExecStart` 只能调用 §9.1 的 `operations update`，由 UpdateRunner 产生持久 job；
+  systemd 负责进程监督，project-local CLI 锁负责跨手工/Web/timer 的最终单飞。
+- timer 使用固定 unit 名 `stock-quant-data-update@<project-id>.timer`，时区按宿主机
+  `Asia/Shanghai` 配置；`Persistent=false`，停机期间错过的触发记在 systemd 日志，
+  不在恢复后补跑任务风暴。
+- 一次 timer 触发遇到现有锁时，UpdateRunner 创建一个最终状态为 FAILED、原因码为
+  `update_already_running` 的 job，随后非零退出；这样冲突在 Web 与 journal 两处可见。
 - 调度失败通知读取 job 的最终状态，不解析质量问题来决定“忽略后继续”。
 - 调度器不得调用 acceptance、research、report build 或清理命令。
 
@@ -474,7 +588,8 @@ disclosure-lookback-days，且按 CLI 同一类型约束验证。
 | --- | --- |
 | RiceQuant 凭据缺失 | optional source unavailable；无秘密回显；既有必选 lane 按原规则执行 |
 | SDK 超时/崩溃 | 子进程终止，raw/任务证据保留，不接受部分帧 |
-| `basic_factor` schema/coverage 失败 | 按 research_only 契约降级并阻止正式消费；FATAL 仍阻断整轮 |
+| `basic_factor` schema/coverage 失败 | 依据实际 tier 和新增 coverage 执行逻辑降级或阻断；不得仅凭声明字段假定已处理 |
+| 成分应有观测漏采 | 写 `membership_observation_gap`，中断该 universe coverage，不跨 gap 猜边界 |
 | 成分事实与既有事实冲突 | 候选不自动发布，输出差异证据 |
 | 发布门禁拒绝 | job FAILED，`CURRENT` 不变，质量原因可从 CLI/job 查看 |
 | 服务读期间 CURRENT 改变 | 当前请求继续读已解析版本；下一请求才可解析新 CURRENT |
@@ -486,7 +601,8 @@ disclosure-lookback-days，且按 CLI 同一类型约束验证。
 
 每阶段遵循测试先行，并至少包含：
 
-- **单元**：adapter 转换、单位、错误分类、schema、coverage、API 参数、状态机、cron。
+- **单元**：adapter 转换、单位、错误分类、schema、coverage、slice hash、API 参数、
+  状态机和 systemd 命令渲染。
 - **契约**：供应商 stub、OpenAPI、data_contracts、manifest、acceptance 摘要。
 - **集成**：raw → normalize → gate → publish；版本读取；CLI 子进程；单飞锁。
 - **并发**：多 reader + 一个 writer；两个 writer；进程重启后的 orphan recovery。
@@ -500,15 +616,17 @@ disclosure-lookback-days，且按 CLI 同一类型约束验证。
 
 | Gate | 可开始条件 | 退出条件 |
 | --- | --- | --- |
-| G0 决策 | 本规格获批 | 许可记录 + ADR-021/022 获批 |
+| G0 决策 | 本规格获批 | 许可记录 + ADR-021/022 + membership-hash ADR 获批 |
 | G1 源接入 | G0 | RiceQuant adapter/lane 测试与小窗口 smoke 通过 |
-| G2 数据扩展 | G1 | PIT 候选流程和 basic_factor 全链路通过，真实版本可验证 |
+| G2 数据扩展 | G1；schema-v2 slice hash 与 definition registry 已落地 | PIT 候选流程和 basic_factor 全链路通过，mixed-lineage 真实版本可验证 |
 | G3 查询服务 | G0；可与 G1/G2 并行 | GET API、安全与并发读验证通过 |
 | G4 操作/调度 | G3 的状态模型已冻结 | 单飞锁、持久 job、一次计划触发通过 |
 | G5 Web | G3；更新页另依赖 G4 | 四页 E2E 通过，版本/验收展示纪律满足 |
 
 G1/G2 与 G3 可由不同分支并行；G4 依赖 G3 的公共响应模型，G5 不得先于 API 契约
-冻结。估算保持 **6–10 周单人**，clean-room 成本已包含在区间内。
+冻结。加入 schema-v2 slice hash、definition registry 和 coverage 执行点后，估算调整为
+**8–12 周单人**；clean-room 成本已包含在区间内。若 membership-hash 迁移独立先行，
+其余阶段仍可按原边界分别交付。
 
 ## 14. 迁移完成的定义
 
@@ -518,10 +636,13 @@ G1/G2 与 G3 可由不同分支并行；G4 依赖 G3 的公共响应模型，G5 
 2. RiceQuant 数据全部经过 raw provenance、canonical schema、data contract、质量门禁
    和内容寻址发布。
 3. `basic_factor` 没有复制行情字段，Panda 兼容宽表只是一条版本内只读联接。
-4. CSI300/500/1000 成分事实能追到原始快照和可得日期；冲突不会静默覆盖。
-5. 查询、操作、调度和 Web 都无法绕过人工验收或启动正式研究。
-6. 所有 UI 数据和报告都能追到 dataset version；CURRENT 变化不会改变已打开视图。
-7. 架构、ADR、RUNBOOK、依赖声明和测试与实际运行形态一致。
+4. `basic_factor` 主源由 ADR-022 的双源探针规则选出；一个版本不混写不同主源，单位、
+   transport、coverage 和 anchor 冲突均有运行时证据。
+5. CSI300/500/1000 成分事实能追到原始快照和可得日期；多个 `universe_id` 在同一表中
+   分别钉 slice hash，漏采与冲突不会被静默跨越或覆盖。
+6. 查询、操作、调度和 Web 都无法绕过人工验收或启动正式研究。
+7. 所有 UI 数据和报告都能追到 dataset version；CURRENT 变化不会改变已打开视图。
+8. 架构、ADR、RUNBOOK、依赖声明和测试与实际运行形态一致。
 
 达到这些条件后，Stock 获得的是“可信数据底座上的产品化入口”，而不是一套叠加在
 旁边的 Panda 副本。
