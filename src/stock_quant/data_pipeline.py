@@ -57,6 +57,10 @@ from stock_quant.data_model.adjusted_bar import (
     action_id_of,
     build_adjusted_bars,
 )
+from stock_quant.data_model.basic_factor import (
+    build_basic_factor_coverage,
+    normalize_basic_factor,
+)
 from stock_quant.data_model.batch_evidence import (
     BatchOutcomeRecord,
     BatchRequestEvidence,
@@ -122,6 +126,7 @@ from stock_quant.data_model.fetch_coverage import (
     KIND_CARRIED,
     KIND_FETCHED,
     KIND_NOT_FETCHED,
+    NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
     NOT_FETCHED_SOURCE_DISABLED,
     NOT_FETCHED_SOURCE_UNAVAILABLE,
     FetchSegment,
@@ -167,6 +172,7 @@ from stock_quant.data_model.trade_calendar_facts import (
     parse_trade_cal_frame,
 )
 from stock_quant.data_model.universe import Universe
+from stock_quant.data_model.universe_membership import SecurityMasterBoundary
 from stock_quant.data_quality.gates import (
     TABLE_LEVEL_BLOCKING_CODES,
     evaluate_publication,
@@ -648,6 +654,89 @@ def _disabled_or_carried_segments(
         segments.append(FetchSegment(
             table, KIND_NOT_FETCHED, covered[1] + timedelta(days=1), end,
             reason=NOT_FETCHED_SOURCE_DISABLED))
+    return segments
+
+
+def _merge_basic_factor(
+    baseline: pd.DataFrame, fetched: pd.DataFrame
+) -> pd.DataFrame:
+    """Merge this round's fetched ``basic_factor`` rows over the baseline.
+
+    Baseline rows stay except where this round re-fetched the same
+    ``(trade_date, symbol)`` key -- the fetched row replaces it -- so a
+    steady-state round never rewrites carried history (spec §7.2).  The
+    merge style follows ``_merge_daily``: keep-then-concat.  Both sides are
+    coerced to ``datetime64`` ``trade_date`` first: a carried frame reads
+    back ``datetime64`` from the dataset while a normalized frame holds
+    ``datetime.date`` objects, and the mixed column cannot sort.
+    """
+    if fetched.empty:
+        return baseline
+    if baseline.empty:
+        return fetched.reset_index(drop=True)
+    baseline_keys = _basic_factor_keys(baseline)
+    fetched_keys = set(_basic_factor_keys(fetched))
+    kept = baseline.loc[~baseline_keys.isin(fetched_keys)].copy()
+    kept["trade_date"] = pd.to_datetime(kept["trade_date"])
+    fresh = fetched.copy()
+    fresh["trade_date"] = pd.to_datetime(fresh["trade_date"])
+    merged = pd.concat([kept, fresh], ignore_index=True)
+    return merged.sort_values(
+        ["trade_date", "symbol"], kind="stable"
+    ).reset_index(drop=True)
+
+
+def _basic_factor_keys(frame: pd.DataFrame) -> pd.Series:
+    """Dtype-proof ``(trade_date, symbol)`` identity keys of one frame."""
+    return (
+        pd.to_datetime(frame["trade_date"]).dt.strftime("%Y-%m-%d")
+        + "|"
+        + frame["symbol"].astype(str)
+    )
+
+
+def _basic_factor_fetch_segments(
+    table: str,
+    covered: tuple[date, date] | None,
+    anchor: date,
+    end: date,
+    supported_start: date | None,
+    fetched_start: date,
+) -> list[FetchSegment]:
+    """Segments of the wired ``basic_factor`` fetch lane (P2c Task 2).
+
+    ``supported_start`` is the earliest trade date the merged facts actually
+    support (``None`` when nothing answerable came back this round and the
+    baseline itself has no facts): the lane then falls back to the Task 1
+    disabled record (spec §7.5.2).  Otherwise the segments tile [anchor,
+    end]: the ONLY legal ``not_fetched`` prefix when supported history
+    begins after the acceptance anchor (spec §7.5.1 -- the P2a-reserved
+    history-prefix writer), the baseline's recorded ``carried`` span, and
+    this round's ``fetched`` window.
+    """
+    if supported_start is None:
+        return _disabled_or_carried_segments(table, covered, anchor, end)
+    segments: list[FetchSegment] = []
+    if supported_start > anchor:
+        segments.append(FetchSegment(
+            table,
+            KIND_NOT_FETCHED,
+            anchor,
+            supported_start - timedelta(days=1),
+            reason=NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+        ))
+    if covered is not None:
+        low = max(covered[0], supported_start)
+        high = min(covered[1], fetched_start - timedelta(days=1))
+        if low <= high:
+            segments.append(FetchSegment(table, KIND_CARRIED, low, high))
+    fetched_segment_start = max(fetched_start, supported_start)
+    if fetched_segment_start <= end:
+        segments.append(
+            FetchSegment(table, KIND_FETCHED, fetched_segment_start, end)
+        )
+    if not segments:
+        return _disabled_or_carried_segments(table, covered, anchor, end)
     return segments
 
 
@@ -1388,6 +1477,70 @@ class DataPipeline:
         )
         issues.extend(self._master_bar_boundary_issues(master, new_daily))
 
+        # ---- basic_factor: the wired daily_basic lane (P2c Task 2) ------ #
+        # Whole-market per-day snapshots (spec §6.2): the contract window
+        # paginates by open day.  A per-day failure is evidence, never a
+        # blocker -- it lands in the meta the coverage rows render (§7.3).
+        # An empty answer (unreachable source / nothing open) keeps the
+        # Task 1 disabled path: carried tables, no coverage rebuild.
+        basic_factor_plan = plans.get("basic_factor")
+        new_basic_factor = basic_factor
+        new_basic_factor_coverage = basic_factor_coverage
+        basic_factor_meta: dict[str, object] = {
+            "failed_days": (), "truncated": True, "unavailable": True,
+        }
+        if (
+            basic_factor_plan is not None
+            and basic_factor_plan.kind == KIND_FETCHED
+            and "tushare" in enabled
+        ):
+            basic_factor_raw, basic_factor_meta = (
+                self._fetch_basic_factor_window(
+                    basic_factor_plan.window_start,
+                    end,
+                    calendar_open,
+                    issues,
+                    raw_snapshots,
+                )
+            )
+            fetched_factor = normalize_basic_factor(
+                basic_factor_raw, ingested_at=_ingest_time(basic_factor_meta)
+            )
+            new_basic_factor = _merge_basic_factor(
+                basic_factor, fetched_factor
+            )
+            if not new_basic_factor.empty:
+                # ``delist_date`` is a termination announcement, not a proven
+                # last tradable date (SecurityMasterBoundary contract), so
+                # ``last_tradable_date`` can only be ``None`` here.  The
+                # expected set is the EQUITY bar days: benchmark index rows
+                # in ``daily_bar`` are not basic_factor facts (an index has
+                # no total_mv/turnover snapshot), so they never enter the
+                # per-symbol decision table.
+                new_basic_factor_coverage = build_basic_factor_coverage(
+                    window_start=_as_date(
+                        new_basic_factor["trade_date"].min()
+                    ),
+                    window_end=end,
+                    factor=new_basic_factor,
+                    daily_bar=new_daily[
+                        new_daily["symbol"].isin(equity_symbols)
+                    ],
+                    master={
+                        record["symbol"]: SecurityMasterBoundary(
+                            record["symbol"],
+                            _as_date(record.get("list_date")),
+                            None,
+                        )
+                        for record in master.to_dict("records")
+                    },
+                    failed_days=tuple(basic_factor_meta.get("failed_days", ())),
+                    request_days_missing=bool(
+                        basic_factor_meta.get("truncated")
+                    ),
+                    checked_at=_ingest_time(basic_factor_meta),
+                )
+
         # ---- total-return bars over the merged canonical daily ---------- #
         adjusted = build_adjusted_bars(
             new_daily,
@@ -1420,8 +1573,8 @@ class DataPipeline:
                 list(TRADING_CALENDAR_COLUMNS)
             ],
         }
-        tables["basic_factor"] = basic_factor[BASIC_FACTOR_COLUMNS]
-        tables["basic_factor_coverage"] = basic_factor_coverage
+        tables["basic_factor"] = new_basic_factor[BASIC_FACTOR_COLUMNS]
+        tables["basic_factor_coverage"] = new_basic_factor_coverage
         if membership is not None:
             # Membership facts are immutable qualification records: an update
             # never rewrites them, it carries the registered raw table
@@ -1544,14 +1697,37 @@ class DataPipeline:
             if segments:
                 fetch_segments[table] = segments
 
-        # fetch lane lands in Task 2; until then the honest record for a
-        # registered-but-unwired table is source_disabled (§7.5.2), never a
-        # fabricated fetched segment.
-        for table in ("basic_factor", "basic_factor_coverage"):
-            fetch_segments.pop(table, None)
-            fetch_segments[table] = _disabled_or_carried_segments(
-                table, recorded_spans.get(table), acceptance_anchor, end
+        # The wired basic_factor lane (P2c Task 2): both tables share one
+        # fetch channel, so both publish the same segment shape -- the
+        # P2a-reserved history prefix when supported history begins after
+        # the acceptance anchor, the baseline's recorded carried span, and
+        # this round's fetched window.  A round whose plan skipped the lane
+        # (operator explicit window) keeps the generic record above; a
+        # wholesale source failure falls back to the disabled record (§7.5.2).
+        if (
+            basic_factor_plan is not None
+            and basic_factor_plan.kind == KIND_FETCHED
+        ):
+            supported_start = (
+                _as_date(new_basic_factor["trade_date"].min())
+                if not new_basic_factor.empty
+                else None
             )
+            for table in ("basic_factor", "basic_factor_coverage"):
+                fetch_segments[table] = _basic_factor_fetch_segments(
+                    table,
+                    recorded_spans.get(table),
+                    acceptance_anchor,
+                    end,
+                    supported_start,
+                    basic_factor_plan.window_start,
+                )
+            if basic_factor_meta.get("unavailable"):
+                for table in ("basic_factor", "basic_factor_coverage"):
+                    fetch_segments[table] = _disabled_or_carried_segments(
+                        table, recorded_spans.get(table), acceptance_anchor,
+                        end,
+                    )
 
         report = QualityReport(issues=tuple(issues))
         # Declared tiers are computed once and reused by the gate, the
@@ -2034,6 +2210,86 @@ class DataPipeline:
             "tushare", True, True, reason_code="ok"
         )
         return False
+
+    def _fetch_basic_factor_window(
+        self,
+        start: date,
+        end: date,
+        open_days: Sequence[date],
+        issues: list[QualityIssue],
+        raw_snapshots: list[RawSnapshot],
+    ) -> tuple[pd.DataFrame, dict[str, object]]:
+        """The whole ``daily_basic`` window of one round (spec §7.2).
+
+        Per-day whole-market vocabulary (spec §6.2): one request per open
+        day inside the contract window, ``symbols`` empty and
+        ``start_date == end_date`` on every request.  Returns the raw
+        response frames plus a meta dict the callers render into coverage
+        evidence: ``failed_days`` (per-day request failures, each a
+        WARNING -- the coverage rows are the verdict, §7.3), ``truncated``
+        (days this round could not even request) and ``unavailable``
+        (nothing answerable: the caller keeps the disabled fallback).  The
+        method never raises.
+        """
+        empty = pd.DataFrame()
+        source = self._adapter_or_warn("tushare", issues)
+        if source is None:
+            return empty, {
+                "failed_days": (), "truncated": True, "unavailable": True,
+            }
+        config: SourceConfig = self._project_config.sources.get(
+            "tushare", SourceConfig()
+        )
+        policy = RetryPolicy(
+            max_attempts=min(config.max_retries + 1, 3),
+            maximum_wait_seconds=min(config.timeout_seconds, 30),
+            call_timeout_seconds=config.timeout_seconds,
+        )
+        frames: list[pd.DataFrame] = []
+        failed: list[date] = []
+        last_metadata: object = None
+        for day in open_days:
+            if not isinstance(day, date) or not start <= day <= end:
+                continue
+            request = DataRequest("daily_basic", (), day, day, {})
+            try:
+                result = fetch_with_retry(
+                    source, request, policy, sleeper=self._sleeper
+                )
+            except Exception as error:  # noqa: BLE001 - the lane never raises
+                failed.append(day)
+                issues.append(
+                    _issue(
+                        Severity.WARNING,
+                        CODE_SOURCE_FETCH_FAILED,
+                        details={
+                            "source": "tushare",
+                            "endpoint": "daily_basic",
+                            "message": str(translate_supplier_error(error)),
+                        },
+                    )
+                )
+                continue
+            self._count_fetch("tushare", "daily_basic", "fetched")
+            raw_snapshots.append(self._record_raw(result))
+            frames.append(result.frame)
+            last_metadata = result.metadata
+        meta: dict[str, object] = {
+            "failed_days": tuple(failed),
+            # Every open day of the window was attempted (per-day failures
+            # are failed_days), so nothing is "requested-but-missing" on
+            # this path; the no-adapter path above is the truncated one.
+            "truncated": False,
+            "unavailable": not frames,
+        }
+        if isinstance(last_metadata, Mapping):
+            meta["response_timestamp"] = last_metadata.get("response_timestamp")
+        if not frames:
+            return empty, meta
+        raw = frames[0] if len(frames) == 1 else pd.concat(
+            frames, ignore_index=True
+        )
+        return raw, meta
 
     def _deepen_head_anchors(
         self,

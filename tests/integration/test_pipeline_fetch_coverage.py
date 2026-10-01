@@ -79,8 +79,16 @@ class StubAdapter:
     """A ``DataSource`` whose ``fetch`` returns deterministic raw frames."""
 
     name: str
+    #: The stub raises for ``daily_basic`` instead of answering (the wired
+    #: basic_factor lane's wholesale-outage path).
+    fail_daily_basic: bool = False
+    #: (ts_code, YYYYMMDD) rows the ``daily_basic`` answer omits, so a test
+    # can open a per-symbol per-day facts hole.
+    daily_basic_missing: tuple[tuple[str, str], ...] = ()
 
     def fetch(self, request: DataRequest) -> FetchResult:
+        if request.endpoint == "daily_basic" and self.fail_daily_basic:
+            raise ValueError("stub daily_basic outage")
         frame = self._frame(request)
         return FetchResult(
             source=self.name,
@@ -99,6 +107,8 @@ class StubAdapter:
             return self._stock_basic_frame()
         if request.endpoint == "trade_cal":
             return self._trade_cal_frame(request)
+        if request.endpoint == "daily_basic":
+            return self._daily_basic_frame(request)
         if request.endpoint in (
             "cninfo_corporate_actions",
             "eastmoney_corporate_actions",
@@ -133,6 +143,27 @@ class StubAdapter:
                     "amount": 55000.0,
                 }
                 for day in sessions
+            ]
+        )
+
+    def _daily_basic_frame(self, request: DataRequest) -> pd.DataFrame:
+        """One whole-market per-day daily_basic snapshot (spec §6.2)."""
+        days = [
+            day.strftime("%Y%m%d")
+            for day in _weekdays(request.start_date, request.end_date)
+        ]
+        missing = set(self.daily_basic_missing)
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": symbol,
+                    "trade_date": day,
+                    "total_mv": 15000_0000.0,
+                    "turnover_rate": 1.25,
+                }
+                for symbol in _FIXTURE_UNIVERSE_SYMBOLS
+                for day in days
+                if (symbol, day) not in missing
             ]
         )
 
@@ -343,12 +374,20 @@ def test_update_writes_call_ledger(tmp_path):
     }
 
 
-def test_unwired_basic_factor_publishes_disabled_not_fetched(tmp_path):
-    """A registered-but-unwired table publishes empty canonical frames with
-    whole-window source_disabled segments (§7.5.2/§11), never a fabricated
-    fetched segment."""
+def test_basic_factor_source_outage_falls_back_to_disabled(tmp_path):
+    """A wholesale ``daily_basic`` outage keeps the disabled record (§7.5.2).
+
+    The wired lane (P2c Task 2) never raises: every requested day fails,
+    the round publishes the carried (empty) canonical frames, and the
+    segment shape stays the Task 1 whole-window ``source_disabled`` record
+    -- never a fabricated fetched segment.
+    """
     project = build_fixture_project(tmp_path / "project")
-    result = DataPipeline(project.root, sources=_all_stubs()).update(
+    stubs = {
+        **_all_stubs(),
+        "tushare": StubAdapter("tushare", fail_daily_basic=True),
+    }
+    result = DataPipeline(project.root, sources=stubs).update(
         DataUpdateRequest(start_date=BARS_START, end_date=_GEN1_END)
     )
     assert result.dataset_ref is not None
@@ -361,3 +400,106 @@ def test_unwired_basic_factor_publishes_disabled_not_fetched(tmp_path):
         assert [s["kind"] for s in segments] == ["not_fetched"]
         assert segments[0]["reason"] == "source_disabled"
         assert segments[0]["window_end"] == _GEN1_END.isoformat()
+
+
+def test_basic_factor_lane_publishes_facts_and_history_prefix(tmp_path):
+    """A fully answered ``daily_basic`` window publishes both tables.
+
+    The first wired pull over a baseline without basic_factor history
+    starts at the project's own start anchor (2020-01-01), later than the
+    acceptance anchor (BARS_START): the manifest records the ONLY legal
+    prefix -- ``history_begins_after_anchor`` over [anchor,
+    supported_start - 1] -- followed by this round's ``fetched`` segment,
+    and the coverage table shares the facts table's window exactly
+    (spec §7.5.1, P2a's reserved prefix writer).
+    """
+    project = build_fixture_project(tmp_path / "project")
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(end_date=_GEN2_END)
+    )
+    assert result.dataset_ref is not None
+    version = result.dataset_ref.version
+    build = _manifest_build(project.root, version)
+    segments = build["table_fetch_coverage"]["basic_factor"]
+    assert [s["kind"] for s in segments] == ["not_fetched", "fetched"]
+    prefix, fetched = segments
+    assert prefix["reason"] == "history_begins_after_anchor"
+    assert prefix["window_start"] == BARS_START.isoformat()
+    assert (
+        date.fromisoformat(prefix["window_end"])
+        == date.fromisoformat(fetched["window_start"]) - timedelta(days=1)
+    )
+    assert fetched["window_start"] == date(2020, 1, 1).isoformat()
+    assert fetched["window_end"] == _GEN2_END.isoformat()
+    coverage_segments = build["table_fetch_coverage"][
+        "basic_factor_coverage"
+    ]
+    strip_table = [
+        {k: v for k, v in s.items() if k != "table"} for s in coverage_segments
+    ]
+    assert strip_table == [
+        {k: v for k, v in s.items() if k != "table"} for s in segments
+    ]
+    violations = validate_table_fetch_coverage(
+        build["table_fetch_coverage"],
+        anchor_start=BARS_START,
+        published_end=_GEN2_END,
+    )
+    assert [
+        v
+        for v in violations
+        if v[1].get("table")
+        in ("basic_factor", "basic_factor_coverage")
+    ] == [], f"basic_factor fetch coverage violations: {violations}"
+
+    tables_root = project.root / "data" / "standardized" / version
+    facts = pd.read_parquet(tables_root / "basic_factor.parquet")
+    coverage = pd.read_parquet(tables_root / "basic_factor_coverage.parquet")
+    assert not facts.empty and not coverage.empty
+    assert pd.Timestamp(facts["trade_date"].min()) == pd.Timestamp(
+        "2020-01-01"
+    )
+    assert facts["source"].eq("tushare").all()
+    probe = facts.iloc[0]
+    assert probe["market_cap"] == 15000_0000.0 * 10_000.0
+    assert probe["turnover_rate"] == 1.25 / 100.0
+    assert not coverage["status"].eq("UNTRUSTED").any()
+
+
+def test_basic_factor_missing_row_is_evidence_not_a_blocker(tmp_path):
+    """A per-symbol per-day facts hole publishes UNTRUSTED coverage rows.
+
+    The stub omits one symbol's row on the last session: the facts table
+    simply lacks that row, the coverage table carries the
+    ``UNTRUSTED``/``FACTS_INCOMPLETE`` verdict for that symbol -- evidence,
+    never a blocker -- and every fully answered symbol stays ``VERIFIED``
+    (spec §7.3).
+    """
+    project = build_fixture_project(tmp_path / "project")
+    stubs = {
+        **_all_stubs(),
+        "tushare": StubAdapter(
+            "tushare",
+            daily_basic_missing=(("600000.SH", _GEN2_END.strftime("%Y%m%d")),),
+        ),
+    }
+    result = DataPipeline(project.root, sources=stubs).update(
+        DataUpdateRequest(end_date=_GEN2_END)
+    )
+    assert result.dataset_ref is not None
+    tables_root = (
+        project.root / "data" / "standardized" / result.dataset_ref.version
+    )
+    coverage = pd.read_parquet(tables_root / "basic_factor_coverage.parquet")
+    facts = pd.read_parquet(tables_root / "basic_factor.parquet")
+    victim = coverage[coverage["symbol"] == "600000.SH"]
+    assert len(victim) == 1
+    assert victim.iloc[0]["status"] == "UNTRUSTED"
+    assert victim.iloc[0]["reason"] == "FACTS_INCOMPLETE"
+    others = coverage[coverage["symbol"] != "600000.SH"]
+    assert not others.empty
+    assert others["status"].eq("VERIFIED").all()
+    victim_dates = pd.to_datetime(
+        facts.loc[facts["symbol"] == "600000.SH", "trade_date"]
+    )
+    assert pd.Timestamp(_GEN2_END).date() not in set(victim_dates.dt.date)
