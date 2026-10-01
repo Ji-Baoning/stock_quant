@@ -45,7 +45,7 @@
 
 - relay：25/25 个 label 全部返回读数，0 错误。三指数码每个 cadence 月窗与
   历史月窗均有响应（含空响应形态）。
-- proxy：25 个 label 中 11 个成功、14 个 `ServerError`。失败散布无模式：
+- proxy：25 个 label 中 9 个成功、16 个 `ServerError`。失败散布无模式：
   `000852.SH` 全部 8 个调用失败；`399300.SZ` 的 cadence 202604/202606、
   history 200501/201001 失败；`000905.SH` 的 cadence 202605、history
   201001/201501/202001 失败。成功的 label 读数与 relay 同窗读数一致或同构。
@@ -95,7 +95,7 @@
   而 relay 返回 600 行 / 2 快照日（proxy 只回窗内一个快照日）；proxy
   `399300.SZ` cadence 202607 的 weight min/max（0.025/4.012）与 relay
   （0.0218/4.8431）不同，说明其返回的快照日与 relay 不同。
-- relay 零错误；proxy 14/25 `ServerError`。index_weight 的可靠 transport 是
+- relay 零错误；proxy 16/25 `ServerError`。index_weight 的可靠 transport 是
   relay。
 - 消耗：50 次请求（25 × 2 transport），子命令预算 60 次内。
 
@@ -189,7 +189,7 @@
   （`index_code`+起止窗）返回 `index_code/con_code/trade_date/weight` 且
   weight 非空、百分数量级；`daily_basic` 按 `trade_date`+`fields` 原样返回
   所请 4 列（null 保持 null）、按区间返回全默认列集。proxy 对 index_weight
-  退化严重（14/25 ServerError）、对 daily_basic 完整可用。建议将两端点纳入
+  退化严重（16/25 ServerError）、对 daily_basic 完整可用。建议将两端点纳入
   `_NAMED_ENDPOINTS`，transport 主用 relay（proxy 的 index_weight 行为差异：
   月窗只回一个快照日；精度损失），供 owner 裁定后记录。
 - 指数代码冻结表：本探针的三个代码仅是起点；节奏与形态结论（月度快照、
