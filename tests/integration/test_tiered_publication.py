@@ -4,7 +4,10 @@ one blocks; the published quality report carries the UNTRUSTED record.
 The frame builders below are copied from the existing publication tests
 (``tests/integration/test_dataset_publish.py`` for ``daily_bar`` and the
 integration ``conftest.py`` fixture for the typed empty ``corporate_action``
-frame) so the staged frames satisfy the canonical schemas exactly.
+frame) so the staged frames satisfy the canonical schemas exactly.  Since the
+registry-completeness gate (spec §7.5.6) blocks any publish omitting a
+registered table, the tier flow publishes over a registry-complete frame set:
+the tables this test does not exercise are typed empties carrying no issues.
 """
 
 from __future__ import annotations
@@ -17,8 +20,15 @@ import pytest
 
 from stock_quant.data_model.dataset import DatasetPublisher, PublicationBlocked
 from stock_quant.data_model.schemas import (
+    ADJUSTED_BAR_COLUMNS,
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_COVERAGE_COLUMNS,
+    CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
+    SECURITY_MASTER_COLUMNS,
+    SECURITY_MASTER_COVERAGE_COLUMNS,
+    TRADING_CALENDAR_COLUMNS,
+    UNIVERSE_MEMBERSHIP_COLUMNS,
 )
 from stock_quant.data_pipeline import _downgrade_issues
 from stock_quant.data_quality.gates import evaluate_publication
@@ -97,7 +107,9 @@ def test_gate_admits_anchored_table_only_with_declared_tier():
 def test_publish_downgraded_anchored_table_and_block_core(tmp_path):
     daily = _daily_frame([10.5, 10.8, 11.0])
     actions = _corporate_action_frame()
-    tables = {"daily_bar": daily, "corporate_action": actions}
+    tables = _registry_complete(
+        {"daily_bar": daily, "corporate_action": actions}
+    )
 
     tiers = {"daily_bar": "core", "corporate_action": "anchored"}
     publisher = DatasetPublisher(tmp_path)
@@ -130,6 +142,29 @@ def test_publish_downgraded_anchored_table_and_block_core(tmp_path):
 def _report_with_downgrade(report, contracts):
     issues = list(report.issues) + _downgrade_issues(report.issues, contracts)
     return QualityReport(issues=tuple(issues))
+
+
+#: The registered tables the tier criteria do not exercise.  The publish gate
+#: blocks any publish omitting a registered table (spec §7.5.6), so the tier
+#: flow completes its publish shape with these typed empties.
+_AUXILIARY_COLUMNS = {
+    "adjusted_bar": ADJUSTED_BAR_COLUMNS,
+    "corporate_action_coverage": CORPORATE_ACTION_COVERAGE_COLUMNS,
+    "corporate_action_quarantine": CORPORATE_ACTION_QUARANTINE_COLUMNS,
+    "security_master": SECURITY_MASTER_COLUMNS,
+    "security_master_coverage": SECURITY_MASTER_COVERAGE_COLUMNS,
+    "trading_calendar": TRADING_CALENDAR_COLUMNS,
+    "universe_membership": UNIVERSE_MEMBERSHIP_COLUMNS,
+}
+
+
+def _registry_complete(tables: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """Complete a publish shape to every registered standardized table."""
+    complete = dict(tables)
+    for name, columns in _AUXILIARY_COLUMNS.items():
+        if name not in complete:
+            complete[name] = pd.DataFrame(columns=columns)
+    return complete
 
 
 # ---- canonical frame builders (copied from the existing publish tests) ----- #
