@@ -49,7 +49,6 @@ import argparse
 import hashlib
 import json
 import os
-import time
 from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
@@ -63,6 +62,7 @@ from stock_quant.data_model.index_membership_import import (
     prepare_membership_file,
 )
 from stock_quant.data_quality.models import QualityReport
+from stock_quant.data_sources.base import DataRequest
 from stock_quant.data_sources.tushare import TushareSource
 from stock_quant.project_root import resolve_project_root
 
@@ -73,18 +73,6 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _month_ends(start_yearmonth: str, end_yearmonth: str) -> list[str]:
-    """``YYYYMM`` values from start to end inclusive."""
-    start = pd.Period(start_yearmonth, freq="M")
-    end = pd.Period(end_yearmonth, freq="M")
-    if start > end:
-        raise SystemExit(f"start {start} is after end {end}")
-    return [
-        str(period).replace("-", "")
-        for period in pd.period_range(start, end, freq="M")
-    ]
 
 
 def _month_end_date(yearmonth: str) -> date:
@@ -100,46 +88,39 @@ def run(
     start: str = "201412",
     end: str = "202608",
     universe_id: str = "custom_csi300_tw",
-    pause_seconds: float = 1.0,
     skip_pull: bool = False,
 ) -> int:
-    token = os.environ.get("TUSHARE_TOKEN")
-    if not token and not skip_pull:
-        raise SystemExit("TUSHARE_TOKEN is required (index_weight permission)")
-
     snapshot_dir = root / "data" / "raw" / "csi" / "index_weight"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
-    months = _month_ends(start, end)
 
     # ---- step 1: pull and store every monthly snapshot --------------------
     if not skip_pull:
-        # ``allow_auto_transport=True`` keeps this offline collector working
-        # after the published path became strict.  Rewiring it to consume the
-        # relay as its transport (and dropping the TUSHARE_TOKEN gate above) is
-        # design spec §4, stage 4 -- not this change.
-        source = TushareSource(
-            config.sources["tushare"], allow_auto_transport=True
-        )
-        client = source._client
-        for index, yearmonth in enumerate(months):
-            target = snapshot_dir / f"{index_code}_{yearmonth}.csv"
+        if not (os.environ.get("TUSHARE_TOKEN")
+                or (os.environ.get("TUSHARE_RELAY_URL")
+                    and os.environ.get("TUSHARE_RELAY_KEY"))):
+            raise SystemExit("a tushare transport is required for the pull "
+                             "(relay pair or TUSHARE_TOKEN)")
+        # Thin wrapper: monthly sharding, per-month validation and per-month
+        # sha256 digests now live in the TushareSource endpoint (spec §6.2).
+        source = TushareSource(config.sources["tushare"],
+                               allow_auto_transport=True)
+        request = DataRequest(
+            endpoint="index_weight", symbols=(index_code,),
+            start_date=_month_end_date(start).replace(day=1),
+            end_date=_month_end_date(end))
+        result = source.fetch(request)
+        for shard in json.loads(result.metadata["index_weight_snapshots"]):
+            month = str(shard["month"])
+            target = snapshot_dir / f"{index_code}_{month}.csv"
             if target.exists():
                 continue
-            frame = client.index_weight(
-                index_code=index_code,
-                start_date=f"{yearmonth}01",
-                end_date=f"{yearmonth}31",
-            )
-            if frame is None or frame.empty:
-                print(f"[{index + 1}/{len(months)}] {yearmonth}: EMPTY (kept)")
-                frame = pd.DataFrame(
-                    columns=["index_code", "con_code", "trade_date", "weight"]
-                )
-            frame.to_csv(target, index=False)
-            print(
-                f"[{index + 1}/{len(months)}] {yearmonth}: {len(frame)} rows"
-            )
-            time.sleep(pause_seconds)
+            month_frame = result.frame[
+                result.frame["trade_date"].astype(str).str.startswith(month)]
+            month_frame.to_csv(target, index=False)
+            assert _sha256_file(target) == shard["sha256"], (
+                f"endpoint digest mismatch for {target.name}")
+            print(f"[{month}] {shard['rows']} rows "
+                  f"sha256={shard['sha256'][:12]}…")
 
     # ---- step 2: evidence manifest ----------------------------------------
     snapshot_files = sorted(snapshot_dir.glob(f"{index_code}_*.csv"))
@@ -318,7 +299,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="custom_csi300_tw",
         help="custom_<slug> (no cardinality check) or csi300 (exactly 300/day)",
     )
-    parser.add_argument("--pause-seconds", type=float, default=1.0)
     parser.add_argument("--skip-pull", action="store_true",
                         help="reuse stored snapshots; only re-run steps 2-5")
     args = parser.parse_args(argv)
@@ -331,7 +311,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         start=args.start,
         end=args.end,
         universe_id=args.universe_id,
-        pause_seconds=args.pause_seconds,
         skip_pull=args.skip_pull,
     )
 

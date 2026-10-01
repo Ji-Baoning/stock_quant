@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import types
@@ -144,3 +145,84 @@ def test_daily_basic_conversion_uses_the_frozen_constants_and_keeps_nulls():
     assert rows["turnover_rate"].tolist()[0] == pytest.approx(
         0.53 / TURNOVER_RATE_TO_RATIO_DIVISOR)
     assert rows["market_cap"].isna().tolist() == [False, True]  # never 0
+
+
+class IndexWeightStub:
+    sdk_version = "stub-1"
+
+    def __init__(self, frames):
+        self._frames, self.calls = list(frames), []
+
+    def index_weight(self, **params):
+        self.calls.append(params)
+        return self._frames.pop(0)
+
+
+def _weight_rows(rows):
+    return pd.DataFrame(rows, columns=["index_code", "con_code",
+                                       "trade_date", "weight"])
+
+
+def _weight_request(end=date(2026, 2, 28)):
+    return DataRequest("index_weight", ("399300.SZ",), date(2026, 1, 1), end, {})
+
+
+def test_index_weight_shards_by_calendar_month_and_digests_each_snapshot():
+    january = _weight_rows([["399300.SZ", "000001.SZ", "20260130", "0.32"]])
+    stub = IndexWeightStub([
+        january,
+        _weight_rows([["399300.SZ", "000001.SZ", "20260227", "0.33"]])])
+    result = TushareSource(SourceConfig(), client=stub).fetch(_weight_request())
+    assert stub.calls == [
+        {"index_code": "399300.SZ", "start_date": "20260101",
+         "end_date": "20260131"},
+        {"index_code": "399300.SZ", "start_date": "20260201",
+         "end_date": "20260231"}]
+    assert len(result.frame) == 2
+    digests = json.loads(result.metadata["index_weight_snapshots"])
+    assert [d["month"] for d in digests] == ["202601", "202602"]
+    assert digests[0]["sha256"] == hashlib.sha256(
+        january.to_csv(index=False).encode("utf-8")).hexdigest()
+
+
+def test_an_empty_month_is_recorded_not_interpreted():
+    january = _weight_rows([])  # empty month WITH columns: kept, rows=0
+    stub = IndexWeightStub([
+        january, _weight_rows([["399300.SZ", "000001.SZ", "20260227", "0.33"]])])
+    result = TushareSource(SourceConfig(), client=stub).fetch(_weight_request())
+    digests = json.loads(result.metadata["index_weight_snapshots"])
+    assert digests[0]["rows"] == 0
+    assert digests[0]["sha256"] == hashlib.sha256(
+        january.to_csv(index=False).encode("utf-8")).hexdigest()
+    assert len(result.frame) == 1  # no membership invented for the empty month
+
+
+def test_an_all_empty_window_is_a_contract_failure():
+    stub = IndexWeightStub([_weight_rows([]), _weight_rows([])])
+    with pytest.raises(ContractError, match="empty response"):
+        TushareSource(SourceConfig(), client=stub).fetch(_weight_request())
+
+
+def test_index_weight_rejects_codes_outside_the_probe_frozen_table():
+    request = DataRequest("index_weight", ("999999.SZ",),
+                          date(2026, 1, 1), date(2026, 1, 31), {})
+    with pytest.raises(ValueError, match="probe-frozen index table"):
+        TushareSource(SourceConfig(), client=IndexWeightStub([])).fetch(request)
+
+
+@pytest.mark.parametrize("january,match", [
+    (_weight_rows([["399300.SZ", "000001.SZ", "20260130", "0.3"],
+                   ["399300.SZ", "000001.SZ", "20260130", "0.3"]]),
+     "duplicate primary-key"),
+    (_weight_rows([["399300.SZ", "000001.SZ", "20260302", "0.3"]]),
+     "outside the requested date range"),
+    (pd.DataFrame([["000001.SZ", "20260130", "0.3"]],
+                  columns=["con_code", "trade_date", "weight"]),
+     "missing columns: index_code"),  # 缺指数
+])
+def test_index_weight_classifies_contract_failures(january, match):
+    request = DataRequest("index_weight", ("399300.SZ",),
+                          date(2026, 1, 1), date(2026, 1, 31), {})
+    with pytest.raises(ContractError, match=match):
+        TushareSource(SourceConfig(),
+                      client=IndexWeightStub([january])).fetch(request)

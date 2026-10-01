@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from datetime import date
 from typing import Any, Mapping
 
 import pandas as pd
@@ -40,6 +43,28 @@ _TRADE_CAL_COLUMNS = ("cal_date", "is_open", "pretrade_date")
 #: amount/OHLCV are ``daily_bar`` facts, spec §6.1).
 _DAILY_BASIC_FIELDS = "ts_code,trade_date,total_mv,turnover_rate"
 _DAILY_BASIC_COLUMNS = ("ts_code", "trade_date", "total_mv", "turnover_rate")
+
+#: Index codes the index_weight endpoint may be asked for, frozen from the
+#: §6.4 probe evidence (docs/operations/2026-10-01-endpoint-probe-evidence.
+#: evidence.json, ``_status=measured``): 399300.SZ is lineage-proven (766-row
+#: custom_csi300_tw_tradable); the CSI500/1000 entries are the probe-confirmed
+#: codes -- never guessed from digit prefixes (spec §6.2).
+INDEX_WEIGHT_INDEX_CODES = ("399300.SZ", "000905.SH", "000852.SH")
+
+#: The native columns an ``index_weight`` monthly snapshot must carry.
+_INDEX_WEIGHT_COLUMNS = ("index_code", "con_code", "trade_date", "weight")
+
+
+def _month_shards(start: date, end: date) -> list[tuple[str, str, str]]:
+    """(YYYYMM, YYYYMM01, YYYYMM31) month shards, lineage-shaped."""
+    shards = []
+    cursor = pd.Period(start.strftime("%Y%m"), freq="M")
+    last = pd.Period(end.strftime("%Y%m"), freq="M")
+    while cursor <= last:
+        yearmonth = str(cursor).replace("-", "")
+        shards.append((yearmonth, f"{yearmonth}01", f"{yearmonth}31"))
+        cursor += 1
+    return shards
 
 
 class TushareSource:
@@ -101,9 +126,11 @@ class TushareSource:
             return self._fetch_symbol_series(request)
         if request.endpoint == "daily_basic":
             return self._fetch_daily_basic(request)
+        if request.endpoint == "index_weight":
+            return self._fetch_index_weight(request)
         raise ValueError(
             "TushareSource supports only the daily, daily_basic, index_daily, "
-            "stock_basic, and trade_cal endpoints"
+            "index_weight, stock_basic, and trade_cal endpoints"
         )
 
     def _fetch_symbol_series(self, request: DataRequest) -> FetchResult:
@@ -367,6 +394,96 @@ class TushareSource:
             date_columns=("trade_date",),
             require_symbol=False,
         )
+
+    def _fetch_index_weight(self, request: DataRequest) -> FetchResult:
+        """Month-sharded index_weight snapshots, one sha256 per month.
+
+        Sharding mirrors the lineage script's proven shape (spec §6.2).  An
+        empty month is recorded as a rows=0 shard, never interpreted as "no
+        constituents that day"; an all-empty window fails the contract.
+        """
+        if len(request.symbols) != 1:
+            raise ValueError("Tushare index_weight requests require exactly "
+                             "one index code")
+        index_code = request.symbols[0]
+        if index_code not in INDEX_WEIGHT_INDEX_CODES:
+            raise ValueError(
+                f"index code {index_code!r} is not in the probe-frozen index "
+                f"table ({', '.join(INDEX_WEIGHT_INDEX_CODES)}); extend the "
+                "table from probe evidence, never by guessing")
+        request_timestamp = _utc_timestamp()
+        frames: list[pd.DataFrame] = []
+        digests: list[dict[str, object]] = []
+        for yearmonth, month_start, month_end in _month_shards(
+                request.start_date, request.end_date):
+            try:
+                frame = self._client_read(
+                    "index_weight", index_code=index_code,
+                    start_date=month_start, end_date=month_end)
+            except Exception as error:
+                translated = translate_supplier_error(error)
+                if translated is error:
+                    raise
+                raise translated from None
+            period = pd.Period(yearmonth, freq="M")
+            frame = self._empty_month_as_shard(frame)
+            self._validate_index_weight(frame, DataRequest(
+                request.endpoint, request.symbols,
+                max(period.start_time.date(), request.start_date),
+                min(period.end_time.date(), request.end_date),
+                dict(request.params)))
+            frames.append(frame)
+            digests.append({
+                "month": yearmonth, "rows": int(len(frame)),
+                "sha256": hashlib.sha256(
+                    frame.to_csv(index=False).encode("utf-8")).hexdigest()})
+        combined = pd.concat(frames, ignore_index=True)
+        validate_supplier_frame(  # all-empty windows fail here
+            combined, request, symbol_columns=("index_code",),
+            date_columns=("trade_date",))
+        metadata = request_metadata(
+            request, self._supplier_endpoint("index_weight"),
+            self._sdk_version, transport_id=self._transport.transport_id,
+            request_timestamp=request_timestamp,
+            response_timestamp=_utc_timestamp())
+        metadata["index_weight_snapshots"] = json.dumps(digests, sort_keys=True)
+        return FetchResult(source=self.name, endpoint=request.endpoint,
+                           request_key=request_key(request), frame=combined,
+                           metadata=metadata)
+
+    @staticmethod
+    def _empty_month_as_shard(frame: pd.DataFrame | None) -> pd.DataFrame:
+        """Absorb the supplier's empty-month shapes exactly as the lineage script did.
+
+        ``collect_index_weight_membership.py:133-137`` substituted an empty
+        4-column frame whenever a month's response was ``None`` or a
+        column-less empty frame -- the shape a month predating the index's
+        coverage comes back as.  Keeping that rule here makes such a month a
+        recorded rows=0 shard instead of failing the whole window; a
+        columns-bearing empty frame already passes ``_validate_index_weight``.
+        """
+        if frame is None or (frame.empty and not len(frame.columns)):
+            return pd.DataFrame(columns=list(_INDEX_WEIGHT_COLUMNS))
+        return frame
+
+    @staticmethod
+    def _validate_index_weight(frame: pd.DataFrame, request: DataRequest) -> None:
+        """Per-month shape; empty months pass through as recorded evidence."""
+        if not isinstance(frame, pd.DataFrame):
+            raise ContractError("supplier response is not a pandas DataFrame")
+        missing = [c for c in _INDEX_WEIGHT_COLUMNS if c not in frame.columns]
+        if missing:
+            raise ContractError("supplier index_weight response is missing "
+                                "columns: " + ", ".join(missing))
+        if frame.empty:
+            return
+        duplicated = frame.duplicated(subset=["con_code", "trade_date"]).sum()
+        if duplicated:
+            raise ContractError(
+                f"supplier index_weight response has {int(duplicated)} "
+                "duplicate primary-key rows")
+        validate_supplier_frame(frame, request, symbol_columns=("index_code",),
+                                date_columns=("trade_date",))
 
 
 def injected_transport(client: Any) -> TushareTransport:
