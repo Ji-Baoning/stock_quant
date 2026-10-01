@@ -698,10 +698,11 @@ def _basic_factor_keys(frame: pd.DataFrame) -> pd.Series:
 def _basic_factor_fetch_segments(
     table: str,
     covered: tuple[date, date] | None,
-    anchor: date,
+    anchor: date | None,
     end: date,
     supported_start: date | None,
     fetched_start: date,
+    start: date,
 ) -> list[FetchSegment]:
     """Segments of the wired ``basic_factor`` fetch lane (P2c Task 2).
 
@@ -713,7 +714,14 @@ def _basic_factor_fetch_segments(
     begins after the acceptance anchor (spec §7.5.1 -- the P2a-reserved
     history-prefix writer), the baseline's recorded ``carried`` span, and
     this round's ``fetched`` window.
+
+    ``anchor`` is ``None`` for a project without a universe definition; the
+    lane then tiles the request window itself -- the same fallback
+    ``_unavailable_outage_segments`` applies (anchor when present, else
+    ``start``).
     """
+    if anchor is None:
+        anchor = start
     if supported_start is None:
         return _disabled_or_carried_segments(table, covered, anchor, end)
     segments: list[FetchSegment] = []
@@ -1721,11 +1729,16 @@ class DataPipeline:
                     end,
                     supported_start,
                     basic_factor_plan.window_start,
+                    start,
                 )
             if basic_factor_meta.get("unavailable"):
                 for table in ("basic_factor", "basic_factor_coverage"):
                     fetch_segments[table] = _disabled_or_carried_segments(
-                        table, recorded_spans.get(table), acceptance_anchor,
+                        table,
+                        recorded_spans.get(table),
+                        acceptance_anchor
+                        if acceptance_anchor is not None
+                        else start,
                         end,
                     )
 

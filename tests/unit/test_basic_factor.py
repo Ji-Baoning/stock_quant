@@ -12,7 +12,12 @@ from stock_quant.data_model.basic_factor import (
     normalize_basic_factor,
     untrusted_coverage_rows,
 )
+from stock_quant.data_model.fetch_coverage import (
+    KIND_NOT_FETCHED,
+    NOT_FETCHED_SOURCE_DISABLED,
+)
 from stock_quant.data_model.universe_membership import SecurityMasterBoundary
+from stock_quant.data_pipeline import _basic_factor_fetch_segments
 
 INGESTED = pd.Timestamp("2026-10-01T08:00:00Z")
 
@@ -75,3 +80,43 @@ def test_verified_empty_requires_master_evidence_and_filter_is_equality():
     mixed = pd.DataFrame({"status": ["UNTRUSTED", "VERIFIED", "VERIFIED_EMPTY"]})
     # 只许 == "UNTRUSTED"；!= "VERIFIED" 会把 VERIFIED_EMPTY 误判（§7.3）
     assert untrusted_coverage_rows(mixed)["status"].tolist() == ["UNTRUSTED"]
+
+
+def test_no_anchor_whole_window_disabled_record_falls_back_to_window_start():
+    """无 configs/universes 的工程没有 acceptance anchor（P2c Task 2 回归）。
+
+    anchor=None + 基线无该表（covered=None）+ 本轮无可答事实
+    （supported_start=None）时，wired lane 必须落回 Task 1 的整窗
+    not_fetched/source_disabled 记录，窗口起点用回退锚（请求窗起点），
+    而不是在段构造时抛 TypeError。
+    """
+    start, end = date(2026, 9, 1), date(2026, 9, 30)
+    segments = _basic_factor_fetch_segments(
+        "basic_factor",
+        covered=None,
+        anchor=None,
+        end=end,
+        supported_start=None,
+        fetched_start=start,
+        start=start,
+    )
+    assert [(s.kind, s.window_start, s.window_end, s.reason) for s in segments] == [
+        (KIND_NOT_FETCHED, start, end, NOT_FETCHED_SOURCE_DISABLED)
+    ]
+
+
+def test_anchored_whole_window_disabled_record_keeps_the_anchor():
+    """有锚工程的行为不变：整窗 disabled 记录仍从 acceptance anchor 起步。"""
+    anchor, end = date(2026, 9, 15), date(2026, 9, 30)
+    segments = _basic_factor_fetch_segments(
+        "basic_factor",
+        covered=None,
+        anchor=anchor,
+        end=end,
+        supported_start=None,
+        fetched_start=anchor,
+        start=date(2026, 9, 1),
+    )
+    assert [(s.kind, s.window_start, s.window_end, s.reason) for s in segments] == [
+        (KIND_NOT_FETCHED, anchor, end, NOT_FETCHED_SOURCE_DISABLED)
+    ]
