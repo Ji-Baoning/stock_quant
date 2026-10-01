@@ -1,5 +1,1380 @@
 {
   "record": "docs/operations/2026-10-01-endpoint-probe-evidence.md",
-  "_status": "awaiting_authorization",
-  "probes": {}
+  "_status": "measured",
+  "probes": {
+    "index_weight": {
+      "relay": {
+        "observed_at_utc": "2026-10-01T09:02:45+00:00",
+        "readings": [
+          {
+            "label": "399300.SZ cadence 202604",
+            "rows": 600,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 2,
+            "shape": {
+              "con_codes": 300,
+              "weight_dtype": "float64",
+              "weight_min": 0.019,
+              "weight_max": 4.393
+            }
+          },
+          {
+            "label": "399300.SZ cadence 202605",
+            "rows": 600,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 2,
+            "shape": {
+              "con_codes": 300,
+              "weight_dtype": "float64",
+              "weight_min": 0.019,
+              "weight_max": 4.83
+            }
+          },
+          {
+            "label": "399300.SZ cadence 202606",
+            "rows": 600,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 2,
+            "shape": {
+              "con_codes": 319,
+              "weight_dtype": "float64",
+              "weight_min": 0.0194,
+              "weight_max": 5.008
+            }
+          },
+          {
+            "label": "399300.SZ cadence 202607",
+            "rows": 600,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 2,
+            "shape": {
+              "con_codes": 300,
+              "weight_dtype": "float64",
+              "weight_min": 0.0218,
+              "weight_max": 4.8431
+            }
+          },
+          {
+            "label": "399300.SZ history 200501",
+            "rows": 0,
+            "columns": [],
+            "null_counts": {}
+          },
+          {
+            "label": "399300.SZ history 201001",
+            "rows": 6000,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 20,
+            "shape": {
+              "con_codes": 300,
+              "weight_dtype": "float64",
+              "weight_min": 0.019,
+              "weight_max": 3.44
+            }
+          },
+          {
+            "label": "399300.SZ history 201501",
+            "rows": 300,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 300,
+              "weight_dtype": "float64",
+              "weight_min": 0.02,
+              "weight_max": 4.35
+            }
+          },
+          {
+            "label": "399300.SZ history 202001",
+            "rows": 600,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 2,
+            "shape": {
+              "con_codes": 300,
+              "weight_dtype": "float64",
+              "weight_min": 0.0236,
+              "weight_max": 6.708
+            }
+          },
+          {
+            "label": "000905.SH cadence 202604",
+            "rows": 500,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 500,
+              "weight_dtype": "float64",
+              "weight_min": 0.019,
+              "weight_max": 1.232
+            }
+          },
+          {
+            "label": "000905.SH cadence 202605",
+            "rows": 500,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 500,
+              "weight_dtype": "float64",
+              "weight_min": 0.018,
+              "weight_max": 1.444
+            }
+          },
+          {
+            "label": "000905.SH cadence 202606",
+            "rows": 500,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 500,
+              "weight_dtype": "float64",
+              "weight_min": 0.013,
+              "weight_max": 1.662
+            }
+          },
+          {
+            "label": "000905.SH cadence 202607",
+            "rows": 500,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 500,
+              "weight_dtype": "float64",
+              "weight_min": 0.017,
+              "weight_max": 1.229
+            }
+          },
+          {
+            "label": "000905.SH history 200501",
+            "rows": 500,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 500,
+              "weight_dtype": "float64",
+              "weight_min": 0.066,
+              "weight_max": 0.595
+            }
+          },
+          {
+            "label": "000905.SH history 201001",
+            "rows": 6000,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 12,
+            "shape": {
+              "con_codes": 501,
+              "weight_dtype": "float64",
+              "weight_min": 0.04,
+              "weight_max": 0.69
+            }
+          },
+          {
+            "label": "000905.SH history 201501",
+            "rows": 500,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 500,
+              "weight_dtype": "float64",
+              "weight_min": 0.04,
+              "weight_max": 1.11
+            }
+          },
+          {
+            "label": "000905.SH history 202001",
+            "rows": 500,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 500,
+              "weight_dtype": "float64",
+              "weight_min": 0.02,
+              "weight_max": 0.96
+            }
+          },
+          {
+            "label": "000852.SH cadence 202604",
+            "rows": 1000,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 1000,
+              "weight_dtype": "float64",
+              "weight_min": 0.011,
+              "weight_max": 1.02
+            }
+          },
+          {
+            "label": "000852.SH cadence 202605",
+            "rows": 1000,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 1000,
+              "weight_dtype": "float64",
+              "weight_min": 0.009,
+              "weight_max": 1.063
+            }
+          },
+          {
+            "label": "000852.SH cadence 202606",
+            "rows": 1000,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 1000,
+              "weight_dtype": "float64",
+              "weight_min": 0.008,
+              "weight_max": 0.815
+            }
+          },
+          {
+            "label": "000852.SH cadence 202607",
+            "rows": 1000,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 1000,
+              "weight_dtype": "float64",
+              "weight_min": 0.011,
+              "weight_max": 0.583
+            }
+          },
+          {
+            "label": "000852.SH history 200501",
+            "rows": 0,
+            "columns": [],
+            "null_counts": {}
+          },
+          {
+            "label": "000852.SH history 201001",
+            "rows": 0,
+            "columns": [],
+            "null_counts": {}
+          },
+          {
+            "label": "000852.SH history 201501",
+            "rows": 1000,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 1000,
+              "weight_dtype": "float64",
+              "weight_min": 0.02,
+              "weight_max": 0.39
+            }
+          },
+          {
+            "label": "000852.SH history 202001",
+            "rows": 1001,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 1001,
+              "weight_dtype": "float64",
+              "weight_min": 0.017,
+              "weight_max": 0.593
+            }
+          },
+          {
+            "label": "empty-shape",
+            "rows": 0,
+            "columns": [],
+            "null_counts": {}
+          }
+        ]
+      },
+      "proxy": {
+        "observed_at_utc": "2026-10-01T09:14:22+00:00",
+        "readings": [
+          {
+            "label": "399300.SZ cadence 202604",
+            "error": "ServerError"
+          },
+          {
+            "label": "399300.SZ cadence 202605",
+            "rows": 300,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 300,
+              "weight_dtype": "float64",
+              "weight_min": 0.019,
+              "weight_max": 4.83
+            }
+          },
+          {
+            "label": "399300.SZ cadence 202606",
+            "error": "ServerError"
+          },
+          {
+            "label": "399300.SZ cadence 202607",
+            "rows": 300,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 300,
+              "weight_dtype": "float64",
+              "weight_min": 0.025,
+              "weight_max": 4.012
+            }
+          },
+          {
+            "label": "399300.SZ history 200501",
+            "error": "ServerError"
+          },
+          {
+            "label": "399300.SZ history 201001",
+            "error": "ServerError"
+          },
+          {
+            "label": "399300.SZ history 201501",
+            "rows": 300,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 300,
+              "weight_dtype": "float64",
+              "weight_min": 0.02,
+              "weight_max": 4.35
+            }
+          },
+          {
+            "label": "399300.SZ history 202001",
+            "rows": 300,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 300,
+              "weight_dtype": "float64",
+              "weight_min": 0.024,
+              "weight_max": 6.708
+            }
+          },
+          {
+            "label": "000905.SH cadence 202604",
+            "rows": 500,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 500,
+              "weight_dtype": "float64",
+              "weight_min": 0.019,
+              "weight_max": 1.232
+            }
+          },
+          {
+            "label": "000905.SH cadence 202605",
+            "error": "ServerError"
+          },
+          {
+            "label": "000905.SH cadence 202606",
+            "rows": 500,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 500,
+              "weight_dtype": "float64",
+              "weight_min": 0.013,
+              "weight_max": 1.662
+            }
+          },
+          {
+            "label": "000905.SH cadence 202607",
+            "rows": 500,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 500,
+              "weight_dtype": "float64",
+              "weight_min": 0.017,
+              "weight_max": 1.229
+            }
+          },
+          {
+            "label": "000905.SH history 200501",
+            "rows": 500,
+            "columns": [
+              "index_code",
+              "con_code",
+              "trade_date",
+              "weight"
+            ],
+            "null_counts": {
+              "index_code": 0,
+              "con_code": 0,
+              "trade_date": 0,
+              "weight": 0
+            },
+            "snapshot_days": 1,
+            "shape": {
+              "con_codes": 500,
+              "weight_dtype": "float64",
+              "weight_min": 0.066,
+              "weight_max": 0.595
+            }
+          },
+          {
+            "label": "000905.SH history 201001",
+            "error": "ServerError"
+          },
+          {
+            "label": "000905.SH history 201501",
+            "error": "ServerError"
+          },
+          {
+            "label": "000905.SH history 202001",
+            "error": "ServerError"
+          },
+          {
+            "label": "000852.SH cadence 202604",
+            "error": "ServerError"
+          },
+          {
+            "label": "000852.SH cadence 202605",
+            "error": "ServerError"
+          },
+          {
+            "label": "000852.SH cadence 202606",
+            "error": "ServerError"
+          },
+          {
+            "label": "000852.SH cadence 202607",
+            "error": "ServerError"
+          },
+          {
+            "label": "000852.SH history 200501",
+            "error": "ServerError"
+          },
+          {
+            "label": "000852.SH history 201001",
+            "error": "ServerError"
+          },
+          {
+            "label": "000852.SH history 201501",
+            "error": "ServerError"
+          },
+          {
+            "label": "000852.SH history 202001",
+            "error": "ServerError"
+          },
+          {
+            "label": "empty-shape",
+            "rows": 0,
+            "columns": [],
+            "null_counts": {}
+          }
+        ]
+      }
+    },
+    "daily_basic": {
+      "relay": {
+        "observed_at_utc": "2026-10-01T09:14:58+00:00",
+        "readings": [
+          {
+            "label": "by-day",
+            "rows": 5561,
+            "columns": [
+              "ts_code",
+              "trade_date",
+              "total_mv",
+              "turnover_rate"
+            ],
+            "null_counts": {
+              "ts_code": 0,
+              "trade_date": 0,
+              "total_mv": 0,
+              "turnover_rate": 0
+            },
+            "snapshot_days": 1,
+            "magnitude_reference": {
+              "symbol": "000001.SZ",
+              "trade_date": "20260930",
+              "raw_total_mv": "22452647.3574",
+              "raw_turnover_rate": "0.5387"
+            }
+          },
+          {
+            "label": "by-range",
+            "rows": 7,
+            "columns": [
+              "ts_code",
+              "trade_date",
+              "close",
+              "turnover_rate",
+              "turnover_rate_f",
+              "volume_ratio",
+              "pe",
+              "pe_ttm",
+              "pb",
+              "ps",
+              "ps_ttm",
+              "dv_ratio",
+              "dv_ttm",
+              "total_share",
+              "float_share",
+              "free_share",
+              "total_mv",
+              "circ_mv"
+            ],
+            "null_counts": {
+              "ts_code": 0,
+              "trade_date": 0,
+              "close": 0,
+              "turnover_rate": 0,
+              "turnover_rate_f": 0,
+              "volume_ratio": 0,
+              "pe": 0,
+              "pe_ttm": 0,
+              "pb": 0,
+              "ps": 0,
+              "ps_ttm": 0,
+              "dv_ratio": 0,
+              "dv_ttm": 0,
+              "total_share": 0,
+              "float_share": 0,
+              "free_share": 0,
+              "total_mv": 0,
+              "circ_mv": 0
+            },
+            "snapshot_days": 7,
+            "magnitude_reference": {
+              "symbol": "000001.SZ",
+              "trade_date": "20260930",
+              "raw_total_mv": "22452647.3574",
+              "raw_turnover_rate": "0.5387"
+            }
+          },
+          {
+            "label": "history 200501",
+            "rows": 19,
+            "columns": [
+              "ts_code",
+              "trade_date",
+              "close",
+              "turnover_rate",
+              "turnover_rate_f",
+              "volume_ratio",
+              "pe",
+              "pe_ttm",
+              "pb",
+              "ps",
+              "ps_ttm",
+              "dv_ratio",
+              "dv_ttm",
+              "total_share",
+              "float_share",
+              "free_share",
+              "total_mv",
+              "circ_mv"
+            ],
+            "null_counts": {
+              "ts_code": 0,
+              "trade_date": 0,
+              "close": 0,
+              "turnover_rate": 0,
+              "turnover_rate_f": 0,
+              "volume_ratio": 0,
+              "pe": 0,
+              "pe_ttm": 0,
+              "pb": 0,
+              "ps": 0,
+              "ps_ttm": 0,
+              "dv_ratio": 0,
+              "dv_ttm": 19,
+              "total_share": 0,
+              "float_share": 0,
+              "free_share": 0,
+              "total_mv": 0,
+              "circ_mv": 0
+            },
+            "snapshot_days": 19,
+            "magnitude_reference": {
+              "symbol": "000001.SZ",
+              "trade_date": "20050131",
+              "raw_total_mv": "1179168.2223",
+              "raw_turnover_rate": "0.1318"
+            }
+          },
+          {
+            "label": "history 201001",
+            "rows": 20,
+            "columns": [
+              "ts_code",
+              "trade_date",
+              "close",
+              "turnover_rate",
+              "turnover_rate_f",
+              "volume_ratio",
+              "pe",
+              "pe_ttm",
+              "pb",
+              "ps",
+              "ps_ttm",
+              "dv_ratio",
+              "dv_ttm",
+              "total_share",
+              "float_share",
+              "free_share",
+              "total_mv",
+              "circ_mv"
+            ],
+            "null_counts": {
+              "ts_code": 0,
+              "trade_date": 0,
+              "close": 0,
+              "turnover_rate": 0,
+              "turnover_rate_f": 0,
+              "volume_ratio": 0,
+              "pe": 0,
+              "pe_ttm": 0,
+              "pb": 0,
+              "ps": 0,
+              "ps_ttm": 0,
+              "dv_ratio": 0,
+              "dv_ttm": 20,
+              "total_share": 0,
+              "float_share": 0,
+              "free_share": 0,
+              "total_mv": 0,
+              "circ_mv": 0
+            },
+            "snapshot_days": 20,
+            "magnitude_reference": {
+              "symbol": "000001.SZ",
+              "trade_date": "20100129",
+              "raw_total_mv": "6738791.2635",
+              "raw_turnover_rate": "0.8231"
+            }
+          },
+          {
+            "label": "history 201501",
+            "rows": 20,
+            "columns": [
+              "ts_code",
+              "trade_date",
+              "close",
+              "turnover_rate",
+              "turnover_rate_f",
+              "volume_ratio",
+              "pe",
+              "pe_ttm",
+              "pb",
+              "ps",
+              "ps_ttm",
+              "dv_ratio",
+              "dv_ttm",
+              "total_share",
+              "float_share",
+              "free_share",
+              "total_mv",
+              "circ_mv"
+            ],
+            "null_counts": {
+              "ts_code": 0,
+              "trade_date": 0,
+              "close": 0,
+              "turnover_rate": 0,
+              "turnover_rate_f": 0,
+              "volume_ratio": 0,
+              "pe": 0,
+              "pe_ttm": 0,
+              "pb": 0,
+              "ps": 0,
+              "ps_ttm": 0,
+              "dv_ratio": 0,
+              "dv_ttm": 0,
+              "total_share": 0,
+              "float_share": 0,
+              "free_share": 0,
+              "total_mv": 0,
+              "circ_mv": 0
+            },
+            "snapshot_days": 20,
+            "magnitude_reference": {
+              "symbol": "000001.SZ",
+              "trade_date": "20150130",
+              "raw_total_mv": "15914878.4383",
+              "raw_turnover_rate": "0.9456"
+            }
+          },
+          {
+            "label": "history 202001",
+            "rows": 16,
+            "columns": [
+              "ts_code",
+              "trade_date",
+              "close",
+              "turnover_rate",
+              "turnover_rate_f",
+              "volume_ratio",
+              "pe",
+              "pe_ttm",
+              "pb",
+              "ps",
+              "ps_ttm",
+              "dv_ratio",
+              "dv_ttm",
+              "total_share",
+              "float_share",
+              "free_share",
+              "total_mv",
+              "circ_mv"
+            ],
+            "null_counts": {
+              "ts_code": 0,
+              "trade_date": 0,
+              "close": 0,
+              "turnover_rate": 0,
+              "turnover_rate_f": 0,
+              "volume_ratio": 0,
+              "pe": 0,
+              "pe_ttm": 0,
+              "pb": 0,
+              "ps": 0,
+              "ps_ttm": 0,
+              "dv_ratio": 0,
+              "dv_ttm": 0,
+              "total_share": 0,
+              "float_share": 0,
+              "free_share": 0,
+              "total_mv": 0,
+              "circ_mv": 0
+            },
+            "snapshot_days": 16,
+            "magnitude_reference": {
+              "symbol": "000001.SZ",
+              "trade_date": "20200123",
+              "raw_total_mv": "30156796.8797",
+              "raw_turnover_rate": "0.5671"
+            }
+          }
+        ]
+      },
+      "proxy": {
+        "observed_at_utc": "2026-10-01T09:15:46+00:00",
+        "readings": [
+          {
+            "label": "by-day",
+            "rows": 5561,
+            "columns": [
+              "ts_code",
+              "trade_date",
+              "total_mv",
+              "turnover_rate"
+            ],
+            "null_counts": {
+              "ts_code": 0,
+              "trade_date": 0,
+              "total_mv": 0,
+              "turnover_rate": 0
+            },
+            "snapshot_days": 1,
+            "magnitude_reference": {
+              "symbol": "000001.SZ",
+              "trade_date": "20260930",
+              "raw_total_mv": "22452647.3574",
+              "raw_turnover_rate": "0.5387"
+            }
+          },
+          {
+            "label": "by-range",
+            "rows": 7,
+            "columns": [
+              "ts_code",
+              "trade_date",
+              "close",
+              "turnover_rate",
+              "turnover_rate_f",
+              "volume_ratio",
+              "pe",
+              "pe_ttm",
+              "pb",
+              "ps",
+              "ps_ttm",
+              "dv_ratio",
+              "dv_ttm",
+              "total_share",
+              "float_share",
+              "free_share",
+              "total_mv",
+              "circ_mv"
+            ],
+            "null_counts": {
+              "ts_code": 0,
+              "trade_date": 0,
+              "close": 0,
+              "turnover_rate": 0,
+              "turnover_rate_f": 2,
+              "volume_ratio": 2,
+              "pe": 0,
+              "pe_ttm": 0,
+              "pb": 0,
+              "ps": 0,
+              "ps_ttm": 0,
+              "dv_ratio": 2,
+              "dv_ttm": 2,
+              "total_share": 0,
+              "float_share": 0,
+              "free_share": 2,
+              "total_mv": 0,
+              "circ_mv": 0
+            },
+            "snapshot_days": 7,
+            "magnitude_reference": {
+              "symbol": "000001.SZ",
+              "trade_date": "20260930",
+              "raw_total_mv": "22452647.3574",
+              "raw_turnover_rate": "0.5387"
+            }
+          },
+          {
+            "label": "history 200501",
+            "rows": 19,
+            "columns": [
+              "ts_code",
+              "trade_date",
+              "close",
+              "turnover_rate",
+              "turnover_rate_f",
+              "volume_ratio",
+              "pe",
+              "pe_ttm",
+              "pb",
+              "ps",
+              "ps_ttm",
+              "dv_ratio",
+              "dv_ttm",
+              "total_share",
+              "float_share",
+              "free_share",
+              "total_mv",
+              "circ_mv"
+            ],
+            "null_counts": {
+              "ts_code": 0,
+              "trade_date": 0,
+              "close": 0,
+              "turnover_rate": 0,
+              "turnover_rate_f": 0,
+              "volume_ratio": 0,
+              "pe": 0,
+              "pe_ttm": 0,
+              "pb": 0,
+              "ps": 0,
+              "ps_ttm": 0,
+              "dv_ratio": 0,
+              "dv_ttm": 0,
+              "total_share": 0,
+              "float_share": 0,
+              "free_share": 0,
+              "total_mv": 0,
+              "circ_mv": 0
+            },
+            "snapshot_days": 19,
+            "magnitude_reference": {
+              "symbol": "000001.SZ",
+              "trade_date": "20050131",
+              "raw_total_mv": "1179168.2223",
+              "raw_turnover_rate": "0.1318"
+            }
+          },
+          {
+            "label": "history 201001",
+            "rows": 20,
+            "columns": [
+              "ts_code",
+              "trade_date",
+              "close",
+              "turnover_rate",
+              "turnover_rate_f",
+              "volume_ratio",
+              "pe",
+              "pe_ttm",
+              "pb",
+              "ps",
+              "ps_ttm",
+              "dv_ratio",
+              "dv_ttm",
+              "total_share",
+              "float_share",
+              "free_share",
+              "total_mv",
+              "circ_mv"
+            ],
+            "null_counts": {
+              "ts_code": 0,
+              "trade_date": 0,
+              "close": 0,
+              "turnover_rate": 0,
+              "turnover_rate_f": 0,
+              "volume_ratio": 0,
+              "pe": 0,
+              "pe_ttm": 0,
+              "pb": 0,
+              "ps": 0,
+              "ps_ttm": 0,
+              "dv_ratio": 0,
+              "dv_ttm": 0,
+              "total_share": 0,
+              "float_share": 0,
+              "free_share": 0,
+              "total_mv": 0,
+              "circ_mv": 0
+            },
+            "snapshot_days": 20,
+            "magnitude_reference": {
+              "symbol": "000001.SZ",
+              "trade_date": "20100129",
+              "raw_total_mv": "6738791.2635",
+              "raw_turnover_rate": "0.8231"
+            }
+          },
+          {
+            "label": "history 201501",
+            "rows": 20,
+            "columns": [
+              "ts_code",
+              "trade_date",
+              "close",
+              "turnover_rate",
+              "turnover_rate_f",
+              "volume_ratio",
+              "pe",
+              "pe_ttm",
+              "pb",
+              "ps",
+              "ps_ttm",
+              "dv_ratio",
+              "dv_ttm",
+              "total_share",
+              "float_share",
+              "free_share",
+              "total_mv",
+              "circ_mv"
+            ],
+            "null_counts": {
+              "ts_code": 0,
+              "trade_date": 0,
+              "close": 0,
+              "turnover_rate": 0,
+              "turnover_rate_f": 0,
+              "volume_ratio": 0,
+              "pe": 0,
+              "pe_ttm": 0,
+              "pb": 0,
+              "ps": 0,
+              "ps_ttm": 0,
+              "dv_ratio": 0,
+              "dv_ttm": 0,
+              "total_share": 0,
+              "float_share": 0,
+              "free_share": 0,
+              "total_mv": 0,
+              "circ_mv": 0
+            },
+            "snapshot_days": 20,
+            "magnitude_reference": {
+              "symbol": "000001.SZ",
+              "trade_date": "20150130",
+              "raw_total_mv": "15914878.4383",
+              "raw_turnover_rate": "0.9456"
+            }
+          },
+          {
+            "label": "history 202001",
+            "rows": 16,
+            "columns": [
+              "ts_code",
+              "trade_date",
+              "close",
+              "turnover_rate",
+              "turnover_rate_f",
+              "volume_ratio",
+              "pe",
+              "pe_ttm",
+              "pb",
+              "ps",
+              "ps_ttm",
+              "dv_ratio",
+              "dv_ttm",
+              "total_share",
+              "float_share",
+              "free_share",
+              "total_mv",
+              "circ_mv",
+              "limit_status"
+            ],
+            "null_counts": {
+              "ts_code": 0,
+              "trade_date": 0,
+              "close": 1,
+              "turnover_rate": 0,
+              "turnover_rate_f": 0,
+              "volume_ratio": 1,
+              "pe": 1,
+              "pe_ttm": 1,
+              "pb": 1,
+              "ps": 1,
+              "ps_ttm": 1,
+              "dv_ratio": 1,
+              "dv_ttm": 1,
+              "total_share": 0,
+              "float_share": 0,
+              "free_share": 0,
+              "total_mv": 0,
+              "circ_mv": 0,
+              "limit_status": 14
+            },
+            "snapshot_days": 16,
+            "magnitude_reference": {
+              "symbol": "000001.SZ",
+              "trade_date": "20200123",
+              "raw_total_mv": "30156800.0",
+              "raw_turnover_rate": "0.5671"
+            }
+          }
+        ]
+      }
+    },
+    "daily_basic_bar_diff": {
+      "trade_date": "20260930",
+      "diff": {
+        "daily_bar_symbols": 0,
+        "daily_basic_symbols": 5561,
+        "only_in_daily_bar": [],
+        "only_in_daily_basic": [
+          "000001.SZ",
+          "000002.SZ",
+          "000006.SZ",
+          "000007.SZ",
+          "000008.SZ",
+          "000009.SZ",
+          "000010.SZ",
+          "000011.SZ",
+          "000012.SZ",
+          "000014.SZ",
+          "000017.SZ",
+          "000019.SZ",
+          "000020.SZ",
+          "000021.SZ",
+          "000025.SZ",
+          "000026.SZ",
+          "000027.SZ",
+          "000028.SZ",
+          "000029.SZ",
+          "000030.SZ"
+        ]
+      }
+    }
+  },
+  "last_updated_utc": "2026-10-01T09:21:21+00:00"
 }
