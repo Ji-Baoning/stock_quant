@@ -24,6 +24,7 @@
 | `project/probe_dataset_gates.py` | diagnostic | 预览真实更新必须通过的硬门禁 | 无替代项 |
 | `project/probe_batch_channel.py` | diagnostic | 探测星耀批量日线通道的配额与耗时，作为默认启用的前提 | 无替代项 |
 | `project/probe_expansion_gap_risk.py` | diagnostic | 抽样衡量扩容前的缺口风险 | 无替代项 |
+| `project/probe_index_weight_daily_basic.py` | diagnostic | 探测 index_weight/daily_basic 端点契约（联网子命令需 owner 授权） | 无替代项 |
 | `project/probe_relay_substitution.py` | diagnostic | 检测 relay 的静默数据替代 | 无替代项 |
 | `project/probe_tushare_proxy.py` | diagnostic | 只读探测 Tushare 兼容代理能力 | 无替代项 |
 | `project/rebuild_offline_real_dataset.py` | migration | 从已存真实表重建规范数据集 | 无替代项 |
