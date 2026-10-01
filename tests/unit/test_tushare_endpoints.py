@@ -226,3 +226,43 @@ def test_index_weight_classifies_contract_failures(january, match):
     with pytest.raises(ContractError, match=match):
         TushareSource(SourceConfig(),
                       client=IndexWeightStub([january])).fetch(request)
+
+
+def _relay_by_day_reference() -> dict:
+    from stock_quant.data_model.basic_factor_normalize import PROBE_EVIDENCE_JSON
+    document = json.loads(
+        (REPO_ROOT / PROBE_EVIDENCE_JSON).read_text(encoding="utf-8"))
+    assert document["_status"] == "measured", "probe evidence not measured yet"
+    readings = [reading for reading in
+                document["probes"]["daily_basic"]["relay"]["readings"]
+                if "magnitude_reference" in reading]
+    assert readings, "relay by-day reading carries no magnitude_reference"
+    return readings[0]["magnitude_reference"]
+
+
+def test_frozen_readings_match_the_measured_evidence():
+    from stock_quant.data_model.basic_factor_normalize import (
+        EVIDENCE_REFERENCE_READINGS,
+    )
+    reference = _relay_by_day_reference()
+    assert [dict(r) for r in EVIDENCE_REFERENCE_READINGS] == [{
+        "symbol": reference["symbol"], "trade_date": reference["trade_date"],
+        "raw_total_mv": reference["raw_total_mv"],
+        "raw_turnover_rate": reference["raw_turnover_rate"]}]
+
+
+def test_magnitude_reference_converts_into_plausible_bands():
+    from stock_quant.data_model.basic_factor_normalize import (
+        EVIDENCE_REFERENCE_READINGS,
+        daily_basic_to_basic_factor_rows,
+    )
+    assert EVIDENCE_REFERENCE_READINGS
+    rows = daily_basic_to_basic_factor_rows(pd.DataFrame(
+        [[r["symbol"], r["trade_date"],
+          r["raw_total_mv"], r["raw_turnover_rate"]]
+         for r in EVIDENCE_REFERENCE_READINGS],
+        columns=["ts_code", "trade_date", "total_mv", "turnover_rate"]))
+    for value in rows["market_cap"]:  # yuan, large-cap order of magnitude
+        assert 1e10 <= value <= 1e12
+    for value in rows["turnover_rate"]:  # dimensionless ratio, not percent
+        assert 1e-5 <= value <= 0.2

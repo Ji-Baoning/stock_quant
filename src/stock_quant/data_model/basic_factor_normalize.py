@@ -18,6 +18,17 @@ PROBE_EVIDENCE_JSON = (
 )
 
 
+#: Known-security readings copied VERBATIM from the relay section of the
+#: dated probe evidence (docs/operations/2026-10-01-endpoint-probe-evidence.md
+#: and .evidence.json, §daily_basic by-day magnitude_reference; recorded
+#: 2026-10-01).  String values stay strings; these feed the magnitude
+#: assertions in tests/unit/test_tushare_endpoints.py.
+EVIDENCE_REFERENCE_READINGS: tuple[dict[str, str], ...] = (
+    {"symbol": "000001.SZ", "trade_date": "20260930",
+     "raw_total_mv": "22452647.3574", "raw_turnover_rate": "0.5387"},
+)
+
+
 def daily_basic_to_basic_factor_rows(frame: pd.DataFrame) -> pd.DataFrame:
     """Convert raw daily_basic rows to basic_factor business columns.
 
