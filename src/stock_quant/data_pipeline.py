@@ -122,6 +122,7 @@ from stock_quant.data_model.fetch_coverage import (
     KIND_CARRIED,
     KIND_FETCHED,
     KIND_NOT_FETCHED,
+    NOT_FETCHED_SOURCE_DISABLED,
     NOT_FETCHED_SOURCE_UNAVAILABLE,
     FetchSegment,
     to_build_config_payload,
@@ -133,7 +134,9 @@ from stock_quant.data_model.fetch_windows import (
 from stock_quant.data_model.normalize import normalize_daily
 from stock_quant.data_model.schemas import (
     ADJUSTED_BAR_SCHEMA,
+    BASIC_FACTOR_COLUMNS,
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_COVERAGE_COLUMNS,
     CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     DAILY_SCHEMA,
@@ -630,6 +633,24 @@ def _unavailable_outage_segments(
     ]
 
 
+def _disabled_or_carried_segments(
+    table: str, covered: tuple[date, date] | None, anchor: date, end: date,
+) -> list[FetchSegment]:
+    """Carry a not-enabled table's baseline span; mark the rest disabled."""
+    if covered is None:
+        return [FetchSegment(table, KIND_NOT_FETCHED, anchor, end,
+                             reason=NOT_FETCHED_SOURCE_DISABLED)]
+    segments: list[FetchSegment] = []
+    low, high = max(covered[0], anchor), min(covered[1], end)
+    if low <= high:
+        segments.append(FetchSegment(table, KIND_CARRIED, low, high))
+    if covered[1] < end:
+        segments.append(FetchSegment(
+            table, KIND_NOT_FETCHED, covered[1] + timedelta(days=1), end,
+            reason=NOT_FETCHED_SOURCE_DISABLED))
+    return segments
+
+
 def dataset_build_config(
     *,
     run_id: str,
@@ -972,6 +993,8 @@ class DataPipeline:
             fetch_coverage,
             baseline_version,
             baseline_frames,
+            basic_factor,
+            basic_factor_coverage,
         ) = baseline
         recorded_spans, carried_master_coverage, carried_ca_coverage, (
             baseline_covered
@@ -1397,6 +1420,8 @@ class DataPipeline:
                 list(TRADING_CALENDAR_COLUMNS)
             ],
         }
+        tables["basic_factor"] = basic_factor[BASIC_FACTOR_COLUMNS]
+        tables["basic_factor_coverage"] = basic_factor_coverage
         if membership is not None:
             # Membership facts are immutable qualification records: an update
             # never rewrites them, it carries the registered raw table
@@ -1518,6 +1543,15 @@ class DataPipeline:
                 )
             if segments:
                 fetch_segments[table] = segments
+
+        # fetch lane lands in Task 2; until then the honest record for a
+        # registered-but-unwired table is source_disabled (§7.5.2), never a
+        # fabricated fetched segment.
+        for table in ("basic_factor", "basic_factor_coverage"):
+            fetch_segments.pop(table, None)
+            fetch_segments[table] = _disabled_or_carried_segments(
+                table, recorded_spans.get(table), acceptance_anchor, end
+            )
 
         report = QualityReport(issues=tuple(issues))
         # Declared tiers are computed once and reused by the gate, the
@@ -1793,6 +1827,9 @@ class DataPipeline:
         so it stays updatable.  The carried ``security_master_coverage`` /
         ``corporate_action_coverage`` frames stand in for a skipped refresh
         so a carried-forward publish never loses its evidence (spec D5.2).
+        The registered-but-unwired ``basic_factor`` tables carry their
+        canonical empty frames when the baseline predates their registration
+        (fetch lane lands in Task 2).
         ``baseline_spans`` parses the manifest's ``calendar_coverage``
         evidence; a legacy manifest without the key yields no spans and the
         publish-time span gate then requires this window to cover the whole
@@ -1851,6 +1888,16 @@ class DataPipeline:
                 if TABLE_CORPORATE_ACTION_COVERAGE in context.tables
                 else None
             )
+            basic_factor = (
+                context.read("basic_factor")
+                if "basic_factor" in context.tables
+                else pd.DataFrame(columns=BASIC_FACTOR_COLUMNS)
+            )
+            basic_factor_coverage = (
+                context.read("basic_factor_coverage")
+                if "basic_factor_coverage" in context.tables
+                else pd.DataFrame(columns=CORPORATE_ACTION_COVERAGE_COLUMNS)
+            )
         open_days = _calendar_open_days(calendar_frame)
         build = manifest.get("build_config") if isinstance(manifest, Mapping) else None
         raw_spans = build.get(COVERAGE_KEY, []) if isinstance(build, Mapping) else []
@@ -1883,6 +1930,8 @@ class DataPipeline:
             fetch_coverage,
             str(ref.version),
             baseline_frames,
+            basic_factor,
+            basic_factor_coverage,
         )
 
     def _require_available(

@@ -137,6 +137,26 @@ ADJUSTED_BAR_COLUMNS = [
     "applied_action_ids",
 ]
 
+# Daily per-symbol factors Stock has no other unique fact source for (spec
+# §7.2): market cap and turnover rate ONLY -- no OHLCV, no amount, no panda
+# ten-column wide table.  ``ingested_at`` is deterministic provenance.
+BASIC_FACTOR_COLUMNS = [
+    "trade_date", "symbol", "market_cap", "turnover_rate",
+    "source", "ingested_at",
+]
+
+
+def _basic_factor_fields() -> list[pa.Field]:
+    return [
+        pa.field("trade_date", pa.date32()),
+        pa.field("symbol", pa.string()),
+        pa.field("market_cap", pa.float64()),
+        pa.field("turnover_rate", pa.float64()),
+        pa.field("source", pa.string()),
+        pa.field("ingested_at", pa.timestamp("us", tz="UTC")),
+    ]
+
+
 # Corporate-action quarantine holds the reconciled-but-untrusted events
 # (``QUARANTINE_COLUMNS`` from the reconciler, persisted verbatim) so quality
 # gates and the adjusted-bar builder can mark exact trust breaks per ex_date.
@@ -293,3 +313,4 @@ SECURITY_MASTER_COVERAGE_SCHEMA = pa.schema(_security_master_coverage_fields())
 UNIVERSE_MEMBERSHIP_SCHEMA = pa.schema(_universe_membership_fields())
 TRADING_CALENDAR_SCHEMA = pa.schema(_trading_calendar_fields())
 ADJUSTED_BAR_SCHEMA = pa.schema(_adjusted_bar_fields())
+BASIC_FACTOR_SCHEMA = pa.schema(_basic_factor_fields())

@@ -123,3 +123,22 @@ data_contracts:
     pit: null
     coverage_shape: none
     incremental: change_driven_full
+  # basic_factor (spec §7.2/§7.3, ADR-022): research_only -- no independent
+  # anchor this phase; single-candidate tushare daily_basic.  primary_transport
+  # is the P1 probe winner (docs/operations/2026-10-01-endpoint-probe-evidence.md).
+  - table: basic_factor
+    tier: research_only
+    primary_transport: tushare:relay
+    anchors: []
+    conflict: block
+    pit: null
+    coverage_shape: per_symbol_window
+    incremental: last_covered_plus_1
+  - table: basic_factor_coverage
+    tier: core
+    primary_transport: tushare:relay
+    anchors: []
+    conflict: block
+    pit: null
+    coverage_shape: none
+    incremental: last_covered_plus_1

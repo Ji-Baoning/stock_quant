@@ -36,6 +36,7 @@ import pyarrow.parquet as pq
 
 from stock_quant.data_model.schemas import (
     ADJUSTED_BAR_SCHEMA,
+    BASIC_FACTOR_SCHEMA,
     CORPORATE_ACTION_COVERAGE_SCHEMA,
     CORPORATE_ACTION_QUARANTINE_SCHEMA,
     CORPORATE_ACTION_SCHEMA,
@@ -67,6 +68,8 @@ STANDARDIZED_SCHEMAS: dict[str, pa.Schema] = {
     "corporate_action_coverage": CORPORATE_ACTION_COVERAGE_SCHEMA,
     "trading_calendar": TRADING_CALENDAR_SCHEMA,
     "universe_membership": UNIVERSE_MEMBERSHIP_SCHEMA,
+    "basic_factor": BASIC_FACTOR_SCHEMA,
+    "basic_factor_coverage": CORPORATE_ACTION_COVERAGE_SCHEMA,
 }
 
 _MANIFEST_NAME = "dataset_manifest.json"

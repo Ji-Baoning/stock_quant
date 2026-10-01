@@ -22,6 +22,7 @@ from pathlib import Path
 import pandas as pd
 from conftest import BARS_END, BARS_START, build_fixture_project  # noqa: E402
 
+from stock_quant.data_model.dataset import DatasetReader
 from stock_quant.data_model.fetch_coverage import validate_table_fetch_coverage
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_pipeline import DataPipeline, DataUpdateRequest
@@ -58,6 +59,8 @@ _DECLARED_TABLES = (
     "corporate_action_coverage",
     "trading_calendar",
     "universe_membership",
+    "basic_factor",
+    "basic_factor_coverage",
 )
 
 
@@ -338,3 +341,23 @@ def test_update_writes_call_ledger(tmp_path):
         name: {"calls": 0, "endpoints": {}, "reused": {}, "transport": {}}
         for name in ("tushare", "akshare", "xingyao")
     }
+
+
+def test_unwired_basic_factor_publishes_disabled_not_fetched(tmp_path):
+    """A registered-but-unwired table publishes empty canonical frames with
+    whole-window source_disabled segments (§7.5.2/§11), never a fabricated
+    fetched segment."""
+    project = build_fixture_project(tmp_path / "project")
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        DataUpdateRequest(start_date=BARS_START, end_date=_GEN1_END)
+    )
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as ctx:
+        assert ctx.read("basic_factor").empty
+        assert ctx.read("basic_factor_coverage").empty
+    build = _manifest_build(project.root, result.dataset_ref.version)
+    for table in ("basic_factor", "basic_factor_coverage"):
+        segments = build["table_fetch_coverage"][table]
+        assert [s["kind"] for s in segments] == ["not_fetched"]
+        assert segments[0]["reason"] == "source_disabled"
+        assert segments[0]["window_end"] == _GEN1_END.isoformat()
