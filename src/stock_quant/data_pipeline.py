@@ -122,6 +122,7 @@ from stock_quant.data_model.fetch_coverage import (
     KIND_CARRIED,
     KIND_FETCHED,
     KIND_NOT_FETCHED,
+    NOT_FETCHED_SOURCE_UNAVAILABLE,
     FetchSegment,
     to_build_config_payload,
 )
@@ -175,6 +176,7 @@ from stock_quant.data_quality.models import (
     CODE_ADJUSTED_BAR_WRONG_BASIS,
     CODE_COVERAGE_DOWNGRADED,
     CODE_QUARANTINE_OUT_OF_WINDOW,
+    CODE_TABLE_EMPTIED_BY_FETCH,
     CODE_UNREGISTERED_TABLE,
     TABLE_CORPORATE_ACTION,
     QualityIssue,
@@ -197,6 +199,7 @@ from stock_quant.data_sources.base import (
     DataSource,
     FetchResult,
     RetryPolicy,
+    TransientSourceError,
     fetch_batch_with_retry,
     fetch_with_retry,
     request_key,
@@ -565,6 +568,68 @@ def _plan_skips_fetch(plan: object, end: date) -> bool:
     return plan.window_start > end
 
 
+def _unavailable_outage_segments(
+    table: str,
+    baseline_frame: pd.DataFrame | None,
+    recorded_span: tuple[date, date] | None,
+    baseline_covered: tuple[date, date] | None,
+    anchor: date | None,
+    start: date,
+    end: date,
+) -> list[FetchSegment]:
+    """Coverage segments for a registered table whose source is down.
+
+    Spec §7.5.4: a table whose baseline frame carries facts publishes those
+    facts unchanged -- a ``carried`` segment over the span the baseline
+    recorded (chained from the acceptance anchor, like every carried
+    segment) plus the ``source_unavailable`` tail that reaches exactly the
+    published end.  A table the baseline carries no facts for (its first
+    publish) publishes the canonical empty frame with the outage marked over
+    the whole review window; there is no carried segment because there is
+    nothing carried.
+    """
+    whole_window = anchor if anchor is not None else start
+    whole_window = min(whole_window, end)
+    if baseline_frame is not None and not baseline_frame.empty:
+        covered = recorded_span if recorded_span is not None else baseline_covered
+        segments: list[FetchSegment] = []
+        carried_end: date | None = None
+        if covered is not None:
+            low = max(covered[0], anchor) if anchor is not None else covered[0]
+            high = min(covered[1], end)
+            if low <= high:
+                carried_end = high
+                segments.append(
+                    FetchSegment(table, KIND_CARRIED, low, carried_end)
+                )
+        tail_start = (
+            carried_end + timedelta(days=1)
+            if carried_end is not None
+            else whole_window
+        )
+        if tail_start <= end:
+            segments.append(
+                FetchSegment(
+                    table,
+                    KIND_NOT_FETCHED,
+                    tail_start,
+                    end,
+                    reason=NOT_FETCHED_SOURCE_UNAVAILABLE,
+                )
+            )
+        if segments:
+            return segments
+    return [
+        FetchSegment(
+            table,
+            KIND_NOT_FETCHED,
+            whole_window,
+            end,
+            reason=NOT_FETCHED_SOURCE_UNAVAILABLE,
+        )
+    ]
+
+
 def dataset_build_config(
     *,
     run_id: str,
@@ -906,11 +971,16 @@ class DataPipeline:
             baseline_spans,
             fetch_coverage,
             baseline_version,
+            baseline_frames,
         ) = baseline
         recorded_spans, carried_master_coverage, carried_ca_coverage, (
             baseline_covered
         ) = fetch_coverage
         issues.extend(self._universe_master_issues(master))
+        # Registered tables whose source lane failed transiently this round
+        # (spec §7.5.2/4): each publishes its carried baseline facts with a
+        # ``source_unavailable`` tail, instead of failing the whole round.
+        unavailable: set[str] = set()
 
         # ---- universe definitions: a config fault, read before any fetch -- #
         # The criterion is computed from ``configs/universes`` and is only *used*
@@ -1016,19 +1086,29 @@ class DataPipeline:
                 statuses,
                 raw_snapshots,
                 baseline_spans,
+                unavailable,
             )
             if refreshed is None:
-                return self._result(
-                    issues, None, run_id, end, statuses, raw_snapshots
+                if "trading_calendar" not in unavailable:
+                    return self._result(
+                        issues, None, run_id, end, statuses, raw_snapshots
+                    )
+                # Transient calendar outage (spec §7.5.4): the published
+                # calendar and its spans are carried unchanged, exactly as a
+                # skipped contract window carries them.
+                calendar_open, calendar_spans = (
+                    published_open_days,
+                    baseline_spans,
                 )
-            calendar_open, calendar_spans = refreshed
+            else:
+                calendar_open, calendar_spans = refreshed
 
         # ---- required security-master reference (tushare stock_basic) ----- #
         master_plan = plans.get("security_master")
         if _plan_skips_fetch(master_plan, end):
             master_coverage = carried_master_coverage
         else:
-            master, master_coverage = self._refresh_security_master(
+            refreshed_master, master_coverage = self._refresh_security_master(
                 (
                     master_plan.window_start
                     if master_plan is not None
@@ -1039,11 +1119,20 @@ class DataPipeline:
                 statuses,
                 raw_snapshots,
                 master,
+                unavailable,
             )
-            if master is None:
-                return self._result(
-                    issues, None, run_id, end, statuses, raw_snapshots,
-                )
+            if refreshed_master is None:
+                if "security_master" not in unavailable:
+                    return self._result(
+                        issues, None, run_id, end, statuses, raw_snapshots,
+                    )
+                # Transient reference outage (spec §7.5.4): the baseline
+                # master and its coverage evidence stand in for the skipped
+                # refresh, exactly as an operator-window skip carries them.
+                unavailable.add("security_master_coverage")
+                master_coverage = carried_master_coverage
+            else:
+                master = refreshed_master
 
         # ---- required primary stock daily ------------------------------- #
         equity_symbols = _equity_symbols(master)
@@ -1057,6 +1146,10 @@ class DataPipeline:
             if daily_plan is not None and daily_plan.window_start is not None
             else start
         )
+        # A transient primary-lane outage carries the baseline daily table
+        # untouched (spec §7.5.4); the reference/validation lanes that only
+        # serve this window's re-judgement then have nothing to answer for.
+        daily_unavailable = False
         if not daily_skipped:
             fatal = self._fetch_primary_stock(
                 enabled,
@@ -1069,62 +1162,69 @@ class DataPipeline:
                 primary_rows,
                 primary_dates,
                 raw_daily_frames,
+                unavailable,
             )
             if fatal:
-                return self._result(
-                    issues,
-                    None,
-                    run_id,
+                if "daily_bar" not in unavailable:
+                    return self._result(
+                        issues,
+                        None,
+                        run_id,
+                        end,
+                        statuses,
+                        raw_snapshots,
+                    )
+                daily_unavailable = True
+            if not daily_unavailable:
+
+                # ---- proof-only pre-window anchors ---------------------- #
+                # Runs before _materialize_suspensions reads the raw frames,
+                # and after the primary fetch whose responses it deepens.
+                self._deepen_head_anchors(
+                    enabled,
+                    equity_symbols,
+                    master,
+                    calendar_open,
+                    daily_start,
                     end,
+                    issues,
                     statuses,
                     raw_snapshots,
+                    raw_daily_frames,
+                    fetch_start=daily_start,
                 )
 
-            # ---- proof-only pre-window anchors -------------------------- #
-            # Runs before _materialize_suspensions reads the raw frames, and
-            # after the primary fetch whose responses it deepens.
-            self._deepen_head_anchors(
-                enabled,
-                equity_symbols,
-                master,
-                calendar_open,
-                daily_start,
-                end,
-                issues,
-                statuses,
-                raw_snapshots,
-                raw_daily_frames,
-                fetch_start=daily_start,
-            )
-
-            # ---- required benchmark history ----------------------------- #
-            benchmark_symbols = tuple(self._project_config.benchmark_symbols)
-            benchmark_rows: list[pd.DataFrame] = []
-            benchmark_dates: set[date] = set()
-            fatal = self._fetch_benchmarks(
-                enabled,
-                benchmark_symbols,
-                daily_start,
-                end,
-                issues,
-                statuses,
-                raw_snapshots,
-                benchmark_rows,
-                benchmark_dates,
-            )
-            if fatal:
-                return self._result(
-                    issues,
-                    None,
-                    run_id,
+                # ---- required benchmark history ------------------------- #
+                benchmark_symbols = tuple(
+                    self._project_config.benchmark_symbols
+                )
+                benchmark_rows: list[pd.DataFrame] = []
+                benchmark_dates: set[date] = set()
+                fatal = self._fetch_benchmarks(
+                    enabled,
+                    benchmark_symbols,
+                    daily_start,
                     end,
+                    issues,
                     statuses,
                     raw_snapshots,
+                    benchmark_rows,
+                    benchmark_dates,
                 )
-        else:
-            # Nothing to fetch: the baseline daily table is carried untouched
-            # and no benchmark lane runs, so ``_missing_issues`` sees an empty
-            # grid and never re-judges carried history (spec D5.2).
+                if fatal:
+                    return self._result(
+                        issues,
+                        None,
+                        run_id,
+                        end,
+                        statuses,
+                        raw_snapshots,
+                    )
+        if daily_skipped or daily_unavailable:
+            # Nothing to fetch (or nothing answerable): the baseline daily
+            # table is carried untouched and no benchmark lane runs, so
+            # ``_missing_issues`` sees an empty grid and never re-judges
+            # carried history (spec D5.2).
             benchmark_symbols = tuple(self._project_config.benchmark_symbols)
             benchmark_rows: list[pd.DataFrame] = []
             benchmark_dates: set[date] = set()
@@ -1174,7 +1274,7 @@ class DataPipeline:
         # ---- optional validation daily ---------------------------------- #
         validation_rows: list[pd.DataFrame] = []
         for lane_name, lane_reuse in (("baostock", False), ("xingyao", True)):
-            if lane_name not in enabled or daily_skipped:
+            if lane_name not in enabled or daily_skipped or daily_unavailable:
                 continue
             self._fetch_validation_daily(
                 lane_name,
@@ -1219,14 +1319,15 @@ class DataPipeline:
             ingested,
             pre_close_lookup=self._stored_pre_close_lookup(),
         )
-        if daily_skipped:
-            # Carried forward untouched: the fetch window was empty, so no
-            # baseline row inside the request window is replaced.  The one
-            # exception is the interior-gap proof (ADR-020): rows it adds
-            # fill holes the carried table itself provably has -- days with
-            # no carried row at all, so a plain concat replaces nothing --
-            # and without it a hole interior to the covered span would never
-            # heal: no round re-fetches a covered day.
+        if daily_skipped or daily_unavailable:
+            # Carried forward untouched: the fetch window was empty (or the
+            # primary source was unreachable this round), so no baseline row
+            # inside the request window is replaced.  The one exception is
+            # the interior-gap proof (ADR-020): rows it adds fill holes the
+            # carried table itself provably has -- days with no carried row
+            # at all, so a plain concat replaces nothing -- and without it a
+            # hole interior to the covered span would never heal: no round
+            # re-fetches a covered day.
             new_daily = current_daily
             if interior_rows is not None and not interior_rows.empty:
                 new_daily = _coerce_daily(
@@ -1313,6 +1414,27 @@ class DataPipeline:
             _contract_issues(tables, self._project_config.data_contracts)
         )
 
+        # Destroyed-facts guard (spec §7.5.4): no fetch outcome may clear a
+        # table the baseline version carries.  An assembled empty frame over
+        # a non-empty baseline frame is a clearing incident, FATAL and
+        # publication-blocking regardless of tier -- the sanctioned outage
+        # paths above carry the baseline frame instead, and the first-publish
+        # empty frame only arises when the baseline itself has no facts.
+        for registered in sorted(self._project_config.data_contracts):
+            base_frame = baseline_frames.get(registered)
+            if base_frame is None or base_frame.empty:
+                continue
+            new_frame = tables.get(registered)
+            if new_frame is not None and new_frame.empty:
+                issues.append(
+                    _issue(
+                        Severity.FATAL,
+                        CODE_TABLE_EMPTIED_BY_FETCH,
+                        table=registered,
+                        details={"table": registered},
+                    )
+                )
+
         # Per-table fetch-coverage evidence (spec D5.3): ``fetched`` segments
         # are the contract windows actually requested this round, ``carried``
         # segments chain the span the baseline recorded, and a table whose
@@ -1322,6 +1444,22 @@ class DataPipeline:
         acceptance_anchor = criterion.acceptance_start
         fetch_segments: dict[str, list[FetchSegment]] = {}
         for table, plan in sorted(plans.items()):
+            if table in unavailable:
+                # The table's source lane failed transiently this round
+                # (spec §7.5.4): carried baseline facts plus a
+                # ``source_unavailable`` tail reaching the published end --
+                # or, when the baseline carries no facts for the table, the
+                # whole review window marked unavailable.
+                fetch_segments[table] = _unavailable_outage_segments(
+                    table,
+                    baseline_frames.get(table),
+                    recorded_spans.get(table),
+                    baseline_covered,
+                    acceptance_anchor,
+                    start,
+                    end,
+                )
+                continue
             if plan.kind == KIND_NOT_FETCHED:
                 low = (
                     max(start, acceptance_anchor)
@@ -1684,6 +1822,12 @@ class DataPipeline:
             calendar_frame = context.read("trading_calendar")
             daily = context.read("daily_bar")
             ca = context.read(TABLE_CORPORATE_ACTION)
+            # Every table the baseline actually carries, for the
+            # destroyed-facts guard: a round may never assemble an empty
+            # frame over one of these (spec §7.5.4).
+            baseline_frames = {
+                name: context.read(name) for name in context.tables
+            }
             membership = (
                 context.read(TABLE_UNIVERSE_MEMBERSHIP)
                 if TABLE_UNIVERSE_MEMBERSHIP in context.tables
@@ -1738,6 +1882,7 @@ class DataPipeline:
             spans,
             fetch_coverage,
             str(ref.version),
+            baseline_frames,
         )
 
     def _require_available(
@@ -1780,7 +1925,17 @@ class DataPipeline:
         primary_rows,
         primary_dates,
         raw_daily_frames,
+        unavailable: set[str] | None = None,
     ) -> bool:
+        """Fetch the primary daily lane; ``True`` stops the round's fetches.
+
+        A transient supplier outage is not fatal: ``daily_bar`` lands in
+        ``unavailable`` and the caller carries the baseline daily table
+        instead (spec §7.5.4).  Every other failure stays fatal.  A caller
+        that passes no ``unavailable`` set keeps the all-failures-fatal
+        contract.
+        """
+        outage: set[str] | None = None if unavailable is None else set()
         if "tushare" not in enabled:
             return False
         source = self._adapter_or_fail("tushare", statuses)
@@ -1790,7 +1945,7 @@ class DataPipeline:
             dispatched = self._dispatch(
                 "tushare", source, "daily", symbol, start, end,
                 {"adjustment": "unadjusted"}, required=True, issues=issues,
-                reuse=True,
+                reuse=True, transient_outage=outage,
             )
             if dispatched is None:
                 statuses["tushare"] = SourceStatus(
@@ -1798,6 +1953,8 @@ class DataPipeline:
                     reason=f"required fetch failed for {symbol}",
                     reason_code="source_fetch_failed",
                 )
+                if outage:
+                    unavailable.add("daily_bar")
                 return True
             result, snapshot = dispatched
             raw_snapshots.append(snapshot)
@@ -2228,6 +2385,7 @@ class DataPipeline:
         statuses,
         raw_snapshots,
         baseline_spans,
+        unavailable,
     ) -> tuple[tuple[date, ...], tuple[CalendarCoverageSpan, ...]] | None:
         """Fetch, validate and materialise this window's trading calendar.
 
@@ -2239,7 +2397,9 @@ class DataPipeline:
         ``(open_days, spans)`` or ``None`` after a FATAL issue: a raised
         calendar never publishes, never writes a partial span, and never
         reuses a previous run's raw response (the supplier is re-requested on
-        every run).
+        every run).  A transient supplier outage is not fatal: the round
+        carries the published calendar instead (spec §7.5.4) and the table
+        name lands in ``unavailable`` so the coverage record marks the tail.
         """
         source = self._adapter_or_fail("tushare", statuses)
         if source is None:
@@ -2277,6 +2437,17 @@ class DataPipeline:
                 result = fetch_with_retry(
                     source, request, policy, sleeper=self._sleeper
                 )
+            except TransientSourceError as error:
+                # Enabled but unreachable this round (spec §7.5.2): not a
+                # FATAL -- the caller carries the published calendar and the
+                # coverage record marks the ``source_unavailable`` tail.
+                statuses["tushare"] = SourceStatus(
+                    "tushare", True, False,
+                    reason=f"trade_cal fetch failed: {error}",
+                    reason_code="source_fetch_failed",
+                )
+                unavailable.add("trading_calendar")
+                return None
             except Exception as error:  # noqa: BLE001 - required calendar
                 issues.append(
                     _issue(
@@ -2372,6 +2543,7 @@ class DataPipeline:
 
     def _refresh_security_master(
         self, start, end, issues, statuses, raw_snapshots, master,
+        unavailable,
     ):
         """Apply the required tushare stock_basic whole-market snapshot.
 
@@ -2384,7 +2556,10 @@ class DataPipeline:
         ``list_status``); the universe labels stay from ``configs/universe.yml``
         as carried by ``master``.  Returns ``(refreshed_master, coverage)`` on
         success, or ``(None, None)`` after a FATAL issue (transport failure or
-        a snapshot missing a universe symbol), which blocks publication.
+        a snapshot missing a universe symbol), which blocks publication.  A
+        transient supplier outage is not fatal: the caller carries the
+        baseline master and its coverage evidence instead (spec §7.5.4) and
+        the table name lands in ``unavailable``.
         """
         source = self._adapter_or_fail("tushare", statuses)
         if source is None:
@@ -2418,6 +2593,16 @@ class DataPipeline:
                 policy,
                 sleeper=self._sleeper,
             )
+        except TransientSourceError as error:
+            # Enabled but unreachable this round (spec §7.5.2/4): the caller
+            # carries the baseline master; no FATAL is raised.
+            statuses["tushare"] = SourceStatus(
+                "tushare", True, False,
+                reason=f"stock_basic fetch failed: {error}",
+                reason_code="source_fetch_failed",
+            )
+            unavailable.add("security_master")
+            return None, None
         except Exception as error:  # noqa: BLE001 - required role
             issues.append(
                 _issue(
@@ -3328,6 +3513,7 @@ class DataPipeline:
         issues=None,
         reuse: bool = False,
         allow_empty: bool = False,
+        transient_outage: set[str] | None = None,
     ):
         """One per-symbol request: ``(result, snapshot)`` or ``None``.
 
@@ -3344,6 +3530,12 @@ class DataPipeline:
         Eligibility is enforced inside ``RawStore.resolve_reusable`` via
         ``REUSABLE_CHANNELS``; passing ``reuse=True`` only asks for the
         lookup, it cannot widen the channel set.
+
+        A required request that fails with a ``TransientSourceError`` records
+        the source in ``transient_outage`` (when supplied) and returns
+        ``None`` without the FATAL: the caller answers with the carried
+        baseline table instead of failing the round (spec §7.5.4).  Every
+        other required failure keeps its FATAL issue.
         """
         config: SourceConfig = self._project_config.sources.get(
             name, SourceConfig()
@@ -3386,6 +3578,39 @@ class DataPipeline:
             result = fetch_with_retry(
                 source, request, policy, sleeper=self._sleeper
             )
+        except TransientSourceError as error:
+            if required and transient_outage is not None:
+                transient_outage.add(name)
+                return None
+            message = str(translate_supplier_error(error))
+            if required:
+                issues.append(
+                    _issue(
+                        Severity.FATAL,
+                        CODE_SOURCE_FETCH_FAILED,
+                        details={
+                            "source": name,
+                            "endpoint": endpoint,
+                            "symbol": symbol,
+                            "message": message,
+                        },
+                    )
+                )
+                return None
+            if issues is not None:
+                issues.append(
+                    _issue(
+                        Severity.WARNING,
+                        CODE_OPTIONAL_SOURCE_FAILURE,
+                        details={
+                            "source": name,
+                            "endpoint": endpoint,
+                            "symbol": symbol,
+                            "message": message,
+                        },
+                    )
+                )
+            return None
         except Exception as error:  # noqa: BLE001
             message = str(translate_supplier_error(error))
             if required:

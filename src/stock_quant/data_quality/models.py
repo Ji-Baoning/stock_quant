@@ -85,6 +85,13 @@ CODE_UNREGISTERED_TABLE = "unregistered_table"
 # because a later release registered new tables.
 CODE_MISSING_REGISTERED_TABLE = "missing_registered_table"
 
+# A round whose assembled table is empty while the baseline version carries
+# rows for it (spec §7.5.4): no fetch outcome may destroy existing facts, so
+# the clearing incident blocks the publication unconditionally -- the carried
+# or empty-frame outage paths never produce this shape, only a malformed
+# round does.
+CODE_TABLE_EMPTIED_BY_FETCH = "table_emptied_by_fetch"
+
 # Downgrade evidence (spec D1): a non-core table carrying a table-level
 # blocking code publishes with this WARNING record instead of blocking.
 # It is deliberately NOT in PUBLICATION_BLOCKING_CODES.

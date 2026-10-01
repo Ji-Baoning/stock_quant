@@ -24,6 +24,7 @@ from conftest import (  # noqa: E402
     build_fixture_project,
 )
 
+from stock_quant.cli import app
 from stock_quant.data_model.calendar_coverage import CODE_CALENDAR_COVERAGE_GAP
 from stock_quant.data_model.dataset import (
     DatasetPublisher,
@@ -1879,3 +1880,195 @@ def test_a_factor_contract_break_keeps_the_evidence_it_carried(project, monkeypa
     ]
     assert len(failures) == 1
     _assert_backward_factor_snapshot(project, result)
+
+
+# --------------------------------------------------------------------------- #
+# Source-unavailable carry and tail semantics (spec §7.5.4)
+# --------------------------------------------------------------------------- #
+
+
+#: A window strictly after the baseline coverage, so an unavailable source
+#: leaves a genuinely uncovered tail to mark.
+_DECEMBER_START = date(2021, 12, 1)
+_DECEMBER_END = date(2021, 12, 31)
+
+
+def _no_retry(seconds: float) -> None:
+    """Retry backoff sleeper: transient stub failures replay instantly."""
+    return None
+
+
+def _published_table(root: Path, version: str, table: str) -> pd.DataFrame:
+    with DatasetReader(root).open(version) as context:
+        return context.read(table)
+
+
+def _coverage_segments(root: Path, version: str, table: str) -> list[dict]:
+    with DatasetReader(root).open(version) as context:
+        build = context.manifest.get("build_config")
+    return build["table_fetch_coverage"][table]
+
+
+def _unavailable_tushare_pipeline(project, **overrides) -> DataPipeline:
+    """A pipeline whose tushare supplier is unreachable for the whole round.
+
+    ``ServerError`` is a ``TransientSourceError``: the enabled supplier is
+    unreachable this round (spec §7.5.2), which is the outage class the carry
+    semantics answer -- never a permanent ``AuthenticationError``.
+    """
+    failing = StubAdapter("tushare", raise_with=ServerError)
+    return DataPipeline(
+        project.root,
+        sources=_all_stubs(tushare=failing),
+        sleeper=_no_retry,
+        **overrides,
+    )
+
+
+def test_an_unavailable_source_keeps_the_baseline_table_and_marks_the_tail(
+    project,
+):
+    """A transient source outage publishes the carried baseline table.
+
+    The round must not fail and must not drop one existing fact: the
+    republished ``trading_calendar`` is row-identical to the previous
+    version's, and its coverage record tiles the review window as a carried
+    head plus a ``not_fetched``/``source_unavailable`` tail that ends exactly
+    at the published end (spec §7.5.4).
+    """
+    first = DataPipeline(
+        project.root, sources=_all_stubs(), sleeper=_no_retry
+    ).update(_request())
+    assert first.dataset_ref is not None
+    baseline_version = first.dataset_ref.version
+    carried_calendar = _published_table(
+        project.root, baseline_version, "trading_calendar"
+    )
+
+    second = _unavailable_tushare_pipeline(project).update(
+        DataUpdateRequest(start_date=_DECEMBER_START, end_date=_DECEMBER_END)
+    )
+    assert second.dataset_ref is not None
+    republished = _published_table(
+        project.root, second.dataset_ref.version, "trading_calendar"
+    )
+    pd.testing.assert_frame_equal(
+        republished, carried_calendar, check_dtype=False
+    )
+
+    segments = _coverage_segments(
+        project.root, second.dataset_ref.version, "trading_calendar"
+    )
+    assert [segment["kind"] for segment in segments] == [
+        "carried",
+        "not_fetched",
+    ]
+    head, tail = segments
+    assert tail["reason"] == "source_unavailable"
+    assert tail["window_start"] == _DECEMBER_START.isoformat()
+    assert tail["window_end"] == _DECEMBER_END.isoformat()
+    assert head["window_start"] == BARS_START.isoformat()
+    assert head["window_end"] == "2021-11-30"
+
+
+def test_a_first_publish_with_an_unavailable_source_may_be_empty(project):
+    """A registered table with no baseline facts may publish empty.
+
+    When the baseline carries no facts for the table (the first publish of
+    that table) and its source is unreachable, the round publishes the
+    canonical empty frame and records one whole-window
+    ``not_fetched``/``source_unavailable`` segment -- the quarantine
+    empty-frame precedent extended to the outage path (spec §7.5.4).
+    """
+    publisher = DatasetPublisher(project.root)
+    with DatasetReader(project.root).open(publisher.current().version) as (
+        context
+    ):
+        tables = {name: context.read(name) for name in context.tables}
+        build_config = context.manifest.get("build_config")
+    tables["security_master_coverage"] = master_coverage_frame([])
+    publisher.publish(tables, QualityReport(), build_config=build_config)
+
+    result = _unavailable_tushare_pipeline(project).update(
+        DataUpdateRequest(start_date=_DECEMBER_START, end_date=_DECEMBER_END)
+    )
+    assert result.dataset_ref is not None
+    republished = _published_table(
+        project.root, result.dataset_ref.version, "security_master_coverage"
+    )
+    assert republished.empty
+    segments = _coverage_segments(
+        project.root, result.dataset_ref.version, "security_master_coverage"
+    )
+    assert len(segments) == 1
+    segment = segments[0]
+    assert segment["kind"] == "not_fetched"
+    assert segment["reason"] == "source_unavailable"
+    assert segment["window_start"] == BARS_START.isoformat()
+    assert segment["window_end"] == _DECEMBER_END.isoformat()
+
+
+def test_clearing_an_existing_table_never_publishes(project, monkeypatch):
+    """A round that assembles an empty frame over a carried table is blocked.
+
+    No fetch outcome may destroy existing facts: a round whose assembled
+    table is empty while the baseline version carries rows for it fails with
+    the FATAL ``table_emptied_by_fetch`` naming the table, the publication is
+    refused, and CURRENT keeps the previous version (spec §7.5.4).
+    """
+    from stock_quant.data_pipeline import CODE_TABLE_EMPTIED_BY_FETCH
+
+    first = DataPipeline(
+        project.root, sources=_all_stubs(), sleeper=_no_retry
+    ).update(_request())
+    assert first.dataset_ref is not None
+    baseline_version = first.dataset_ref.version
+
+    with DatasetReader(project.root).open(baseline_version) as context:
+        emptied = context.read("adjusted_bar").iloc[0:0]
+    monkeypatch.setattr(
+        "stock_quant.data_pipeline.build_adjusted_bars",
+        lambda *_args, **_kwargs: emptied,
+    )
+    cleared = DataPipeline(
+        project.root, sources=_all_stubs(), sleeper=_no_retry
+    ).update(_request())
+    assert cleared.dataset_ref is None
+    assert DatasetPublisher(project.root).current().version == baseline_version
+    report = cleared.quality_report
+    assert CODE_TABLE_EMPTIED_BY_FETCH in report.by_code()
+    issue = next(
+        item
+        for item in report.issues
+        if item.code == CODE_TABLE_EMPTIED_BY_FETCH
+    )
+    assert issue.severity is Severity.FATAL
+    assert issue.table == "adjusted_bar"
+    assert issue.details.get("table") == "adjusted_bar"
+
+
+def test_a_source_unavailable_tail_version_passes_data_validate(
+    project, cli_runner
+):
+    """The carried+tail version an outage produced is a legitimate dataset.
+
+    The offline acceptance suite must consume the new coverage shape: the
+    version published under a transient tushare outage passes
+    ``data validate`` end to end (spec §7.5.4 -- the tail is evidence, not a
+    defect), which is the only proof the shape lands in the store and is
+    consumed by the acceptance side.
+    """
+    first = DataPipeline(
+        project.root, sources=_all_stubs(), sleeper=_no_retry
+    ).update(_request())
+    assert first.dataset_ref is not None
+    second = _unavailable_tushare_pipeline(project).update(
+        DataUpdateRequest(start_date=_DECEMBER_START, end_date=_DECEMBER_END)
+    )
+    assert second.dataset_ref is not None
+
+    result = cli_runner.invoke(
+        app, ["data", "validate", "--root", str(project.root)]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "PASS" in result.stdout

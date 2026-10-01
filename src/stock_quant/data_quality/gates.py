@@ -27,6 +27,7 @@ from stock_quant.data_quality.models import (
     CODE_QUARANTINE_MISSING_REASON,
     CODE_REPORT_GENERATION_FAILED,
     CODE_SCHEMA_MISMATCH,
+    CODE_TABLE_EMPTIED_BY_FETCH,
     CODE_UNEXPLAINED_PRIMARY_GAP,
     CODE_UNKNOWN_ADJUSTMENT,
     CODE_UNKNOWN_SOURCE,
@@ -58,6 +59,11 @@ PUBLICATION_BLOCKING_CODES = frozenset(
         # omits a currently registered table blocks unconditionally — like
         # B1's unregistered-table rule it joins the global process-code set.
         CODE_MISSING_REGISTERED_TABLE,
+        # Destroyed-facts guard (spec §7.5.4): a round that assembles an
+        # empty frame over a table the baseline carries blocks
+        # unconditionally -- like the registry rules it is a process-level
+        # obligation, never a tier-downgradable table defect.
+        CODE_TABLE_EMPTIED_BY_FETCH,
         CODE_QUARANTINE_MISSING_REASON,
         CODE_REPORT_GENERATION_FAILED,
         CODE_ADJUSTED_BAR_MISSING_RAW,
@@ -76,6 +82,7 @@ GLOBAL_PROCESS_CODES = frozenset(
         CODE_QUARANTINE_MISSING_REASON,
         CODE_UNREGISTERED_TABLE,
         CODE_MISSING_REGISTERED_TABLE,
+        CODE_TABLE_EMPTIED_BY_FETCH,
     }
 )
 
