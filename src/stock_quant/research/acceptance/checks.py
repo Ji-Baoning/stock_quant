@@ -67,7 +67,7 @@ from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.calendar_coverage import (
     validate_build_calendar_evidence,
 )
-from stock_quant.data_model.dataset import STANDARDIZED_SCHEMAS, DatasetReader
+from stock_quant.data_model.dataset import DatasetReader
 from stock_quant.data_model.fetch_coverage import (
     validate_table_fetch_coverage,
 )
@@ -275,10 +275,25 @@ def _check_quality_report(value: AcceptanceCheckInput) -> CheckResult:
 
 
 def _check_required_tables(value: AcceptanceCheckInput) -> CheckResult:
-    """Require every table registered by the current schema contract."""
+    """Require the manifest's own recorded tables to all be present.
+
+    The "current registry must be complete" obligation moved to the publish
+    gate (spec §7.5.6): re-reviewing an old version must not fail because a
+    later release registered new tables.  Here the manifest is judged only
+    against the table set it records itself.
+    """
     evidence = dataset_evidence(value)
     tables = _tables_mapping(evidence.manifest.get("tables"))
-    missing = sorted(set(STANDARDIZED_SCHEMAS) - set(tables))
+    build = evidence.manifest.get("build_config")
+    recorded = set(tables)
+    if isinstance(build, Mapping):
+        coverage = build.get("table_fetch_coverage")
+        if isinstance(coverage, Mapping):
+            recorded |= {str(name) for name in coverage}
+        lineage = build.get("table_lineage")
+        if isinstance(lineage, Mapping):
+            recorded |= {str(name) for name in lineage}
+    missing = sorted(recorded - set(tables))
     failures = [["missing_required_table", name] for name in missing]
     return _result("required_table_coverage", failures)
 
@@ -463,6 +478,11 @@ def _check_table_fetch_coverage(value: AcceptanceCheckInput) -> CheckResult:
     failures = [
         [code, json.dumps(details, sort_keys=True)] for code, details in violations
     ]
+    coverage = build.get("table_fetch_coverage")
+    if isinstance(coverage, Mapping):
+        published = set(_tables_mapping(evidence.manifest.get("tables")))
+        for name in sorted(published - set(coverage)):
+            failures.append(["table_fetch_coverage_table_unrecorded", name])
     return _result("table_fetch_coverage_evidence", failures)
 
 

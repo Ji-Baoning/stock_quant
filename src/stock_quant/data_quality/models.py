@@ -78,6 +78,13 @@ CODE_QUARANTINE_OUT_OF_WINDOW = "quarantine_out_of_window"
 # names a dataset that must never reach the immutable store.
 CODE_UNREGISTERED_TABLE = "unregistered_table"
 
+# A publish that omits a table from the current schema registry (spec
+# §7.5.6): registry completeness is a publication obligation, enforced by
+# the publisher itself, so a partial offline publish can never reach the
+# immutable store -- while re-reviewing an older manifest never fails
+# because a later release registered new tables.
+CODE_MISSING_REGISTERED_TABLE = "missing_registered_table"
+
 # Downgrade evidence (spec D1): a non-core table carrying a table-level
 # blocking code publishes with this WARNING record instead of blocking.
 # It is deliberately NOT in PUBLICATION_BLOCKING_CODES.

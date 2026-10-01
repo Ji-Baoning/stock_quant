@@ -20,6 +20,7 @@ from stock_quant.data_quality.models import (
     CODE_ADJUSTED_BAR_WRONG_BASIS,
     CODE_DUPLICATE_CONFLICT,
     CODE_INVALID_OHLC,
+    CODE_MISSING_REGISTERED_TABLE,
     CODE_NEGATIVE_AMOUNT,
     CODE_NEGATIVE_VOLUME,
     CODE_NONPOSITIVE_PRICE,
@@ -53,6 +54,10 @@ PUBLICATION_BLOCKING_CODES = frozenset(
         # data_contracts declaration blocks unconditionally — from B1 on it
         # joins the global process-code set.
         CODE_UNREGISTERED_TABLE,
+        # Publish-path registry completeness (spec §7.5.6): a publish that
+        # omits a currently registered table blocks unconditionally — like
+        # B1's unregistered-table rule it joins the global process-code set.
+        CODE_MISSING_REGISTERED_TABLE,
         CODE_QUARANTINE_MISSING_REASON,
         CODE_REPORT_GENERATION_FAILED,
         CODE_ADJUSTED_BAR_MISSING_RAW,
@@ -70,6 +75,7 @@ GLOBAL_PROCESS_CODES = frozenset(
         CODE_REPORT_GENERATION_FAILED,
         CODE_QUARANTINE_MISSING_REASON,
         CODE_UNREGISTERED_TABLE,
+        CODE_MISSING_REGISTERED_TABLE,
     }
 )
 

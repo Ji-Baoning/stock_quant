@@ -46,7 +46,13 @@ from stock_quant.data_model.schemas import (
     UNIVERSE_MEMBERSHIP_SCHEMA,
 )
 from stock_quant.data_quality.gates import evaluate_publication
-from stock_quant.data_quality.models import QualityReport, issue_dict_dumps
+from stock_quant.data_quality.models import (
+    CODE_MISSING_REGISTERED_TABLE,
+    QualityIssue,
+    QualityReport,
+    Severity,
+    issue_dict_dumps,
+)
 
 #: The standardized tables this repository can publish, keyed by canonical
 #: table name and fixed to the Task 3 Arrow schemas. New canonical tables must
@@ -70,6 +76,30 @@ _CURRENT_NAME = "CURRENT"
 
 class PublicationBlocked(RuntimeError):
     """The neutral publication gate refused this dataset."""
+
+
+def _with_registered_table_issues(
+    report: QualityReport, tables: Mapping[str, object]
+) -> QualityReport:
+    """Fold ``missing_registered_table`` into the report being gated.
+
+    Registry completeness (spec §7.5.6) is a *publication* obligation, not a
+    review obligation: it is enforced here so that every caller -- ``data
+    update`` and the offline ``project/*.py`` publishers alike -- is covered,
+    and so that re-reviewing an old version never fails because a later
+    release registered a new table.
+    """
+    missing = tuple(
+        QualityIssue(
+            severity=Severity.FATAL,
+            code=CODE_MISSING_REGISTERED_TABLE,
+            table=name,
+        )
+        for name in sorted(set(STANDARDIZED_SCHEMAS) - set(tables))
+    )
+    if not missing:
+        return report
+    return QualityReport(issues=(*report.issues, *missing))
 
 
 class DatasetNotFoundError(FileNotFoundError):
@@ -107,6 +137,7 @@ class DatasetPublisher:
         table_tiers: Mapping[str, str] | None = None,
     ) -> DatasetRef:
         """Gate, stage and atomically publish one immutable dataset version."""
+        report = _with_registered_table_issues(report, tables)
         decision = evaluate_publication(report, table_tiers=table_tiers)
         if not decision.passed:
             raise PublicationBlocked(

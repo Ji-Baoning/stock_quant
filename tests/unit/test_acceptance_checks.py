@@ -22,6 +22,7 @@ import pytest
 
 from stock_quant.research.acceptance.checks import (
     AcceptanceCheckInput,
+    _check_required_tables,
     _check_table_fetch_coverage,
     _open_days,
     dataset_evidence,
@@ -306,3 +307,91 @@ def test_table_fetch_coverage_evidence_requires_build_config(tmp_path):
     assert ["dataset_build_evidence_missing", "build_config"] in (
         check.details["failures"]
     )
+
+
+def test_a_published_table_without_a_coverage_record_fails(tmp_path):
+    """Every published table must carry its own fetch-coverage record.
+
+    The recorded ``daily_bar`` payload tiles the review window, so the only
+    failure is the published ``trading_calendar`` the build evidence never
+    mentions (spec §7.5.6: one coverage record per published table).
+    """
+    _write_build_manifest(
+        tmp_path,
+        {
+            "origin": "data_update",
+            "full_history_acceptance_start": "2021-11-01",
+            "resolved_end_date": "2021-11-30",
+            "table_fetch_coverage": {
+                "daily_bar": [
+                    {
+                        "table": "daily_bar",
+                        "kind": "carried",
+                        "window_start": "2021-11-01",
+                        "window_end": "2021-11-29",
+                    },
+                    {
+                        "table": "daily_bar",
+                        "kind": "fetched",
+                        "window_start": "2021-11-30",
+                        "window_end": "2021-11-30",
+                    },
+                ]
+            },
+        },
+    )
+    dataset = tmp_path / "data" / "standardized" / ("a" * 64)
+    manifest = json.loads(
+        (dataset / "dataset_manifest.json").read_text(encoding="utf-8")
+    )
+    manifest["tables"] = {
+        "daily_bar": {"path": "daily_bar.parquet"},
+        "trading_calendar": {"path": "trading_calendar.parquet"},
+    }
+    (dataset / "dataset_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    check = _check_table_fetch_coverage(_input(tmp_path))
+    assert check.status is CheckStatus.FAIL
+    assert check.details["code"] == "table_fetch_coverage_table_unrecorded"
+    assert ["table_fetch_coverage_table_unrecorded", "trading_calendar"] in (
+        check.details["failures"]
+    )
+
+
+def test_required_tables_no_longer_judge_by_the_current_registry(tmp_path):
+    """``required_table_coverage`` judges the manifest's own recorded tables.
+
+    Re-reviewing an old version must not fail because a later release
+    registered new tables: a manifest whose table set sits outside the
+    current ``STANDARDIZED_SCHEMAS`` registry passes, while a table the
+    manifest records in its own build evidence without publishing it still
+    fails (spec §7.5.6 moved registry completeness to the publish gate).
+    """
+    dataset = _write_dataset(
+        tmp_path,
+        {
+            "dataset_version": "a" * 64,
+            "tables": {
+                "legacy_extra_table": {"path": "legacy_extra_table.parquet"}
+            },
+        },
+    )
+    (dataset / "quality_report.json").write_text("{}\n", encoding="utf-8")
+    check = _check_required_tables(_input(tmp_path))
+    assert check.status is CheckStatus.PASS
+
+    # A table the manifest itself records without publishing it still fails.
+    stray = {
+        "dataset_version": "a" * 64,
+        "tables": {
+            "legacy_extra_table": {"path": "legacy_extra_table.parquet"}
+        },
+        "build_config": {"table_fetch_coverage": {"daily_bar": []}},
+    }
+    (dataset / "dataset_manifest.json").write_text(
+        json.dumps(stray), encoding="utf-8"
+    )
+    check = _check_required_tables(_input(tmp_path))
+    assert check.status is CheckStatus.FAIL
+    assert ["missing_required_table", "daily_bar"] in check.details["failures"]
