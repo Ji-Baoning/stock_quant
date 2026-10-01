@@ -395,3 +395,35 @@ def test_required_tables_no_longer_judge_by_the_current_registry(tmp_path):
     check = _check_required_tables(_input(tmp_path))
     assert check.status is CheckStatus.FAIL
     assert ["missing_required_table", "daily_bar"] in check.details["failures"]
+
+
+def test_required_tables_reads_legacy_manifest_without_table_lineage(tmp_path):
+    """A build_config without ``table_lineage`` is read in its legacy form.
+
+    Dataset versions recorded before per-table lineage existed carry only
+    ``tables`` and ``table_fetch_coverage``: the check must neither error on
+    the absent key nor invent a missing-table failure from it, and must judge
+    the manifest by its own recorded sets (spec §7.4 re-review of old
+    versions after newer releases registered further tables).
+    """
+    dataset = _write_dataset(
+        tmp_path,
+        {
+            "dataset_version": "a" * 64,
+            "tables": {
+                "daily_bar": {"path": "daily_bar.parquet"},
+                "trading_calendar": {"path": "trading_calendar.parquet"},
+            },
+            "build_config": {
+                "origin": "data_update",
+                "table_fetch_coverage": {
+                    "daily_bar": [],
+                    "trading_calendar": [],
+                },
+            },
+        },
+    )
+    (dataset / "quality_report.json").write_text("{}\n", encoding="utf-8")
+    check = _check_required_tables(_input(tmp_path))
+    assert check.status is CheckStatus.PASS
+    assert check.details == {}
