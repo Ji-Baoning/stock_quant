@@ -92,6 +92,15 @@ CODE_MISSING_REGISTERED_TABLE = "missing_registered_table"
 # round does.
 CODE_TABLE_EMPTIED_BY_FETCH = "table_emptied_by_fetch"
 
+# daily_bar x basic_factor join consistency (spec §7.2): duplicated
+# (trade_date, symbol) keys on either side, an inner join that expands rows,
+# or a daily-bar day with no basic_factor row and no covering UNTRUSTED
+# coverage row are cross-table invariants -- a left join must never silently
+# absorb them, so all three are FATAL global-process codes no tier may waive.
+CODE_BASIC_FACTOR_JOIN_DUPLICATE = "basic_factor_join_duplicate"
+CODE_BASIC_FACTOR_JOIN_EXPANSION = "basic_factor_join_expansion"
+CODE_BASIC_FACTOR_COVERAGE_ROW_MISSING = "basic_factor_coverage_row_missing"
+
 # Downgrade evidence (spec D1): a non-core table carrying a table-level
 # blocking code publishes with this WARNING record instead of blocking.
 # It is deliberately NOT in PUBLICATION_BLOCKING_CODES.

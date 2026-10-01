@@ -58,6 +58,7 @@ from stock_quant.data_model.adjusted_bar import (
     build_adjusted_bars,
 )
 from stock_quant.data_model.basic_factor import (
+    basic_factor_join_issues,
     build_basic_factor_coverage,
     normalize_basic_factor,
 )
@@ -1741,6 +1742,38 @@ class DataPipeline:
                         else start,
                         end,
                     )
+
+        # One-to-one daily_bar x basic_factor join consistency (spec §7.2,
+        # P2c Task 3): duplicated (trade_date, symbol) keys, an inner join
+        # that expands rows, or a bar day with no factor row and no covering
+        # UNTRUSTED coverage row -- all FATAL global-process codes, so the
+        # round fails here instead of a left join absorbing the defect.
+        # The judged domain is the coverage builder's own (P2c Task 2):
+        # EQUITY bar rows inside the rebuilt coverage window -- benchmark
+        # index rows are not basic_factor facts, carried bar history outside
+        # the judged window carries no coverage verdict, and a round whose
+        # daily_basic lane never ran (disabled / wholesale-outage fallback)
+        # makes no one-to-one claim to judge.
+        if (
+            basic_factor_plan is not None
+            and basic_factor_plan.kind == KIND_FETCHED
+            and not basic_factor_meta.get("unavailable")
+            and not new_basic_factor_coverage.empty
+        ):
+            bar_days = pd.to_datetime(new_daily["trade_date"])
+            low = pd.Timestamp(new_basic_factor_coverage["window_start"].min())
+            high = pd.Timestamp(new_basic_factor_coverage["window_end"].max())
+            issues.extend(
+                basic_factor_join_issues(
+                    new_daily[
+                        new_daily["symbol"].isin(equity_symbols)
+                        & (bar_days >= low)
+                        & (bar_days <= high)
+                    ],
+                    new_basic_factor,
+                    new_basic_factor_coverage,
+                )
+            )
 
         report = QualityReport(issues=tuple(issues))
         # Declared tiers are computed once and reused by the gate, the

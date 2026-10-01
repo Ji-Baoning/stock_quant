@@ -8,6 +8,7 @@ import pandas as pd
 from stock_quant.data_model.basic_factor import (
     MARKET_CAP_UNIT_FACTOR,
     TURNOVER_RATE_UNIT_DIVISOR,
+    basic_factor_join_issues,
     build_basic_factor_coverage,
     normalize_basic_factor,
     untrusted_coverage_rows,
@@ -120,3 +121,48 @@ def test_anchored_whole_window_disabled_record_keeps_the_anchor():
     assert [(s.kind, s.window_start, s.window_end, s.reason) for s in segments] == [
         (KIND_NOT_FETCHED, anchor, end, NOT_FETCHED_SOURCE_DISABLED)
     ]
+
+
+def _bar():
+    return pd.DataFrame(
+        {"trade_date": [date(2026, 9, 29), date(2026, 9, 30)],
+         "symbol": ["600000.SH", "600000.SH"]}
+    )
+
+
+def _factor():
+    return pd.DataFrame({"trade_date": [date(2026, 9, 29)],
+                         "symbol": ["600000.SH"]})
+
+
+def _covering_coverage(symbol="600000.SH"):
+    return pd.DataFrame(
+        [{"symbol": symbol, "window_start": date(2026, 9, 1),
+          "window_end": date(2026, 9, 30), "status": "UNTRUSTED"}]
+    )
+
+
+def test_duplicate_key_and_join_expansion_fail_the_round():
+    dup_bar = pd.DataFrame(
+        {"trade_date": [date(2026, 9, 29), date(2026, 9, 29)],
+         "symbol": ["600000.SH", "600000.SH"]}
+    )
+    issues = basic_factor_join_issues(dup_bar, _factor(), _covering_coverage())
+    codes = [i.code for i in issues]
+    assert "basic_factor_join_duplicate" in codes
+    # 2 x 1 同键内联接得 2 行 > len(factor) == 1：扩行可见
+    assert "basic_factor_join_expansion" in codes
+
+
+def test_row_set_diff_without_a_coverage_row_fails():
+    issues = basic_factor_join_issues(
+        _bar(), _factor(), _covering_coverage(symbol="000001.SZ"))
+    missing = [i for i in issues
+               if i.code == "basic_factor_coverage_row_missing"]
+    assert missing and missing[0].symbol == "600000.SH"
+    assert missing[0].trade_date == date(2026, 9, 30)
+
+
+def test_covered_diff_and_clean_join_produce_no_issue():
+    assert basic_factor_join_issues(
+        _bar(), _factor(), _covering_coverage()) == []

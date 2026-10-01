@@ -85,6 +85,9 @@ class StubAdapter:
     #: (ts_code, YYYYMMDD) rows the ``daily_basic`` answer omits, so a test
     # can open a per-symbol per-day facts hole.
     daily_basic_missing: tuple[tuple[str, str], ...] = ()
+    #: (ts_code, YYYYMMDD) rows the ``daily_basic`` answer emits twice, so a
+    # test can plant a duplicate (trade_date, symbol) join key.
+    daily_basic_duplicated: tuple[tuple[str, str], ...] = ()
 
     def fetch(self, request: DataRequest) -> FetchResult:
         if request.endpoint == "daily_basic" and self.fail_daily_basic:
@@ -153,19 +156,23 @@ class StubAdapter:
             for day in _weekdays(request.start_date, request.end_date)
         ]
         missing = set(self.daily_basic_missing)
-        return pd.DataFrame(
-            [
-                {
-                    "ts_code": symbol,
-                    "trade_date": day,
-                    "total_mv": 15000_0000.0,
-                    "turnover_rate": 1.25,
-                }
-                for symbol in _FIXTURE_UNIVERSE_SYMBOLS
-                for day in days
-                if (symbol, day) not in missing
-            ]
-        )
+        rows = [
+            {
+                "ts_code": symbol,
+                "trade_date": day,
+                "total_mv": 15000_0000.0,
+                "turnover_rate": 1.25,
+            }
+            for symbol in _FIXTURE_UNIVERSE_SYMBOLS
+            for day in days
+            if (symbol, day) not in missing
+        ]
+        duplicated = set(self.daily_basic_duplicated)
+        rows += [
+            row for row in rows
+            if (row["ts_code"], row["trade_date"]) in duplicated
+        ]
+        return pd.DataFrame(rows)
 
     @staticmethod
     def _stock_basic_frame() -> pd.DataFrame:
@@ -503,3 +510,38 @@ def test_basic_factor_missing_row_is_evidence_not_a_blocker(tmp_path):
         facts.loc[facts["symbol"] == "600000.SH", "trade_date"]
     )
     assert pd.Timestamp(_GEN2_END).date() not in set(victim_dates.dt.date)
+
+
+def test_duplicate_basic_factor_key_fails_the_round(tmp_path):
+    """A duplicated (trade_date, symbol) fact fails the round (spec §7.2).
+
+    The stub answers ``daily_basic`` with one duplicated row: the P2c
+    Task 3 join check blocks publication -- no dataset ref, CURRENT stays
+    on the fixture baseline, and the quality report carries the FATAL
+    ``basic_factor_join_duplicate`` code.  (The formal integration shape
+    lands with Task 5's ``test_basic_factor_publish.py``.)
+    """
+    project = build_fixture_project(tmp_path / "project")
+    standardized_root = project.root / "data" / "standardized"
+    before = (standardized_root / "CURRENT").read_text(encoding="utf-8")
+    stubs = {
+        **_all_stubs(),
+        "tushare": StubAdapter(
+            "tushare",
+            daily_basic_duplicated=(
+                ("600000.SH", _GEN1_END.strftime("%Y%m%d")),
+            ),
+        ),
+    }
+    result = DataPipeline(project.root, sources=stubs).update(
+        DataUpdateRequest(start_date=BARS_START, end_date=_GEN1_END)
+    )
+    assert result.dataset_ref is None
+    assert "basic_factor_join_duplicate" in result.quality_report.by_code()
+    assert [
+        item.severity.value
+        for item in result.quality_report.issues
+        if item.code == "basic_factor_join_duplicate"
+    ] == ["FATAL"]
+    after = (standardized_root / "CURRENT").read_text(encoding="utf-8")
+    assert after == before

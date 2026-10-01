@@ -18,6 +18,9 @@ from stock_quant.data_quality.models import (
     CODE_ADJUSTED_BAR_RAW_CLOSE_MISMATCH,
     CODE_ADJUSTED_BAR_UNKNOWN_ACTION,
     CODE_ADJUSTED_BAR_WRONG_BASIS,
+    CODE_BASIC_FACTOR_COVERAGE_ROW_MISSING,
+    CODE_BASIC_FACTOR_JOIN_DUPLICATE,
+    CODE_BASIC_FACTOR_JOIN_EXPANSION,
     CODE_DUPLICATE_CONFLICT,
     CODE_INVALID_OHLC,
     CODE_MISSING_REGISTERED_TABLE,
@@ -64,6 +67,13 @@ PUBLICATION_BLOCKING_CODES = frozenset(
         # unconditionally -- like the registry rules it is a process-level
         # obligation, never a tier-downgradable table defect.
         CODE_TABLE_EMPTIED_BY_FETCH,
+        # daily_bar x basic_factor join consistency (spec §7.2): duplicated
+        # keys, an inner join that expands rows, or an uncovered bar-day
+        # difference are cross-table invariants -- global process codes no
+        # tier may downgrade (§7.4 "let the round fail").
+        CODE_BASIC_FACTOR_JOIN_DUPLICATE,
+        CODE_BASIC_FACTOR_JOIN_EXPANSION,
+        CODE_BASIC_FACTOR_COVERAGE_ROW_MISSING,
         CODE_QUARANTINE_MISSING_REASON,
         CODE_REPORT_GENERATION_FAILED,
         CODE_ADJUSTED_BAR_MISSING_RAW,
@@ -83,6 +93,9 @@ GLOBAL_PROCESS_CODES = frozenset(
         CODE_UNREGISTERED_TABLE,
         CODE_MISSING_REGISTERED_TABLE,
         CODE_TABLE_EMPTIED_BY_FETCH,
+        CODE_BASIC_FACTOR_JOIN_DUPLICATE,
+        CODE_BASIC_FACTOR_JOIN_EXPANSION,
+        CODE_BASIC_FACTOR_COVERAGE_ROW_MISSING,
     }
 )
 

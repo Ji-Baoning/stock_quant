@@ -27,6 +27,13 @@ from stock_quant.data_model.symbols import (
     normalize_symbol,
 )
 from stock_quant.data_model.universe_membership import SecurityMasterBoundary
+from stock_quant.data_quality.models import (
+    CODE_BASIC_FACTOR_COVERAGE_ROW_MISSING,
+    CODE_BASIC_FACTOR_JOIN_DUPLICATE,
+    CODE_BASIC_FACTOR_JOIN_EXPANSION,
+    QualityIssue,
+    Severity,
+)
 
 #: FROZEN FROM PROBE EVIDENCE (spec §6.4):
 #: docs/operations/2026-10-01-endpoint-probe-evidence.md -- daily_basic
@@ -158,3 +165,81 @@ def _scaled(value: Any, factor: float) -> float:
     if pd.isna(number):
         return float("nan")
     return number * factor
+
+
+def basic_factor_join_issues(
+    daily_bar: pd.DataFrame,
+    basic_factor: pd.DataFrame,
+    coverage: pd.DataFrame,
+) -> list[QualityIssue]:
+    """One-to-one (trade_date, symbol) between daily_bar and basic_factor.
+
+    §7.2: duplicated keys on either side, a merge that expands rows, or a
+    daily-bar row with no basic_factor row and no covering UNTRUSTED
+    coverage row are quality errors -- never silently absorbed by a left
+    join.  All three are cross-table invariants: FATAL global-process codes
+    no tier may waive.
+
+    The row-set difference is judged on the ``daily_bar`` side only:
+    basic_factor days without a daily_bar row are the coverage decision
+    table's own domain (factor support legitimately precedes the bar
+    baseline's first session and a VERIFIED row blesses it), while a bar
+    day lacking its factor row is exactly the silent loss the left join
+    would otherwise absorb.
+    """
+    issues: list[QualityIssue] = []
+    key = list(JOIN_KEY)
+    for side, frame in (("daily_bar", daily_bar),
+                        ("basic_factor", basic_factor)):
+        count = int(frame.duplicated(subset=key).sum())
+        if count:
+            issues.append(QualityIssue(
+                severity=Severity.FATAL,
+                code=CODE_BASIC_FACTOR_JOIN_DUPLICATE,
+                table="basic_factor",
+                details={"side": side, "duplicate_rows": count},
+            ))
+    # A carried frame reads back ``datetime64`` while a normalized frame
+    # holds ``date`` objects; pandas refuses a direct mixed-dtype key merge,
+    # so both sides are key-normalized first (row counts are unchanged).
+    merged = _key_normalized(daily_bar).merge(
+        _key_normalized(basic_factor), on=key, how="inner"
+    )
+    if len(merged) > len(daily_bar) or len(merged) > len(basic_factor):
+        issues.append(QualityIssue(
+            severity=Severity.FATAL,
+            code=CODE_BASIC_FACTOR_JOIN_EXPANSION,
+            table="basic_factor",
+            details={"merged_rows": int(len(merged)),
+                     "daily_bar_rows": int(len(daily_bar)),
+                     "basic_factor_rows": int(len(basic_factor))},
+        ))
+    untrusted = untrusted_coverage_rows(coverage)
+    windows = {
+        (str(r["symbol"]), pd.Timestamp(r["window_start"]).date(),
+         pd.Timestamp(r["window_end"]).date())
+        for r in untrusted.to_dict("records")
+    }
+    for symbol, day in sorted(_key_set(daily_bar) - _key_set(basic_factor)):
+        if not any(s == symbol and lo <= day <= hi for s, lo, hi in windows):
+            issues.append(QualityIssue(
+                severity=Severity.FATAL,
+                code=CODE_BASIC_FACTOR_COVERAGE_ROW_MISSING,
+                table="basic_factor",
+                symbol=symbol,
+                trade_date=day,
+                details={"side": "daily_bar_only"},
+            ))
+    return issues
+
+
+def _key_set(frame: pd.DataFrame) -> set:
+    return {
+        (str(r["symbol"]), pd.Timestamp(r["trade_date"]).date())
+        for r in frame.to_dict("records")
+    }
+
+
+def _key_normalized(frame: pd.DataFrame) -> pd.DataFrame:
+    """Both join sides on one ``trade_date`` dtype (datetime64)."""
+    return frame.assign(trade_date=pd.to_datetime(frame["trade_date"]))
