@@ -415,9 +415,10 @@ def test_research_run_rejects_window_before_supported_history(tmp_path):
     ``history_begins_after_anchor`` prefix of the momentum factor's input, so
     the run is rejected at ``table_tiers`` with the stable
     ``table_history_start_after_window`` code.  The summary names the
-    unsupported tables and records the judged window explicitly: the check
-    window is ``date_range`` -- the walk-forward warm-up is excluded by
-    design (the preflight runs before fold scheduling).
+    unsupported tables and records the judged window explicitly: this legacy
+    single-window spec has no point-in-time universe preflight, so there is
+    no walk-forward warm-up to fold into the window (``warmup_excluded``)
+    and the check window stays ``date_range``.
     """
     project = build_fixture_project(tmp_path / "project")
     _republish_with_history_prefix_adjusted_bar(project)
@@ -503,3 +504,194 @@ def test_engineering_run_labels_window_before_supported_history(tmp_path):
     assert record["check_window"] == ["2020-01-01", "2021-12-31"]
     assert record["warmup_excluded"] is True
     assert published.manifest.dataset_version != project.version
+
+
+class _BasicFactorProbe(Momentum60):
+    """Momentum60 read surface whose declared inputs add ``basic_factor``.
+
+    ``compute`` is inherited unchanged, so the ENGINEERING diagnostic replays
+    real adjusted-bar momentum; the ``basic_factor`` entry in ``inputs`` is
+    what the table-tier preflight routes through the tier policy.  The table
+    is declared research_only (no independent anchor this phase) and the
+    fixture baseline records its unanswered lane with a whole-window
+    ``source_disabled`` NOT_FETCHED segment (spec §7.5.2), so both the tier
+    and the window judgment have something to reject on.
+    """
+
+    name = "basic_factor_probe"
+    inputs = ("adjusted_bar", "basic_factor")
+
+
+class _BasicFactorProbeProvider:
+    """Provides the basic_factor probe factor once per call."""
+
+    def provide(self) -> dict[str, _BasicFactorProbe]:
+        factor = _BasicFactorProbe()
+        return {factor.name: factor}
+
+
+_BASIC_FACTOR_PROBE_SPEC = "configs/experiments/basic_factor_probe.yml"
+
+
+def _write_basic_factor_probe_spec(project_root: Path) -> str:
+    """A single-window spec naming the basic_factor probe factor.
+
+    Mirrors the probe spec shape; only the hypothesis and ``factor_versions``
+    change.  The window (2020-01-01..2021-12-31) intersects the fixture
+    baseline's whole-window ``source_disabled`` basic_factor segment
+    (2019-08-01..2021-11-30), so the window-aware check rejects on top of the
+    research_only tier code (P2c Task 5 Step 1④, fail-closed half).
+    """
+    path = Path(project_root) / _BASIC_FACTOR_PROBE_SPEC
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "hypothesis": (
+                    "table-tier preflight probe declaring the research_only "
+                    "basic_factor input; offline synthetic sample, not a "
+                    "recommendation"
+                ),
+                "factor_versions": {"basic_factor_probe": "2.0.0"},
+                "dataset_version": "CURRENT",
+                "universe_version": "CURRENT",
+                "data_acceptance_id": "CURRENT_ACCEPTED",
+                "date_range": {
+                    "start_date": "2020-01-01",
+                    "end_date": "2021-12-31",
+                },
+                "train_validation_holdout_policy":
+                    "not_applicable_engineering_mvp",
+                "preprocessing": {
+                    "winsorization": "none",
+                    "standardization": "none",
+                },
+                "portfolio_rule": {
+                    "name": "top_n_equal_weight",
+                    "top_n": 10,
+                    "lot_size": 100,
+                },
+                "cost_scenarios": ["zero_cost", "commission_tax", "full_cost"],
+                "random_seed": 42,
+                "code_commit": "unversioned",
+                "parent_experiment_ids": [],
+                "agent_id": None,
+            },
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    return _BASIC_FACTOR_PROBE_SPEC
+
+
+def test_research_run_rejects_basic_factor_input(tmp_path):
+    """A RESEARCH run referencing basic_factor fails closed (P2c Task 5 ④).
+
+    The fixture baseline answers every daily_basic lane with nothing: the
+    registered-but-unwired ``basic_factor`` tables carry a whole-window
+    ``source_disabled`` NOT_FETCHED segment.  A RESEARCH run whose factor
+    declares ``basic_factor`` as an input is rejected at ``table_tiers`` with
+    the research_only tier code and the stable window code (the spec window
+    intersects the not-fetched zone); the summary keeps the ``date_range``
+    check window because the legacy single-window universe has no walk-forward
+    warm-up to fold in.  ENGINEERING stays exempt and labeled (next test).
+    """
+    project = build_fixture_project(tmp_path / "project")
+    spec_path = _write_basic_factor_probe_spec(project.root)
+    runner = ResearchRunner(
+        project.root, factor_provider=_BasicFactorProbeProvider().provide
+    )
+    with pytest.raises(ResearchRunFailed, match="table_tiers"):
+        runner.run(spec_path, trust_mode="research")
+    manifests = sorted(
+        (project.root / "data" / "runs").glob(
+            "run_preflight_*/table_tier_preflight.json"
+        )
+    )
+    assert len(manifests) == 1
+    payload = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert payload["failed"] is True
+    assert payload["mode"] == "research"
+    assert payload["violations"] == [
+        "table_tier_research_only",
+        "table_history_start_after_window",
+    ]
+    assert payload["not_fetched_tables"] == []
+    assert payload["unsupported_window_tables"] == ["basic_factor"]
+    assert payload["check_window"] == ["2020-01-01", "2021-12-31"]
+    assert payload["warmup_excluded"] is True
+    assert payload["label"] is None
+    state = runner.latest_run_manifest()
+    assert state.status == "FAILED"
+    assert state.failed_stage == "table_tiers"
+    assert DatasetPublisher(project.root).current().version == project.version
+    assert not runner.partial_experiment_exists()
+
+
+def test_engineering_run_labels_basic_factor_input(tmp_path):
+    """ENGINEERING is exempt from the basic_factor rejections but labeled.
+
+    Same pinned ``source_disabled`` basic_factor lane as the rejection case;
+    the diagnostic replays the full pipeline over the baseline version and
+    its PASS preflight record labels it RESEARCH-ONLY with the unsupported
+    input table named.
+    """
+    project = build_fixture_project(tmp_path / "project")
+    spec_path = _write_basic_factor_probe_spec(project.root)
+    runner = ResearchRunner(
+        project.root, factor_provider=_BasicFactorProbeProvider().provide
+    )
+    published = runner.run(spec_path, trust_mode="engineering")
+    record = json.loads(
+        (project.root / "data" / "runs" / runner.run_id
+         / "table_tier_preflight.json").read_text(encoding="utf-8")
+    )
+    assert record["failed"] is False
+    assert record["mode"] == "engineering"
+    assert record["violations"] == []
+    assert record["unsupported_window_tables"] == ["basic_factor"]
+    assert record["not_fetched_tables"] == []
+    assert record["engineering_exempt"] is True
+    assert record["label"] == "RESEARCH-ONLY"
+    assert published.manifest.dataset_version == project.version
+
+
+def test_research_run_rejects_warmup_reaching_history_prefix(tmp_path):
+    """A walk-forward warm-up reaching into a pinned prefix fails RESEARCH.
+
+    ADR-022 (consequences) / P2c Task 5 Step 2: the OOS window of the fixture
+    walk-forward spec (2021-01-01..2021-12-31) sits fully inside the
+    supported segment of the prefix version, but its single fold's warm-up
+    opens at 2018-01-01 (three calendar years before the fold) and therefore
+    reaches into the pinned ``history_begins_after_anchor`` prefix
+    (2019-08-01..2020-05-31).  The preflight judges
+    ``min(date_range.start, earliest warm-up start)``, so the run is rejected
+    with the stable window code and the summary records the widened check
+    window (``warmup_excluded`` false -- the warm-up was judged).
+    """
+    project = build_fixture_project(tmp_path / "project")
+    _republish_with_history_prefix_adjusted_bar(project)
+    runner = ResearchRunner(project.root)
+    with pytest.raises(ResearchRunFailed, match="table_tiers"):
+        runner.run("configs/experiments/walk_forward.yml", trust_mode="research")
+    manifests = sorted(
+        (project.root / "data" / "runs").glob(
+            "run_preflight_*/table_tier_preflight.json"
+        )
+    )
+    assert len(manifests) == 1
+    payload = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert payload["failed"] is True
+    assert payload["mode"] == "research"
+    assert payload["violations"] == ["table_history_start_after_window"]
+    assert payload["unsupported_window_tables"] == ["adjusted_bar"]
+    assert payload["not_fetched_tables"] == []
+    assert payload["check_window"] == ["2018-01-01", "2021-12-31"]
+    assert payload["warmup_excluded"] is False
+    assert payload["label"] is None
+    state = runner.latest_run_manifest()
+    assert state.status == "FAILED"
+    assert state.failed_stage == "table_tiers"
+    assert DatasetPublisher(project.root).current().version != project.version
+    assert not runner.partial_experiment_exists()

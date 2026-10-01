@@ -1226,16 +1226,24 @@ class ResearchRunner:
         # Window-scoped not-fetched zones (spec §7.5.3): a pinned
         # ``history_begins_after_anchor`` prefix or a
         # ``source_disabled``/``source_unavailable`` tail is partial coverage
-        # a run window can avoid.  The judged window is ``spec.date_range``;
-        # the walk-forward warm-up is NOT included -- this preflight runs
-        # before fold scheduling, and moving the window to
-        # ``warmup_calendar_start`` would re-route existing pipeline-stage
-        # failures, so the limitation is recorded on the summary instead
-        # (``warmup_excluded``).
+        # a run window can avoid.  The judged window opens at
+        # ``min(spec.date_range.start_date, earliest warm-up start)`` (ADR-022
+        # consequences): the walk-forward warm-up reads the same factor input
+        # tables, so a warm-up day inside a not-fetched zone is as
+        # evidence-blind as an OOS day there.  When the fold schedule cannot
+        # be materialized here (no point-in-time universe preflight, or the
+        # pinned calendar does not cover the requested range) the judgment
+        # falls back to ``spec.date_range`` and the summary records the
+        # limitation (``warmup_excluded``); "no complete 12-month OOS fold"
+        # stays owned by the pipeline stage, which fails the run loudly.
+        window_start = spec.date_range.start_date
+        warmup_start = self._earliest_warmup_start(spec)
+        if warmup_start is not None:
+            window_start = min(window_start, warmup_start)
         unsupported = table_unsupported_window_tables(
             manifest.get("build_config", {}),
             input_tables,
-            spec.date_range.start_date,
+            window_start,
             spec.date_range.end_date,
         )
         violations = table_tier_violations(
@@ -1291,10 +1299,10 @@ class ResearchRunner:
             "not_fetched_tables": list(not_fetched),
             "unsupported_window_tables": list(unsupported),
             "check_window": [
-                str(spec.date_range.start_date),
+                str(window_start),
                 str(spec.date_range.end_date),
             ],
-            "warmup_excluded": True,
+            "warmup_excluded": warmup_start is None,
             "engineering_exempt": engineering_exempt,
             "label": "RESEARCH-ONLY" if engineering_exempt else None,
             "violations": violations,
@@ -1307,6 +1315,36 @@ class ResearchRunner:
                 error_codes=violations,
             )
         return summary
+
+    def _earliest_warmup_start(self, frozen: ExperimentSpec) -> date | None:
+        """The earliest fold warm-up start of the frozen spec, or ``None``.
+
+        ADR-022 (consequences) obliges the table-tier window judgment to
+        cover the walk-forward warm-up, not only the OOS ``date_range``: the
+        warm-up reads the same factor input tables.  The fold schedule is
+        re-materialized deterministically from the pinned calendar and the
+        frozen universe preflight's membership snapshots (the same
+        materialization the schedule stage later persists), so the judged
+        window is exactly what the folds will read.
+
+        ``None`` keeps the ``date_range``-only judgment and is recorded as
+        ``warmup_excluded`` on the preflight summary.  It is returned when
+        the run has no point-in-time universe preflight (the legacy
+        single-window universe has no folds to warm up) or when the
+        schedule cannot be materialized here (``ValueError``/``OSError``:
+        the pinned calendar does not cover the requested range, has no open
+        days, or the pinned data is unreadable) -- the schedule-stage
+        rejections, including "no complete 12-month OOS fold", remain owned
+        by the pipeline stage, which fails the run loudly there.
+        """
+        if self._universe_preflight is None:
+            return None
+        try:
+            schedule = self._materialize_walk_forward_schedule(frozen)
+        except (ValueError, OSError):
+            return None
+        starts = [fold.warmup_calendar_start for fold in schedule.folds]
+        return min(starts) if starts else None
 
     def _write_table_tier_preflight_record(self) -> None:
         """Persist the PASS tier-preflight summary in the run workspace."""

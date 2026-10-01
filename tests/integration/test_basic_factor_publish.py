@@ -15,11 +15,21 @@ no token).  The publish-time obligations pinned here (spec §7.3):
   (FATAL ``coverage_table_missing``), and a research_only table's table-level
   blocking issues downgrade to ``coverage_downgraded`` WARNING records
   instead of blocking (spec D1).
+
+P2c Task 5 Step 1 adds the offline end-to-end completion conditions (§7.4
+subset): the published stub window passes the real ``data validate`` CLI,
+identical payloads republish to the same content-addressed version without
+rewriting a byte, one changed ``total_mv`` fact yields a new version beside
+an intact old one, one missing fact row lands an UNTRUSTED
+FACTS_INCOMPLETE coverage row without blocking the publish, and a
+whole-null ``total_mv`` window publishes nulls -- never fill-zero.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -28,7 +38,8 @@ import pandas as pd
 from conftest import BARS_END, build_fixture_project  # noqa: E402
 
 from stock_quant.data_contracts import DataContract
-from stock_quant.data_model.dataset import DatasetReader
+from stock_quant.data_model.basic_factor import MARKET_CAP_UNIT_FACTOR
+from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_pipeline import (
     DataPipeline,
@@ -36,7 +47,7 @@ from stock_quant.data_pipeline import (
     _table_lineage_issues,
     coverage_table_of,
 )
-from stock_quant.data_quality.models import QualityIssue, Severity
+from stock_quant.data_quality.models import QualityIssue, QualityReport, Severity
 from stock_quant.data_sources.base import (
     DataRequest,
     DataSource,
@@ -419,3 +430,223 @@ def test_basic_factor_table_block_downgrades_instead_of_blocking(
     assert build["table_lineage"]["basic_factor"]["transport"] == "tushare:relay"
     with DatasetReader(project.root).open(result.dataset_ref.version) as ctx:
         assert not ctx.read("basic_factor").empty
+
+
+# --------------------------------------------------------------------------- #
+# Task 5 Step 1: offline end-to-end completion conditions (§7.4 subset)
+# --------------------------------------------------------------------------- #
+
+
+#: The universe symbol and in-window sessions the fact-level scenarios probe.
+_PROBE_SYMBOL = _FIXTURE_UNIVERSE_SYMBOLS[0]
+_MISSING_DAY = "20211115"  # a Monday session inside the stub update window
+_MUTATED_DAY = "20211116"
+_MUTATED_TOTAL_MV = 15123_4567.0
+
+
+class _NullTotalMvAdapter(StubAdapter):
+    """Same answers with every ``total_mv`` fact nulled (§7.2: no fill-zero)."""
+
+    def _daily_basic_frame(self, request: DataRequest) -> pd.DataFrame:
+        frame = super()._daily_basic_frame(request)
+        frame["total_mv"] = None
+        return frame
+
+
+class _MissingRowAdapter(StubAdapter):
+    """Same answers minus one covered symbol-day ``daily_basic`` fact row."""
+
+    def _daily_basic_frame(self, request: DataRequest) -> pd.DataFrame:
+        frame = super()._daily_basic_frame(request)
+        drop = (frame["ts_code"] == _PROBE_SYMBOL) & (
+            frame["trade_date"] == _MISSING_DAY
+        )
+        return frame[~drop].reset_index(drop=True)
+
+
+def _named_stubs(adapter_cls) -> dict[str, DataSource]:
+    return {name: adapter_cls(name) for name in _STUB_NAMES}
+
+
+def _update_stub_window(project_root: Path, adapter_cls=StubAdapter):
+    """One offline stub update over the fixture project's whole window."""
+    return DataPipeline(project_root, sources=_named_stubs(adapter_cls)).update(
+        DataUpdateRequest(end_date=BARS_END)
+    )
+
+
+def _version_bytes(project_root: Path, version: str) -> dict[str, bytes]:
+    """Every file byte under one published version directory."""
+    version_dir = project_root / "data" / "standardized" / version
+    return {
+        str(path.relative_to(version_dir)): path.read_bytes()
+        for path in sorted(version_dir.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _fact_row(factor: pd.DataFrame, symbol: str, day: str) -> pd.DataFrame:
+    """The one factor row for a (symbol, trade_date) key, dtype-agnostic."""
+    day_mask = pd.to_datetime(factor["trade_date"]) == pd.Timestamp(day)
+    return factor[day_mask & (factor["symbol"] == symbol)]
+
+
+def test_validate_cli_passes_on_the_published_stub_window(tmp_path):
+    """The stub-published window passes the real ``data validate`` CLI.
+
+    §7.4 "真实小窗口 raw→新 version→validate 通过" in its offline form: one
+    stub update publishes a new version as CURRENT, then the same CLI
+    subprocess an operator runs (``python -m stock_quant data validate
+    --root <project>``) re-checks that version and exits 0 with PASS.
+    """
+    project = build_fixture_project(tmp_path / "project")
+    result = _update_stub_window(project.root)
+    assert result.dataset_ref is not None
+    version = result.dataset_ref.version
+    completed = subprocess.run(
+        [sys.executable, "-m", "stock_quant", "data", "validate",
+         "--root", str(project.root)],
+        capture_output=True, text=True, timeout=600,
+        cwd=str(project.root),
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert f"version={version}" in completed.stdout
+    assert "PASS" in completed.stdout
+
+
+def test_republishing_the_round_payload_reuses_the_version_never_rewrites(
+    tmp_path,
+):
+    """The same round payload hashes to the same version, byte for byte.
+
+    §7.4 "相同输入重跑哈希不变;旧版本目录字节不动".  The content-addressed
+    identity is the publish boundary: the exact (tables, build_config)
+    payload of the stub round, republished, hashes to the same
+    ``dataset_version`` and the publisher stages nothing over the existing
+    directory.  (A second ``update`` round is a distinct build event by
+    design -- its ``run_id`` and reuse evidence are identity-bearing -- so
+    the invariance claim is judged on the payload, like
+    ``test_dataset_publish.py``'s idempotency test.)
+    """
+    project = build_fixture_project(tmp_path / "project")
+    result = _update_stub_window(project.root)
+    assert result.dataset_ref is not None
+    version = result.dataset_ref.version
+    before = _version_bytes(project.root, version)
+    with DatasetReader(project.root).open(version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+        build_config = context.manifest["build_config"]
+    republished = DatasetPublisher(project.root).publish(
+        tables, QualityReport(), build_config=build_config
+    )
+    assert republished.version == version
+    assert republished.path == (
+        project.root / "data" / "standardized" / version
+    )
+    assert _version_bytes(project.root, version) == before
+
+
+def test_single_fact_change_yields_new_version_and_keeps_old_bytes(tmp_path):
+    """One changed total_mv-derived fact moves the version, not old bytes.
+
+    §7.4 "单源事实变化出新版本且旧版本不动".  An incremental round carries
+    its covered facts (``last_covered_plus_1``), so the fact-level identity
+    change is exercised at the publish boundary over the real stub round
+    payload: exactly one ``basic_factor`` ``market_cap`` value (the
+    probe-symbol session's ``total_mv`` × the probe-frozen unit factor)
+    changes, the version hash changes, and the old version directory keeps
+    its bytes with the old fact.
+    """
+    project = build_fixture_project(tmp_path / "project")
+    result = _update_stub_window(project.root)
+    assert result.dataset_ref is not None
+    old_version = result.dataset_ref.version
+    old_bytes = _version_bytes(project.root, old_version)
+    with DatasetReader(project.root).open(old_version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+        build_config = context.manifest["build_config"]
+    factor = tables["basic_factor"]
+    row = (
+        (pd.to_datetime(factor["trade_date"]) == pd.Timestamp(_MUTATED_DAY))
+        & (factor["symbol"] == _PROBE_SYMBOL)
+    )
+    assert row.sum() == 1
+    changed = factor.copy()
+    changed.loc[row, "market_cap"] = _MUTATED_TOTAL_MV * MARKET_CAP_UNIT_FACTOR
+    tables["basic_factor"] = changed
+    republished = DatasetPublisher(project.root).publish(
+        tables, QualityReport(), build_config=build_config
+    )
+    assert republished.version != old_version
+    assert _version_bytes(project.root, old_version) == old_bytes
+    with DatasetReader(project.root).open(republished.version) as context:
+        moved = _fact_row(
+            context.read("basic_factor"), _PROBE_SYMBOL, _MUTATED_DAY
+        )
+        assert moved["market_cap"].tolist() == [
+            _MUTATED_TOTAL_MV * MARKET_CAP_UNIT_FACTOR
+        ]
+    with DatasetReader(project.root).open(old_version) as context:
+        kept = _fact_row(
+            context.read("basic_factor"), _PROBE_SYMBOL, _MUTATED_DAY
+        )
+        assert kept["market_cap"].tolist() == [
+            15000_0000.0 * MARKET_CAP_UNIT_FACTOR
+        ]
+
+
+def test_missing_daily_basic_row_lands_untrusted_fact_coverage(tmp_path):
+    """One missing fact row: UNTRUSTED coverage, publish proceeds.
+
+    §7.4 "应有而无落 UNTRUSTED(FACTS_INCOMPLETE)" on the publish side: the
+    stub answers every ``daily_basic`` row except the probe symbol's one
+    session.  The round still publishes (the covering UNTRUSTED row is the
+    join check's legal answer for the bar-day lacking its factor row), the
+    coverage table marks exactly that symbol's round window
+    FACTS_INCOMPLETE, and the missing key is absent from the facts while
+    every other symbol stays complete.  The fail-closed consumer half (a
+    RESEARCH preflight rejecting the table, ENGINEERING exempt and labeled)
+    is pinned in ``tests/integration/test_table_tier_preflight.py``.
+    """
+    project = build_fixture_project(tmp_path / "project")
+    result = _update_stub_window(project.root, _MissingRowAdapter)
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as ctx:
+        coverage = ctx.read("basic_factor_coverage")
+        untrusted = coverage[coverage["status"] == "UNTRUSTED"]
+        assert len(untrusted) == 1
+        row = untrusted.iloc[0]
+        assert row["symbol"] == _PROBE_SYMBOL
+        assert row["reason"] == "FACTS_INCOMPLETE"
+        assert pd.Timestamp(row["window_start"]) <= pd.Timestamp(_MISSING_DAY)
+        assert pd.Timestamp(row["window_end"]) >= pd.Timestamp(_MISSING_DAY)
+        verified = coverage[coverage["status"] == "VERIFIED"]
+        assert len(verified) == len(_FIXTURE_UNIVERSE_SYMBOLS) - 1
+        factor = ctx.read("basic_factor")
+        assert _fact_row(factor, _PROBE_SYMBOL, _MISSING_DAY).empty
+        per_symbol = factor.groupby("symbol").size()
+        assert per_symbol[_PROBE_SYMBOL] == per_symbol.max() - 1
+        assert per_symbol.drop(_PROBE_SYMBOL).nunique() == 1
+
+
+def test_all_null_total_mv_publishes_nulls_without_fill_zero(tmp_path):
+    """A whole-null total_mv window publishes nulls, never fill-zero.
+
+    §7.4 "缺失保 null;无 fill-zero、无可信空值空洞": the stub answers every
+    row with a null ``total_mv``; the normalized facts keep the null (the
+    probe-frozen unit scaling maps null to null), the answered keys count as
+    present so the coverage verdicts stay VERIFIED -- a null value with
+    evidence is not a trust hole -- and the turnover column is untouched.
+    """
+    project = build_fixture_project(tmp_path / "project")
+    result = _update_stub_window(project.root, _NullTotalMvAdapter)
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as ctx:
+        factor = ctx.read("basic_factor")
+        assert not factor.empty
+        assert factor["market_cap"].isna().all()
+        assert (factor["market_cap"] == 0).sum() == 0
+        assert not factor["turnover_rate"].isna().any()
+        coverage = ctx.read("basic_factor_coverage")
+        assert (coverage["status"] == "VERIFIED").all()
+        assert not (coverage["status"] == "UNTRUSTED").any()
