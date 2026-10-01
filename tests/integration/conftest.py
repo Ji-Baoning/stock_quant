@@ -44,6 +44,8 @@ from stock_quant.data_model.corporate_action_coverage import (
 from stock_quant.data_model.dataset import DatasetPublisher
 from stock_quant.data_model.fetch_coverage import (
     KIND_FETCHED,
+    KIND_NOT_FETCHED,
+    NOT_FETCHED_OPERATOR_EXPLICIT_WINDOW,
     FetchSegment,
     to_build_config_payload,
 )
@@ -245,6 +247,21 @@ _WF_DOCUMENT = "ab" * 32
 _UPDATE_WINDOW_START = date(2021, 11, 1)
 _UPDATE_WINDOW_END = date(2021, 11, 30)
 _UPDATE_RUN_ID = "fixture-data-update-0001"
+
+#: Every published fixture table except the derived ``adjusted_bar``.  Spec
+#: §7.5.6 requires one fetch-coverage record per published table; these
+#: tables record a whole-table ``not_fetched`` skip (see the
+#: ``fixture_build_config`` comment for why that is the honest record here).
+_COVERAGE_SKIPPED_TABLES = (
+    "daily_bar",
+    "security_master",
+    "security_master_coverage",
+    "corporate_action",
+    "corporate_action_quarantine",
+    "corporate_action_coverage",
+    "trading_calendar",
+    "universe_membership",
+)
 
 #: The fixed acceptance identity of the trusted fixture record: a constant
 #: creation instant and operator keep the content-derived ``acceptance_id``
@@ -500,22 +517,39 @@ def fixture_build_config(
     criterion = load_universe_coverage_criterion(
         project_root / "configs" / "universes"
     )
-    # Minimal legal fetch-coverage evidence (plan Task 13 Step 6): one
-    # ``fetched`` segment tiling the review window (acceptance anchor through
-    # the resolved end).  It sits on the lane-less derived ``adjusted_bar``
-    # table on purpose: a fetched segment on a fetch-lane table would make
-    # ``last_covered_plus_1`` planning treat this hand-published baseline as
-    # covering through the review end, flipping every explicit-window update
-    # into a full carry with no raw evidence.
+    # Per-table fetch-coverage evidence (spec §7.5.6): every published table
+    # carries its own record over the review window (acceptance anchor through
+    # the resolved end).  The derived ``adjusted_bar`` table records one
+    # ``fetched`` segment -- it is re-derived over the round window each
+    # update, and it is the momentum factor's sole declared input, so the
+    # research table-tier preflight sees a completely fetched input.  Every
+    # other published table records a whole-table ``not_fetched``
+    # operator_explicit_window skip: none of their published rows were
+    # produced by this round's fetch lanes (the saved snapshots evidence the
+    # sources, not the row provenance), and that is also the shape that keeps
+    # update planning exactly as it was before the record existed --
+    # ``not_fetched`` spans never seed ``last_covered_plus_1`` baselines
+    # (``_recorded_fetch_spans``), so an explicit-window update re-fetches its
+    # window instead of flipping this hand-published baseline into a full
+    # carry with no raw evidence.
     review_start = criterion.acceptance_start or _UPDATE_WINDOW_START
-    table_fetch_coverage = to_build_config_payload(
-        {
-            "adjusted_bar": [
-                FetchSegment("adjusted_bar", KIND_FETCHED, review_start,
-                             _UPDATE_WINDOW_END)
-            ]
-        }
-    )
+    coverage: dict[str, list[FetchSegment]] = {
+        table: [
+            FetchSegment(
+                table,
+                KIND_NOT_FETCHED,
+                review_start,
+                _UPDATE_WINDOW_END,
+                reason=NOT_FETCHED_OPERATOR_EXPLICIT_WINDOW,
+            )
+        ]
+        for table in _COVERAGE_SKIPPED_TABLES
+    }
+    coverage["adjusted_bar"] = [
+        FetchSegment("adjusted_bar", KIND_FETCHED, review_start,
+                     _UPDATE_WINDOW_END)
+    ]
+    table_fetch_coverage = to_build_config_payload(coverage)
     return dataset_build_config(
         run_id=_UPDATE_RUN_ID,
         request=DataUpdateRequest(

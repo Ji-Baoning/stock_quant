@@ -209,7 +209,9 @@ def _republish_with_not_fetched_adjusted_bar(project) -> str:
     same tables and provenance; only ``build_config.table_fetch_coverage``
     changes: ``adjusted_bar`` (the momentum factor's declared input) carries
     a single NOT_FETCHED segment with the operator-window reason, exactly the
-    shape an explicit-window update records (spec D5.2).  A fresh ACCEPTED
+    shape an explicit-window update records (spec D5.2), while every other
+    published table keeps its fixture coverage record (spec §7.5.6: one
+    record per published table).  A fresh ACCEPTED
     record is published over the successor so a RESEARCH run passes the
     acceptance gate and reaches the table-tier preflight.
     """
@@ -218,20 +220,20 @@ def _republish_with_not_fetched_adjusted_bar(project) -> str:
          / "dataset_manifest.json").read_text(encoding="utf-8")
     )
     build = dict(manifest["build_config"])
-    build["table_fetch_coverage"] = {
-        "adjusted_bar": [
-            {
-                "table": "adjusted_bar",
-                "kind": "not_fetched",
-                "window_start": (
-                    build.get("full_history_acceptance_start")
-                    or build["effective_start_date"]
-                ),
-                "window_end": build["resolved_end_date"],
-                "reason": "operator_explicit_window",
-            }
-        ]
-    }
+    coverage = dict(build["table_fetch_coverage"])
+    coverage["adjusted_bar"] = [
+        {
+            "table": "adjusted_bar",
+            "kind": "not_fetched",
+            "window_start": (
+                build.get("full_history_acceptance_start")
+                or build["effective_start_date"]
+            ),
+            "window_end": build["resolved_end_date"],
+            "reason": "operator_explicit_window",
+        }
+    ]
+    build["table_fetch_coverage"] = coverage
     reader = DatasetReader(project.root)
     with reader.open(project.version) as context:
         tables = {name: context.read(name) for name in context.tables}
@@ -362,7 +364,8 @@ def _republish_with_history_prefix_adjusted_bar(project) -> str:
     the unique ``history_begins_after_anchor`` prefix
     ``[acceptance_start, supported_start - 1]`` followed by one fetched
     segment tiling to ``resolved_end_date`` (spec §7.5.1), with
-    ``supported_start = 2020-06-01``.  The fixture momentum spec's window
+    ``supported_start = 2020-06-01``, while every other published table keeps
+    its fixture coverage record (spec §7.5.6).  The fixture momentum spec's window
     (2020-01-01..2021-12-31) therefore reaches into the prefix while the
     supported-window probe spec (2020-07-01..2021-11-30) stays inside the
     supported segment.  A fresh ACCEPTED record is published over the
@@ -379,7 +382,8 @@ def _republish_with_history_prefix_adjusted_bar(project) -> str:
     )
     resolved_end = date.fromisoformat(str(build["resolved_end_date"]))
     supported_start = date(2020, 6, 1)
-    build["table_fetch_coverage"] = to_build_config_payload(
+    coverage = dict(build["table_fetch_coverage"])
+    coverage["adjusted_bar"] = to_build_config_payload(
         {
             "adjusted_bar": [
                 FetchSegment(
@@ -392,7 +396,8 @@ def _republish_with_history_prefix_adjusted_bar(project) -> str:
                 ),
             ]
         }
-    )
+    )["adjusted_bar"]
+    build["table_fetch_coverage"] = coverage
     reader = DatasetReader(project.root)
     with reader.open(project.version) as context:
         tables = {name: context.read(name) for name in context.tables}

@@ -25,7 +25,11 @@ from conftest import (  # noqa: E402
 )
 
 from stock_quant.data_model.calendar_coverage import CODE_CALENDAR_COVERAGE_GAP
-from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+from stock_quant.data_model.dataset import (
+    DatasetPublisher,
+    DatasetReader,
+    PublicationBlocked,
+)
 from stock_quant.data_model.security_master import master_coverage_frame
 from stock_quant.data_model.trade_calendar_facts import (
     CODE_CALENDAR_EXCHANGE_MISMATCH,
@@ -1390,86 +1394,61 @@ def _republish_current_tables(
     root: Path,
     *,
     master_coverage: pd.DataFrame | None = None,
-    include_master_coverage: bool = True,
-    include_corporate_action: bool = True,
 ) -> str:
-    """Republish CURRENT with optional canonical-table variants.
+    """Republish CURRENT with every registered table (spec §7.5.6).
 
-    ``master_coverage`` replaces the published table; ``include_master_coverage
-    = False`` omits it entirely, and ``include_corporate_action=False`` omits
-    the facts table (the "older dataset" shapes).  Used only to stage
-    validate-only audit breaches the pipeline itself can never write.
+    ``master_coverage`` replaces the published table -- pass an empty
+    ``master_coverage_frame()`` to stage the missing-evidence breach the
+    pipeline itself can never write.  The publisher blocks any publish that
+    omits a registered table outright, so the "older dataset" shapes that
+    omit tables are no longer stageable here at all.
     """
     publisher = DatasetPublisher(root)
     version = publisher.current().version
     reader = DatasetReader(root)
     with reader.open(version) as context:
-        tables = {
-            "daily_bar": context.read("daily_bar"),
-            "security_master": context.read("security_master"),
-            "corporate_action_coverage": context.read(
-                "corporate_action_coverage"
-            ),
-            "trading_calendar": context.read("trading_calendar"),
-        }
-        if include_corporate_action:
-            tables["corporate_action"] = context.read("corporate_action")
-        if include_master_coverage:
-            tables["security_master_coverage"] = (
-                master_coverage
-                if master_coverage is not None
-                else context.read("security_master_coverage")
-            )
+        tables = {name: context.read(name) for name in context.tables}
+    if master_coverage is not None:
+        tables["security_master_coverage"] = master_coverage
     return publisher.publish(tables, QualityReport()).version
 
 
-def test_validate_fails_closed_without_total_return_tables(project):
-    """A dataset manifest without adjusted_bar can never validate clean.
+def test_publish_blocks_trimmed_dataset_without_total_return_tables(project):
+    """Registry completeness (spec §7.5.6) blocks the trimmed dataset shape.
 
-    The publisher accepts table subsets silently, so ``validate`` must fail
-    closed on the missing total-return tables instead of waving a legacy (or
-    trimmed) dataset through as trusted.
+    The publisher now refuses any publish omitting a registered table, so a
+    pre-migration or trimmed dataset without ``adjusted_bar`` can only predate
+    this gate -- the publish blocks upstream of the ``validate`` fail-closed
+    path that still guards stores written before the obligation existed.
     """
-    pipeline, result = _update_and_validate(project)
+    _, result = _update_and_validate(project)
     assert result.dataset_ref is not None
-    # Republish CURRENT from an update-published dataset minus both new
-    # tables -- the exact shape a pre-migration or trimmed dataset has.
-    _republish_current_tables(project.root)
-    report = pipeline.validate()
-    issue = next(
-        item
-        for item in report.issues
-        if item.code == CODE_ADJUSTED_BAR_MISSING_FROM_DATASET
-    )
-    assert issue.severity is Severity.FATAL
-    assert issue.table == "adjusted_bar"
-    assert issue.details["missing_tables"] == [
-        "adjusted_bar",
-        "corporate_action_quarantine",
-    ]
+    reader = DatasetReader(project.root)
+    with reader.open(result.dataset_ref.version) as context:
+        tables = {
+            name: context.read(name)
+            for name in context.tables
+            if name != "adjusted_bar"
+        }
+    with pytest.raises(PublicationBlocked, match="missing_registered_table"):
+        DatasetPublisher(project.root).publish(tables, QualityReport())
 
 
-def test_validate_fails_closed_without_corporate_action(project):
-    """The same coded FATAL guards the facts the lineage checks read.
-
-    A dataset without ``corporate_action`` could not have its adjusted rows
-    audited, so it must fail closed too -- never crash on the bare read.
-    """
-    pipeline, _ = _update_and_validate(project)
-    _republish_current_tables(project.root, include_corporate_action=False)
-    report = pipeline.validate()
-    issue = next(
-        item
-        for item in report.issues
-        if item.code == CODE_ADJUSTED_BAR_MISSING_FROM_DATASET
-    )
-    assert issue.severity is Severity.FATAL
-    assert issue.table == "adjusted_bar"
-    assert issue.details["missing_tables"] == [
-        "corporate_action",
-        "adjusted_bar",
-        "corporate_action_quarantine",
-    ]
+def test_publish_blocks_trimmed_dataset_without_corporate_action(project):
+    """The same publication obligation guards the facts the lineage checks
+    read: a publish omitting ``corporate_action`` is blocked outright instead
+    of reaching the store for ``validate`` to fail closed on."""
+    _, result = _update_and_validate(project)
+    assert result.dataset_ref is not None
+    reader = DatasetReader(project.root)
+    with reader.open(result.dataset_ref.version) as context:
+        tables = {
+            name: context.read(name)
+            for name in context.tables
+            if name != "corporate_action"
+        }
+    with pytest.raises(PublicationBlocked, match="missing_registered_table"):
+        DatasetPublisher(project.root).publish(tables, QualityReport())
 
 
 def _update_and_validate(project, **tushare_overrides):
@@ -1539,9 +1518,13 @@ def test_validate_surfaces_master_coverage_mismatch_as_fatal(project):
 
 
 def test_validate_surfaces_missing_master_coverage_as_fatal(project):
-    """Validate-only: a dataset without the evidence table cannot validate."""
+    """Validate-only: a dataset whose evidence table carries no rows cannot
+    validate.  The table itself must stay registered (the publish would
+    block otherwise), so the breach is staged with an empty frame."""
     pipeline, _ = _update_and_validate(project)
-    _republish_current_tables(project.root, include_master_coverage=False)
+    _republish_current_tables(
+        project.root, master_coverage=master_coverage_frame([])
+    )
     report = pipeline.validate()
     assert report.by_code()[CODE_MASTER_COVERAGE_MISMATCH] == 1
     issue = next(
@@ -1637,17 +1620,13 @@ def test_update_carries_universe_membership_table_unchanged(project):
     assert report.by_severity()[Severity.ERROR.value] == 0
 
 
-def test_update_publishes_without_membership_table_when_absent(project):
-    """A pre-membership legacy baseline stays publishable; the update must
-    not invent an empty membership table for it (older datasets simply
-    update without the table until an explicit membership refresh)."""
-    _publish_legacy_baseline_without_membership(project.root)
-    result = DataPipeline(project.root, sources=_all_stubs()).update(
-        _request()
-    )
-    assert result.dataset_ref is not None
-    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
-        assert "universe_membership" not in context.tables
+def test_pre_membership_baseline_publish_is_blocked(project):
+    """Registry completeness (spec §7.5.6) is a publication obligation, so a
+    pre-membership legacy baseline that omits the registered
+    ``universe_membership`` table can no longer reach the immutable store at
+    all -- an update never faces a membership-less baseline to carry."""
+    with pytest.raises(PublicationBlocked, match="missing_registered_table"):
+        _publish_legacy_baseline_without_membership(project.root)
 
 
 def test_validate_surfaces_tampered_membership_evidence_as_fatal(project):

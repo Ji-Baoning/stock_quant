@@ -76,7 +76,11 @@ from stock_quant.data_model.corporate_action_coverage import (
     coverage_frame,
     coverage_record,
 )
-from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+from stock_quant.data_model.dataset import (
+    DatasetPublisher,
+    DatasetReader,
+    PublicationBlocked,
+)
 from stock_quant.data_model.schemas import (
     CORPORATE_ACTION_COLUMNS,
     CORPORATE_ACTION_QUARANTINE_COLUMNS,
@@ -805,37 +809,47 @@ def _publish_dataset_without_master_evidence(project_root: Path) -> str:
 
 
 def _publish_legacy_dataset(project_root: Path) -> str:
-    """Republish CURRENT in the pre-adjusted_bar legacy shape (with membership).
+    """Republish CURRENT in the pre-provenance legacy shape (with membership).
 
-    The dataset keeps its pre-provenance shape (no ``build_config`` evidence,
-    no ``adjusted_bar``) and publishes no acceptance record, so a RESEARCH run
-    over it fails the acceptance gate; the membership table is present so the
-    universe preflight passes and the acceptance gate is what stops the run.
-    The missing-``adjusted_bar`` no-fallback contract of the factor adapter is
-    exercised by an ENGINEERING diagnostic instead.
+    The dataset keeps its pre-provenance shape -- no ``build_config``
+    evidence and no ACCEPTED record -- so a RESEARCH run over it fails the
+    acceptance gate.  The tables stay registry-complete (spec §7.5.6 makes
+    registry completeness a publication obligation), so the shape this
+    helper replaces -- a dataset without ``adjusted_bar`` -- is no longer
+    publishable at all and is asserted blocked by the caller.
     """
     master = _security_master()
     _ensure_fixture_configs(project_root, master)
     symbols = tuple(master["symbol"])
     traded = [symbol for symbol, _ in EQUITY_GROWTH]
     filler_symbols = tuple(symbol for symbol in symbols if symbol not in set(traded))
+    daily = pd.concat(
+        [
+            _bars(
+                _weekdays(_BARS_START, _BARS_END),
+                index_close=(4000.0, 2000.0),
+            ),
+            _window_filler_bars(filler_symbols),
+        ],
+        ignore_index=True,
+    )[DAILY_COLUMNS]
+    corporate_actions = _corporate_action()
+    coverage = _coverage(symbols, status=CoverageStatus.VERIFIED_EMPTY)
+    empty_quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
     tables = {
-        "daily_bar": pd.concat(
-            [
-                _bars(
-                    _weekdays(_BARS_START, _BARS_END),
-                    index_close=(4000.0, 2000.0),
-                ),
-                _window_filler_bars(filler_symbols),
-            ],
-            ignore_index=True,
-        )[DAILY_COLUMNS],
+        "daily_bar": daily,
+        "adjusted_bar": build_adjusted_bars(
+            daily,
+            corporate_actions,
+            empty_quarantine,
+            coverage,
+            symbols=symbols,
+        ),
         "security_master": master,
         "security_master_coverage": _master_coverage(master),
-        "corporate_action": _corporate_action(),
-        "corporate_action_coverage": _coverage(
-            symbols, status=CoverageStatus.VERIFIED_EMPTY
-        ),
+        "corporate_action": corporate_actions,
+        "corporate_action_quarantine": empty_quarantine,
+        "corporate_action_coverage": coverage,
         "trading_calendar": _trading_calendar(),
         "universe_membership": membership_frame(list(_fact_payloads()))[
             UNIVERSE_MEMBERSHIP_COLUMNS
@@ -1373,17 +1387,26 @@ def test_research_factor_input_uses_adjusted_bar(env):
 
 def test_research_rejects_dataset_without_adjusted_bar(env):
     """A legacy dataset fails closed: it has no build evidence, so a RESEARCH
-    run cannot even accept it, and an ENGINEERING diagnostic that does reach
-    the factor adapter never falls back to an unadjusted close series."""
+    run cannot even accept it, and the adjusted_bar-less shape the factor
+    adapter's no-fallback contract used to be exercised against is no longer
+    publishable at all -- registry completeness (spec §7.5.6) is a
+    publication obligation that blocks any publish omitting a registered
+    table before a run could ever reach the adapter."""
     _publish_legacy_dataset(env.root)
     runner = ResearchRunner(env.root, config_root=env.config_root)
     with pytest.raises(
         ResearchRunFailed, match="no valid real-data-v1 acceptance"
     ):
         runner.run(_SPEC)
-    debug = ResearchRunner(env.root, config_root=env.config_root)
-    with pytest.raises(ResearchRunFailed, match="adjusted_bar"):
-        debug.run(_SPEC, trust_mode=DataTrustMode.ENGINEERING)
+    reader = DatasetReader(env.root)
+    with reader.open(DatasetPublisher(env.root).current().version) as context:
+        tables = {
+            name: context.read(name)
+            for name in context.tables
+            if name != "adjusted_bar"
+        }
+    with pytest.raises(PublicationBlocked, match="missing_registered_table"):
+        DatasetPublisher(env.root).publish(tables, QualityReport())
 
 
 def test_research_rejects_spec_requesting_retired_factor_version(env, tmp_path):
