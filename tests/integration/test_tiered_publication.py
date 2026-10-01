@@ -21,6 +21,7 @@ import pytest
 from stock_quant.data_model.dataset import DatasetPublisher, PublicationBlocked
 from stock_quant.data_model.schemas import (
     ADJUSTED_BAR_COLUMNS,
+    BASIC_FACTOR_COLUMNS,
     CORPORATE_ACTION_COLUMNS,
     CORPORATE_ACTION_COVERAGE_COLUMNS,
     CORPORATE_ACTION_QUARANTINE_COLUMNS,
@@ -149,6 +150,8 @@ def _report_with_downgrade(report, contracts):
 #: flow completes its publish shape with these typed empties.
 _AUXILIARY_COLUMNS = {
     "adjusted_bar": ADJUSTED_BAR_COLUMNS,
+    "basic_factor": BASIC_FACTOR_COLUMNS,
+    "basic_factor_coverage": CORPORATE_ACTION_COVERAGE_COLUMNS,
     "corporate_action_coverage": CORPORATE_ACTION_COVERAGE_COLUMNS,
     "corporate_action_quarantine": CORPORATE_ACTION_QUARANTINE_COLUMNS,
     "security_master": SECURITY_MASTER_COLUMNS,

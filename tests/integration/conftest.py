@@ -46,11 +46,14 @@ from stock_quant.data_model.fetch_coverage import (
     KIND_FETCHED,
     KIND_NOT_FETCHED,
     NOT_FETCHED_OPERATOR_EXPLICIT_WINDOW,
+    NOT_FETCHED_SOURCE_DISABLED,
     FetchSegment,
     to_build_config_payload,
 )
 from stock_quant.data_model.schemas import (
+    BASIC_FACTOR_COLUMNS,
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_COVERAGE_COLUMNS,
     CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
@@ -464,6 +467,15 @@ def build_fixture_project(root: Path, *, broken: bool = False) -> FixtureProject
         # ``custom_wf_fixture`` definition; the empty frame would satisfy
         # only the engineering workflows.
         "universe_membership": membership_frame(facts),
+        # The registered-but-unwired basic_factor tables (P2c Task 1) publish
+        # their canonical empty frames: the fetch lane is disabled until
+        # Task 2 wires it, so the honest record is an empty frame plus the
+        # whole-window ``source_disabled`` segment ``fixture_build_config``
+        # binds -- never a fabricated fetched segment (spec §7.5.2).
+        "basic_factor": pd.DataFrame(columns=BASIC_FACTOR_COLUMNS),
+        "basic_factor_coverage": pd.DataFrame(
+            columns=CORPORATE_ACTION_COVERAGE_COLUMNS
+        ),
     }
     if broken:
         version = DatasetPublisher(root).publish(tables, QualityReport()).version
@@ -549,6 +561,19 @@ def fixture_build_config(
         FetchSegment("adjusted_bar", KIND_FETCHED, review_start,
                      _UPDATE_WINDOW_END)
     ]
+    # The unwired basic_factor tables record the Task 1 disabled-state
+    # semantics (one whole-window ``source_disabled`` segment), not the
+    # operator-window skip: their lanes are not enabled at all (spec §7.5.2).
+    for table in ("basic_factor", "basic_factor_coverage"):
+        coverage[table] = [
+            FetchSegment(
+                table,
+                KIND_NOT_FETCHED,
+                review_start,
+                _UPDATE_WINDOW_END,
+                reason=NOT_FETCHED_SOURCE_DISABLED,
+            )
+        ]
     table_fetch_coverage = to_build_config_payload(coverage)
     return dataset_build_config(
         run_id=_UPDATE_RUN_ID,

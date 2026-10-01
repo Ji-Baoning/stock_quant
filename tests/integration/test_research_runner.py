@@ -82,7 +82,9 @@ from stock_quant.data_model.dataset import (
     PublicationBlocked,
 )
 from stock_quant.data_model.schemas import (
+    BASIC_FACTOR_COLUMNS,
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_COVERAGE_COLUMNS,
     CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
@@ -682,6 +684,13 @@ def _publish_synthetic_dataset(
         "corporate_action_quarantine": empty_quarantine,
         "corporate_action_coverage": coverage,
         "trading_calendar": _trading_calendar(),
+        # Registered-but-unwired basic_factor tables (P2c Task 1): canonical
+        # empty frames; ``fixture_build_config`` binds their whole-window
+        # ``source_disabled`` fetch-coverage segments (spec §7.5.2).
+        "basic_factor": pd.DataFrame(columns=BASIC_FACTOR_COLUMNS),
+        "basic_factor_coverage": pd.DataFrame(
+            columns=CORPORATE_ACTION_COVERAGE_COLUMNS
+        ),
     }
     if with_membership:
         tables["universe_membership"] = membership_frame(list(facts))[
@@ -854,6 +863,12 @@ def _publish_legacy_dataset(project_root: Path) -> str:
         "universe_membership": membership_frame(list(_fact_payloads()))[
             UNIVERSE_MEMBERSHIP_COLUMNS
         ],
+        # Registered-but-unwired basic_factor tables publish canonical empty
+        # frames in every hand-assembled registry-complete dataset.
+        "basic_factor": pd.DataFrame(columns=BASIC_FACTOR_COLUMNS),
+        "basic_factor_coverage": pd.DataFrame(
+            columns=CORPORATE_ACTION_COVERAGE_COLUMNS
+        ),
     }
     return DatasetPublisher(project_root).publish(tables, QualityReport()).version
 
