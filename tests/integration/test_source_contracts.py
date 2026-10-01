@@ -914,6 +914,49 @@ def test_tushare_trade_cal_names_a_client_without_the_endpoint(monkeypatch):
         )
 
 
+class _DailyBasicClient:
+    """A recording stub session exposing only the ``daily_basic`` endpoint."""
+
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+        self.calls: list[dict[str, str]] = []
+
+    def daily_basic(self, **kwargs: str) -> pd.DataFrame:
+        self.calls.append(kwargs)
+        return self.frame
+
+
+def test_tushare_daily_basic_returns_native_columns_and_supplier_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """``daily_basic`` is a whole-market per-day snapshot passed through raw."""
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    frame = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "600000.SH"],
+            "trade_date": ["20240102", "20240102"],
+            "total_mv": ["372000.0", None],
+            "turnover_rate": ["0.53", None],
+        }
+    )
+    client = _DailyBasicClient(frame)
+
+    result = TushareSource(SourceConfig(), client).fetch(
+        DataRequest("daily_basic", (), date(2024, 1, 2), date(2024, 1, 2), {})
+    )
+
+    assert client.calls == [
+        {
+            "trade_date": "20240102",
+            "fields": "ts_code,trade_date,total_mv,turnover_rate",
+        }
+    ]
+    assert result.endpoint == "daily_basic"
+    assert result.frame is frame  # raw evidence; no normalization, no zero fill
+    assert result.frame["total_mv"].isna().tolist() == [False, True]
+    assert result.metadata["supplier_endpoint"] == "tushare.pro.daily_basic"
+
+
 def test_xingyao_returns_recorded_native_columns(monkeypatch: pytest.MonkeyPatch):
     """The adapter must hand back the supplier's own columns, unfiltered.
 

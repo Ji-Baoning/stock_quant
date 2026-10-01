@@ -5,7 +5,15 @@ from __future__ import annotations
 import importlib.util
 import json
 import types
+from datetime import date
 from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from stock_quant.config import SourceConfig
+from stock_quant.data_sources.base import ContractError, DataRequest
+from stock_quant.data_sources.tushare import TushareSource
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROBE_PATH = REPO_ROOT / "project" / "probe_index_weight_daily_basic.py"
@@ -31,3 +39,108 @@ def test_probe_render_is_offline_and_lists_every_request_shape(capsys):
     assert all(e["transport"] in ("relay", "proxy")
                for group in shapes.values() for e in group)
     assert "000905.SH" in json.dumps(shapes)  # probe starting point, not evidence
+
+
+class StubClient:
+    sdk_version = "stub-1"
+
+    def __init__(self, frame):
+        self.frame, self.calls = frame, []
+
+    def daily_basic(self, **params):
+        self.calls.append(params)
+        return self.frame
+
+
+class ProxyShapeStub:
+    sdk_version = "stub-proxy-1"
+
+    def __init__(self, frame):
+        self.frame, self.calls = frame, []
+
+    def query(self, endpoint, **params):
+        self.calls.append((endpoint, params))
+        return self.frame
+
+
+def _daily_basic_frame(rows):
+    return pd.DataFrame(rows, columns=["ts_code", "trade_date",
+                                       "total_mv", "turnover_rate"])
+
+
+def _truncated(frame):
+    frame.attrs["truncated"] = True
+    return frame
+
+
+def _daily_basic_request(day=date(2026, 9, 1)):
+    return DataRequest("daily_basic", (), day, day, {})
+
+
+def test_daily_basic_passes_the_raw_frame_through_without_zero_fill():
+    frame = _daily_basic_frame([["000001.SZ", "20260901", "372000.0", "0.53"],
+                                ["600000.SH", "20260901", None, None]])
+    stub = StubClient(frame)
+    result = TushareSource(SourceConfig(), client=stub).fetch(_daily_basic_request())
+    assert stub.calls == [{"trade_date": "20260901",
+                           "fields": "ts_code,trade_date,total_mv,turnover_rate"}]
+    assert result.frame is frame  # raw evidence; no normalization, no zero fill
+    assert result.frame["total_mv"].isna().tolist() == [False, True]
+    assert result.metadata["supplier_endpoint"] == "tushare.pro.daily_basic"
+
+
+def test_daily_basic_falls_back_to_the_proxys_verified_query():
+    stub = ProxyShapeStub(_daily_basic_frame([["000001.SZ", "20260901", "1", "0.5"]]))
+    TushareSource(SourceConfig(), client=stub).fetch(_daily_basic_request())
+    assert stub.calls == [("daily_basic", {"trade_date": "20260901",
+                           "fields": "ts_code,trade_date,total_mv,turnover_rate"})]
+
+
+@pytest.mark.parametrize("frame,match", [
+    (_daily_basic_frame([]), "empty response"),
+    (pd.DataFrame([["000001.SZ", "1.0", "0.5"]],
+                  columns=["ts_code", "total_mv", "turnover_rate"]),
+     "missing columns: trade_date"),  # 缺日期键
+    (pd.DataFrame([["000001.SZ", "20260901", "0.5"]],
+                  columns=["ts_code", "trade_date", "turnover_rate"]),
+     "missing columns: total_mv"),  # schema drift: value column renamed away
+    (_daily_basic_frame([["000001.SZ", "20260901", "1", "0.5"],
+                         ["000001.SZ", "20260901", "1", "0.5"]]),
+     "duplicate primary-key"),
+    (_truncated(_daily_basic_frame([["000001.SZ", "20260901", "1", "0.5"]])),
+     "truncated"),
+    (_daily_basic_frame([["000001.SZ", "20260910", "1", "0.5"]]),
+     "outside the requested date range"),
+])
+def test_daily_basic_classifies_contract_failures(frame, match):
+    with pytest.raises(ContractError, match=match):
+        TushareSource(SourceConfig(), client=StubClient(frame)).fetch(
+            _daily_basic_request())
+
+
+def test_daily_basic_rejects_symbol_scoped_and_multi_day_windows():
+    source = TushareSource(
+        SourceConfig(), client=StubClient(
+            _daily_basic_frame([["000001.SZ", "20260901", "1", "0.5"]])))
+    with pytest.raises(ValueError, match="whole-market per-day"):
+        source.fetch(DataRequest("daily_basic", ("000001.SZ",),
+                                 date(2026, 9, 1), date(2026, 9, 1), {}))
+    with pytest.raises(ValueError, match="exactly one trade_date"):
+        source.fetch(DataRequest("daily_basic", (), date(2026, 9, 1),
+                                 date(2026, 9, 2), {}))
+
+
+def test_daily_basic_conversion_uses_the_frozen_constants_and_keeps_nulls():
+    from stock_quant.data_model.basic_factor_normalize import (
+        TOTAL_MV_TO_YUAN_MULTIPLIER,
+        TURNOVER_RATE_TO_RATIO_DIVISOR,
+        daily_basic_to_basic_factor_rows,
+    )
+    rows = daily_basic_to_basic_factor_rows(_daily_basic_frame(
+        [["000001.SZ", "20260901", "372000.0", "0.53"],
+         ["600000.SH", "20260901", None, None]]))
+    assert rows["market_cap"].tolist()[0] == pytest.approx(
+        372000.0 * TOTAL_MV_TO_YUAN_MULTIPLIER)
+    assert rows["turnover_rate"].tolist()[0] == pytest.approx(
+        0.53 / TURNOVER_RATE_TO_RATIO_DIVISOR)
+    assert rows["market_cap"].isna().tolist() == [False, True]  # never 0

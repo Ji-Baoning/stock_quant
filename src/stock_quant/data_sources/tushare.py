@@ -35,6 +35,12 @@ _TRADE_CAL_EXCHANGES = ("SSE", "SZSE")
 #: The native columns a ``trade_cal`` response must carry.
 _TRADE_CAL_COLUMNS = ("cal_date", "is_open", "pretrade_date")
 
+#: The daily_basic fields one basic_factor snapshot needs, and the native
+#: columns a ``daily_basic`` response must carry (identity + value columns;
+#: amount/OHLCV are ``daily_bar`` facts, spec §6.1).
+_DAILY_BASIC_FIELDS = "ts_code,trade_date,total_mv,turnover_rate"
+_DAILY_BASIC_COLUMNS = ("ts_code", "trade_date", "total_mv", "turnover_rate")
+
 
 class TushareSource:
     """Fetch raw Tushare ``daily`` responses without column normalization.
@@ -93,9 +99,11 @@ class TushareSource:
             return self._fetch_trade_cal(request)
         if request.endpoint in ("daily", "index_daily"):
             return self._fetch_symbol_series(request)
+        if request.endpoint == "daily_basic":
+            return self._fetch_daily_basic(request)
         raise ValueError(
-            "TushareSource supports only the daily, index_daily, stock_basic, "
-            "and trade_cal endpoints"
+            "TushareSource supports only the daily, daily_basic, index_daily, "
+            "stock_basic, and trade_cal endpoints"
         )
 
     def _fetch_symbol_series(self, request: DataRequest) -> FetchResult:
@@ -274,6 +282,91 @@ class TushareSource:
             )
         except ContractError:
             raise
+
+    def _client_read(self, endpoint: str, **params: object) -> pd.DataFrame:
+        """Named method when the transport has one, else the proxy's query()."""
+        method = getattr(self._client, endpoint, None)
+        if method is not None:
+            return method(**params)
+        query = getattr(self._client, "query", None)
+        if query is None:
+            raise ValueError(
+                f"tushare transport {self._transport.transport_id} has no "
+                f"{endpoint} endpoint"
+            )
+        return query(endpoint, **params)
+
+    def _fetch_daily_basic(self, request: DataRequest) -> FetchResult:
+        """One whole-market daily_basic snapshot for a single trade date.
+
+        Per-day vocabulary (spec §6.2): ``symbols`` empty, window exactly one
+        day, callers paginate by day.  Only identity + total_mv/turnover_rate
+        are requested -- amount/OHLCV are ``daily_bar`` facts (spec §6.1).
+        """
+        if request.symbols:
+            raise ValueError(
+                "Tushare daily_basic is a whole-market per-day request, not a "
+                "symbol-scoped query"
+            )
+        if request.start_date != request.end_date:
+            raise ValueError(
+                "Tushare daily_basic requests exactly one trade_date "
+                "(start_date must equal end_date)"
+            )
+        request_timestamp = _utc_timestamp()
+        try:
+            frame = self._client_read(
+                "daily_basic",
+                trade_date=request.start_date.strftime("%Y%m%d"),
+                fields=_DAILY_BASIC_FIELDS,
+            )
+        except Exception as error:
+            translated = translate_supplier_error(error)
+            if translated is error:
+                raise
+            raise translated from None
+        response_timestamp = _utc_timestamp()
+        self._validate_daily_basic(frame, request)
+        metadata = request_metadata(
+            request,
+            self._supplier_endpoint(request.endpoint),
+            self._sdk_version,
+            transport_id=self._transport.transport_id,
+            request_timestamp=request_timestamp,
+            response_timestamp=response_timestamp,
+        )
+        return FetchResult(
+            source=self.name,
+            endpoint=request.endpoint,
+            request_key=request_key(request),
+            frame=frame,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _validate_daily_basic(frame: pd.DataFrame, request: DataRequest) -> None:
+        """Classify the daily_basic contract; an empty day is never success."""
+        if not isinstance(frame, pd.DataFrame):
+            raise ContractError("supplier response is not a pandas DataFrame")
+        missing = [name for name in _DAILY_BASIC_COLUMNS if name not in frame.columns]
+        if missing:
+            raise ContractError(
+                "supplier daily_basic response is missing columns: "
+                + ", ".join(missing)
+            )
+        duplicated = frame.duplicated(subset=["ts_code", "trade_date"]).sum()
+        if duplicated:
+            raise ContractError(
+                f"supplier daily_basic response has {int(duplicated)} "
+                "duplicate primary-key rows"
+            )
+        validate_supplier_frame(
+            frame,
+            request,
+            symbol_columns=("ts_code",),
+            date_columns=("trade_date",),
+            require_symbol=False,
+        )
 
 
 def injected_transport(client: Any) -> TushareTransport:
