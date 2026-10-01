@@ -89,13 +89,14 @@ def _shape(label: str, frame: pd.DataFrame, reference: str) -> dict[str, object]
 
 
 def _index_weight_calls(codes, cadence_start, cadence_months, years):
-    months = [str(p).replace("-", "") for p in pd.period_range(
-        cadence_start, periods=cadence_months, freq="M")]
+    months = [(str(p).replace("-", ""), p.end_time.strftime("%Y%m%d"))
+              for p in pd.period_range(cadence_start, periods=cadence_months,
+                                       freq="M")]
     calls = []
     for code in codes:  # per code, not just the first
         calls += [(f"{code} cadence {m}", "index_weight",
                    {"index_code": code, "start_date": f"{m}01",
-                    "end_date": f"{m}31"}) for m in months]
+                    "end_date": end}) for m, end in months]
         calls += [(f"{code} history {y}01", "index_weight",
                    {"index_code": code, "start_date": f"{y}0101",
                     "end_date": f"{y}0131"}) for y in years]
@@ -190,9 +191,17 @@ def _write_evidence(path: Path, section: str, payload: dict[str, object]) -> Non
         document = {"record": f"docs/operations/{RECORD_BASENAME}.md",
                     "probes": {}}
     document["probes"][section] = payload
-    if any(entry.get("readings")
-           for entry in document["probes"].values()
-           if isinstance(entry, dict)):
+
+    def _has_readings(node: object) -> bool:
+        """Readings sit per transport (findings[kind]['readings']), not at the
+        section top level, so the lookup must descend into the payload."""
+        if not isinstance(node, dict):
+            return False
+        if node.get("readings"):
+            return True
+        return any(_has_readings(child) for child in node.values())
+
+    if any(_has_readings(entry) for entry in document["probes"].values()):
         document["_status"] = "measured"
     document["last_updated_utc"] = _utc_now()
     path.write_text(
