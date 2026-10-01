@@ -21,6 +21,7 @@ from stock_quant.data_quality.models import (
     CODE_BASIC_FACTOR_COVERAGE_ROW_MISSING,
     CODE_BASIC_FACTOR_JOIN_DUPLICATE,
     CODE_BASIC_FACTOR_JOIN_EXPANSION,
+    CODE_COVERAGE_TABLE_MISSING,
     CODE_DUPLICATE_CONFLICT,
     CODE_INVALID_OHLC,
     CODE_MISSING_REGISTERED_TABLE,
@@ -31,6 +32,7 @@ from stock_quant.data_quality.models import (
     CODE_REPORT_GENERATION_FAILED,
     CODE_SCHEMA_MISMATCH,
     CODE_TABLE_EMPTIED_BY_FETCH,
+    CODE_TABLE_LINEAGE_TRANSPORT_MISMATCH,
     CODE_UNEXPLAINED_PRIMARY_GAP,
     CODE_UNKNOWN_ADJUSTMENT,
     CODE_UNKNOWN_SOURCE,
@@ -74,6 +76,13 @@ PUBLICATION_BLOCKING_CODES = frozenset(
         CODE_BASIC_FACTOR_JOIN_DUPLICATE,
         CODE_BASIC_FACTOR_JOIN_EXPANSION,
         CODE_BASIC_FACTOR_COVERAGE_ROW_MISSING,
+        # Publish-time table-lineage verification (spec §7.3): a build whose
+        # recorded answering transport contradicts the declared
+        # primary_transport, or that publishes a per_symbol_window table
+        # without its coverage table, is a broken build process -- global
+        # process codes no tier may downgrade (§7.4).
+        CODE_TABLE_LINEAGE_TRANSPORT_MISMATCH,
+        CODE_COVERAGE_TABLE_MISSING,
         CODE_QUARANTINE_MISSING_REASON,
         CODE_REPORT_GENERATION_FAILED,
         CODE_ADJUSTED_BAR_MISSING_RAW,
@@ -96,6 +105,8 @@ GLOBAL_PROCESS_CODES = frozenset(
         CODE_BASIC_FACTOR_JOIN_DUPLICATE,
         CODE_BASIC_FACTOR_JOIN_EXPANSION,
         CODE_BASIC_FACTOR_COVERAGE_ROW_MISSING,
+        CODE_TABLE_LINEAGE_TRANSPORT_MISMATCH,
+        CODE_COVERAGE_TABLE_MISSING,
     }
 )
 

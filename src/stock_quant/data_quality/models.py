@@ -101,6 +101,14 @@ CODE_BASIC_FACTOR_JOIN_DUPLICATE = "basic_factor_join_duplicate"
 CODE_BASIC_FACTOR_JOIN_EXPANSION = "basic_factor_join_expansion"
 CODE_BASIC_FACTOR_COVERAGE_ROW_MISSING = "basic_factor_coverage_row_missing"
 
+# Publish-time table-lineage verification (spec §7.3): the recorded
+# table_lineage transport must equal the table contract's primary_transport,
+# and every per_symbol_window table must publish its coverage table.  Both
+# are cross-table invariants of the build itself -- global process codes no
+# tier may waive (§7.4 "let the round fail").
+CODE_TABLE_LINEAGE_TRANSPORT_MISMATCH = "table_lineage_transport_mismatch"
+CODE_COVERAGE_TABLE_MISSING = "coverage_table_missing"
+
 # Downgrade evidence (spec D1): a non-core table carrying a table-level
 # blocking code publishes with this WARNING record instead of blocking.
 # It is deliberately NOT in PUBLICATION_BLOCKING_CODES.

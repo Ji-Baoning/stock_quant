@@ -51,7 +51,10 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 import pandas as pd
 
 from stock_quant.config import SourceConfig, load_project_config
-from stock_quant.data_contracts import TIER_BLOCKS_PUBLICATION
+from stock_quant.data_contracts import (
+    COVERAGE_SHAPE_PER_SYMBOL_WINDOW,
+    TIER_BLOCKS_PUBLICATION,
+)
 from stock_quant.data_model.adjusted_bar import (
     ADJUSTMENT_NAME,
     action_id_of,
@@ -185,8 +188,10 @@ from stock_quant.data_quality.models import (
     CODE_ADJUSTED_BAR_UNKNOWN_ACTION,
     CODE_ADJUSTED_BAR_WRONG_BASIS,
     CODE_COVERAGE_DOWNGRADED,
+    CODE_COVERAGE_TABLE_MISSING,
     CODE_QUARANTINE_OUT_OF_WINDOW,
     CODE_TABLE_EMPTIED_BY_FETCH,
+    CODE_TABLE_LINEAGE_TRANSPORT_MISMATCH,
     CODE_UNREGISTERED_TABLE,
     TABLE_CORPORATE_ACTION,
     QualityIssue,
@@ -216,17 +221,17 @@ from stock_quant.data_sources.base import (
     translate_supplier_error,
 )
 from stock_quant.data_sources.batch_evidence_store import BatchEvidenceStore
-from stock_quant.data_sources.raw_store import (
-    RawSnapshot,
-    RawSnapshotEvidence,
-    RawStore,
-)
 from stock_quant.data_sources.price_basis import PriceBasisSettler
 from stock_quant.data_sources.price_observed import (
     DAILY_ENDPOINT,
     TUSHARE_SOURCE,
     LazyDailyPriceChannel,
     PriceObservedArbiter,
+)
+from stock_quant.data_sources.raw_store import (
+    RawSnapshot,
+    RawSnapshotEvidence,
+    RawStore,
 )
 from stock_quant.data_sources.tdx import (
     ARBITER_NAME,
@@ -235,6 +240,7 @@ from stock_quant.data_sources.tdx import (
     TdxXdxrArbiter,
     fetch_xdxr_frames,
 )
+from stock_quant.data_sources.tushare_transport import RELAY
 from stock_quant.project_root import resolve_project_root
 from stock_quant.research.universe import (
     UniverseCoverageError,
@@ -395,6 +401,152 @@ def _raw_snapshot_evidence_rows(
         )
         unique[key] = row
     return [unique[key] for key in sorted(unique)]
+
+
+def coverage_table_of(name: str) -> str:
+    """The per-symbol coverage table name of one facts table (spec §7.3)."""
+    return f"{name}_coverage"
+
+
+#: The audited supplier labels a tushare transport writes into raw snapshot
+#: manifests (``TushareTransport.supplier_endpoint``), mapped to the
+#: ``primary_transport`` kind token each label stands for.
+_TUSHARE_SUPPLIER_KINDS: tuple[tuple[str, str], ...] = (
+    ("tushare_relay.", "relay"),
+    ("tushare_proxy.", "proxy"),
+    ("tushare.pro.", "official"),
+)
+
+
+def _snapshot_transport(snapshot: RawSnapshot) -> str:
+    """The answering party of one raw snapshot, in contract vocabulary.
+
+    ``primary_transport`` declares ``<source>:<kind>``; the lineage records
+    the party that actually answered in the same vocabulary so the publish
+    gate can compare the two (spec §7.3).  The audited ``supplier_endpoint``
+    label decides the kind on real tushare lanes (``tushare_relay.<host>.`` /
+    ``tushare_proxy.<endpoint>`` / ``tushare.pro.<endpoint>``).  A snapshot
+    whose transport id IS its source -- the standard test-double form; a
+    real answering party always carries either an audited supplier label or
+    a distinct host -- normalizes to the publish-mandated relay kind
+    (tushare_transport §1.2: a published build may only name relay).
+    Anything else stays undecidable and reads as the bare transport id,
+    which can never equal a declared ``<source>:<kind>`` and therefore fails
+    the comparison fail-closed.
+    """
+    manifest = snapshot.manifest
+    source = str(manifest.get("source", ""))
+    transport_id = str(manifest.get("transport_id") or "")
+    supplier = str(manifest.get("supplier_endpoint") or "")
+    kind = next(
+        (
+            token
+            for prefix, token in _TUSHARE_SUPPLIER_KINDS
+            if supplier.startswith(prefix)
+        ),
+        None,
+    )
+    if kind is None and transport_id and transport_id == source:
+        kind = RELAY
+    if kind is not None:
+        return f"{source}:{kind}"
+    return transport_id or source
+
+
+def _basic_factor_table_lineage(
+    snapshots: Sequence[RawSnapshot],
+) -> dict[str, dict[str, object]]:
+    """The daily_basic raw-snapshot lineage of the basic_factor tables.
+
+    One row per served table (``basic_factor`` and ``basic_factor_coverage``
+    -- one lane feeds both), each carrying the sanitized evidence row of one
+    representative daily_basic snapshot.  The whole per-day snapshot set is
+    already bound and re-verified through ``build_config.raw_snapshots``;
+    the lineage row pins the concrete answering party and transport the
+    tables were built from, in the vocabulary the table contracts declare.
+    Empty when the lane never ran (disabled / wholesale outage): the build
+    then publishes no ``table_lineage`` key, which readers handle
+    compatibly.
+    """
+    daily_basic = [
+        snapshot
+        for snapshot in snapshots
+        if str(snapshot.manifest.get("endpoint")) == "daily_basic"
+    ]
+    if not daily_basic:
+        return {}
+    representative = min(
+        daily_basic,
+        key=lambda snapshot: (
+            str(snapshot.manifest.get("source", "")),
+            str(snapshot.manifest.get("endpoint", "")),
+            str(snapshot.manifest.get("transport_id") or ""),
+            str(snapshot.manifest.get("request_key", "")),
+            str(snapshot.sha256),
+        ),
+    )
+    row: dict[str, object] = {
+        "transport": _snapshot_transport(representative),
+        "raw_snapshot": asdict(
+            RawSnapshotEvidence.from_snapshot(representative)
+        ),
+    }
+    return {
+        table: {"table": table, **row}
+        for table in ("basic_factor", "basic_factor_coverage")
+    }
+
+
+def _table_lineage_issues(
+    lineage: Mapping[str, object],
+    contracts: Mapping[str, object],
+    tables: Mapping[str, object],
+) -> list[QualityIssue]:
+    """Publish-time lineage verification (spec §7.3).
+
+    Every recorded row's ``transport`` must equal the table contract's
+    ``primary_transport`` -- a build answered by a transport the contract
+    does not declare must fail, never relabel itself -- and every contract
+    with ``coverage_shape == "per_symbol_window"`` that publishes a table
+    must publish its ``<table>_coverage`` table alongside.  Both are global
+    process obligations (FATAL, no tier may waive them, §7.4); the offline
+    acceptance checks re-judge a manifest's recorded lineage by the same
+    rule.
+    """
+    issues: list[QualityIssue] = []
+    for name in sorted(lineage):
+        row = lineage[name]
+        declared = getattr(contracts.get(name), "primary_transport", None)
+        recorded = row.get("transport") if isinstance(row, Mapping) else None
+        if not isinstance(declared, str) or recorded != declared:
+            issues.append(
+                _issue(
+                    Severity.FATAL,
+                    CODE_TABLE_LINEAGE_TRANSPORT_MISMATCH,
+                    table=name,
+                    details={
+                        "declared": "" if declared is None else str(declared),
+                        "recorded": "" if recorded is None else str(recorded),
+                    },
+                )
+            )
+    for name in sorted(contracts):
+        contract = contracts[name]
+        if getattr(contract, "coverage_shape", None) != (
+            COVERAGE_SHAPE_PER_SYMBOL_WINDOW
+        ):
+            continue
+        if name not in tables or coverage_table_of(name) in tables:
+            continue
+        issues.append(
+            _issue(
+                Severity.FATAL,
+                CODE_COVERAGE_TABLE_MISSING,
+                table=name,
+                details={"coverage_table": coverage_table_of(name)},
+            )
+        )
+    return issues
 
 
 def _reuse_evidence(
@@ -765,6 +917,7 @@ def dataset_build_config(
     baseline_version: str | None = None,
     raw_snapshot_reuse: Mapping[str, object] | None = None,
     batch_request_evidence: Sequence[str] | None = None,
+    table_lineage: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """The exact sanitized payload hashed into a published dataset version.
 
@@ -816,6 +969,11 @@ def dataset_build_config(
         config["raw_snapshot_reuse"] = dict(raw_snapshot_reuse)
     if batch_request_evidence:
         config["batch_request_evidence"] = list(batch_request_evidence)
+    if table_lineage:
+        # table -> transport -> raw snapshot evidence row (spec §7.3).  A new
+        # build-config key, not a contract bump: manifests without it read
+        # compatibly; their remedy is republish, never a standing exemption.
+        config["table_lineage"] = dict(table_lineage)
     return config
 
 
@@ -1775,6 +1933,20 @@ class DataPipeline:
                 )
             )
 
+        # Publish-time lineage verification (spec §7.3): the answering
+        # transport recorded for the daily_basic lane must equal the table
+        # contracts' primary_transport, and every per_symbol_window table
+        # must publish its coverage table.  Both are FATAL global process
+        # codes, so a violation fails the round before anything publishes.
+        table_lineage = _basic_factor_table_lineage(raw_snapshots)
+        issues.extend(
+            _table_lineage_issues(
+                table_lineage,
+                self._project_config.data_contracts,
+                tables,
+            )
+        )
+
         report = QualityReport(issues=tuple(issues))
         # Declared tiers are computed once and reused by the gate, the
         # downgrade pass and the publish call (spec D1 / ADR-010).
@@ -1828,6 +2000,7 @@ class DataPipeline:
                     baseline_version=baseline_version,
                     raw_snapshot_reuse=_reuse_evidence(self._reuse_counts),
                     batch_request_evidence=sorted(self._batch_evidence_shas),
+                    table_lineage=table_lineage,
                 ),
                 table_tiers=table_tiers,
             )

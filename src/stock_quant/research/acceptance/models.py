@@ -83,6 +83,7 @@ AUTOMATED_CHECK_CODES = (
     "raw_snapshot_traceability",
     "calendar_coverage_evidence",
     "table_fetch_coverage_evidence",
+    "table_lineage_evidence",
     "source_role_health",
 )
 #: Manual checks only an operator can complete, each with evidence.

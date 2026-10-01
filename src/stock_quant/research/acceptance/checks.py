@@ -83,6 +83,7 @@ from stock_quant.data_model.universe_membership import (
 from stock_quant.data_pipeline import (
     DATASET_BUILD_CONTRACT_VERSION,
     DataPipeline,
+    _table_lineage_issues,
 )
 from stock_quant.data_quality.gates import evaluate_publication
 from stock_quant.data_quality.models import (
@@ -204,6 +205,7 @@ def run_automated_checks(value: AcceptanceCheckInput) -> tuple[CheckResult, ...]
         "raw_snapshot_traceability": _check_raw_snapshots,
         "calendar_coverage_evidence": _check_calendar_coverage,
         "table_fetch_coverage_evidence": _check_table_fetch_coverage,
+        "table_lineage_evidence": _check_table_lineage,
         "source_role_health": _check_source_roles,
     }
     results = []
@@ -484,6 +486,36 @@ def _check_table_fetch_coverage(value: AcceptanceCheckInput) -> CheckResult:
         for name in sorted(published - set(coverage)):
             failures.append(["table_fetch_coverage_table_unrecorded", name])
     return _result("table_fetch_coverage_evidence", failures)
+
+
+def _check_table_lineage(value: AcceptanceCheckInput) -> CheckResult:
+    """Re-judge the recorded table lineage against the declared contracts.
+
+    The recorded rows are judged by the same rule the publish path enforced
+    (:func:`stock_quant.data_pipeline._table_lineage_issues`): each row's
+    ``transport`` must equal the table contract's ``primary_transport`` and
+    every ``per_symbol_window`` table must publish its coverage table.  A
+    build_config without ``table_lineage`` is a legacy manifest read
+    compatibly -- the remedy is republish under the current build evidence,
+    never a standing exemption (the build-config contract stays version 1).
+    """
+    evidence = dataset_evidence(value)
+    build = _build_config(evidence.manifest)
+    if build is None:
+        return _result(
+            "table_lineage_evidence",
+            [["dataset_build_evidence_missing", "build_config"]],
+        )
+    lineage = build.get("table_lineage")
+    if lineage is None:
+        return _result("table_lineage_evidence", [])
+    if not isinstance(lineage, dict):
+        raise ValueError("dataset build table_lineage is malformed")
+    contracts = load_project_config(value.project_root).data_contracts
+    tables = _tables_mapping(evidence.manifest.get("tables"))
+    issues = _table_lineage_issues(lineage, contracts, tables)
+    failures = [[issue.code, issue.table] for issue in issues]
+    return _result("table_lineage_evidence", failures)
 
 
 def _check_source_roles(value: AcceptanceCheckInput) -> CheckResult:

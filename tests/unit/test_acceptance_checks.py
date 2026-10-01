@@ -19,11 +19,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from stock_quant.research.acceptance.checks import (
     AcceptanceCheckInput,
     _check_required_tables,
     _check_table_fetch_coverage,
+    _check_table_lineage,
     _open_days,
     dataset_evidence,
     run_automated_checks,
@@ -425,5 +427,205 @@ def test_required_tables_reads_legacy_manifest_without_table_lineage(tmp_path):
     )
     (dataset / "quality_report.json").write_text("{}\n", encoding="utf-8")
     check = _check_required_tables(_input(tmp_path))
+    assert check.status is CheckStatus.PASS
+    assert check.details == {}
+
+
+# --------------------------------------------------------------------------- #
+# table_lineage_evidence (P2c Task 4)
+# --------------------------------------------------------------------------- #
+
+
+def _write_contracts_project(root: Path) -> None:
+    """A minimal project root whose contracts declare the basic_factor pair.
+
+    ``table_lineage_evidence`` judges a recorded lineage row against the
+    table contract's ``primary_transport``, so the evidence tree needs a
+    project config to read the declarations from -- the same config path the
+    other config-reading checks take (``_check_quality_report``).
+    """
+    configs = root / "configs"
+    configs.mkdir()
+    (configs / "project.yml").write_text(
+        yaml.safe_dump(
+            {
+                "start_date": "2020-01-01",
+                "end_date": "2020-01-31",
+                "initial_cash": 1000000,
+                "benchmark_symbols": ["000300.SH"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (configs / "sources.yml").write_text(
+        yaml.safe_dump(
+            {
+                "data_contracts": [
+                    {
+                        "table": "basic_factor",
+                        "tier": "research_only",
+                        "primary_transport": "tushare:relay",
+                        "anchors": [],
+                        "conflict": "block",
+                        "pit": None,
+                        "coverage_shape": "per_symbol_window",
+                        "incremental": "last_covered_plus_1",
+                    },
+                    {
+                        "table": "basic_factor_coverage",
+                        "tier": "core",
+                        "primary_transport": "tushare:relay",
+                        "anchors": [],
+                        "conflict": "block",
+                        "pit": None,
+                        "coverage_shape": "none",
+                        "incremental": "last_covered_plus_1",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (configs / "costs.yml").write_text("", encoding="utf-8")
+
+
+def _lineage_row(transport: str) -> dict:
+    return {
+        "table": "basic_factor",
+        "transport": transport,
+        "raw_snapshot": {
+            "source": "tushare",
+            "endpoint": "daily_basic",
+            "transport_id": "tushare",
+            "request_key": "k1",
+            "file_sha256": "b" * 64,
+            "manifest_sha256": "c" * 64,
+        },
+    }
+
+
+def _write_lineage_manifest(tmp_path: Path, manifest: dict) -> None:
+    dataset = _write_dataset(tmp_path, manifest)
+    (dataset / "quality_report.json").write_text("{}\n", encoding="utf-8")
+
+
+def test_table_lineage_evidence_passes_consistent_lineage(tmp_path):
+    """A recorded lineage row consistent with the declaration passes.
+
+    ``basic_factor`` is declared ``tushare:relay`` with a
+    ``per_symbol_window`` coverage shape: the row names the same transport
+    and the manifest publishes ``basic_factor_coverage``, so the check has
+    nothing to flag.
+    """
+    _write_contracts_project(tmp_path)
+    _write_lineage_manifest(
+        tmp_path,
+        {
+            "dataset_version": "a" * 64,
+            "tables": {
+                "basic_factor": {"path": "basic_factor.parquet"},
+                "basic_factor_coverage": {
+                    "path": "basic_factor_coverage.parquet"
+                },
+            },
+            "build_config": {
+                "origin": "data_update",
+                "pipeline_contract_version": 1,
+                "table_lineage": {
+                    "basic_factor": _lineage_row("tushare:relay")
+                },
+            },
+        },
+    )
+    check = _check_table_lineage(_input(tmp_path))
+    assert check.status is CheckStatus.PASS
+    assert check.details == {}
+
+
+def test_table_lineage_evidence_fails_on_transport_mismatch(tmp_path):
+    """A recorded transport that differs from the declaration fails."""
+    _write_contracts_project(tmp_path)
+    _write_lineage_manifest(
+        tmp_path,
+        {
+            "dataset_version": "a" * 64,
+            "tables": {
+                "basic_factor": {"path": "basic_factor.parquet"},
+                "basic_factor_coverage": {
+                    "path": "basic_factor_coverage.parquet"
+                },
+            },
+            "build_config": {
+                "origin": "data_update",
+                "pipeline_contract_version": 1,
+                "table_lineage": {
+                    "basic_factor": _lineage_row("tushare:proxy")
+                },
+            },
+        },
+    )
+    check = _check_table_lineage(_input(tmp_path))
+    assert check.status is CheckStatus.FAIL
+    assert ["table_lineage_transport_mismatch", "basic_factor"] in (
+        check.details["failures"]
+    )
+
+
+def test_table_lineage_evidence_fails_on_missing_coverage_table(tmp_path):
+    """A published per-symbol-window table without its coverage table fails.
+
+    The lineage row itself matches the declaration; the failure is the
+    absent ``basic_factor_coverage`` the ``per_symbol_window`` shape owes
+    the manifest.
+    """
+    _write_contracts_project(tmp_path)
+    _write_lineage_manifest(
+        tmp_path,
+        {
+            "dataset_version": "a" * 64,
+            "tables": {"basic_factor": {"path": "basic_factor.parquet"}},
+            "build_config": {
+                "origin": "data_update",
+                "pipeline_contract_version": 1,
+                "table_lineage": {
+                    "basic_factor": _lineage_row("tushare:relay")
+                },
+            },
+        },
+    )
+    check = _check_table_lineage(_input(tmp_path))
+    assert check.status is CheckStatus.FAIL
+    assert ["coverage_table_missing", "basic_factor"] in (
+        check.details["failures"]
+    )
+
+
+def test_table_lineage_evidence_reads_legacy_manifest_without_the_key(tmp_path):
+    """A build_config without ``table_lineage`` passes compatibly.
+
+    Dataset versions recorded before per-table lineage existed carry no
+    ``table_lineage`` key: the check reads them in their legacy form and
+    passes without error -- the remedy for such a version is republish
+    under the current build evidence, never a standing exemption, and the
+    build-config contract version stays ``1``.
+    """
+    _write_contracts_project(tmp_path)
+    _write_lineage_manifest(
+        tmp_path,
+        {
+            "dataset_version": "a" * 64,
+            "tables": {
+                "basic_factor": {"path": "basic_factor.parquet"},
+                "basic_factor_coverage": {
+                    "path": "basic_factor_coverage.parquet"
+                },
+            },
+            "build_config": {
+                "origin": "data_update",
+                "pipeline_contract_version": 1,
+            },
+        },
+    )
+    check = _check_table_lineage(_input(tmp_path))
     assert check.status is CheckStatus.PASS
     assert check.details == {}
