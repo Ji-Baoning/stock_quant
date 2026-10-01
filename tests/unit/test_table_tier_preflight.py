@@ -144,3 +144,64 @@ def test_not_fetched_input_tables_detected():
     }
     assert not_fetched_input_tables(build_config, ("income",)) == []
     assert not_fetched_input_tables(build_config, ("daily_bar",)) == ["daily_bar"]
+
+
+def test_window_scoped_not_fetched_reasons_are_not_whole_table_skips():
+    """The §7.5.1/2 zone reasons are partial-coverage, not whole-table skips.
+
+    A ``history_begins_after_anchor`` prefix is legal pinned coverage; a run
+    over it is judged window-aware by ``table_unsupported_window_tables``
+    (``table_history_start_after_window``), so it must not trip the
+    whole-table ``table_not_fetched`` routing (spec §7.5.3).
+    """
+    from stock_quant.data_model.fetch_coverage import not_fetched_input_tables
+
+    build_config = {
+        "table_fetch_coverage": {
+            "daily_bar": [
+                {"table": "daily_bar", "kind": "not_fetched",
+                 "window_start": "2021-01-04", "window_end": "2023-12-29",
+                 "reason": "history_begins_after_anchor"},
+                {"table": "daily_bar", "kind": "fetched",
+                 "window_start": "2023-12-30", "window_end": "2026-08-28"},
+            ],
+        }
+    }
+    assert not_fetched_input_tables(build_config, ("daily_bar",)) == []
+
+
+def test_unsupported_window_tables_detected():
+    """Windows inside a pinned not-fetched zone route to the new violation.
+
+    The runner appends ``table_history_start_after_window`` for the tables
+    this helper returns (RESEARCH) and counts the same code into the
+    ENGINEERING RESEARCH-ONLY exemption family; the routing itself is covered
+    by the integration preflight tests.
+    """
+    from datetime import date
+
+    from stock_quant.data_model.fetch_coverage import (
+        table_unsupported_window_tables,
+    )
+
+    build_config = {
+        "table_fetch_coverage": {
+            "daily_bar": [
+                {"table": "daily_bar", "kind": "not_fetched",
+                 "window_start": "2021-01-04", "window_end": "2023-12-29",
+                 "reason": "history_begins_after_anchor"},
+                {"table": "daily_bar", "kind": "fetched",
+                 "window_start": "2023-12-30", "window_end": "2026-08-28"},
+            ],
+            "income": [
+                {"table": "income", "kind": "fetched",
+                 "window_start": "2021-01-04", "window_end": "2026-08-28"},
+            ],
+        }
+    }
+    assert table_unsupported_window_tables(
+        build_config, ("daily_bar", "income"), date(2024, 1, 1), date(2024, 6, 30)
+    ) == []
+    assert table_unsupported_window_tables(
+        build_config, ("daily_bar", "income"), date(2022, 1, 1), date(2022, 6, 30)
+    ) == ["daily_bar"]

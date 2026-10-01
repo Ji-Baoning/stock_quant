@@ -42,6 +42,19 @@ _REASONS = frozenset(
     }
 )
 
+#: The zone reasons a run window can avoid (spec §7.5.1/2): a pinned version
+#: carrying them is partially fetchable, so runs over it are judged
+#: window-aware (``table_unsupported_window_tables`` /
+#: ``table_history_start_after_window``) instead of whole-table
+#: (``table_not_fetched``).
+_WINDOW_SCOPED_NOT_FETCHED_REASONS = frozenset(
+    {
+        NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+        NOT_FETCHED_SOURCE_DISABLED,
+        NOT_FETCHED_SOURCE_UNAVAILABLE,
+    }
+)
+
 
 @dataclass(frozen=True)
 class FetchSegment:
@@ -96,11 +109,16 @@ def to_build_config_payload(
 def not_fetched_input_tables(
     build_config: Mapping[str, object], input_tables: Sequence[str]
 ) -> list[str]:
-    """Input tables whose pinned version carries NOT_FETCHED segments.
+    """Input tables whose pinned version skips fetching the whole table.
 
-    A version with skipped fetches is not a complete-fetch version; research
-    runs referencing such tables fail preflight and should pin a full-update
-    version instead (spec D5.3, sixth-round ruling).
+    An ``operator_explicit_window`` skip (or a malformed reason-less
+    ``not_fetched`` segment) leaves no fetchable window, so a research run
+    referencing such tables fails preflight outright and should pin a
+    full-update version instead (spec D5.3, sixth-round ruling).  The
+    window-scoped zone reasons (``history_begins_after_anchor`` prefix,
+    ``source_disabled``/``source_unavailable`` tails) declare partial
+    coverage a run window can avoid: runs over them are judged window-aware
+    by :func:`table_unsupported_window_tables` (spec §7.5.3).
     """
     coverage = build_config.get("table_fetch_coverage", {})
     if not isinstance(coverage, dict):
@@ -109,7 +127,9 @@ def not_fetched_input_tables(
     for table in input_tables:
         segments = coverage.get(table, [])
         if isinstance(segments, list) and any(
-            isinstance(segment, Mapping) and segment.get("kind") == KIND_NOT_FETCHED
+            isinstance(segment, Mapping)
+            and segment.get("kind") == KIND_NOT_FETCHED
+            and segment.get("reason") not in _WINDOW_SCOPED_NOT_FETCHED_REASONS
             for segment in segments
         ):
             skipped.append(table)
@@ -294,3 +314,43 @@ def _contiguity_violations(
             ("fetch_coverage_gap", {"table": table, "gap_start": cursor.isoformat()})
         )
     return violations
+
+
+def table_unsupported_window_tables(
+    build_config: Mapping[str, object],
+    input_tables: Sequence[str],
+    window_start: date,
+    window_end: date,
+) -> list[str]:
+    """Input tables whose not-fetched zones intersect the run window.
+
+    The not-fetched zones are the ``history_begins_after_anchor`` prefix
+    (supported_start = the first fetched/carried segment's window_start) and
+    any ``source_disabled``/``source_unavailable`` tail.  A run window that
+    reaches into either is preflight-rejected (spec §7.5.3,
+    ``table_history_start_after_window``); ENGINEERING keeps its exemption.
+    """
+    coverage = build_config.get("table_fetch_coverage", {})
+    if not isinstance(coverage, Mapping):
+        return []
+    unsupported: list[str] = []
+    for table in input_tables:
+        segments = coverage.get(table, [])
+        if not isinstance(segments, list):
+            continue
+        for segment in segments:
+            if not isinstance(segment, Mapping):
+                continue
+            reason = segment.get("reason")
+            if reason not in (
+                NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+                NOT_FETCHED_SOURCE_DISABLED,
+                NOT_FETCHED_SOURCE_UNAVAILABLE,
+            ):
+                continue
+            start = date.fromisoformat(str(segment["window_start"]))
+            end = date.fromisoformat(str(segment["window_end"]))
+            if window_start <= end and window_end >= start:
+                unsupported.append(table)
+                break
+    return unsupported

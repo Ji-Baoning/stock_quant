@@ -317,6 +317,60 @@ def test_operator_window_stays_whole_table():
     ) == []
 
 
+def test_a_window_before_supported_start_is_unsupported():
+    from stock_quant.data_model.fetch_coverage import (
+        NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+        table_unsupported_window_tables,
+    )
+
+    build = {
+        "table_fetch_coverage": to_build_config_payload(
+            {
+                "basic_factor": [
+                    FetchSegment(
+                        "basic_factor", KIND_NOT_FETCHED, ANCHOR, date(2023, 12, 29),
+                        reason=NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+                    ),
+                    FetchSegment("basic_factor", KIND_FETCHED, date(2023, 12, 30), END),
+                ]
+            }
+        )
+    }
+    assert table_unsupported_window_tables(
+        build, ["basic_factor"], date(2022, 1, 4), date(2022, 6, 30)
+    ) == ["basic_factor"]
+    assert table_unsupported_window_tables(
+        build, ["basic_factor"], date(2024, 1, 4), date(2024, 6, 30)
+    ) == []
+
+
+def test_a_window_reaching_into_an_unavailable_tail_is_unsupported():
+    from stock_quant.data_model.fetch_coverage import (
+        NOT_FETCHED_SOURCE_UNAVAILABLE,
+        table_unsupported_window_tables,
+    )
+
+    build = {
+        "table_fetch_coverage": to_build_config_payload(
+            {
+                "daily_bar": [
+                    FetchSegment("daily_bar", KIND_FETCHED, ANCHOR, date(2026, 8, 27)),
+                    FetchSegment(
+                        "daily_bar", KIND_NOT_FETCHED, END, END,
+                        reason=NOT_FETCHED_SOURCE_UNAVAILABLE,
+                    ),
+                ]
+            }
+        )
+    }
+    assert table_unsupported_window_tables(
+        build, ["daily_bar"], date(2026, 1, 1), END
+    ) == ["daily_bar"]
+    assert table_unsupported_window_tables(
+        build, ["daily_bar"], date(2026, 1, 1), date(2026, 8, 27)
+    ) == []
+
+
 def test_a_table_starting_late_without_a_prefix_is_still_a_gap():
     payload = to_build_config_payload(
         {

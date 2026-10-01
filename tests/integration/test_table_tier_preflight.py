@@ -15,6 +15,7 @@ labeled RESEARCH-ONLY.  All fixtures are offline and live under ``tmp_path``.
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,13 @@ import yaml
 from conftest import build_fixture_project, publish_fixture_acceptance
 
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+from stock_quant.data_model.fetch_coverage import (
+    KIND_FETCHED,
+    KIND_NOT_FETCHED,
+    NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+    FetchSegment,
+    to_build_config_payload,
+)
 from stock_quant.data_quality.models import QualityReport
 from stock_quant.factors.momentum import Momentum60
 from stock_quant.research.models import ResearchRunFailed
@@ -290,3 +298,203 @@ def test_engineering_run_labels_not_fetched_inputs(tmp_path):
     assert record["engineering_exempt"] is True
     assert record["label"] == "RESEARCH-ONLY"
     assert published.manifest.dataset_version == version
+
+
+_SUPPORTED_WINDOW_SPEC = "configs/experiments/supported_window_probe.yml"
+
+
+def _write_supported_window_spec(project_root: Path) -> str:
+    """A single-window spec whose run window sits in the supported segment.
+
+    Mirrors the fixture spec's shape; only the hypothesis and the date range
+    change (the fixture bars start 2019-08-01, so the 60-day momentum warm-up
+    over a 2020-07-01 window start replays from real evidence).
+    """
+    path = Path(project_root) / _SUPPORTED_WINDOW_SPEC
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "hypothesis": (
+                    "过去 60 个交易日的复权收益在合成样本内对随后短期收益存在持续性；"
+                    "运行窗口完全落在支持段内，仅验证离线 CLI 工程链路，"
+                    "不构成投资建议。"
+                ),
+                "factor_versions": {"momentum_60d": "2.0.0"},
+                "dataset_version": "CURRENT",
+                "universe_version": "CURRENT",
+                "data_acceptance_id": "CURRENT_ACCEPTED",
+                "date_range": {
+                    "start_date": "2020-07-01",
+                    "end_date": "2021-11-30",
+                },
+                "train_validation_holdout_policy":
+                    "not_applicable_engineering_mvp",
+                "preprocessing": {
+                    "winsorization": "none",
+                    "standardization": "none",
+                },
+                "portfolio_rule": {
+                    "name": "top_n_equal_weight",
+                    "top_n": 10,
+                    "lot_size": 100,
+                },
+                "cost_scenarios": ["zero_cost", "commission_tax", "full_cost"],
+                "random_seed": 42,
+                "code_commit": "unversioned",
+                "parent_experiment_ids": [],
+                "agent_id": None,
+            },
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    return _SUPPORTED_WINDOW_SPEC
+
+
+def _republish_with_history_prefix_adjusted_bar(project) -> str:
+    """Publish a successor whose pinned coverage declares a history prefix.
+
+    Same re-publish path as :func:`_republish_with_not_fetched_adjusted_bar`
+    (real publisher over unchanged tables); only
+    ``build_config.table_fetch_coverage`` changes: ``adjusted_bar`` carries
+    the unique ``history_begins_after_anchor`` prefix
+    ``[acceptance_start, supported_start - 1]`` followed by one fetched
+    segment tiling to ``resolved_end_date`` (spec §7.5.1), with
+    ``supported_start = 2020-06-01``.  The fixture momentum spec's window
+    (2020-01-01..2021-12-31) therefore reaches into the prefix while the
+    supported-window probe spec (2020-07-01..2021-11-30) stays inside the
+    supported segment.  A fresh ACCEPTED record is published over the
+    successor so runs pass the acceptance gate and reach the preflight.
+    """
+    manifest = json.loads(
+        (project.root / "data" / "standardized" / project.version
+         / "dataset_manifest.json").read_text(encoding="utf-8")
+    )
+    build = dict(manifest["build_config"])
+    anchor = date.fromisoformat(
+        str(build.get("full_history_acceptance_start")
+            or build["effective_start_date"])
+    )
+    resolved_end = date.fromisoformat(str(build["resolved_end_date"]))
+    supported_start = date(2020, 6, 1)
+    build["table_fetch_coverage"] = to_build_config_payload(
+        {
+            "adjusted_bar": [
+                FetchSegment(
+                    "adjusted_bar", KIND_NOT_FETCHED, anchor,
+                    supported_start - timedelta(days=1),
+                    reason=NOT_FETCHED_HISTORY_BEGINS_AFTER_ANCHOR,
+                ),
+                FetchSegment(
+                    "adjusted_bar", KIND_FETCHED, supported_start, resolved_end
+                ),
+            ]
+        }
+    )
+    reader = DatasetReader(project.root)
+    with reader.open(project.version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+    version = DatasetPublisher(project.root).publish(
+        tables, QualityReport(), build_config=build
+    ).version
+    publish_fixture_acceptance(project.root, version)
+    return version
+
+
+def test_research_run_rejects_window_before_supported_history(tmp_path):
+    """A RESEARCH run reaching into a pinned history prefix fails preflight.
+
+    Spec §7.5.3: the run window (2020-01-01..2021-12-31) intersects the
+    ``history_begins_after_anchor`` prefix of the momentum factor's input, so
+    the run is rejected at ``table_tiers`` with the stable
+    ``table_history_start_after_window`` code.  The summary names the
+    unsupported tables and records the judged window explicitly: the check
+    window is ``date_range`` -- the walk-forward warm-up is excluded by
+    design (the preflight runs before fold scheduling).
+    """
+    project = build_fixture_project(tmp_path / "project")
+    _republish_with_history_prefix_adjusted_bar(project)
+    runner = ResearchRunner(project.root)
+    with pytest.raises(ResearchRunFailed, match="table_tiers"):
+        runner.run("configs/experiments/momentum_60d.yml", trust_mode="research")
+    manifests = sorted(
+        (project.root / "data" / "runs").glob(
+            "run_preflight_*/table_tier_preflight.json"
+        )
+    )
+    assert len(manifests) == 1
+    payload = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert payload["failed"] is True
+    assert payload["mode"] == "research"
+    assert payload["violations"] == ["table_history_start_after_window"]
+    assert payload["unsupported_window_tables"] == ["adjusted_bar"]
+    assert payload["not_fetched_tables"] == []
+    assert payload["check_window"] == ["2020-01-01", "2021-12-31"]
+    assert payload["warmup_excluded"] is True
+    assert payload["label"] is None
+    state = runner.latest_run_manifest()
+    assert state.status == "FAILED"
+    assert state.failed_stage == "table_tiers"
+    assert DatasetPublisher(project.root).current().version != project.version
+    assert not runner.partial_experiment_exists()
+
+
+def test_research_run_over_supported_window_passes(tmp_path):
+    """A RESEARCH run whose window stays in the supported segment proceeds.
+
+    Same pinned prefix as the rejection case; only the spec window moves
+    (2020-07-01..2021-11-30, fully inside the fetched segment).  The run is
+    not rejected by the window check and completes over the successor
+    version (spec §7.5.3: the prefix obliges nothing for windows after the
+    supported start).
+    """
+    project = build_fixture_project(tmp_path / "project")
+    version = _republish_with_history_prefix_adjusted_bar(project)
+    spec_path = _write_supported_window_spec(project.root)
+    runner = ResearchRunner(project.root)
+    published = runner.run(spec_path, trust_mode="research")
+    record = json.loads(
+        (project.root / "data" / "runs" / runner.run_id
+         / "table_tier_preflight.json").read_text(encoding="utf-8")
+    )
+    assert record["failed"] is False
+    assert record["violations"] == []
+    assert record["unsupported_window_tables"] == []
+    assert record["not_fetched_tables"] == []
+    assert record["check_window"] == ["2020-07-01", "2021-11-30"]
+    assert record["warmup_excluded"] is True
+    assert record["engineering_exempt"] is False
+    assert record["label"] is None
+    assert published.manifest.dataset_version == version
+
+
+def test_engineering_run_labels_window_before_supported_history(tmp_path):
+    """ENGINEERING is exempt from the window rejection but labeled.
+
+    The diagnostic replays the full pipeline over the prefix version and its
+    PASS preflight record labels it RESEARCH-ONLY with the unsupported input
+    tables named (same exemption family as research_only usage and the
+    whole-table ``table_not_fetched`` skip).
+    """
+    project = build_fixture_project(tmp_path / "project")
+    _republish_with_history_prefix_adjusted_bar(project)
+    runner = ResearchRunner(project.root)
+    published = runner.run(
+        "configs/experiments/momentum_60d.yml", trust_mode="engineering"
+    )
+    record = json.loads(
+        (project.root / "data" / "runs" / runner.run_id
+         / "table_tier_preflight.json").read_text(encoding="utf-8")
+    )
+    assert record["failed"] is False
+    assert record["mode"] == "engineering"
+    assert record["violations"] == []
+    assert record["unsupported_window_tables"] == ["adjusted_bar"]
+    assert record["not_fetched_tables"] == []
+    assert record["engineering_exempt"] is True
+    assert record["label"] == "RESEARCH-ONLY"
+    assert record["check_window"] == ["2020-01-01", "2021-12-31"]
+    assert record["warmup_excluded"] is True
+    assert published.manifest.dataset_version != project.version

@@ -71,7 +71,10 @@ from stock_quant.data_model.dataset import (
     DatasetPublisher,
     DatasetReader,
 )
-from stock_quant.data_model.fetch_coverage import not_fetched_input_tables
+from stock_quant.data_model.fetch_coverage import (
+    not_fetched_input_tables,
+    table_unsupported_window_tables,
+)
 from stock_quant.data_model.security_master import missing_master_coverage_symbols
 from stock_quant.data_model.trading_rules import TradingRuleBook
 from stock_quant.data_model.universe import Universe
@@ -1220,6 +1223,21 @@ class ResearchRunner:
         not_fetched = not_fetched_input_tables(
             manifest.get("build_config", {}), input_tables
         )
+        # Window-scoped not-fetched zones (spec §7.5.3): a pinned
+        # ``history_begins_after_anchor`` prefix or a
+        # ``source_disabled``/``source_unavailable`` tail is partial coverage
+        # a run window can avoid.  The judged window is ``spec.date_range``;
+        # the walk-forward warm-up is NOT included -- this preflight runs
+        # before fold scheduling, and moving the window to
+        # ``warmup_calendar_start`` would re-route existing pipeline-stage
+        # failures, so the limitation is recorded on the summary instead
+        # (``warmup_excluded``).
+        unsupported = table_unsupported_window_tables(
+            manifest.get("build_config", {}),
+            input_tables,
+            spec.date_range.start_date,
+            spec.date_range.end_date,
+        )
         violations = table_tier_violations(
             contracts, input_tables, downgrade_records, mode.value
         )
@@ -1230,6 +1248,12 @@ class ResearchRunner:
         engineering = mode is DataTrustMode.ENGINEERING
         if not_fetched and not engineering:
             violations.append("table_not_fetched")
+        # A run window reaching into a pinned not-fetched zone has no
+        # complete evidence for the dates it claims (spec §7.5.3): RESEARCH
+        # fails closed with the stable window code; ENGINEERING is exempt
+        # and labeled with the same research_only family.
+        if unsupported and not engineering:
+            violations.append("table_history_start_after_window")
         # ENGINEERING exempts research_only/untrusted-anchored inputs, so the
         # exemption label is judged against RESEARCH semantics: exempt exactly
         # when the same inputs would have been rejected under RESEARCH.
@@ -1245,12 +1269,15 @@ class ResearchRunner:
         )
         if engineering and not_fetched:
             research_codes = [*research_codes, "table_not_fetched"]
+        if engineering and unsupported:
+            research_codes = [*research_codes, "table_history_start_after_window"]
         engineering_exempt = engineering and any(
             code in research_codes
             for code in (
                 "table_tier_research_only",
                 "table_tier_untrusted",
                 "table_not_fetched",
+                "table_history_start_after_window",
             )
         )
         summary: dict[str, object] = {
@@ -1262,6 +1289,12 @@ class ResearchRunner:
                 for table in input_tables
             ),
             "not_fetched_tables": list(not_fetched),
+            "unsupported_window_tables": list(unsupported),
+            "check_window": [
+                str(spec.date_range.start_date),
+                str(spec.date_range.end_date),
+            ],
+            "warmup_excluded": True,
             "engineering_exempt": engineering_exempt,
             "label": "RESEARCH-ONLY" if engineering_exempt else None,
             "violations": violations,
