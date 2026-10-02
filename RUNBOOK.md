@@ -304,17 +304,52 @@ PROJECT_MEMORY §8.4。
 
 ```bash
 cd ~/work/program/stock/project
-# 1) 准备清单：自动检查当场离线重跑；每条人工项初始为显式 FAIL
+# 1) 准备清单：自动检查当场离线重跑；九条人工项（交易所日历抽查、来源行数
+#    抽查、缺失原因抽查、跨源价格抽查、公司行为抽查、基准抽查、交易规则
+#    生效日、证券主数据抽查、秘密扫描）一律初始为 PENDING_CONFIRMATION。
+#    其中六个机械项已挂好本命令生成的证据（data/acceptance-evidence/<版本>/），
+#    三项外部佐证（日历抽查、跨源价格抽查、规则生效日）**有意留空** —— 它们
+#    只能由操作者签，prepare 永不把任何人工行标成 PASS。
+#    每条人工项同时得到一份工作表 data/acceptance-worksheets/<版本>/<code>.md。
 python -m stock_quant data acceptance prepare \
   --version <数据版本哈希> --operator <操作者ID> \
   --output acceptance-<数据版本哈希>.yml --root .
 
-# 2) 操作者手工编辑清单：把每条人工项（交易所日历抽查、来源行数抽查、
-#    缺失原因抽查、跨源价格抽查、公司行为抽查、基准抽查、交易规则生效日、
-#    证券主数据抽查、秘密扫描）改为 PASS，并附证据：
-#    - local 证据 = 项目内的相对路径 + sha256 + 摘要（绝不写绝对路径，
-#      越出项目根/软链跳板会被拒）；
-#    - external 证据永不抓取：sha256 只钉住清单里的 UTF-8 摘要文本。
+# 2) 逐条确认：`confirm` 是**唯一**能把人工行变成 PASS/FAIL 的写入口，一次一个
+#    code（共九条命令）。它只翻点名的这一行，其余行、自动行、容器字段一律只读
+#    校验。签名前须在工作表 program 区的 `queue:` 里逐条看过待核项，并把条数
+#    报给 --acknowledge。
+python -m stock_quant data acceptance confirm \
+  --checklist acceptance-<数据版本哈希>.yml \
+  --code <CODE> --operator <操作者ID> \
+  [--external-input <官方摘录文件>] [--acknowledge <队列条数>] --root .
+
+#    逐 code 参数差异（传错即拒，参数本身也是契约）：
+#    - 六个机械项：队列恒为空 → **必须省略** --acknowledge；传 --external-input
+#      会被拒（reason=external_input_invalid）。
+#    - cross_source_price_sample：**不能**传 --external-input —— 跨源价格没有
+#      “官方价格摘录”这种输入契约。比对器在版本只有单一独立日线源时以稳定原因
+#      拒绝运行（不是 FAIL），强度恒为 OPERATOR_ATTESTED，不得伪装成通过了
+#      跨源验证。
+#    - exchange_calendar_sample：可传官方日历，每行一个 ISO 日期、`#` 注释、
+#      第二列 `1|0` 标注开/休市（与 bootstrap_seed --calendar-csv 同格式）。
+#      两列齐全且与数据集日历双向零差异 → 强度升为 EXTERNAL_CORROBORATED；
+#      单列摘录分不清“官方休市”与“漏抄”，只剩 OPERATOR_ATTESTED。
+#    - trading_rule_effective_dates：可传官方规则摘录，五列 CSV，表头恰为
+#      board,status,effective_from,rate,source_url；逐条覆盖
+#      configs/trading_rules.yml 展开后的每一行且费率一致 → EXTERNAL_CORROBORATED。
+#    强度由程序判定，不是入参：操作者无法把 OPERATOR_ATTESTED 声称成
+#    EXTERNAL_CORROBORATED。--conclusion 只在 --fail / --supersede 时必填；
+#    更正已签行用 --supersede（新开修订，绝不覆盖旧文件）。
+#
+#    --acknowledge 必须**精确等于 confirm 当场重算的队列长度**，而不是工作表上
+#    印的数：外部输入落盘后比对差异行会追加进队列，摘录有差异或未覆盖 → 队列
+#    变长 → reason=acknowledgement_required 挡回。这是故意的，有差异就是你要
+#    背书的那几项。首次签署的队列 = 全部候选内容；同一 code 后续签署只排
+#    相对上一版 PASS 修订新增/变更的项（跨源价格每轮全量），所以稳态很便宜。
+#
+#    2026-09-27 实测（版本 99f8ff28…，窗口 2015-01-05..2026-09-24）：
+#    日历 2852、跨源价格 1144、规则 9，六个机械项均为 0。
 
 # 3) 发布：发布方不信任准备结果，自动检查与全部哈希当场重算。
 #    全部通过 → decision=ACCEPTED，退出码 0；
@@ -329,6 +364,15 @@ python -m stock_quant data acceptance publish \
 python -m stock_quant data acceptance show --version <数据版本哈希> --root .
 ```
 
+**九条人工行全部 `PASS` 且每行都有证据引用，`publish` 才可能给 ACCEPTED。**
+判据是“证据为空即拒”，与 status 无关（[service.py:355](src/stock_quant/research/acceptance/service.py#L355)）：
+手工把某行改写成 `PASS` 不产生证据，只会换来一条
+`reason=manual_<code>_evidence_missing` 的 REJECTED 记录（不可变留档）。还有一条
+硬约束：`confirm` 启动时会校验整份清单的其余行，任何一行落在“手改过的 PASS”这类
+非法状态，都会以 `reason=signed_worksheet_drift` 拦下**所有** code 的确认。此时
+重跑 `prepare` 即把九行退回 `PENDING_CONFIRMATION`（尚无签名时不需要 `--force`，
+`--force` 用于把已签行回灌进重建的清单，二者都绝不覆盖或删除已签工作表）。
+
 规格与冻结语义：实验规格的 `data_acceptance_id` 可写占位符
 `CURRENT_ACCEPTED`（运行时解析为该数据版本最新的有效 ACCEPTED 记录，并**每次
 运行重新复核**全部绑定哈希）或显式 64 位十六进制 id（只钉住该条记录）；冻结
@@ -336,9 +380,11 @@ python -m stock_quant data acceptance show --version <数据版本哈希> --root
 研究选中**；没有有效 ACCEPTED 记录时，正式研究在任何因子/组合/回测计算前
 失败，只留 `data/runs/preflight_acceptance_<uuid>/` 的 FAILED preflight。
 
-> 注意：验收**机制已实现并离线测试覆盖**，但截至本文档更新尚无操作者在真实
-> 数据上执行过完整验收流程。人工核验的逐条要点见
-> `docs/operations/phase-one-validation.md` §4/§7。
+> 注意：验收**机制已实现并离线测试覆盖**，`confirm` 是唯一的签名入口。2026-09-27
+> 版本 `99f8ff28…` 的九行曾被手工改写为 `PASS` 而非签名，两次 `publish` 均得
+> `REJECTED`（逐条 `manual_*_evidence_missing`）—— 第 2 步的写法就是为堵住这条路。
+> 人工核验的逐条要点见 `docs/operations/phase-one-validation.md` §4/§7；该文档
+> §7.1 的命令表仍是签名入口之前的手改流程，以本节为准。
 >
 > `corporate_action_evidence` 报 FAIL 时，逐条 `reason=` 的归属（哪几只已有
 > 决策依据、哪几只待签字、哪几只待裁决）见
@@ -444,7 +490,16 @@ ACCEPTED）与 `research run --spec` 指向一份**未声明** `walk_forward_oos
 python -m stock_quant report build --root .        # 最新实验 HTML + 当前数据质量 HTML
 # 打开 data/reports/*.html 核对：来源/局限、三成本场景、两基准、因子价格口径、
 # 真实数据验收（结论/规则/验收 ID/操作者/时间）、免责声明
+
+python -m stock_quant report build --root . --debug   # 工程诊断 HTML（读 data/runs/debug）
 ```
+
+`report build` 默认只读**正式发布**的 `data/experiments`；`--debug` 改读
+`data/runs/debug`，用来给 `backtest momentum_60d --engineering` 产出的工程诊断出
+同一份完整报告（默认落 `data/reports/debug-<id>.html`，不覆盖同名正式报告）。
+它只换**读取来源**，不换结论：`UNTRUSTED` 判定、ENGINEERING 横幅与逐标的不可信
+原因全部来自该 run 自己写下的 `metrics.json`。**覆盖证据完整也不等于可信绩效** ——
+engineering 运行永远标注为工程诊断，不得当作业绩声明。
 
 按 `docs/operations/phase-one-validation.md` §4 收尾：源行数、跨源最大差、复权抽查
 （adjusted_bar 口径）、公司行为冲突、密钥扫描、无盈利宣称、单次 run 计时（<600s）。
