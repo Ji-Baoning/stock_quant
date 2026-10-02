@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 
@@ -18,7 +19,11 @@ from stock_quant.data_model.fetch_coverage import (
     NOT_FETCHED_SOURCE_DISABLED,
 )
 from stock_quant.data_model.universe_membership import SecurityMasterBoundary
-from stock_quant.data_pipeline import _basic_factor_fetch_segments
+from stock_quant.data_pipeline import (
+    _basic_factor_fetch_segments,
+    _snapshot_transport,
+)
+from stock_quant.data_sources.raw_store import RawSnapshot
 
 INGESTED = pd.Timestamp("2026-10-01T08:00:00Z")
 
@@ -166,3 +171,28 @@ def test_row_set_diff_without_a_coverage_row_fails():
 def test_covered_diff_and_clean_join_produce_no_issue():
     assert basic_factor_join_issues(
         _bar(), _factor(), _covering_coverage()) == []
+
+
+def test_supplier_label_precedes_stub_normalization():
+    """钉死 _snapshot_transport 的优先级不变量：规则①恒先于规则②。
+
+    证据行同时带审计标签（supplier_endpoint="tushare_proxy.<endpoint>"）
+    与标准 stub 形态（transport_id == source）时，kind 必须由标签判为
+    proxy，不得被 transport_id==source 的 stub 归一改判成 relay。真实
+    transport 恒携带审计标签，规则②只触达标准 stub 形态——这是函数的
+    长期成立条件，不是实现顺序巧合。
+    """
+    snapshot = RawSnapshot(
+        path=Path("data/raw/tushare/daily_basic/tushare/probe"),
+        sha256="0" * 64,
+        manifest={
+            "source": "tushare",
+            "endpoint": "daily_basic",
+            "transport_id": "tushare",
+            "supplier_endpoint": "tushare_proxy.daily_basic",
+            "request_key": "probe",
+        },
+    )
+    transport = _snapshot_transport(snapshot)
+    assert transport == "tushare:proxy"
+    assert transport != "tushare:relay"

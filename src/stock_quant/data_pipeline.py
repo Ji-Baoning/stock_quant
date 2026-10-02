@@ -433,6 +433,16 @@ def _snapshot_transport(snapshot: RawSnapshot) -> str:
     Anything else stays undecidable and reads as the bare transport id,
     which can never equal a declared ``<source>:<kind>`` and therefore fails
     the comparison fail-closed.
+
+    Invariant (a long-held condition of this function, not an
+    implementation-order coincidence): rule 1 -- the audited
+    ``supplier_endpoint`` prefix -- always precedes rule 2 -- the
+    ``transport_id == source`` stub normalization.  A real answering
+    transport always carries an audited label (``tushare_relay.*`` /
+    ``tushare_proxy.*`` / ``tushare.pro.*``), so rule 2 only ever reaches
+    the standard stub form; a labeled evidence row must therefore resolve
+    through its supplier label and never be re-normalized to the relay
+    kind.
     """
     manifest = snapshot.manifest
     source = str(manifest.get("source", ""))
