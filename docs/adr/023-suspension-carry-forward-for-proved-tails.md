@@ -62,8 +62,11 @@ own conclusions stand and are not superseded.
      `tushare_suspend` bar (zero volume, carried reference price) -- the
      halt was in progress when coverage ended;
    - (d) the round's per-symbol `daily` response is truly empty (the
-     empty-response ContractError itself; a well-formed but rowless frame
-     with columns is a different shape and stays on its existing path).
+     empty-response ContractError itself; both empty shapes -- zero rows
+     with no columns, and a rowless frame carrying columns -- raise the same
+     ContractError at the adapter boundary and are indistinguishable at the
+     seam, so the evidence class is keyed on the four proof conditions, not
+     on the response shape).
 2. **The materialization.** When (a)-(d) hold, each open day of the fetch
    window is materialized as a carry-forward bar in the same canonical shape
    the suspension proofs emit: OHLC at the boundary bar's close (parity),
