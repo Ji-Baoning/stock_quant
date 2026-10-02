@@ -17,6 +17,15 @@ dependencies = [
     "pyarrow>=14",
     "PyYAML>=6",
     "typer>=0.9",
+    "duckdb>=1",
+]
+
+[project.optional-dependencies]
+# The read-only query service stack (spec §5.4, ADR-021): the core CLI
+# install must not pull it in; install with `pip install -e '.[service]'`.
+service = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 
 [tool.setuptools.packages.find]

@@ -46,7 +46,7 @@ There is no hidden global state and no fallback root; see
 | Python 3.10+ | Runtime. `pyproject.toml` declares `requires-python = ">=3.10"`; `environment.yml` pins the conda environment `stock-quant` to 3.10. |
 | pandas | The unit of exchange between stages: every table read, normalized, gated and written is a `DataFrame`. |
 | PyArrow | The on-disk interchange format. Published dataset tables and every published artefact are Parquet. |
-| DuckDB | Read-only query layer over a dataset version's Parquet tables. Not a dependency of `pyproject.toml` — it is installed by `environment.yml`. |
+| DuckDB | Read-only query layer over a dataset version's Parquet tables. A core dependency of `pyproject.toml` (`DatasetReader` imports it on its normal path); `environment.yml` pins the conda environment. |
 | Pydantic v2 | The contract layer: frozen experiment specs, acceptance records, manifests, membership facts. Validation happens at load, not at use. |
 | Typer | CLI surface and argument parsing. |
 
