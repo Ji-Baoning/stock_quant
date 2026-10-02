@@ -49,6 +49,7 @@ from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
     CODE_UNIVERSE_MASTER_MISMATCH,
     DataPipeline,
     DataUpdateRequest,
+    _calendar_open_days,
 )
 from stock_quant.data_quality.models import (
     CODE_NONPOSITIVE_PRICE,
@@ -2282,3 +2283,109 @@ def test_an_empty_response_for_a_delisted_symbol_stays_fatal(project):
     ]
     assert len(fatal) == 1
     assert fatal[0].details["symbol"] == _HALT_SYMBOL
+
+
+def _carry_forward_evidence(root: Path) -> dict:
+    """The ``carry_forward`` evidence dict exactly as ``update`` assembles
+    it: the carried master and daily table, an *active* membership fact,
+    the published open calendar.  The guard test then removes only the
+    master listing fact to isolate the widened condition's carried half."""
+    with DatasetReader(root).open(
+        DatasetPublisher(root).current().version
+    ) as context:
+        tables = {name: context.read(name) for name in context.tables}
+    return {
+        "master": tables["security_master"],
+        "membership": _membership_fixture_frame(),
+        "carried_daily": tables["daily_bar"],
+        "calendar_open": _calendar_open_days(tables["trading_calendar"]),
+        "ingested_at": pd.Timestamp.now(tz="UTC"),
+    }
+
+
+def test_an_empty_response_for_a_removed_member_with_a_master_listing_publishes(
+    project,
+):
+    """ADR-023 addendum (2026-10-02): the 601198.SH real blueprint.
+
+    The symbol's membership fact has ended (``status="removed"``) but the
+    security master still carries its listing with no delist, the baseline
+    ends in a ``tushare_suspend`` tail on the boundary, and the
+    whole-window ``daily`` response is truly empty: the window materializes
+    as carry-forward bars and the round publishes.  Membership status says
+    nothing about whether the symbol has future rows -- the bar table's
+    continuity obligation covers every carried symbol.
+    """
+    membership = _membership_fixture_frame()
+    removed = membership["symbol"] == _HALT_SYMBOL
+    membership.loc[removed, "status"] = "removed"
+    membership.loc[removed, "reason"] = "regular_rebalance"
+    membership.loc[removed, "raw_effective_to"] = pd.Timestamp(date(2021, 6, 29))
+    _publish_baseline_with_membership(project.root, membership)
+    _republish_baseline_with_suspension_tail(project.root, _HALT_SYMBOL)
+    boundary_frame = _published_table(
+        project.root, DatasetPublisher(project.root).current().version, "daily_bar"
+    )
+    boundary_close = float(
+        boundary_frame.loc[
+            (boundary_frame["symbol"] == _HALT_SYMBOL)
+            & (boundary_frame["trade_date"] == pd.Timestamp(_TAIL_END)),
+            "close",
+        ].iloc[0]
+    )
+
+    result = DataPipeline(project.root, sources=_empty_response_sources()).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_NOV_12)
+    )
+    assert result.dataset_ref is not None
+    report = result.quality_report
+    assert not [i for i in report.issues if i.severity is Severity.FATAL]
+    assert CODE_SUSPENSION_RUN_UNVERIFIED not in report.by_code()
+    assert CODE_UNEXPLAINED_PRIMARY_GAP not in report.by_code()
+    assert CODE_SUSPENSION_ROW in report.by_code()
+    status = next(s for s in result.source_status if s.source == "tushare")
+    assert status.ok and status.reason_code == "ok"
+
+    daily = _published_table(project.root, result.dataset_ref.version, "daily_bar")
+    rows = _window_daily_rows(daily, _HALT_SYMBOL, _NOV_12)
+    assert set(rows["source"]) == {"tushare_suspend"}
+    assert (rows["volume"] == 0).all()
+    assert (rows["amount"] == 0.0).all()
+    assert (rows["open"] == rows["close"]).all()
+    assert (rows["high"] == rows["close"]).all()
+    assert (rows["low"] == rows["close"]).all()
+    assert ((rows["close"] - boundary_close).abs() < 1e-4).all()
+
+    # The published version passes the offline acceptance suite end to end,
+    # carried membership table included.
+    validation = DataPipeline(project.root).validate(result.dataset_ref.version)
+    assert not [i for i in validation.issues if i.severity is Severity.FATAL]
+
+
+def test_a_carry_forward_without_a_master_listing_stays_fatal(project):
+    """ADR-023 addendum guard: the "carried" half of the widened condition.
+
+    Every other proof is in place -- an active membership fact, the
+    suspension tail, the truly empty window -- but the symbol has no
+    listing fact in the security master: the verdict is the fail-closed
+    direction, because the master, not the membership, now decides whether
+    the symbol is alive.  The same evidence with the full master
+    materializes, so only the missing listing fact decides.
+    """
+    _republish_baseline_with_suspension_tail(project.root, _HALT_SYMBOL)
+    pipeline = DataPipeline(project.root, sources=_empty_response_sources())
+    evidence = _carry_forward_evidence(project.root)
+    rows, issues = pipeline._carry_forward_rows(
+        _HALT_SYMBOL, _WINDOW_START, _NOV_12, evidence
+    )
+    assert rows is not None and not rows.empty
+    assert not [i for i in issues if i.severity is Severity.FATAL]
+
+    evidence["master"] = evidence["master"].loc[
+        evidence["master"]["symbol"] != _HALT_SYMBOL
+    ]
+    rows, issues = pipeline._carry_forward_rows(
+        _HALT_SYMBOL, _WINDOW_START, _NOV_12, evidence
+    )
+    assert rows is None
+    assert issues == []

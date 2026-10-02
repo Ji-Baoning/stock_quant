@@ -180,7 +180,6 @@ from stock_quant.data_model.trade_calendar_facts import (
 )
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_model.universe_membership import (
-    MembershipStatus,
     SecurityMasterBoundary,
 )
 from stock_quant.data_quality.gates import (
@@ -1461,7 +1460,6 @@ class DataPipeline:
                 unavailable,
                 carry_forward={
                     "master": master,
-                    "membership": membership,
                     "carried_daily": current_daily,
                     "calendar_open": calendar_open,
                     "ingested_at": pd.Timestamp.now(tz="UTC"),
@@ -2405,12 +2403,13 @@ class DataPipeline:
         contract.
 
         With ``carry_forward`` evidence (ADR-023: the carried baseline table,
-        the security master, the universe membership and the open calendar),
-        one failure shape is judged instead of being fatal on the spot: a
-        symbol whose whole-window ``daily`` response is truly empty.  When
-        the empty response is *proved* by the baseline's suspension tail
-        (active membership, no delist, a ``tushare_suspend`` boundary bar on
-        the last open day before the window, at most
+        the security master and the open calendar), one failure shape is
+        judged instead of being fatal on the spot: a symbol whose
+        whole-window ``daily`` response is truly empty.  When the empty
+        response is *proved* by the baseline's suspension tail (a carried
+        master listing with no delist at or before the window end -- the
+        ADR-023 addendum of 2026-10-02 --, a ``tushare_suspend`` boundary
+        bar on the last open day before the window, at most
         ``MAX_CARRY_FORWARD_DAYS`` open days), the window's bars are
         materialized as carry-forward rows and the lane continues; every
         other symbol and every unproved shape keeps the exact pre-existing
@@ -2506,51 +2505,46 @@ class DataPipeline:
         """ADR-023's verdict for one symbol's whole-window empty response.
 
         Returns the window's carry-forward bars (with their INFO evidence
-        issue) when the empty response is *proved* -- all four conditions of
-        the evidence class hold -- and ``(None, [])`` (the fail-closed
+        issue) when the empty response is *proved* -- every condition of
+        the evidence class holds -- and ``(None, [])`` (the fail-closed
         direction) otherwise:
 
-        (a) the symbol is an active fact of the carried universe membership
-            table; a baseline without the table proves nothing;
-        (b) the security master lists no delist at or before the window end;
-        (c) the symbol's last carried bar strictly before the fetch window
+        (a) the security master carries the symbol's listing fact and the
+            symbol is not delisted inside or before the window (its
+            ``delist_date`` is empty or strictly after the window end; a
+            symbol absent from the master fails closed).  The ADR-023
+            addendum of 2026-10-02 keys this condition on the master, not
+            on universe membership: a listing, not a membership status,
+            says whether a halted symbol can have future rows, and the bar
+            table owes series continuity to every carried symbol;
+        (b) the symbol's last carried bar strictly before the fetch window
             sits on the last open day before the window's first open day and
             is itself a ``tushare_suspend`` bar -- the halt was in progress
             when coverage ended, and no open day is left unproved between
             the baseline and the window;
-        (d) the window owes at most ``MAX_CARRY_FORWARD_DAYS`` open days.
+        (c) the window owes at most ``MAX_CARRY_FORWARD_DAYS`` open days.
 
         The price carried is the boundary bar's own close (parity), the same
         canonical shape the suspension proofs emit.
         """
         if not carry_forward:
             return None, []
-        membership = carry_forward.get("membership")
         master = carry_forward.get("master")
         carried = carry_forward.get("carried_daily")
         calendar_open = carry_forward.get("calendar_open")
-        if (
-            membership is None
-            or membership.empty
-            or not {"symbol", "status"} <= set(membership.columns)
-        ):
+        if master is None or master.empty or "symbol" not in master.columns:
             return None, []
-        active = membership.loc[
-            (membership["symbol"] == symbol)
-            & (membership["status"] == MembershipStatus.ACTIVE.value)
-        ]
-        if active.empty:
+        listing = next(
+            (
+                row
+                for row in master.to_dict("records")
+                if str(row["symbol"]) == symbol
+            ),
+            None,
+        )
+        if listing is None:
             return None, []
-        delist_date = None
-        if master is not None:
-            delist_date = next(
-                (
-                    _as_date(row.get("delist_date"))
-                    for row in master.to_dict("records")
-                    if str(row["symbol"]) == symbol
-                ),
-                None,
-            )
+        delist_date = _as_date(listing.get("delist_date"))
         if delist_date is not None and delist_date <= end:
             return None, []
         if (
