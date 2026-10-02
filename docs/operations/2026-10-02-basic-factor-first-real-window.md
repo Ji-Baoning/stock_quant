@@ -272,3 +272,52 @@ contradicted by evidence and is not recommended.
 Exactly 1 diagnostic request reached the relay for this second read.
 Cumulative for the two diagnostic reads: **2 requests** (1 + 1), no update
 round, no re-run, no other network call.
+
+## 定性修正(2026-10-02):09-25 为中秋节休市日
+
+本节为 dated evidence 的追加修正,不改写上文任何已录原文。上文两处判定——
+"Verdict: systematic empty (系统性空), per the owner's decision tree" 与
+"Verdict: date-level gap (日期级缺口)"——的定性由本节修正:判定树推演时
+默认 2026-09-25 是交易日,而它不是。
+
+### 休市事实(上交所公告)
+
+2026-09-25(星期五)为中秋节,A 股休市日。上海证券交易所公告《关于2026年
+中秋节、国庆节休市安排的公告》(sse.com.cn 公告 `c_20260915_10832273`):
+2026-09-25(星期五)至 2026-09-27(星期日)休市,2026-09-28(星期一)起照常
+开市;2026-10-01 至 2026-10-07 休市,2026-10-08 起照常开市。
+
+### 对两次甄别读数的重新定性
+
+| 甄别 | 请求日期 | 当时判定 | 本节修正后的定性 |
+| --- | --- | --- | --- |
+| 第 1 次 | 2026-09-25 | systematic empty(系统性空) | 空 = **正确的休市行为**(该日无交易、无 `daily` 行),不是供应商数据缺口,更不是端点故障 |
+| 第 2 次 | 2026-09-24 | date-level gap(日期级缺口) | 与休市事实互洽:开市日返回 1 行完整数据,证实 relay `daily` **端点健康**;09-25 并非"数据未就绪",而是该日本就不存在交易数据 |
+
+两次读数合起来即是完整的解释:同一请求形态,开市日(09-24)有数据、
+休市日(09-25)为空——relay 的 `daily` 端点行为正常。
+
+### 真实窗口 FATAL 的机理
+
+`TushareSource._fetch_symbol_series`
+(`src/stock_quant/data_sources/tushare.py:136`)按**日期范围**逐票请求
+(`start_date`/`end_date` 直接取自 update 窗口)。窗口 2026-09-25..2026-09-25
+只含休市日 → 范围响应为空 → 管线 FATAL `source_fetch_failed`(即上文
+"Real update round 1" 所录原文)。这是**既有管线行为**:仅含休市日的单日窗
+会 FATAL,本应作 no-op 轮处理;它被本次"最小窗口"的选择撞出,**不是 P2c
+回归**。含开市日的多日窗(如 2026-09-25..2026-09-30)范围响应含开市日行,
+非空,可正常推进。
+
+### 待办登记(离线处理,不阻塞真实窗口)
+
+仅含休市日的单日 update 窗应作 no-op 而非 FATAL——属既有管线行为,留待
+后续批次离线处理。本节不改代码、不跑测试;该待办不阻塞换窗与真实窗口推进。
+
+### 换窗建议(待 owner 二次确认;不自动续跑)
+
+最小合法真实窗口 = **2026-09-25..2026-09-30**:与基线
+`published_end`=2026-09-24 日历连续;含休市日(09-25..09-27)与开市日
+09-28/09-29/09-30;止于国庆休市(2026-10-01 起)前;`daily_basic`
+@2026-09-30 已由 P1 探针证实可得。上文两节 "Recommendation" 中的换窗/
+加甄别读选项由本条取代。正式 update 仍需 owner 二次确认后方可执行;在获得
+确认前不自动续跑。
