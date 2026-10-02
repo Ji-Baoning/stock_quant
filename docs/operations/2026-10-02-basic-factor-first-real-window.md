@@ -321,3 +321,103 @@ round, no re-run, no other network call.
 @2026-09-30 已由 P1 探针证实可得。上文两节 "Recommendation" 中的换窗/
 加甄别读选项由本条取代。正式 update 仍需 owner 二次确认后方可执行;在获得
 确认前不自动续跑。
+
+## 换窗重跑(2026-09-25..2026-09-30,owner 二次确认)
+
+Owner 二次确认后的正式换窗执行轮。授权范围:恰好两轮真实 update(初始 +
+同窗重跑)+ 一轮 validate,窗口固定 2026-09-25..2026-09-30 不扩大;除授权
+命令外零真实网络调用;不跑 pytest。实际结果:**第一轮真实 update 即 FATAL,
+按停止纪律未执行重跑轮与后续语义观察;数据集未变。**
+
+### 授权与基线(执行前核验)
+
+- 基线 `project/data/standardized/CURRENT` =
+  `99f8ff28cdde53250fb315f2afcf478a84d084f61dfaf3d4602965c33d392f38`
+  (9 张旧形态表,`daily_bar` 至 2026-09-24)。
+- 预期(未达成):新版本 11 张表;`basic_factor` 首发空基线 →
+  `supported_start`=2026-09-28;history 前缀段 `[锚, 09-27]` +
+  fetched `[09-28, 09-30]`;`basic_factor_coverage` 同窗;`table_lineage`
+  transport=`tushare:relay`。
+- 重跑口径(owner 已确认):update 级重跑因 `run_id` 随机预计出新版本号;
+  哈希不变性在内容寻址发布边界成立。——本轮未走到,见下。
+
+### 命令原文(无凭据)
+
+```text
+set -a; . ./.env; set +a
+TUSHARE_TRANSPORT=relay /home/ji/miniconda3/envs/sq312/bin/python \
+  -m stock_quant data update --root project --start 2026-09-25 --end 2026-09-30
+```
+
+### 第一轮真实 update:退出码 1,FATAL
+
+`run_id=data_update_f0a8784beb7b`,`resolved_end_date=2026-09-30`。relay
+transport 正常初始化(`kind=relay`,host `jiaoch.top`,
+`sdk_version=1.4.24`),失败发生在供应商响应边界:
+
+```text
+run_id=data_update_f0a8784beb7b
+resolved_end_date=2026-09-30
+ERROR=0 FATAL=1 INFO=0 WARNING=0
+source tushare: not_ok(source_fetch_failed)
+source akshare: not_ok(not_run)
+source baostock: not_ok(not_run)
+source xingyao: not_ok(not_run)
+blocking issue: severity=FATAL code=source_fetch_failed table=data_update symbol=- trade_date=-
+details={"endpoint": "daily", "message": "supplier returned an empty response", "source": "tushare", "symbol": "601059.SH"}
+FAILED: publication gate did not pass; dataset unchanged
+```
+
+门禁正确拒绝发布,数据集未变。CURRENT 执行后核验仍为
+`99f8ff28cdde…`。
+
+### 定性与停止纪律
+
+- 定性:供应商侧**单票**空响应——`601059.SH`(财达证券)在
+  `daily` @窗口 2026-09-25..2026-09-30 的范围请求返回空体。与上文
+  "单休市日空响应 FATAL" 机理不同:本窗含开市日 09-28/09-29/09-30,
+  范围响应本应含行;空响应是**逐票请求**级别(`_fetch_symbol_series`
+  按日期范围逐票请求),不是窗口级。一个待验证(未验证,不消耗网络调用)
+  的候选解释:该票全窗停牌 → 范围内无任何行 → 既有管线行为类
+  "全窗无行单票 FATAL",与"仅含休市日的单日窗 FATAL"同类,均非 P2c 回归。
+- 非连接级失败:transport 正常初始化、正常往返、返回空体,无
+  connection/timeout/rate-limit 迹象 → 关沙箱重试 allowance 不适用。
+- 按停止纪律("不修、不放宽、不反复重试"):**同窗重跑(update 第二轮)
+  未执行**,validate 未对"更新后的 CURRENT"执行(不存在新版本)。
+  重跑口径(新版本号/哈希边界不变性)本轮未获 exercised。
+
+### validate(对未变基线,离线只读)
+
+```text
+/home/ji/miniconda3/envs/sq312/bin/python -m stock_quant data validate --root project
+version=99f8ff28cdde53250fb315f2afcf478a84d084f61dfaf3d4602965c33d392f38
+ERROR=0 FATAL=0 INFO=0 WARNING=0
+PASS
+```
+
+退出码 0。基线健康,佐证 "dataset unchanged"。
+
+### 语义观察(全部不可观察)
+
+无新版本,故 §7.4 "真实小窗口 raw→新 version→validate 通过" 条件的五项
+落地证据(11 张表键集、`basic_factor`/`basic_factor_coverage` 行数、
+`table_fetch_coverage` 段形态、coverage status 计数、
+`table_lineage` transport)本轮**均不可观察**。只读核验基线未变:
+
+- tables = 9(旧形态,无 `basic_factor`/`basic_factor_coverage`);
+- `daily_bar` 1,721,796 行,max `trade_date` = 2026-09-24。
+
+### 配额消耗
+
+恰好一轮真实 update 到达供应商:至少一次 `601059.SH` @
+2026-09-25..2026-09-30 的 `daily` 范围请求,返回空体(空响应不计入管线
+ledger 的 completed calls,与前轮口径一致)。无第二轮、无重跑、无其它
+网络调用;离线 validate 零网络。
+
+### Follow-up(待 owner 决定;不自动续跑)
+
+单票全窗空响应 FATAL 是否应按"停牌/无行单票 no-op"处理,属既有管线行为
+待办(与"仅休市日单日窗 no-op"待办同类),本节不改代码。真实窗口推进的
+候选路径:(a) 先做一次针对 `601059.SH` 或目标开市日的只读甄别读(owner
+批准后);(b) 换窗避开该票无行的情形;(c) 挂起并询问 relay 运营方
+`601059.SH` 在 09-28..09-30 的 `daily` 可得性。未经 owner 确认前不执行。
