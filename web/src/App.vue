@@ -1,10 +1,10 @@
-<script setup lang="ts"></script>
+<script setup lang="ts">
+import AppTopBar from "./components/AppTopBar.vue";
+</script>
 
 <template>
   <div class="app">
-    <main class="page">
-      <h1>Stock Quant 数据门户</h1>
-      <p data-testid="scaffold">骨架搭建中</p>
-    </main>
+    <AppTopBar />
+    <main class="page"><RouterView /></main>
   </div>
 </template>
