@@ -498,3 +498,77 @@ def load_universe_definition(path: str | Path) -> UniverseDefinition:
     if not isinstance(document, dict):
         raise ValueError(f"universe definition {path} must be a YAML mapping")
     return UniverseDefinition.model_validate(document)
+
+
+def resolve_versioned_universe_definition(
+    configs_root: str | Path, universe_version: str
+) -> UniverseDefinition:
+    """Resolve an explicit universe_version from the immutable registry.
+
+    The entry must validate and its canonical-JSON version must equal the
+    file name's version (content re-check); only ``CURRENT`` specs resolve
+    the top-level file (spec 7.0.4).
+    """
+    entry = Path(configs_root) / "versions" / f"{universe_version}.yml"
+    if not entry.is_file():
+        raise UniverseCoverageError(
+            f"universe_version {universe_version!r} has no registry entry "
+            f"under {entry.parent}; only CURRENT resolves the top-level file")
+    definition = load_universe_definition(entry)
+    if definition.version != universe_version:
+        raise UniverseCoverageError(
+            f"registry entry {entry.name} content hash {definition.version} "
+            f"does not match its requested version {universe_version!r}")
+    return definition
+
+
+def definition_slice_hash(
+    facts: Sequence[MembershipFact | Mapping[str, Any]],
+    definition: UniverseDefinition,
+) -> str:
+    """The schema-v2 table hash of one definition's slice of the facts.
+
+    A definition whose universe has no rows in the target dataset has no
+    legitimate v2 evidence: refuse to hash the empty slice instead of
+    minting a schema-v2 definition over nothing (spec 7.0.4 keeps such
+    universes on their schema-v1 definitions).
+    """
+    rows = [
+        item for item in facts
+        if (item.universe_id if isinstance(item, MembershipFact)
+            else str(item["universe_id"])) == definition.universe_id
+    ]
+    if not rows:
+        raise ValueError(
+            f"universe {definition.universe_id!r} has no membership slice in "
+            "the target dataset; refusing to hash an empty slice as v2 "
+            "evidence (keep the schema-v1 definition)")
+    return membership_slice_hash(rows, definition.universe_id)
+
+
+def archive_universe_definition(directory: str | Path, name: str) -> Path:
+    """Move a top-level definition into ``archive/`` when the criterion holds.
+
+    A definition that stays schema-v1 (no slice in the target dataset) may
+    leave the enabled set only without changing the publication criterion:
+    the minimum ``coverage_start`` over the remaining enabled definitions
+    must equal the previous one.  Otherwise the move is rolled back and
+    rejected, so the criterion's acceptance start never silently rises.
+    """
+    directory = Path(directory)
+    source = directory / name
+    if not source.is_file():
+        raise UniverseCoverageError(
+            f"universe definition {name!r} does not exist under {directory}")
+    before = load_universe_coverage_criterion(directory).acceptance_start
+    archive_dir = directory / "archive"
+    archive_dir.mkdir(exist_ok=True)
+    target = archive_dir / name
+    source.replace(target)
+    after = load_universe_coverage_criterion(directory).acceptance_start
+    if after != before:
+        target.replace(source)
+        raise UniverseCoverageError(
+            f"archiving {name!r} would raise the acceptance start "
+            f"from {before} to {after}; the definition stays enabled")
+    return target

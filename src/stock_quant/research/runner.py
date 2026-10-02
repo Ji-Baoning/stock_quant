@@ -148,6 +148,7 @@ from stock_quant.research.universe import (
     UniverseDefinition,
     UniverseResolver,
     load_universe_definition,
+    resolve_versioned_universe_definition,
     window_crosses_membership_gap,
 )
 from stock_quant.research.walk_forward.evaluation import evaluate_stability
@@ -960,11 +961,19 @@ class ResearchRunner:
         """
         if spec.universe_definition is None:
             return None
-        definition_path = (
-            self._config_root / "configs" / "universes"
-            / f"{spec.universe_definition}.yml"
-        )
-        definition = load_universe_definition(definition_path)
+        # Only a CURRENT spec resolves the mutable top-level file; an
+        # explicit ``universe_version`` must come from the immutable
+        # registry (``versions/<universe_version>.yml``, spec 7.0.4).
+        if spec.universe_version == _CURRENT:
+            definition = load_universe_definition(
+                self._config_root / "configs" / "universes"
+                / f"{spec.universe_definition}.yml"
+            )
+        else:
+            definition = resolve_versioned_universe_definition(
+                self._config_root / "configs" / "universes",
+                spec.universe_version,
+            )
         # Pin the dataset context once: every later stage reads the same
         # immutable version through the already-open context.
         self._frozen_version = dataset_version

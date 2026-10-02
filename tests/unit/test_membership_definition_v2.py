@@ -201,3 +201,135 @@ def test_the_resolver_rejects_whole_table_forks():
     with pytest.raises(ValueError, match="belongs to universe_id"):
         UniverseResolver(definition, resolve_memberships([mine, theirs]),
                          facts=[mine, theirs])
+
+
+# ---------------------------------------------------------------------------
+# P2b Task 3: the version registry, the non-recursive top-level scan, the
+# no-slice migration helpers and the v1 archive rule (spec 7.0.4)
+# ---------------------------------------------------------------------------
+
+
+def test_an_explicit_version_resolves_from_the_registry_and_rechecks_hash(
+        tmp_path):
+    import yaml
+
+    from stock_quant.research.universe import (
+        UniverseCoverageError,
+        resolve_versioned_universe_definition,
+    )
+    definition = UniverseDefinition.model_validate(_v2())
+    registry = tmp_path / "versions"
+    registry.mkdir()
+    entry = registry / f"{definition.version}.yml"
+    entry.write_text(
+        yaml.safe_dump(definition.model_dump(mode="json"), sort_keys=True),
+        encoding="utf-8")
+    resolved = resolve_versioned_universe_definition(tmp_path, definition.version)
+    assert resolved.version == definition.version
+    entry.write_text(yaml.safe_dump(
+        {**definition.model_dump(mode="json"), "rules_version": "evil"},
+        sort_keys=True), encoding="utf-8")
+    with pytest.raises(UniverseCoverageError, match="content hash"):
+        resolve_versioned_universe_definition(tmp_path, definition.version)
+
+
+def test_a_missing_registry_entry_never_falls_back_to_the_top_level(tmp_path):
+    from stock_quant.research.universe import (
+        UniverseCoverageError,
+        resolve_versioned_universe_definition,
+    )
+    with pytest.raises(UniverseCoverageError, match="registry"):
+        resolve_versioned_universe_definition(tmp_path, "f" * 64)
+
+
+def test_the_top_level_scan_stays_non_recursive(tmp_path):
+    import yaml
+
+    from stock_quant.research.universe import (
+        UniverseCoverageError,
+        load_universe_coverage_criterion,
+        resolve_versioned_universe_definition,
+    )
+    v2 = UniverseDefinition.model_validate(_v2())
+    versions = tmp_path / "versions"
+    versions.mkdir()
+    (versions / f"{v2.version}.yml").write_text(
+        yaml.safe_dump(v2.model_dump(mode="json"), sort_keys=True),
+        encoding="utf-8")
+    top_level = dict(
+        schema_version=1, universe_id="custom_csi300_ic",
+        rules_version="tushare-index-weight-monthly-v1",
+        membership_table_sha256="a" * 64,
+        coverage_start=date(2019, 1, 1), coverage_end=date(2021, 12, 31),
+        evidence_summary_sha256="b" * 64, enabled=True)
+    (tmp_path / "custom_csi300_ic.yml").write_text(
+        yaml.safe_dump(top_level, sort_keys=True), encoding="utf-8")
+    criterion = load_universe_coverage_criterion(tmp_path)
+    assert list(criterion.definition_hashes) == ["custom_csi300_ic"]
+    assert criterion.acceptance_start == date(2019, 1, 1)
+    # 注册表里的 v2 条目只走显式版本解析，永远不进顶层扫描。
+    assert resolve_versioned_universe_definition(
+        tmp_path, v2.version).version == v2.version
+    # 顶层指针文件缺 universe_id：扫描必须阻断发布，而不是悄悄跳过。
+    (tmp_path / "pointer.yml").write_text(
+        yaml.safe_dump({"universe_version": v2.version}, sort_keys=True),
+        encoding="utf-8")
+    with pytest.raises(UniverseCoverageError):
+        load_universe_coverage_criterion(tmp_path)
+
+
+def test_no_slice_definitions_stay_v1_and_archive(tmp_path):
+    import yaml
+
+    from stock_quant.data_model.universe_membership import membership_slice_hash
+    from stock_quant.research.universe import (
+        UniverseCoverageError,
+        archive_universe_definition,
+        definition_slice_hash,
+        load_universe_coverage_criterion,
+    )
+
+    def _v1(universe_id: str, start: date) -> dict:
+        return dict(
+            schema_version=1, universe_id=universe_id,
+            rules_version="tushare-index-weight-monthly-v1",
+            membership_table_sha256="a" * 64,
+            coverage_start=start, coverage_end=date(2021, 12, 31),
+            evidence_summary_sha256="b" * 64)
+
+    keeper = UniverseDefinition.model_validate(
+        _v1("custom_csi300_tw", date(2015, 1, 5)))
+    noslice = UniverseDefinition.model_validate(
+        _v1("custom_csi300_ic", date(2019, 1, 1)))
+    root = tmp_path / "universes"
+    root.mkdir()
+    payloads = {
+        "custom_csi300_tw.yml": keeper.model_dump(mode="json"),
+        "custom_csi300_ic.yml": noslice.model_dump(mode="json"),
+    }
+    for name, payload in payloads.items():
+        (root / name).write_text(
+            yaml.safe_dump(payload, sort_keys=True), encoding="utf-8")
+    facts = [make_fact(universe_id="custom_csi300_tw")]
+    # 目标数据集没有它的 slice：拒绝为空 slice 计算哈希，不冒充 v2。
+    with pytest.raises(ValueError, match="empty slice"):
+        definition_slice_hash(facts, noslice)
+    assert definition_slice_hash(facts, keeper) == \
+        membership_slice_hash(facts, "custom_csi300_tw")
+
+    before = load_universe_coverage_criterion(root).acceptance_start
+    assert before == date(2015, 1, 5)
+    archived = archive_universe_definition(root, "custom_csi300_ic.yml")
+    assert archived == root / "archive" / "custom_csi300_ic.yml"
+    assert archived.read_bytes() == yaml.safe_dump(
+        payloads["custom_csi300_ic.yml"], sort_keys=True).encode("utf-8")
+    after = load_universe_coverage_criterion(root).acceptance_start
+    assert after == before  # 移出后剩余启用定义的最小 coverage_start 不变
+    criterion = load_universe_coverage_criterion(root)
+    assert list(criterion.definition_hashes) == ["custom_csi300_tw"]
+
+    # 反例：移出唯一的最小起点定义会抬高 acceptance_start → 拒绝且原位不动。
+    with pytest.raises(UniverseCoverageError, match="acceptance start"):
+        archive_universe_definition(root, "custom_csi300_tw.yml")
+    assert (root / "custom_csi300_tw.yml").is_file()
+    assert not (root / "archive" / "custom_csi300_tw.yml").exists()

@@ -134,6 +134,7 @@ from stock_quant.research.universe import (
     MEMBERSHIP_OBSERVATION_GAP,
     UniverseDefinition,
     UniverseResolver,
+    load_universe_definition,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -2100,6 +2101,29 @@ def test_run_window_crossing_a_membership_gap_fails_preflight(tmp_path):
     assert not (run_dir / "factor_results.parquet").exists()
     assert not (run_dir / "signals.parquet").exists()
     assert not runner.partial_experiment_exists()
+
+
+def test_current_specs_freeze_the_new_v2_version(tmp_path):
+    """A ``CURRENT`` spec preflights the top-level v2 definition and freezes
+    ``universe_version`` to its content-derived version.
+
+    The fixture project carries no ``versions/`` registry at all, so a spec
+    still bound to ``universe_version: CURRENT`` must resolve the top-level
+    file -- only explicit versions go through the registry (spec 7.0.4).  The
+    frozen version is the schema-v2 definition's slice-scoped content hash,
+    exactly what Task 4's refresh will archive into the registry.
+    """
+    root, _, _ = _mixed_membership_project(tmp_path)
+    spec_name = _write_slice_spec(root)
+    runner = ResearchRunner(root, config_root=root)
+    runner.run(spec_name)
+    definition = load_universe_definition(
+        root / "configs" / "universes" / f"{_WF_UNIVERSE_ID}.yml"
+    )
+    assert definition.schema_version == 2
+    preflight = runner._universe_preflight
+    assert preflight is not None
+    assert preflight.universe_version == definition.version
 
 
 def test_data_validate_still_rejects_a_bad_row_in_the_mixed_table(
