@@ -21,6 +21,7 @@ commands for that area.
 | `stock_quant.portfolio` | Turning eligible candidates into frozen target weights: `equal_weight`, `buffered_risk_weight`, `risk_estimation`, `rebalance_band`, `buffered_models`. | Fills, costs, or account state. |
 | `stock_quant.analytics` | Performance metrics computed from published artefacts. | Data access, rendering. |
 | `stock_quant.reporting` | Rendering self-contained static HTML from committed artefacts. | Fetching data, computing strategy decisions. |
+| `stock_quant.service` | The local, loopback-only, GET-only FastAPI query surface over published dataset versions, acceptance records, experiments and generated reports (`app`, `datasets`, `tables`, `experiments`, `security`). | Any write path: it imports neither the data pipeline nor a publisher, exposes no POST/PUT/PATCH/DELETE, and never automates acceptance (ADR-021). |
 | module-level | `config` (project config loading), `project_root` (root resolution), `bootstrap` (service wiring), `cli` (Typer surface), `safe_yaml`, `logging`. | Domain logic. |
 
 `research` subpackages:
@@ -47,13 +48,16 @@ portfolio    -> backtest, factors, research
 research     -> backtest, config, data_model, data_pipeline, data_quality,
                 data_sources, factors, logging, portfolio, safe_yaml
 reporting    -> analytics, data_quality
+service      -> data_model, project_root
 ```
 
 The intended direction is **inwards towards data**: supplier adapters know
 nothing about research, and quality gates know nothing about strategies.
 `research` is the composition root and may import anything; nothing imports
 `research` except `portfolio` (which imports the walk-forward policy hash
-helper) and `cli`.
+helper) and `cli`. `service` reads the acceptance and experiment stores from
+disk rather than importing `research` (whose acceptance package transitively
+imports the pipeline); nothing imports `service`.
 
 Two package-level cycles exist today. They are narrow and factual, not
 sanctioned layering — do not extend them:
@@ -80,6 +84,7 @@ raised rather than assumed acceptable.
 | The research runner, spec freeze or walk-forward pipeline | `.claude/rules/research.md`, `docs/adr/004-walk-forward-oos.md` |
 | Portfolio rules or risk estimation | `.claude/rules/portfolio.md`, `docs/architecture/invariants.md` |
 | CLI, `config`, `bootstrap` or anything under `project/` | `.claude/rules/config-and-operations.md`, `RUNBOOK.md`, `docs/adr/005-explicit-project-root.md` |
+| The query service or its bind/version/acceptance boundaries | `docs/adr/021-resident-query-surface-and-scheduler.md`, `docs/architecture/data-flow.md` |
 | Anything under `tests/` or `tools/` | `.claude/rules/tests.md` |
 
 ## Authority boundary

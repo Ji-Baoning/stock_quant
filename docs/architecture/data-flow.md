@@ -160,6 +160,25 @@ self-contained static HTML report from already-committed artefacts
 fetches no data and recomputes no strategy decision, so a report is always a
 faithful view of the published experiment.
 
+## 7. Read-only query surface
+
+`python -m stock_quant.service --root <ROOT>` serves GET-only views over
+already-published artefacts (ADR-021). Every data request resolves its
+version exactly once — `current` or a full hash at the entry — and every
+response echoes the resolved full `dataset_version` plus the request's
+parsed arguments; a request never re-reads `CURRENT` mid-flight, so a
+publication that lands during a request leaves it on the old complete
+version. The service opens one read-only `DatasetReader` context per
+request, binds `127.0.0.1` only (non-loopback configuration fails
+startup), imports neither the data pipeline nor a publisher, and offers no
+arbitrary SQL, file paths or downloads; table previews are bounded by the
+version manifest's tables, the canonical schema whitelist, `limit ≤ 500`
+and an independent query time budget. Acceptance is not automated here:
+the service only displays the four read-only summary states
+(`ACCEPTED`/`REJECTED`/`PENDING_CONFIRMATION`/`UNVERIFIED`), and no
+endpoint can write an acceptance verdict, publish a dataset or start a
+research run.
+
 ## Failure semantics
 
 | Failure | What survives |
@@ -169,6 +188,7 @@ faithful view of the published experiment.
 | Universe preflight rejection | FAILED run manifest + redacted preflight record; no identity, no factor artefact |
 | Acceptance gate failure | REJECTED acceptance record persisted first; no run artefacts |
 | Mid-run exception | FAILED run manifest retained under `data/runs/`; completed folds kept |
+| Publication while the service reads | The in-flight request keeps its resolved version; the next request may resolve the new one; no reader ever sees a half-published tree |
 
 ## Authority boundary
 

@@ -21,9 +21,12 @@ context; this file holds only the current technical facts.
 
 ## Runtime shape
 
-One local, single-process CLI — no server, no scheduler, no database. Every
-command is invoked as `python -m stock_quant <group> <command>`, resolves a
-project root explicitly, and is manual and idempotent:
+Local, single-process entry points — still no database, no remote
+deployment, no hidden global state:
+
+1. The CLI remains the **domain write entry**: every
+   `python -m stock_quant <group> <command>` resolves a project root
+   explicitly and is manual and idempotent.
 
 ```text
 stock_quant.cli (Typer)
@@ -34,10 +37,15 @@ stock_quant.cli (Typer)
         └── report     → reporting from already-published artefacts
 ```
 
+2. A local **read-only query service** (`python -m stock_quant.service`) serves
+   GET-only views over already-published artefacts. It binds `127.0.0.1` only
+   (a non-loopback configuration fails startup), imports neither the data
+   pipeline nor a publisher, and pins one dataset version per request, echoing
+   the resolved full hash in every response (ADR-021).
+
 All state lives on disk under the given project root (`data/raw`,
 `data/standardized`, `data/acceptances`, `data/runs`, `data/experiments`).
-There is no hidden global state and no fallback root; see
-`invariants.md`.
+There is no fallback root; see `invariants.md`.
 
 ## Core technologies
 
@@ -76,6 +84,12 @@ never fetches data at render time.
 The arrows are the observed import direction, not a claim of strict layering —
 see `module-map.md`, which names the two narrow package-level cycles that
 exist today.
+
+`service` (the read-only query surface) sits outside this chain: it reads
+published versions through `data_model.dataset.DatasetReader` plus the
+acceptance and experiment stores directly, and nothing imports it. Its
+boundaries — loopback bind, GET-only, version pinning, no automation of
+acceptance — are ADR-021's decision, not this map's assertion.
 
 Reproducibility is the property that binds these together: the same frozen
 spec plus the same dataset version plus the same code commit produce the same
