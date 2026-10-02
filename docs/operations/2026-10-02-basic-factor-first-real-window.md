@@ -204,3 +204,71 @@ update round, no re-run, no other network call. Empty responses are not
 counted as completed calls by the pipeline's ledger convention, but for this
 diagnostic the accounting is stated directly: 1 request issued, 0 rows
 returned.
+
+### Second diagnostic read (2026-10-02, owner-approved): baseline-known date 2026-09-24
+
+Owner approved exactly one more read-only diagnostic relay read (still no
+update, no second round, no other endpoint/date/symbol) to split the scope
+caveat above: endpoint-level failure vs date-level gap. The request shape is
+byte-identical to the first diagnostic read — the repository's own transport
+layer (`build_transport(RELAY, SourceConfig())` → `TushareRelayClient.api`,
+mirroring `TushareSource._fetch_symbol_series` verbatim) — with only the
+date changed to **2026-09-24**, a date the baseline CURRENT `daily_bar`
+covers with 661 symbols:
+
+```text
+client.daily(ts_code="000001.SZ", start_date="20260924", end_date="20260924")
+```
+
+Transport initialized identically: `kind=relay`, host `jiaoch.top`,
+`sdk_version=1.4.24`. The one-shot script stayed in `/tmp` (parameterized
+copy of the first script, never entered the repository); credentials were
+sourced from `.env` per RUNBOOK convention and never read, printed, or
+recorded.
+
+#### Raw return
+
+- `observed_at_utc`: `2026-10-02T02:32:38+00:00`
+- Type: `pandas.DataFrame` (normal return, no exception)
+- Rows: **1**; Columns: **11** — `ts_code, trade_date, open, high, low,
+  close, pre_close, change, pct_chg, vol, amount`
+- attrs: `{}`; head (1 row): `{"ts_code": "000001.SZ", "trade_date":
+  "20260924", "open": 11.35, "high": 11.47, "low": 11.29, "close": 11.3,
+  "pre_close": 11.35, "change": -0.05, "pct_chg": -0.4405, "vol":
+  1043818.72, "amount": 1186736.8957}`
+- Exception: none. Not a connection/timeout/rate-limit failure, so the
+  sandbox-retry allowance never applied and was not used.
+
+#### Comparison of the two diagnostic reads
+
+| Read | Date | Request shape | Result | Observed (UTC) |
+| --- | --- | --- | --- | --- |
+| 1st | 2026-09-25 | `client.daily(ts_code="000001.SZ", start_date="20260925", end_date="20260925")` | Normal return, rows=0, no column schema | 2026-10-02T02:21:42+00:00 |
+| 2nd | 2026-09-24 | `client.daily(ts_code="000001.SZ", start_date="20260924", end_date="20260924")` | Normal return, rows=1, 11-column schema, populated values | 2026-10-02T02:32:38+00:00 |
+
+#### Verdict: date-level gap (日期级缺口), per the owner's decision tree
+
+The relay `daily` endpoint is alive and serving well-formed, populated data
+for a baseline-known date eleven minutes after the same endpoint answered
+empty for 2026-09-25. Under the owner's tree this is the "has data rows →
+date-level gap" branch: 2026-09-25 data is missing / not yet ready on the
+relay side, not an endpoint-level outage. Basis: the two reads above —
+identical transport, identical request shape, only the date differs, and
+only the 2026-09-25 ask comes back empty.
+
+#### Recommendation for the real window (owner to confirm; no auto-follow-up)
+
+Candidate window is the most recent trade day the relay demonstrably
+serves. This read proves **2026-09-24 is obtainable** from the relay;
+availability of 2026-09-28 / 2026-09-29 / 2026-09-30 is NOT proven by this
+call. Two options for owner confirmation: (a) before the next real window,
+issue one more diagnostic read targeted at the intended trade date, or
+(b) switch the window directly and let the pipeline's own gates judge
+naturally during the run. The same-window 2026-09-25 retry remains
+contradicted by evidence and is not recommended.
+
+#### Quota accounting (cumulative)
+
+Exactly 1 diagnostic request reached the relay for this second read.
+Cumulative for the two diagnostic reads: **2 requests** (1 + 1), no update
+round, no re-run, no other network call.
