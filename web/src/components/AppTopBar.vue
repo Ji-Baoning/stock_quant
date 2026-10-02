@@ -47,7 +47,7 @@ onMounted(async () => {
     <span class="fingerprint" data-testid="project-fingerprint">
       项目指纹：<code>{{ versionPinState.projectFingerprint ?? "获取失败" }}</code>
     </span>
-    <span class="resolved" data-testid="resolved-version">
+    <span class="resolved" data-testid="top-resolved-version">
       已解析版本：
       <code v-if="versionPinState.resolvedVersion !== null">{{ versionPinState.resolvedVersion }}</code>
       <span v-else>未解析</span>

@@ -42,7 +42,7 @@ describe("共享顶栏（§10.3 页面地图）", () => {
     const wrapper = mountTopBar(client);
     await flushPromises();
     expect(wrapper.get('[data-testid="project-fingerprint"]').text()).toContain("0123456789abcdef");
-    expect(wrapper.get('[data-testid="resolved-version"]').text()).toContain("未解析");
+    expect(wrapper.get('[data-testid="top-resolved-version"]').text()).toContain("未解析");
     expect(wrapper.find('[data-testid="current-badge"]').exists()).toBe(false);
   });
 
@@ -58,7 +58,7 @@ describe("共享顶栏（§10.3 页面地图）", () => {
     await resolveAndPin(client, "current");
     setCurrentVersion(HASH_A);
     await flushPromises();
-    expect(wrapper.get('[data-testid="resolved-version"]').text()).toContain(HASH_A);
+    expect(wrapper.get('[data-testid="top-resolved-version"]').text()).toContain(HASH_A);
     expect(wrapper.get('[data-testid="current-badge"]').attributes("title")).toBe(
       "CURRENT 是指针标记，不是可信等级",
     );
@@ -88,7 +88,7 @@ describe("共享顶栏（§10.3 页面地图）", () => {
     await wrapper.get('[data-testid="refresh-current"]').trigger("click");
     await flushPromises();
     expect(wrapper.get('[data-testid="new-version-hint"]').text()).toContain("有新版本");
-    expect(wrapper.get('[data-testid="resolved-version"]').text()).toContain(HASH_A);
+    expect(wrapper.get('[data-testid="top-resolved-version"]').text()).toContain(HASH_A);
   });
 
   it("health 失败时显示真实状态'获取失败'，不显示成功文案", async () => {
