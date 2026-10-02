@@ -13,6 +13,7 @@ from stock_quant.config import SourceConfig
 from stock_quant.data_sources.base import (
     ContractError,
     DataRequest,
+    EMPTY_RESPONSE_MESSAGE,
     FetchResult,
     _utc_timestamp,
     request_key,
@@ -217,7 +218,7 @@ class TushareSource:
         if not isinstance(frame, pd.DataFrame):
             raise ContractError("supplier response is not a pandas DataFrame")
         if frame.empty:
-            raise ContractError("supplier returned an empty response")
+            raise ContractError(EMPTY_RESPONSE_MESSAGE)
         required = ("ts_code", "name", "list_date", "delist_date", "list_status")
         missing = [name for name in required if name not in frame.columns]
         if missing:

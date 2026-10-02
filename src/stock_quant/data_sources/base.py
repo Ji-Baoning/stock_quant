@@ -62,6 +62,13 @@ class ContractError(RuntimeError):
     """A supplier response does not satisfy its documented raw contract."""
 
 
+#: The message of the empty-response contract violation
+#: (:func:`validate_supplier_frame`).  Named so callers that must branch on
+#: exactly this failure shape (ADR-023's carry-forward judgement) compare
+#: against one source of truth instead of a duplicated literal.
+EMPTY_RESPONSE_MESSAGE = "supplier returned an empty response"
+
+
 @dataclass(frozen=True)
 class RetryPolicy:
     max_attempts: int = 3
@@ -301,7 +308,7 @@ def validate_supplier_frame(
     if not isinstance(frame, pd.DataFrame):
         raise ContractError("supplier response is not a pandas DataFrame")
     if frame.empty and not allow_empty:
-        raise ContractError("supplier returned an empty response")
+        raise ContractError(EMPTY_RESPONSE_MESSAGE)
     if frame.attrs.get("truncated"):
         raise ContractError("supplier marked its response as truncated")
 

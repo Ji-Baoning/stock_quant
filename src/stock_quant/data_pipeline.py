@@ -160,7 +160,10 @@ from stock_quant.data_model.security_master import (
     master_coverage_record,
 )
 from stock_quant.data_model.suspensions import (
+    MAX_CARRY_FORWARD_DAYS,
+    SUSPENSION_SOURCE,
     canonicalize_supplier_suspensions,
+    carry_forward_rows,
     interior_gap_rows,
     suspension_rows,
 )
@@ -176,7 +179,10 @@ from stock_quant.data_model.trade_calendar_facts import (
     parse_trade_cal_frame,
 )
 from stock_quant.data_model.universe import Universe
-from stock_quant.data_model.universe_membership import SecurityMasterBoundary
+from stock_quant.data_model.universe_membership import (
+    MembershipStatus,
+    SecurityMasterBoundary,
+)
 from stock_quant.data_quality.gates import (
     TABLE_LEVEL_BLOCKING_CODES,
     evaluate_publication,
@@ -210,6 +216,7 @@ from stock_quant.data_quality.raw_checks import (
 from stock_quant.data_sources.base import (
     AuthenticationError,
     ContractError,
+    EMPTY_RESPONSE_MESSAGE,
     DataRequest,
     DataSource,
     FetchResult,
@@ -1452,6 +1459,13 @@ class DataPipeline:
                 primary_dates,
                 raw_daily_frames,
                 unavailable,
+                carry_forward={
+                    "master": master,
+                    "membership": membership,
+                    "carried_daily": current_daily,
+                    "calendar_open": calendar_open,
+                    "ingested_at": pd.Timestamp.now(tz="UTC"),
+                },
             )
             if fatal:
                 if "daily_bar" not in unavailable:
@@ -2380,6 +2394,7 @@ class DataPipeline:
         primary_dates,
         raw_daily_frames,
         unavailable: set[str] | None = None,
+        carry_forward: dict | None = None,
     ) -> bool:
         """Fetch the primary daily lane; ``True`` stops the round's fetches.
 
@@ -2388,6 +2403,18 @@ class DataPipeline:
         instead (spec §7.5.4).  Every other failure stays fatal.  A caller
         that passes no ``unavailable`` set keeps the all-failures-fatal
         contract.
+
+        With ``carry_forward`` evidence (ADR-023: the carried baseline table,
+        the security master, the universe membership and the open calendar),
+        one failure shape is judged instead of being fatal on the spot: a
+        symbol whose whole-window ``daily`` response is truly empty.  When
+        the empty response is *proved* by the baseline's suspension tail
+        (active membership, no delist, a ``tushare_suspend`` boundary bar on
+        the last open day before the window, at most
+        ``MAX_CARRY_FORWARD_DAYS`` open days), the window's bars are
+        materialized as carry-forward rows and the lane continues; every
+        other symbol and every unproved shape keeps the exact pre-existing
+        FATAL.
         """
         outage: set[str] | None = None if unavailable is None else set()
         if "tushare" not in enabled:
@@ -2395,13 +2422,42 @@ class DataPipeline:
         source = self._adapter_or_fail("tushare", statuses)
         if source is None:
             return True
+        empty_responses: set[str] = set()
         for symbol in symbols:
             dispatched = self._dispatch(
                 "tushare", source, "daily", symbol, start, end,
                 {"adjustment": "unadjusted"}, required=True, issues=issues,
                 reuse=True, transient_outage=outage,
+                empty_response_out=(
+                    empty_responses if carry_forward is not None else None
+                ),
             )
             if dispatched is None:
+                if symbol in empty_responses:
+                    rows, carry_issues = self._carry_forward_rows(
+                        symbol, start, end, carry_forward
+                    )
+                    if rows is not None and not rows.empty:
+                        primary_rows.append(rows)
+                        primary_dates.update(
+                            zip(rows["symbol"], rows["trade_date"].dt.date)
+                        )
+                        issues.extend(carry_issues)
+                        continue
+                    # Unproved: the exact fail-closed verdict the boundary
+                    # would have produced, at the same point in the round.
+                    issues.append(
+                        _issue(
+                            Severity.FATAL,
+                            CODE_SOURCE_FETCH_FAILED,
+                            details={
+                                "source": "tushare",
+                                "endpoint": "daily",
+                                "symbol": symbol,
+                                "message": EMPTY_RESPONSE_MESSAGE,
+                            },
+                        )
+                    )
                 statuses["tushare"] = SourceStatus(
                     "tushare", True, False,
                     reason=f"required fetch failed for {symbol}",
@@ -2439,6 +2495,108 @@ class DataPipeline:
             "tushare", True, True, reason_code="ok"
         )
         return False
+
+    def _carry_forward_rows(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        carry_forward: dict | None,
+    ) -> tuple[pd.DataFrame | None, list[QualityIssue]]:
+        """ADR-023's verdict for one symbol's whole-window empty response.
+
+        Returns the window's carry-forward bars (with their INFO evidence
+        issue) when the empty response is *proved* -- all four conditions of
+        the evidence class hold -- and ``(None, [])`` (the fail-closed
+        direction) otherwise:
+
+        (a) the symbol is an active fact of the carried universe membership
+            table; a baseline without the table proves nothing;
+        (b) the security master lists no delist at or before the window end;
+        (c) the symbol's last carried bar strictly before the fetch window
+            sits on the last open day before the window's first open day and
+            is itself a ``tushare_suspend`` bar -- the halt was in progress
+            when coverage ended, and no open day is left unproved between
+            the baseline and the window;
+        (d) the window owes at most ``MAX_CARRY_FORWARD_DAYS`` open days.
+
+        The price carried is the boundary bar's own close (parity), the same
+        canonical shape the suspension proofs emit.
+        """
+        if not carry_forward:
+            return None, []
+        membership = carry_forward.get("membership")
+        master = carry_forward.get("master")
+        carried = carry_forward.get("carried_daily")
+        calendar_open = carry_forward.get("calendar_open")
+        if (
+            membership is None
+            or membership.empty
+            or not {"symbol", "status"} <= set(membership.columns)
+        ):
+            return None, []
+        active = membership.loc[
+            (membership["symbol"] == symbol)
+            & (membership["status"] == MembershipStatus.ACTIVE.value)
+        ]
+        if active.empty:
+            return None, []
+        delist_date = None
+        if master is not None:
+            delist_date = next(
+                (
+                    _as_date(row.get("delist_date"))
+                    for row in master.to_dict("records")
+                    if str(row["symbol"]) == symbol
+                ),
+                None,
+            )
+        if delist_date is not None and delist_date <= end:
+            return None, []
+        if (
+            carried is None
+            or carried.empty
+            or not calendar_open
+            or "trade_date" not in carried.columns
+        ):
+            return None, []
+        window = [
+            day
+            for day in calendar_open
+            if isinstance(day, date) and start <= day <= end
+        ]
+        if not window or len(window) > MAX_CARRY_FORWARD_DAYS:
+            return None, []
+        rows = carried.loc[carried["symbol"] == symbol]
+        if rows.empty:
+            return None, []
+        rows = rows.assign(
+            trade_date=pd.to_datetime(rows["trade_date"])
+        ).sort_values("trade_date")
+        first_day = pd.Timestamp(window[0])
+        prior = rows.loc[rows["trade_date"] < first_day]
+        if prior.empty:
+            return None, []
+        boundary = prior.iloc[-1]
+        boundary_day = boundary["trade_date"].date()
+        prior_open = [
+            day for day in calendar_open
+            if isinstance(day, date) and day < window[0]
+        ]
+        if not prior_open or boundary_day != prior_open[-1]:
+            return None, []
+        if (
+            str(boundary.get("source")) != SUSPENSION_SOURCE
+            or float(boundary["volume"]) != 0.0
+        ):
+            return None, []
+        carry, _issues = carry_forward_rows(
+            symbol,
+            float(boundary["close"]),
+            window,
+            ingested_at=carry_forward.get("ingested_at"),
+        )
+        return carry, _issues
 
     def _fetch_basic_factor_window(
         self,
@@ -4048,6 +4206,7 @@ class DataPipeline:
         reuse: bool = False,
         allow_empty: bool = False,
         transient_outage: set[str] | None = None,
+        empty_response_out: set[str] | None = None,
     ):
         """One per-symbol request: ``(result, snapshot)`` or ``None``.
 
@@ -4069,7 +4228,13 @@ class DataPipeline:
         the source in ``transient_outage`` (when supplied) and returns
         ``None`` without the FATAL: the caller answers with the carried
         baseline table instead of failing the round (spec §7.5.4).  Every
-        other required failure keeps its FATAL issue.
+        other required failure keeps its FATAL issue -- except one shape a
+        caller explicitly opted into: with ``empty_response_out``, a required
+        failure whose cause is exactly the adapter boundary's empty-response
+        contract error is *reported* by adding the symbol to that set and
+        returning ``None`` with no FATAL, deferring the verdict to the caller
+        (ADR-023 judges the proved-tail subset there; every other shape and
+        every non-opted-in call keeps the FATAL right here).
         """
         config: SourceConfig = self._project_config.sources.get(
             name, SourceConfig()
@@ -4146,6 +4311,14 @@ class DataPipeline:
                 )
             return None
         except Exception as error:  # noqa: BLE001
+            if (
+                required
+                and empty_response_out is not None
+                and isinstance(error, ContractError)
+                and str(error) == EMPTY_RESPONSE_MESSAGE
+            ):
+                empty_response_out.add(symbol)
+                return None
             message = str(translate_supplier_error(error))
             if required:
                 issues.append(

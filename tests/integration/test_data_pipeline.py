@@ -53,12 +53,16 @@ from stock_quant.data_pipeline import (  # noqa: F401  (gates Step 2 collection)
 from stock_quant.data_quality.models import (
     CODE_NONPOSITIVE_PRICE,
     CODE_QUARANTINE_OUT_OF_WINDOW,
+    CODE_SUSPENSION_ROW,
+    CODE_SUSPENSION_RUN_UNVERIFIED,
+    CODE_UNEXPLAINED_PRIMARY_GAP,
     QualityReport,
     Severity,
 )
 from stock_quant.data_quality.raw_checks import UNIVERSE_EVIDENCE_MISSING
 from stock_quant.data_sources.base import (
     AuthenticationError,
+    ContractError,
     DataRequest,
     DataSource,
     FetchResult,
@@ -126,6 +130,13 @@ class StubAdapter:
     negative_close_symbol: str | None = None
     missing_daily_symbol: str | None = None
     failing_endpoints: tuple[str, ...] = ()
+    #: ADR-023: the symbol whose per-symbol ``daily`` request the adapter
+    #: boundary answers with a truly empty response -- zero rows, no
+    #: columns -- the 2026-10-02 incident shape.
+    contract_empty_daily_symbol: str | None = None
+    #: ADR-023 boundary: symbols whose ``stock_basic`` row carries a
+    #: ``delist_date`` (the refreshed master then sees the delist).
+    stock_basic_delist_by_symbol: dict[str, date] | None = None
     action_frames: dict[str, dict[str, pd.DataFrame]] | None = None
     stock_basic_symbols: tuple[str, ...] | None = None
     stock_basic_list_date_by_symbol: dict[str, date] | None = None
@@ -145,6 +156,11 @@ class StubAdapter:
         )
         object.__setattr__(
             self,
+            "stock_basic_delist_by_symbol",
+            self.stock_basic_delist_by_symbol or {},
+        )
+        object.__setattr__(
+            self,
             "trade_cal_is_open_by_exchange",
             self.trade_cal_is_open_by_exchange or {},
         )
@@ -161,6 +177,15 @@ class StubAdapter:
         if request.endpoint in self.failing_endpoints:
             failure = self.raise_with or RuntimeError
             raise failure(f"{self.name} supplier failure on {request.endpoint}")
+        if (
+            request.endpoint == "daily"
+            and request.symbols
+            and request.symbols[0] == self.contract_empty_daily_symbol
+        ):
+            # The real adapter boundary maps a truly empty response (zero
+            # rows, no columns) to this contract error; reproduce exactly
+            # that shape so the pipeline sees the incident's failure.
+            raise ContractError("supplier returned an empty response")
         if self.raise_with is not None:
             raise self.raise_with(f"{self.name} supplier failure")
         if (
@@ -254,6 +279,7 @@ class StubAdapter:
         symbol.
         """
         symbols = self.stock_basic_symbols or _FIXTURE_UNIVERSE_SYMBOLS
+        delists = self.stock_basic_delist_by_symbol
         return pd.DataFrame(
             [
                 {
@@ -262,7 +288,11 @@ class StubAdapter:
                     "list_date": self.stock_basic_list_date_by_symbol.get(
                         symbol, _STOCK_BASIC_LIST_DATE
                     ).strftime("%Y%m%d"),
-                    "delist_date": "",
+                    "delist_date": (
+                        delists[symbol].strftime("%Y%m%d")
+                        if delists and symbol in delists
+                        else ""
+                    ),
                     "list_status": "L",
                 }
                 for symbol in symbols
@@ -2072,3 +2102,183 @@ def test_a_source_unavailable_tail_version_passes_data_validate(
     )
     assert result.exit_code == 0, result.stdout
     assert "PASS" in result.stdout
+
+
+# --------------------------------------------------------------------------- #
+# ADR-023: carry-forward for a whole-window empty response over a proved tail
+# --------------------------------------------------------------------------- #
+
+
+#: The halted symbol of the ADR-023 incident blueprint (the fixture's first
+#: universe symbol stands in for 601059.SH).
+_HALT_SYMBOL = "600000.SH"
+
+#: The last baseline open day before the update window (the tail boundary).
+_TAIL_END = date(2021, 10, 29)
+
+#: A 10-open-day window after the baseline end: exactly at the bound.
+_NOV_12 = date(2021, 11, 12)
+
+#: An 11-open-day window: one open day past :data:`MAX_CARRY_FORWARD_DAYS`.
+_NOV_15 = date(2021, 11, 15)
+
+
+def _republish_baseline_with_suspension_tail(root: Path, symbol: str) -> None:
+    """Republish CURRENT with the symbol's bars through ``_TAIL_END`` turned
+    into ``tushare_suspend`` parity rows (the 2026-10-02 incident baseline:
+    a halt in progress when coverage ended).  The carried ``build_config`` is
+    bound again unchanged, exactly like the membership republish helper."""
+    publisher = DatasetPublisher(root)
+    reader = DatasetReader(root)
+    with reader.open(publisher.current().version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+        build_config = context.manifest.get("build_config")
+    daily = tables["daily_bar"]
+    tail = (daily["symbol"] == symbol) & (
+        daily["trade_date"] <= pd.Timestamp(_TAIL_END)
+    )
+    daily.loc[tail, "open"] = daily.loc[tail, "close"]
+    daily.loc[tail, "high"] = daily.loc[tail, "close"]
+    daily.loc[tail, "low"] = daily.loc[tail, "close"]
+    daily.loc[tail, "volume"] = 0
+    daily.loc[tail, "amount"] = 0.0
+    daily.loc[tail, "source"] = "tushare_suspend"
+    tables["daily_bar"] = daily
+    publisher.publish(tables, QualityReport(), build_config=build_config)
+
+
+def _empty_response_sources() -> dict[str, DataSource]:
+    """The incident stub: every symbol answers except the halted one, whose
+    per-symbol ``daily`` response is truly empty (zero rows, no columns)."""
+    return _all_stubs(
+        tushare=StubAdapter("tushare", contract_empty_daily_symbol=_HALT_SYMBOL)
+    )
+
+
+def _window_daily_rows(daily: pd.DataFrame, symbol: str, end: date) -> pd.DataFrame:
+    """One symbol's published rows inside the fetched update window."""
+    rows = daily.loc[
+        (daily["symbol"] == symbol)
+        & (daily["trade_date"] >= pd.Timestamp(_WINDOW_START))
+        & (daily["trade_date"] <= pd.Timestamp(end))
+    ]
+    assert len(rows) == len(_weekdays(_WINDOW_START, end)), rows
+    return rows
+
+
+def test_a_whole_window_empty_response_over_a_suspension_tail_publishes_carry_forward(
+    project,
+):
+    """ADR-023 main case (the 2026-10-02 incident blueprint).
+
+    An active universe symbol whose baseline carries a ``tushare_suspend``
+    tail to the boundary and whose whole-window ``daily`` response is truly
+    empty is materialized as carry-forward bars -- parity price, zero
+    volume, inside the bound -- and the round publishes with the acceptance
+    semantics intact; every other symbol keeps its own rows.
+    """
+    _republish_baseline_with_suspension_tail(project.root, _HALT_SYMBOL)
+    boundary_close = _published_table(
+        project.root, DatasetPublisher(project.root).current().version, "daily_bar"
+    )
+    boundary_close = float(
+        boundary_close.loc[
+            (boundary_close["symbol"] == _HALT_SYMBOL)
+            & (boundary_close["trade_date"] == pd.Timestamp(_TAIL_END)),
+            "close",
+        ].iloc[0]
+    )
+
+    result = DataPipeline(project.root, sources=_empty_response_sources()).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_NOV_12)
+    )
+    assert result.dataset_ref is not None
+    report = result.quality_report
+    assert not [i for i in report.issues if i.severity is Severity.FATAL]
+    assert CODE_SUSPENSION_RUN_UNVERIFIED not in report.by_code()
+    assert CODE_UNEXPLAINED_PRIMARY_GAP not in report.by_code()
+    assert CODE_SUSPENSION_ROW in report.by_code()
+    status = next(
+        s for s in result.source_status if s.source == "tushare"
+    )
+    assert status.ok and status.reason_code == "ok"
+
+    daily = _published_table(
+        project.root, result.dataset_ref.version, "daily_bar"
+    )
+    rows = _window_daily_rows(daily, _HALT_SYMBOL, _NOV_12)
+    assert set(rows["source"]) == {"tushare_suspend"}
+    assert (rows["volume"] == 0).all()
+    assert (rows["amount"] == 0.0).all()
+    assert (rows["open"] == rows["close"]).all()
+    assert (rows["high"] == rows["close"]).all()
+    assert (rows["low"] == rows["close"]).all()
+    assert ((rows["close"] - boundary_close).abs() < 1e-4).all()
+
+    # The other symbols keep their own traded rows, byte-shape unchanged.
+    other = _window_daily_rows(daily, "600036.SH", _NOV_12)
+    assert set(other["source"]) == {"tushare"}
+    assert (other["volume"] > 0).all()
+
+    # The published version passes the offline acceptance suite end to end.
+    validation = DataPipeline(project.root).validate(result.dataset_ref.version)
+    assert not [i for i in validation.issues if i.severity is Severity.FATAL]
+
+
+def test_a_carry_forward_past_the_bound_stays_fatal(project):
+    """ADR-023 boundary: an empty response over a proved tail whose window
+    exceeds ``MAX_CARRY_FORWARD_DAYS`` open days is never materialized."""
+    _republish_baseline_with_suspension_tail(project.root, _HALT_SYMBOL)
+    result = DataPipeline(project.root, sources=_empty_response_sources()).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_NOV_15)
+    )
+    assert result.dataset_ref is None
+    fatal = [
+        i
+        for i in result.quality_report.issues
+        if i.severity is Severity.FATAL and i.code == CODE_SOURCE_FETCH_FAILED
+    ]
+    assert len(fatal) == 1
+    assert fatal[0].details["symbol"] == _HALT_SYMBOL
+    assert fatal[0].details["endpoint"] == "daily"
+    assert fatal[0].details["message"] == "supplier returned an empty response"
+
+
+def test_an_empty_response_without_a_suspension_tail_stays_fatal(project):
+    """ADR-023 boundary: without the baseline suspension tail the empty
+    response proves nothing and the fail-closed FATAL stands."""
+    result = DataPipeline(project.root, sources=_empty_response_sources()).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_NOV_12)
+    )
+    assert result.dataset_ref is None
+    fatal = [
+        i
+        for i in result.quality_report.issues
+        if i.severity is Severity.FATAL and i.code == CODE_SOURCE_FETCH_FAILED
+    ]
+    assert len(fatal) == 1
+    assert fatal[0].details["symbol"] == _HALT_SYMBOL
+
+
+def test_an_empty_response_for_a_delisted_symbol_stays_fatal(project):
+    """ADR-023 boundary: a delist at or before the window end keeps the
+    fail-closed FATAL even with a suspension tail in the baseline."""
+    _republish_baseline_with_suspension_tail(project.root, _HALT_SYMBOL)
+    sources = _all_stubs(
+        tushare=StubAdapter(
+            "tushare",
+            contract_empty_daily_symbol=_HALT_SYMBOL,
+            stock_basic_delist_by_symbol={_HALT_SYMBOL: date(2021, 11, 5)},
+        )
+    )
+    result = DataPipeline(project.root, sources=sources).update(
+        DataUpdateRequest(start_date=_WINDOW_START, end_date=_NOV_12)
+    )
+    assert result.dataset_ref is None
+    fatal = [
+        i
+        for i in result.quality_report.issues
+        if i.severity is Severity.FATAL and i.code == CODE_SOURCE_FETCH_FAILED
+    ]
+    assert len(fatal) == 1
+    assert fatal[0].details["symbol"] == _HALT_SYMBOL

@@ -358,6 +358,73 @@ def _actions_in_run(
 MAX_INTERIOR_PROOF_RUN_DAYS = 5
 
 
+#: The carry-forward bound (ADR-023, owner ruling 2026-10-02): a whole-window
+#: empty per-symbol daily response is materialized from the baseline's
+#: suspension tail over at most this many open days.  The incident shape is
+#: three open days; ten bounds the unreviewed fabrication to two trading
+#: weeks -- past that, a silent relay fault over a resumption would flat-line
+#: a trading symbol too long before any report named it.
+MAX_CARRY_FORWARD_DAYS = 10
+
+
+def carry_forward_rows(
+    symbol: str,
+    boundary_close: float,
+    open_days: Sequence[date],
+    *,
+    ingested_at: object,
+) -> tuple[pd.DataFrame, list[QualityIssue]]:
+    """Materialize ADR-023's carry-forward bars for one proved empty window.
+
+    The whole-window empty response over a suspension tail is the weaker
+    tier the chain proof cannot reach: no resumption row exists, so no
+    ``pre_close`` chains -- the evidence is the baseline's own suspension
+    tail (the halt was in progress when coverage ended) plus the supplier's
+    silence for a window that owed this symbol rows.  Each open day is
+    carried at the boundary bar's close, zero volume, exactly the shape
+    :func:`suspension_rows` emits, labelled :data:`SUSPENSION_SOURCE`; the
+    INFO issue names the run as ``kind="carry_forward"`` so the report
+    distinguishes the tiers.  Eligibility (membership, delist, tail
+    connection, the :data:`MAX_CARRY_FORWARD_DAYS` bound) is the caller's --
+    this builder only shapes the rows.
+    """
+    days = [day for day in open_days]
+    if not days:
+        return _empty_rows(), []
+    records = [
+        {
+            "trade_date": pd.Timestamp(day),
+            "symbol": symbol,
+            "open": boundary_close,
+            "high": boundary_close,
+            "low": boundary_close,
+            "close": boundary_close,
+            "volume": 0,
+            "amount": 0.0,
+            "adjustment": "unadjusted",
+            "source": SUSPENSION_SOURCE,
+            "ingested_at": ingested_at,
+        }
+        for day in days
+    ]
+    first, last = days[0], days[-1]
+    issues = [
+        QualityIssue(
+            severity=Severity.INFO,
+            code=CODE_SUSPENSION_ROW,
+            table="daily_bar",
+            symbol=symbol,
+            trade_date=first,
+            details={
+                "kind": "carry_forward",
+                "run": f"{first.isoformat()}..{last.isoformat()}",
+                "days": len(days),
+            },
+        )
+    ]
+    return _frame_from_records(records), issues
+
+
 def interior_gap_rows(
     symbol: str,
     carried: pd.DataFrame,
