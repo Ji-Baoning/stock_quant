@@ -9,12 +9,15 @@ share the session dataset used by the CLI / end-to-end modules).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import yaml
 from conftest import (  # noqa: E402
@@ -60,7 +63,10 @@ from stock_quant.data_quality.models import (
     QualityReport,
     Severity,
 )
-from stock_quant.data_quality.raw_checks import UNIVERSE_EVIDENCE_MISSING
+from stock_quant.data_quality.raw_checks import (
+    UNIVERSE_EVIDENCE_MISSING,
+    validate_membership_facts,
+)
 from stock_quant.data_sources.base import (
     AuthenticationError,
     ContractError,
@@ -1588,6 +1594,10 @@ def _membership_fixture_frame() -> pd.DataFrame:
                 "source_url": "https://www.csindex.com.cn/fixture.pdf",
                 "snapshot_sha256": "a1" * 32,
                 "source_document_sha256": "b2" * 32,
+                # Provenance is part of the canonical layout now; a real
+                # value keeps the parquet round trip byte-stable (nulls
+                # read back as NaT, not None).
+                "collected_at": datetime(2026, 9, 30, 8, 0),
             }
             for symbol in ("600000.SH", "000333.SZ")
         ]
@@ -1633,6 +1643,27 @@ def _publish_legacy_baseline_without_membership(root: Path):
     ).version
 
 
+def _rewrite_membership_as_legacy_shape(
+    root: Path, version: str, legacy: pd.DataFrame
+) -> None:
+    """Rewrite one stored version's membership parquet to the legacy
+    11-column shape (spec 2.2).  Publication blocks that shape today, but
+    baselines published before the ``collected_at`` column existed carry it
+    on disk; the stored manifest hash is re-bound so the simulation stays
+    internally consistent."""
+    version_dir = DatasetReader(root).standardized_root / version
+    parquet_path = version_dir / "universe_membership.parquet"
+    pq.write_table(
+        pa.Table.from_pandas(legacy, preserve_index=False), parquet_path
+    )
+    manifest_path = version_dir / "dataset_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["tables"]["universe_membership"]["sha256"] = hashlib.sha256(
+        parquet_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
 def test_update_carries_universe_membership_table_unchanged(project):
     """Membership facts are immutable: an update carries the registered raw
     table through to the new dataset version byte-for-byte and the auditor
@@ -1676,6 +1707,31 @@ def test_validate_surfaces_tampered_membership_evidence_as_fatal(project):
     )
     assert issue.severity is Severity.FATAL
     assert issue.table == "universe_membership"
+
+
+def test_schema_accepts_both_membership_shapes(project):
+    """The membership gate accepts the legacy 11-column shape and the
+    collected_at-bearing 12-column shape alike (spec 2.2), and an update
+    carrying a legacy baseline backfills ``collected_at`` as null before
+    republishing the canonical layout."""
+    modern = _membership_fixture_frame()
+    legacy = modern.drop(columns=["collected_at"])
+    for frame in (legacy, modern):
+        assert validate_membership_facts(
+            frame, calendar=(), expected_sizes={}
+        ) == []
+    version = _publish_baseline_with_membership(project.root, modern)
+    _rewrite_membership_as_legacy_shape(project.root, version, legacy)
+    result = DataPipeline(project.root, sources=_all_stubs()).update(
+        _request()
+    )
+    assert result.dataset_ref is not None
+    with DatasetReader(project.root).open(result.dataset_ref.version) as context:
+        carried = context.read("universe_membership")
+    assert list(carried.columns) == list(modern.columns)
+    assert carried["collected_at"].isna().all()
+    report = DataPipeline(project.root).validate()
+    assert report.by_severity()[Severity.FATAL.value] == 0
 
 
 def test_validate_reports_calendar_evidence_of_the_fixture(project):

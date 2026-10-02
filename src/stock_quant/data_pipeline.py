@@ -2287,6 +2287,15 @@ class DataPipeline:
                 if TABLE_UNIVERSE_MEMBERSHIP in context.tables
                 else None
             )
+            if membership is not None and (
+                "collected_at" not in membership.columns
+            ):
+                # Pre-collected_at baselines carry the legacy 11-column
+                # membership shape (spec 2.2): carrying backfills a null
+                # provenance column and the next publish writes the canonical
+                # 12-column layout -- the disposition is republish, never an
+                # in-place rewrite of the stored version.
+                membership["collected_at"] = pd.NaT
             if TABLE_CORPORATE_ACTION_QUARANTINE in context.tables:
                 quarantine = context.read(TABLE_CORPORATE_ACTION_QUARANTINE)
             else:

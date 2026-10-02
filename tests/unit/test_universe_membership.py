@@ -81,6 +81,7 @@ def test_status_and_reason_vocabularies_are_exact():
         "delisting",
         "merger_or_reorganization",
         "correction",
+        "snapshot_observed_change",
     }
 
 
@@ -598,6 +599,7 @@ def test_membership_columns_are_registered_in_canonical_order():
         "source_url",
         "snapshot_sha256",
         "source_document_sha256",
+        "collected_at",
     ]
 
 
@@ -606,9 +608,12 @@ def test_membership_schema_uses_date32_for_dates_and_string_elsewhere():
         UNIVERSE_MEMBERSHIP_COLUMNS
     )
     date_columns = {"raw_effective_from", "raw_effective_to", "announcement_date"}
+    timestamp_columns = {"collected_at"}
     for field in UNIVERSE_MEMBERSHIP_SCHEMA:
         if field.name in date_columns:
             assert pa.types.is_date32(field.type)
+        elif field.name in timestamp_columns:
+            assert pa.types.is_timestamp(field.type)
         else:
             assert pa.types.is_string(field.type)
 

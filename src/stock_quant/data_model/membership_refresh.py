@@ -420,6 +420,15 @@ def _facts_from_membership_frame(frame: pd.DataFrame) -> list[MembershipFact]:
                 if value is None or pd.isna(value)
                 else pd.Timestamp(value).date()
             )
+        # ``pd.NaT`` is a ``datetime`` subclass, so an unnormalized null
+        # provenance value would slip through validation and break JSON
+        # serialization of the content hash.
+        collected_at = payload.get("collected_at")
+        payload["collected_at"] = (
+            None
+            if collected_at is None or pd.isna(collected_at)
+            else pd.Timestamp(collected_at).to_pydatetime()
+        )
         facts.append(MembershipFact.model_validate(payload))
     return facts
 

@@ -277,6 +277,7 @@ _KNOWN_REASONS = frozenset(
         "delisting",
         "merger_or_reorganization",
         "correction",
+        "snapshot_observed_change",
     }
 )
 _KNOWN_STATUSES = frozenset({"active", "removed"})
@@ -386,14 +387,18 @@ def validate_membership_facts(
     days. No check mutates data or consults factor/market state.
     """
     issues: list[QualityIssue] = []
-    if list(frame.columns) != list(UNIVERSE_MEMBER_COLUMNS):
+    required = list(UNIVERSE_MEMBER_COLUMNS)
+    # Two canonical shapes: the legacy 11-column layout and the same table
+    # with the trailing ``collected_at`` provenance column (spec 2.2). Both
+    # pass; anything else is still a schema mismatch.
+    if list(frame.columns) not in (required, required + ["collected_at"]):
         return [
             QualityIssue(
                 severity=Severity.FATAL,
                 code=UNIVERSE_SCHEMA_MISMATCH,
                 table=TABLE_UNIVERSE_MEMBERSHIP,
                 details={
-                    "expected": list(UNIVERSE_MEMBER_COLUMNS),
+                    "expected": required,
                     "present": list(frame.columns),
                 },
             )

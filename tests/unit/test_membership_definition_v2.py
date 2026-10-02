@@ -5,6 +5,11 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from stock_quant.data_model.index_membership_import import (
+    build_snapshot_facts,
+    membership_difference_report,
+    merge_collected_at_first_write,
+)
 from stock_quant.data_model.universe_membership import (
     membership_content_hash,
     membership_slice_hash,
@@ -333,3 +338,101 @@ def test_no_slice_definitions_stay_v1_and_archive(tmp_path):
         archive_universe_definition(root, "custom_csi300_tw.yml")
     assert (root / "custom_csi300_tw.yml").is_file()
     assert not (root / "archive" / "custom_csi300_tw.yml").exists()
+
+
+# ---------------------------------------------------------------------------
+# P2b Task 5: attested-boundary fact generation, the difference report and
+# the first-write collected_at provenance merge (spec 7.1)
+# ---------------------------------------------------------------------------
+
+_KW = dict(universe_id="custom_csi500_tw", source="tushare",
+           source_url="https://tushare.pro/document/2?doc_id=95",
+           collected_at=datetime(2026, 9, 30, 8, 0), cadence="monthly")
+
+
+def _snap(day, symbols, digest="a" * 64):
+    import pandas as pd
+    # 第三个元素是快照文件哈希：MembershipFact.snapshot_sha256 是必填 64-hex，
+    # 测试不能省。
+    return (day, pd.DataFrame({"symbol": symbols}), digest)
+
+
+def test_snapshot_diff_produces_attested_boundary_facts():
+    facts, segments, gaps = build_snapshot_facts(
+        [_snap(date(2024, 1, 31), ["600000.SH"]),
+         _snap(date(2024, 2, 28), ["600000.SH", "000001.SZ"]),
+         _snap(date(2024, 3, 29), ["000001.SZ"])], **_KW)
+    join = next(f for f in facts if f.symbol == "000001.SZ"
+                and f.raw_effective_from == date(2024, 2, 28))
+    assert join.announcement_date == date(2024, 2, 28)  # = raw_effective_from
+    assert join.reason.value == "snapshot_observed_change"
+    gone = next(f for f in facts if f.symbol == "600000.SH")
+    assert gone.raw_effective_to == date(2024, 3, 28)  # 最后列出快照前一日
+    assert gone.status.value == "removed"
+    assert gaps == () and len(segments) == 1
+
+
+def test_a_missing_snapshot_opens_a_gap_and_starts_a_new_segment():
+    facts, segments, gaps = build_snapshot_facts(
+        [_snap(date(2024, 1, 31), ["600000.SH"]),
+         _snap(date(2024, 3, 29), ["600000.SH"])], **_KW)
+    assert [g.reason for g in gaps] == [MEMBERSHIP_OBSERVATION_GAP]
+    assert len(segments) == 2
+    # 跨 gap 不差分：段一闭、段二重开，无任何“精确移除日”声称
+    intervals = sorted((f.raw_effective_from, f.raw_effective_to)
+                       for f in facts if f.symbol == "600000.SH")
+    assert len(intervals) == 2
+
+
+def test_unknown_cadence_refuses_to_guess_without_manual_confirmation():
+    with pytest.raises(ValueError, match="manual confirmation"):
+        build_snapshot_facts([_snap(date(2024, 1, 31), ["600000.SH"])],
+                             **{**_KW, "cadence": "unknown"})
+
+
+def test_backfill_keeps_collected_at_provenance_only():
+    import pandas as pd
+
+    from stock_quant.data_model.universe_membership import membership_frame
+    facts, *_ = build_snapshot_facts(
+        [_snap(date(2015, 1, 30), ["600000.SH"])], **_KW)
+    first = facts[0]
+    assert first.collected_at.date() != first.announcement_date  # 补采 ≠ 快照日
+    # merge 的键是 (universe_id, symbol, raw_effective_from)：baseline 必须
+    # 落在同一键上，否则左连不命中、拿的是 new 的 collected_at。
+    landed = membership_frame([fact(universe_id="custom_csi500_tw",
+                                    raw_effective_from=date(2015, 1, 30),
+                                    collected_at=datetime(2020, 1, 1))])
+    merged = merge_collected_at_first_write(membership_frame([first]), landed)
+    assert pd.Timestamp(merged["collected_at"].iloc[0]).date() == date(2020, 1, 1)
+
+
+def test_official_overlaps_produce_only_a_difference_report():
+    # 两侧必须真有区间差异：`fact()` 的默认值相同，照默认构造会得到两条
+    # 逐字段相等的事实，正确实现应返回空报告，断言就永远不成立。
+    candidate = [fact(universe_id="csi300", symbol="600000.SH",
+                      raw_effective_from=date(2019, 1, 1),
+                      raw_effective_to=date(2021, 12, 31),
+                      status="removed", reason="regular_rebalance")]
+    official = [fact(universe_id="csi300", symbol="600000.SH",
+                     raw_effective_from=date(2019, 1, 1),
+                     raw_effective_to=date(2022, 6, 30),
+                     status="removed", reason="regular_rebalance")]
+    report = membership_difference_report(candidate, official)
+    assert report and report[0]["kind"] == "interval_disagreement"
+    assert report[0]["symbol"] == "600000.SH"
+
+
+def test_a_generated_gap_definition_fails_a_crossing_window():
+    facts, segments, gaps = build_snapshot_facts(
+        [_snap(date(2024, 1, 31), ["600000.SH"]),
+         _snap(date(2024, 3, 29), ["600000.SH"])], **_KW)
+    definition = UniverseDefinition.model_validate(_v2(
+        coverage_start=segments[0].start, coverage_end=segments[-1].end,
+        membership_table_sha256=membership_slice_hash(
+            facts, "custom_csi500_tw"),
+        coverage_segments=list(segments), coverage_gaps=list(gaps)))
+    assert window_crosses_membership_gap(
+        definition, date(2024, 2, 1), date(2024, 2, 15)) is gaps[0]
+    assert window_crosses_membership_gap(
+        definition, date(2024, 3, 29), date(2024, 3, 29)) is None

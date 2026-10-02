@@ -112,6 +112,9 @@ UNIVERSE_MEMBERSHIP_COLUMNS = [
     "source_url",
     "snapshot_sha256",
     "source_document_sha256",
+    # Provenance column (spec 2.2): never enters membership_content_hash;
+    # readers must accept the legacy 11-column shape without it.
+    "collected_at",
 ]
 
 # Trading calendar marks which calendar dates are confirmed open days.
@@ -262,6 +265,7 @@ def _universe_membership_fields() -> list[pa.Field]:
         pa.field("source_url", pa.string()),
         pa.field("snapshot_sha256", pa.string()),
         pa.field("source_document_sha256", pa.string()),
+        pa.field("collected_at", pa.timestamp("us")),
     ]
 
 

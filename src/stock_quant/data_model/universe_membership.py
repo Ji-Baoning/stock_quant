@@ -74,6 +74,7 @@ class MembershipReason(str, Enum):
     DELISTING = "delisting"
     MERGER_OR_REORGANIZATION = "merger_or_reorganization"
     CORRECTION = "correction"
+    SNAPSHOT_OBSERVED_CHANGE = "snapshot_observed_change"
 
 
 class MembershipBoundaryAdjustment(str, Enum):
@@ -360,6 +361,10 @@ def _fact_record(item: MembershipFact) -> dict[str, Any]:
         "source_url": item.source_url,
         "snapshot_sha256": item.snapshot_sha256,
         "source_document_sha256": item.source_document_sha256,
+        # Provenance only: never enters ``membership_content_hash`` (Task 1
+        # excludes it structurally) and never coerced through ``to_datetime``
+        # below -- it is already a ``datetime | None``.
+        "collected_at": item.collected_at,
     }
 
 
