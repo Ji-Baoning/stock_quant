@@ -133,3 +133,74 @@ Retry the same minimal window `2026-09-25..2026-09-25` with
 again (check the relay operator / probe with a read-only endpoint first), then
 resume the authorized sequence: update → validate → same-window re-run →
 observe basic_factor semantics in the new version manifest.
+
+## 甄别性调用(2026-10-02,owner 批准)
+
+Owner approved exactly one read-only diagnostic relay read to discriminate
+transient vs systematic empty for the failed `daily` request above. This is a
+diagnostic call, NOT an update round: no pipeline run, no dataset write, no
+second read, no other endpoint/date/symbol. The one-shot script lived in
+`/tmp` (never entered the repository); credentials were sourced from `.env`
+per RUNBOOK convention and never read, printed, or recorded.
+
+### Call shape (identical to the pipeline's failing request)
+
+Built with the repository's own transport layer
+(`build_transport(RELAY, SourceConfig())` → `TushareRelayClient.api`, the
+official `DataApi` with its base URL rewritten to the relay — same class and
+same construction the update lane uses), mirroring
+`TushareSource._fetch_symbol_series`
+(`src/stock_quant/data_sources/tushare.py`) verbatim:
+
+```text
+client.daily(ts_code="000001.SZ", start_date="20260925", end_date="20260925")
+```
+
+Transport initialized identically to the failed round: `kind=relay`,
+host `jiaoch.top`, `sdk_version=1.4.24`. No `fields` parameter, no
+`trade_date` — exactly the parameters the pipeline sent.
+
+### Raw return
+
+- `observed_at_utc`: `2026-10-02T02:21:42+00:00`
+- Type: `pandas.DataFrame` (normal return, no exception)
+- Rows: **0**; Columns: **`[]`** (empty frame with no field schema at all —
+  the relay answered with an empty payload, consistent with the FATAL
+  round's `"supplier returned an empty response"`)
+- attrs: `{}`; head: `[]`
+- Exception: none. Not a connection/timeout/rate-limit failure, so the
+  sandbox-retry allowance never applied and was not used.
+
+### Verdict: systematic empty (系统性空), per the owner's decision tree
+
+The transport answered normally (successful initialization, normal HTTP
+round-trip, a DataFrame came back) but `data` was empty: rows=0 with no
+column schema. Under the owner's tree this is the "normal return with
+rows=0 → systematic empty" branch, not the transient branch. Basis: the raw
+return above — a later-in-the-day re-ask of the identical request shape that
+FATALed earlier the same day still returns an empty body.
+
+Scope caveat (recorded, not resolved): one data point cannot separate
+"relay's `daily` endpoint is empty for every date" from "2026-09-25 is
+unavailable on the relay". Discriminating those would need a further
+diagnostic read against a baseline-known date (e.g. 2026-09-24) — out of
+scope here and NOT executed.
+
+### Recommendation for the real-window follow-up (owner to confirm)
+
+Per the systematic-empty branch: switch the window or hold (挂起). The
+"retry the same window" advice in the Follow-up section above is now
+contradicted by evidence — a same-window re-run would most likely FATAL the
+same way and spend another update round. Options for owner confirmation,
+in order of information value: (a) authorize one more diagnostic read at a
+baseline-known date to split endpoint-wide vs date-specific emptiness;
+(b) pick a different minimal window for the real update; (c) hold and ask
+the relay operator. No action was taken after the diagnostic call.
+
+### Quota accounting
+
+Exactly 1 diagnostic request reached the relay (the one read above). No
+update round, no re-run, no other network call. Empty responses are not
+counted as completed calls by the pipeline's ledger convention, but for this
+diagnostic the accounting is stated directly: 1 request issued, 0 rows
+returned.
