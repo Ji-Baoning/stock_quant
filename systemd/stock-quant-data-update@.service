@@ -1,0 +1,17 @@
+[Unit]
+Description=Stock Quant scheduled data update (one project root per instance)
+Documentation=file:///home/ji/work/program/stock/RUNBOOK.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# The scheduler may ONLY call the operations shell (spec 9.4): calling
+# `data update` directly would leave the run invisible to the operations
+# API's job records.  The instance name is the systemd-escaped project
+# root (systemd-escape -p <root>); %f expands it back to the absolute
+# path.  A conflicted or failed update exits nonzero (75 for
+# update_already_running) so journalctl shows it; no restarts -- the next
+# scheduled trigger is the retry, with a NEW job id.
+ExecStart=/home/ji/miniconda3/envs/sq312/bin/python -m stock_quant operations update --root %f
+Restart=no

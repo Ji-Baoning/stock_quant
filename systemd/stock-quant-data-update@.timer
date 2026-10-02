@@ -1,0 +1,14 @@
+[Unit]
+Description=Schedule Stock Quant data updates (Asia/Shanghai evening window)
+
+[Timer]
+# Close-of-day window pinned to Asia/Shanghai regardless of host TZ
+# (spec 9.4).  Persistent=false: a trigger missed while the host was down
+# is logged by systemd and is NOT replayed on boot.
+OnCalendar=*-*-* 17:10:00 Asia/Shanghai
+Persistent=false
+AccuracySec=30s
+Unit=stock-quant-data-update@%i.service
+
+[Install]
+WantedBy=timers.target
