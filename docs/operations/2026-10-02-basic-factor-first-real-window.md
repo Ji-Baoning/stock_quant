@@ -559,3 +559,195 @@ transport)本轮不可观察。只读核验基线:9 张旧形态表;无
 零读取、零打印、零记录。在途 WIP(RUNBOOK.md、cli.py、bootstrap.py、
 reporting 模板、相关 tests 及未跟踪 plans/ 等)一律未动;本次仅追加并
 提交本 evidence 文件。
+
+## 第四轮:补注条件 (a) 后的重跑(2026-09-25..2026-09-30,owner 放行)
+
+Owner 第四次放行后的执行轮。授权范围:恰好两轮真实 update(初始 + 同窗
+重跑)+ 一轮 validate;窗口固定 2026-09-25..2026-09-30 不扩大;除授权命令
+外零真实网络调用;不跑 pytest。**结果:两轮 update 均退出码 0 且 PASS,
+各发布一个新内容寻址版本(`2650eaab…`、`3d172132…`);validate PASS;
+ADR-023 补注后的条件 (a)("security master carried 且 delist_date 为空
+或晚于窗口末,master 缺股 fail-closed")在真实窗口首次对 `601059.SH` 与
+`601198.SH` 同时完成 carry-forward 物化。§7.4 真实小窗口条件已闭环。**
+
+### 命令原文(无凭据)
+
+两轮 update 命令完全相同:
+
+```text
+set -a; . ./.env; set +a
+TUSHARE_TRANSPORT=relay /home/ji/miniconda3/envs/sq312/bin/python \
+  -m stock_quant data update --root project --start 2026-09-25 --end 2026-09-30
+```
+
+validate(离线只读,授权恰好一轮,按步骤序在第一轮 update 之后执行):
+
+```text
+/home/ji/miniconda3/envs/sq312/bin/python -m stock_quant data validate --root project
+```
+
+### 第一轮真实 update:退出码 0,PASS,发布 2650eaab…
+
+`run_id=data_update_f75a814a16f0`,`resolved_end_date=2026-09-30`。relay
+transport 正常初始化(`kind=relay`,host `jiaoch.top`,
+`sdk_version=1.4.24`)。控制台完整摘要:
+
+```text
+run_id=data_update_f75a814a16f0
+resolved_end_date=2026-09-30
+ERROR=0 FATAL=0 INFO=64 WARNING=2
+source tushare: ok
+source akshare: ok
+source baostock: not_ok(not_run)
+source xingyao: not_ok(partial_fetch_failure)
+dataset_version=2650eaab2ed70df8d19f10e841537caa991a269a3961118d03c0005ec57d15de
+PASS
+```
+
+退出码 0;执行后 `project/data/standardized/CURRENT` =
+`2650eaab2ed70df8d19f10e841537caa991a269a3961118d03c0005ec57d15de`。
+
+### validate:PASS(授权的一轮)
+
+```text
+version=2650eaab2ed70df8d19f10e841537caa991a269a3961118d03c0005ec57d15de
+ERROR=0 FATAL=0 INFO=0 WARNING=0
+PASS
+```
+
+退出码 0。按授权步骤序(validate 位于两轮 update 之间),第二轮重跑发布
+的 `3d172132…` 未再单独跑 validate 命令——其发布前门禁在 update 进程内
+以同一套检查执行并通过(见下),且授权恰好一轮 validate,未加跑。
+
+### 第二轮同窗重跑:退出码 0,PASS,发布 3d172132…,零网络
+
+`run_id=data_update_552b31a5c28a`,`resolved_end_date=2026-09-30`。摘要:
+
+```text
+run_id=data_update_552b31a5c28a
+resolved_end_date=2026-09-30
+ERROR=0 FATAL=0 INFO=61 WARNING=0
+source tushare: not_ok(not_run)
+source akshare: not_ok(not_run)
+source baostock: not_ok(not_run)
+source xingyao: not_ok(not_run)
+dataset_version=3d172132fb8629b3d27eeaef8e24e70b082909229553f00c74c7e0aa0d55d2b6
+PASS
+```
+
+重跑口径(owner 已确认)成立证据:第二轮 `build_config.baseline_version`
+= 第一轮版本 `2650eaab…`;四源全部 `not_run`(零网络,`raw_snapshot_reuse`
+为 null,call_ledger 仅含 akshare 空条目);但因 `run_id` 随机进入
+`build_config`,内容寻址版本号变为 `3d172132…`。两版本逐 parquet 文件
+SHA256 对比:**11 张表中 10 张字节级完全一致**;唯一不同的
+`corporate_action_coverage.parquet` 逐列核对后仅 `checked_at`(墙钟)
+一列不同(07:30:51Z vs 08:01:15Z),`symbol/window/status/reason/
+sources/snapshot_hashes` 全部相等(status 计数同为 VERIFIED 1,349 /
+VERIFIED_EMPTY 1,287);`dataset_manifest.json` 与 `quality_report.json`
+不同(run_id、时间戳等 run 元数据)。即:**数据层逐字节等价,哈希差异
+全部落在发布边界的 run 元数据上,哈希不变性口径在内容寻址发布边界成立。**
+
+### 语义观察五项(只读,对 2650eaab… 观察;3d172132… 逐项同值)
+
+1. **表键集**:11 张 parquet——`adjusted_bar`、`basic_factor`、
+   `basic_factor_coverage`、`corporate_action`、`corporate_action_coverage`、
+   `corporate_action_quarantine`、`daily_bar`、`security_master`、
+   `security_master_coverage`、`trading_calendar`、`universe_membership`
+   (旧 9 张 + 新 2 张,符合预期)。
+2. **行数**:`basic_factor` 16,667 行(列 `trade_date, symbol, market_cap,
+   turnover_rate, source, ingested_at`,值域 2026-09-28..2026-09-30);
+   `basic_factor_coverage` 5,567 行(列 `symbol, window_start, window_end,
+   status, reason, sources, snapshot_hashes, checked_at`)。
+3. **`table_fetch_coverage` 段形态**:`basic_factor` 与
+   `basic_factor_coverage` 均为两段——`{kind: not_fetched, reason:
+   history_begins_after_anchor, 2015-01-05..2026-09-27}`(history 前缀)+
+   `{kind: fetched, 2026-09-28..2026-09-30}`(本窗)。第二轮同窗确认形态:
+   单段 `{kind: not_fetched, reason: operator_explicit_window,
+   2026-09-25..2026-09-30}`(整窗已被 baseline 覆盖,无新抓取,故第二轮
+   `build_config` 无 `table_lineage` 键)。
+4. **coverage status 计数**:`basic_factor_coverage` status = VERIFIED
+   5,564 / UNTRUSTED 3;3 条 UNTRUSTED 恰为三张停牌物化票
+   (`601059.SH`、`601198.SH`、`601238.SH`),reason=`FACTS_INCOMPLETE`,
+   sources=`[{"endpoint": "daily_basic", "outcome": "success_with_events"}]`
+   ——对停牌票 basic_factor 事实不完整按 fail-closed 标记,语义自洽。
+5. **lineage**:`build_config.table_lineage["basic_factor"]["transport"]`
+   = `tushare:relay`;其 `raw_snapshot` = `{endpoint: daily_basic,
+   source: tushare, transport_id: jiaoch.top}`(`basic_factor_coverage`
+   同)。附:`daily_bar` 全表 1,723,779 行(基线 1,721,796 + 1,983),
+   值域 2015-01-05..**2026-09-30**(末日符合预期)。
+
+### ADR-023 触发情况(两票物化对照,核心语义结果)
+
+第一轮 INFO=64 的构成(quality_report 直读,本轮起事件体可从发布版本
+`quality_report.json` 的 `issues` 直读,不再依赖推导):INFO
+`quarantine_out_of_window` ×61(CA 通道隔离分支,55 个 symbol,窗口
+2026-09-25..2026-09-30,如 `record_date_out_of_window` /
+`announcement_pre_window_implemented`);INFO `suspension_row_materialized`
+×3;WARNING `optional_source_failure` ×2。**两票对照:**
+
+| 项 | 601059.SH 信达证券 | 601198.SH 东兴证券 |
+| --- | --- | --- |
+| INFO 事件 | `suspension_row_materialized`,details `{"kind": "carry_forward", "run": "2026-09-28..2026-09-30", "days": 3}` | 同左,`kind=carry_forward`、days=3 |
+| daily_bar 09-28/29/30 | 三根均 `tushare_suspend`,OHLC=15.56,`volume=0`、`amount=0`(与 09-24 收盘平价) | 三根均 `tushare_suspend`,OHLC=13.06,`volume=0`、`amount=0`(与 09-24 收盘平价) |
+| 第三轮行为 | proved → 进程内物化(未发布) | unproved → fail-closed FATAL |
+| 本轮行为 | **物化并随发布落盘** | **物化并随发布落盘** |
+
+即:补注把条件 (a) 从 "universe membership active" 放宽为 "security
+master carried 且 delist_date 为空或晚于窗口末" 后,`601198.SH`(removed
+但仍在 master、未退市)从第三轮的 FATAL 变为本轮的 carry-forward 三根,
+与 `601059.SH` 对称落盘;76851131d 的实现(suspension carry-forward 改按
+master listing 而非 membership 判定)在真实窗口得到验证。第三票
+`601238.SH` 的 INFO(details 无 `kind` 字段,`days=1`、
+`action_ex_dates=[]`)对应其 09-28 单日停牌行(平价 5.09、零量),
+09-29/30 恢复正常交易(`tushare` 真实行,量 8,135,031 / 199,466,750)。
+
+窗口行构成(只读核对):新窗 1,983 行 = 661 symbol × 3 开市日(09-28/29/30
+每日恰 661 行);source 分布 `tushare` 1,970、`tushare_suspend` 7(上述
+3+3+1)、`akshare` 6(指数 `000300.SH`/`000905.SH` 各 3 根,对应 akshare
+`index_history` fetched=2 的两个快照)。
+
+### 异常与 WARNING 原文(非阻断,如实记录)
+
+第一轮 WARNING `optional_source_failure` ×2(xingyao 为 optional source,
+不阻断发布;对应摘要行 `source xingyao: not_ok(partial_fetch_failure)`):
+
+```text
+{"source": "xingyao", "endpoint": "daily", "symbol": "601059.SH", "message": "the supplier's answer for this code is not a frame"}
+{"source": "xingyao", "endpoint": "daily", "symbol": "601198.SH", "message": "the supplier's answer for this code is not a frame"}
+```
+
+两轮均无 ERROR/FATAL;第二轮无 WARNING(xingyao 未被调用)。注:xingyao
+第三方 SDK(TGW)在 update 进程 stdout 打印了含 session Token 的登录
+json——按凭据零容忍,本 evidence 不复录其任何值;发布工件与 raw store
+中均无该等凭据。
+
+### 配额消耗概况(build_config.raw_snapshot_reuse + call_ledger 只读取证)
+
+- 第一轮(唯一有真实网络的轮):tushare `daily` fetched=149 /
+  reused=509(485 更早轮次 + 24 第三轮,ADR-015 复用);tushare
+  `daily_basic` fetched=3(reused=0,即 basic_factor 本窗 3 个开市日各一
+  快照,本窗首次);akshare `index_history` fetched=2;xingyao `daily`
+  fetched=657(call_ledger 口径:sessions=3、code_queries=3,批量按码
+  查询,2 码返回非 frame → 上述 WARNING)。
+- 第二轮:四源全部 `not_run`,零网络、零新增快照。
+- 沙箱关停重试 allowance:未触发、未使用(两轮 update 与 validate 均
+  一次成功,无连接级失败)。
+
+### §7.4 判定
+
+**§7.4 真实小窗口条件已闭环**:真实小窗口(2026-09-25..2026-09-30)
+update 成功发布(两轮,均 PASS)、validate PASS(退出码 0、零
+ERROR/FATAL)、basic_factor/basic_factor_coverage 以预期形态落盘并通过
+离线 validate,同窗重跑零网络且数据层逐字节等价。CURRENT 执行后为
+`3d172132fb8629b3d27eeaef8e24e70b082909229553f00c74c7e0aa0d55d2b6`。
+
+### 纪律执行
+
+窗口未扩大;未跑 pytest;未改任何代码或门禁。credentials 仅按惯例
+source,零读取、零打印、零记录。在途 WIP(RUNBOOK.md、
+docs/superpowers/specs/2026-09-29-panda-data-loop-grafting-design.md、
+src/stock_quant/cli.py、src/stock_quant/reporting/html.py、
+src/stock_quant/reporting/templates/experiment.html.j2、
+tests/integration/test_cli.py、tests/integration/test_reports.py、
+tests/integration/test_factor_no_lookahead.py、src/stock_quant/bootstrap.py
+及未跟踪 plans/ 等)一律未动;本次仅追加并提交本 evidence 文件。
