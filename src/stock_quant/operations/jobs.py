@@ -9,6 +9,12 @@ Directory contract per job:
 
 The status vocabulary is frozen (spec 9.2): QUEUED / RUNNING / SUCCEEDED /
 FAILED / CANCELLED_BY_SHUTDOWN.  Nothing outside that set is ever written.
+
+Liveness is judged from that heartbeat alone -- never from "the directory
+exists" or "the logs went quiet"; RUNNING jobs whose heartbeat is missing,
+stale (default threshold ~5 minutes) or from another kernel boot, and
+QUEUED jobs that never started, are re-marked FAILED/orphaned_process by
+:func:`reap_orphaned_jobs` without deleting anything.
 """
 
 from __future__ import annotations
@@ -38,6 +44,13 @@ JOB_STATUSES = frozenset(
 #: conflict exit code carries (single source of truth: update_lock.py).
 FAILURE_UPDATE_ALREADY_RUNNING = UPDATE_ALREADY_RUNNING_CODE
 FAILURE_UPDATE_FAILED = "update_failed"
+
+#: Orphan self-check threshold (spec 9.2: "默认量级 5 分钟").
+ORPHAN_HEARTBEAT_TIMEOUT_SECONDS = 300
+
+#: A RUNNING job whose liveness evidence is gone, or a QUEUED job that
+#: never started.  The directory and logs are never deleted.
+FAILURE_ORPHANED_PROCESS = "orphaned_process"
 
 #: Job directories live here, relative to the resolved project root.
 JOBS_RELATIVE_PATH = Path("data") / "service" / "jobs"
@@ -214,6 +227,24 @@ class JobStore:
             replace(record, status=CANCELLED_BY_SHUTDOWN, updated_at=moment)
         )
 
+    def mark_orphaned_unreadable(self, job_id: str, *, now: datetime) -> None:
+        """Fail-closed overwrite for a job whose status.json is unreadable.
+
+        An unreadable status is no heartbeat evidence, so the job is
+        recorded FAILED/orphaned_process outright; there is nothing to
+        preserve because nothing could be read.
+        """
+        self._write_status(
+            JobRecord(
+                job_id=job_id,
+                status=FAILED,
+                created_at=now,
+                updated_at=now,
+                failure_reason=FAILURE_ORPHANED_PROCESS,
+                failure_detail="status_unreadable",
+            )
+        )
+
     # -- reads --------------------------------------------------------- #
     def get(self, job_id: str) -> JobRecord:
         status_path = self.root / job_id / "status.json"
@@ -297,3 +328,117 @@ def _record_from_payload(payload: Mapping[str, object]) -> JobRecord:
             else None
         ),
     )
+
+
+def list_jobs(project_root: Path) -> list[JobRecord]:
+    """Every readable job record, oldest first (job ids sort by creation).
+
+    Unreadable directories are skipped here and left for
+    :func:`reap_orphaned_jobs` to fail closed -- listing must stay usable
+    even with a damaged record on disk.
+    """
+    store = JobStore(project_root)
+    if not store.root.is_dir():
+        return []
+    records: list[JobRecord] = []
+    for child in sorted(store.root.iterdir()):
+        if not child.is_dir():
+            continue
+        try:
+            records.append(store.get(child.name))
+        except (JobNotFound, ValueError, KeyError):
+            continue
+    return records
+
+
+def reap_orphaned_jobs(
+    project_root: Path,
+    *,
+    now: datetime,
+    boot_id: str,
+    timeout_seconds: int = ORPHAN_HEARTBEAT_TIMEOUT_SECONDS,
+) -> list[str]:
+    """Fail-closed self-check over active jobs (spec 9.2).
+
+    A RUNNING job is orphaned when its heartbeat is missing, was written
+    under a different kernel boot (the pid may have been reused since), or
+    is older than ``timeout_seconds``.  A QUEUED job older than the timeout
+    never started.  Orphans are re-marked FAILED/``orphaned_process`` with
+    a machine-readable detail; the directory and its logs are never
+    deleted.  Liveness is *never* inferred from directory existence or log
+    silence.
+    """
+    store = JobStore(project_root)
+    if not store.root.is_dir():
+        return []
+    reaped: list[str] = []
+    for child in sorted(store.root.iterdir()):
+        if not child.is_dir():
+            continue
+        try:
+            record = store.get(child.name)
+        except (JobNotFound, ValueError, KeyError):
+            store.mark_orphaned_unreadable(child.name, now=now)
+            reaped.append(child.name)
+            continue
+        reason: str | None = None
+        detail: str | None = None
+        if record.status == RUNNING:
+            if record.heartbeat_at is None:
+                reason, detail = FAILURE_ORPHANED_PROCESS, "no_heartbeat"
+            elif record.boot_id != boot_id:
+                reason, detail = FAILURE_ORPHANED_PROCESS, "boot_id_changed"
+            elif (now - record.heartbeat_at).total_seconds() > timeout_seconds:
+                reason, detail = FAILURE_ORPHANED_PROCESS, "heartbeat_stale"
+        elif record.status == QUEUED and (
+            (now - record.created_at).total_seconds() > timeout_seconds
+        ):
+            reason, detail = FAILURE_ORPHANED_PROCESS, "never_started"
+        if reason is not None:
+            store.mark_failed(
+                child.name, reason=reason, exit_code=None, now=now, detail=detail
+            )
+            reaped.append(child.name)
+    return reaped
+
+
+def active_job(
+    project_root: Path,
+    *,
+    now: datetime,
+    boot_id: str,
+    timeout_seconds: int = ORPHAN_HEARTBEAT_TIMEOUT_SECONDS,
+) -> JobRecord | None:
+    """The job a conflict answer should link to, if any (spec 9.3/9.4).
+
+    A RUNNING job with a fresh same-boot heartbeat, or a QUEUED job younger
+    than the timeout, counts as running.  Anything else has no liveness
+    evidence and must not block a new request -- the flock inside the inner
+    ``data update`` remains the final single-flight arbiter.
+    """
+    chosen: JobRecord | None = None
+    for record in list_jobs(project_root):
+        if record.status == RUNNING:
+            fresh = (
+                record.heartbeat_at is not None
+                and record.boot_id == boot_id
+                and (now - record.heartbeat_at).total_seconds() <= timeout_seconds
+            )
+        elif record.status == QUEUED:
+            fresh = (now - record.created_at).total_seconds() <= timeout_seconds
+        else:
+            fresh = False
+        if fresh and (chosen is None or record.updated_at > chosen.updated_at):
+            chosen = record
+    return chosen
+
+
+def read_log_tail(path: Path, *, max_bytes: int = 8192) -> str:
+    """The last ``max_bytes`` of a log file, decoded lossily ('' if absent)."""
+    if not path.is_file():
+        return ""
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        handle.seek(max(0, size - max_bytes))
+        return handle.read().decode("utf-8", errors="replace")
