@@ -421,3 +421,141 @@ ledger 的 completed calls,与前轮口径一致)。无第二轮、无重跑、�
 候选路径:(a) 先做一次针对 `601059.SH` 或目标开市日的只读甄别读(owner
 批准后);(b) 换窗避开该票无行的情形;(c) 挂起并询问 relay 运营方
 `601059.SH` 在 09-28..09-30 的 `daily` 可得性。未经 owner 确认前不执行。
+
+## 第三轮:ADR-023 物化后的换窗重跑(2026-09-25..2026-09-30,owner 放行)
+
+Owner 第三次放行后的执行轮。授权范围:恰好两轮真实 update(初始 + 同窗
+重跑)+ 一轮 validate,窗口固定 2026-09-25..2026-09-30 不扩大;除授权命令
+外零真实网络调用;不跑 pytest。实际结果:**第一轮真实 update 仍 FATAL,但
+失败点已从 `601059.SH` 后移到 `601198.SH`——ADR-023 的 carry-forward
+分支在真实窗口首次触发并为 `601059.SH` 完成物化判定(INFO=1),随后
+`601198.SH` 因不属于 active membership 走 fail-closed FATAL。按停止纪律
+未执行重跑轮;数据集未变。**
+
+### 授权与基线(执行前后核验,只读)
+
+- 基线/执行后 `project/data/standardized/CURRENT` 均为
+  `99f8ff28cdde53250fb315f2afcf478a84d084f61dfaf3d4602965c33d392f38`
+  (9 张旧形态 parquet 表,无 `basic_factor`/`basic_factor_coverage`;
+  `daily_bar` 1,721,796 行,2015-01-05..2026-09-24)。执行后核验未变。
+- 重跑口径(owner 已确认):update 级重跑因 `run_id` 随机预计出新版本号,
+  哈希不变性在内容寻址发布边界成立。——本轮未走到(第一轮即 FATAL)。
+
+### 命令原文(无凭据)
+
+```text
+set -a; . ./.env; set +a
+TUSHARE_TRANSPORT=relay /home/ji/miniconda3/envs/sq312/bin/python \
+  -m stock_quant data update --root project --start 2026-09-25 --end 2026-09-30
+```
+
+```text
+/home/ji/miniconda3/envs/sq312/bin/python -m stock_quant data validate --root project
+```
+
+### 第一轮真实 update:退出码 1,FATAL(失败点后移至 601198.SH)
+
+`run_id=data_update_f15731edfbe8`,`resolved_end_date=2026-09-30`,运行窗
+13:41:0x..13:41:43(+0800)。relay transport 正常初始化(`kind=relay`,
+host `jiaoch.top`,`sdk_version=1.4.24`)。控制台完整摘要:
+
+```text
+run_id=data_update_f15731edfbe8
+resolved_end_date=2026-09-30
+ERROR=0 FATAL=1 INFO=1 WARNING=0
+source tushare: not_ok(source_fetch_failed)
+source akshare: not_ok(not_run)
+source baostock: not_ok(not_run)
+source xingyao: not_ok(not_run)
+blocking issue: severity=FATAL code=source_fetch_failed table=data_update symbol=- trade_date=-
+details={"endpoint": "daily", "message": "supplier returned an empty response", "source": "tushare", "symbol": "601198.SH"}
+FAILED: publication gate did not pass; dataset unchanged
+```
+
+门禁正确拒绝发布;CURRENT 执行后核验仍为 `99f8ff28cdde…`。无新版本号。
+
+### INFO=1 的归因(观察事实 vs 推导,分列)
+
+观察事实:摘要 `INFO=1`;CLI 对被拒发布只渲染 blocking 行
+(`_echo_blocking_issues` 只输出 FATAL/ERROR),INFO 事件体未输出;失败运行
+的 run 目录只持久化 `call_ledger.json`(无 `quality_report.json`),事件体
+不可从工件直读。推导链:沿本轮实际执行路径穷举 INFO 发射点——日历通道的
+`calendar_pre_coverage_boundary` 仅当合并后开市日表为空才发(本轮有携带
+日历,不成立);CA 通道因 fetch 停止未运行;`_read_baseline`/
+`_universe_master_issues` 不发 INFO——唯一到达的 INFO 发射点是 ADR-023
+`carry_forward_rows`(`kind="carry_forward"`)。结合本轮空响应集合恰为
+{601059.SH(判定 proved), 601198.SH(走 FATAL 分支,不发 INFO)},该
+INFO=1 即 `601059.SH` 的 carry-forward 物化事件。此为强支撑推断,非工件
+直读,特此标注。
+
+### ADR-023 触发情况(核心语义结果)
+
+两票基线尾部**均为** `tushare_suspend` 至 2026-09-24(条件 (c) 对两票都
+成立),判定真正的 discriminator 是条件 (a) membership 状态:
+
+| 条件 | 601059.SH 信达证券 | 601198.SH 东兴证券 |
+| --- | --- | --- |
+| (a) universe membership active | 是(`custom_csi300_tw_tradable`,`initial_constituent`,active) | **否**(`status=removed`,`raw_effective_to` 2021-06-29) |
+| (b) security_master 无退市 | `delist_date=None` | `delist_date=None` |
+| (c) 边界 bar 为 09-24 `tushare_suspend` | 是,close=15.56,volume=0 | 是,close=13.06,volume=0 |
+| (d) 窗口开市日 ≤ `MAX_CARRY_FORWARD_DAYS=10` | 3 天(09-28/29/30) | 3 天 |
+| 判定 | **proved** → carry-forward 三根(09-28/29/30 @15.56、零量、`tushare_suspend`)+ INFO,进程内物化 | **unproved** → fail-closed FATAL(与 ADR-023 之前行为完全一致) |
+
+- `601059.SH`:ADR-023 证据类四条件全部成立,carry-forward 行与
+  `suspension_row(kind=carry_forward)` INFO 在进程内完成;因随后
+  `601198.SH` FATAL、门禁拒绝发布,未落任何版本。
+- `601198.SH`:空响应整窗,按 fail-closed 保持既有 FATAL 原文(见上)。
+  该票虽在基线中同为停牌尾,但已于 2021-06-29 移出 universe,不是
+  active fact——证据类如设计地只携带**被指数携带**的停牌票。
+- 本轮迭代按 symbol 序进行,fetch 在 `601198.SH` 处停止;其后是否还有
+  同类空响应票,本轮未探测,未知。
+
+### relay 窗口供数观察与配额(raw store 只读取证)
+
+- 本轮 `call_ledger.json`:`tushare.calls=0`,`reused.daily=485`(ledger
+  口径照录;raw store 证据表明该计数不含逐票 daily 派发,与既有"空响应
+  不计 completed calls"口径并存,语义以 raw store 为准)。
+- raw store 本轮新持久化 24 个逐票窗口响应(48 个文件,13:41:11..13:41:42
+  +0800):`601066.SH..601186.SH` 连续区间,**每票 `row_count=3`**——恰为
+  开市日 09-28/29/30。即 relay `daily` 已对本窗普通在市股正常供数,空响应
+  局限于停牌票。
+- 本轮到达 relay 的真实请求合计 26 次:24 次成功逐票 `daily` + 2 次空响应
+  (`601059.SH`、`601198.SH`,空响应不持久化故无 manifest);`trade_cal`
+  走 raw store 复用,零请求。无其它网络调用。
+- 485 个复用响应来自更早轮次写入的 raw store(ADR-015 复用),本轮零网络。
+
+### 停止纪律执行情况
+
+- 定性:供应商侧单票空响应,transport 正常初始化、正常往返、返回空体,
+  非 connection/timeout/rate-limit → 关沙箱重试 allowance 不适用、未使用。
+- 同窗重跑(update 第二轮)**未执行**;无新版本,"两轮 version 哈希"口径
+  未获 exercised;validate 对未变基线离线只读执行:
+
+```text
+version=99f8ff28cdde53250fb315f2afcf478a84d084f61dfaf3d4602965c33d392f38
+ERROR=0 FATAL=0 INFO=0 WARNING=0
+PASS
+```
+
+退出码 0。基线健康,佐证 "dataset unchanged"。
+
+### 语义观察五项(对新版本均不可观察)
+
+无新版本,§7.4 五项落地证据(11 张表键集、`basic_factor`/`basic_factor_coverage`
+行数、`table_fetch_coverage` 段形态、coverage status 计数、`table_lineage`
+transport)本轮不可观察。只读核验基线:9 张旧形态表;无
+`basic_factor*` 表;`daily_bar` 1,721,796 行、末日 2026-09-24;
+`601059.SH` 尾四根 09-21..09-24 均 `tushare_suspend`/15.56/0 量。
+
+### Follow-up(待 owner 决定;不自动续跑)
+
+停牌且**不属于 active membership** 的票(如 `601198.SH`,removed 停牌中)
+整窗空响应会按 fail-closed FATAL 拒绝整轮发布——这是 ADR-023 有意收窄的
+证据类边界,不是回归。候选路径:(a) owner 裁决是否把证据类扩展到
+"removed 但停牌尾可证明"的票(ADR 变更);(b) 挂起等待 relay 对这些票
+恢复供行;(c) 原样重跑,待 relay 供行后自然通过(485+24 已缓存,重跑
+网络开销趋零)。窗口在任何路径下保持 2026-09-25..2026-09-30。未经 owner
+确认前不执行;本节不改代码、未跑 pytest。credentials 仅按惯例 source,
+零读取、零打印、零记录。在途 WIP(RUNBOOK.md、cli.py、bootstrap.py、
+reporting 模板、相关 tests 及未跟踪 plans/ 等)一律未动;本次仅追加并
+提交本 evidence 文件。
