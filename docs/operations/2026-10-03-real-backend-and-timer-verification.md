@@ -72,6 +72,36 @@
 
 **结论:timer 冲突路径验证待办(需交互 sudo,序列与期望结果已备齐)。**
 
+## Timer 冲突路径验证与常开(2026-10-03 01:46–01:48 +08:00,owner 提供 sudo 授权)
+
+owner 于会话内提供 sudo 密码(仅用于本次授权,未写入任何文件/证据)。执行结果:
+
+- **实例更正**:仓库根 `/home/ji/work/program/stock` 无 `configs/project.yml`,不是有效项目根;
+  真实项目根为 `project/`,实例名 = `home-ji-work-program-stock-project`(`systemd-escape -p` 与
+  `stock_quant.operations.systemd_units.timer_unit_name` 输出一致)。计划/RUNBOOK 示例中的
+  仓库根实例名按此更正。
+- **安装**:两个 unit 已 `systemctl link`,`daemon-reload` 完成;环境经
+  `/etc/stock-quant.env`(0600 root,值由 `.env` 直通写入、未显示)+ drop-in
+  `/etc/systemd/system/stock-quant-data-update@.service.d/10-env.conf`
+  (`EnvironmentFile`)提供给 timer 触发的更新——无此文件时计划触发会被
+  transport 显式门 fail-closed 拒绝。
+- **冲突路径取证(全部符合期望)**:
+  - 手工持锁 `project` 根后 `systemctl start` 一次性 service;
+  - `ExecMainStatus = 75`(sysexits TEMPFAIL);
+  - journal:`status=FAILED`、`update_already_running`、`status=75/TEMPFAIL`;
+  - job 落盘:`project/data/service/jobs/job_20261002T174712_a8efda71/` →
+    `FAILED / update_already_running / exit_code=75`;
+  - "Web 可见"半边:操作 API `GET /api/v1/update-jobs` 返回同一 job(FAILED)。
+- **常开(owner 指令)**:`systemctl enable --now
+  stock-quant-data-update@home-ji-work-program-stock-project.timer` 已执行;
+  `list-timers` 确认下次触发 **2026-10-03 17:10:00 CST**。环境已接线,该触发将是
+  **一次真实数据更新**(联网、真实发布,正常增量窗口)。
+- 运营说明:常开意味着每个交易日 17:10(CST)自动真实更新;停止 =
+  `sudo systemctl disable --now stock-quant-data-update@home-ji-work-program-stock.timer`。
+- 清理:操作 API 进程已停;持锁进程 sleep 后自然退出(锁由内核释放);密码未记录。
+
+**结论:timer 冲突路径验证通过;journal 与 Web 两处证据齐备;timer 已常开。**
+
 ## 遗留(均需 owner 另行决定)
 
 1. timer 是否 `enable` 常开(运营决策;当前未 link 未 enable)。
