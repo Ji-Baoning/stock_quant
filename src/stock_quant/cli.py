@@ -60,6 +60,12 @@ from stock_quant.data_quality.models import (
     Severity,
 )
 from stock_quant.project_root import ProjectRootError, resolve_project_root
+from stock_quant.operations.update_lock import (
+    UPDATE_ALREADY_RUNNING_CODE,
+    UPDATE_ALREADY_RUNNING_EXIT_CODE,
+    UpdateAlreadyRunning,
+    acquire_update_lock,
+)
 from stock_quant.reporting.html import (
     ExperimentReportInput,
     ExperimentScenario,
@@ -333,6 +339,17 @@ def data_update(
     """Fetch one window into the raw-store and publish when the gate passes."""
     _enable_transport_logging()
     project_root = _resolved_project_root(root)
+    try:
+        acquire_update_lock(project_root)
+    except UpdateAlreadyRunning:
+        # Stable conflict signal (spec 9.1/9.2): exit code 75 plus the fixed
+        # token line.  Nothing queues, the holder is never disturbed, and no
+        # cleanup is ever needed -- the kernel owns the lock's lifetime.
+        typer.echo(UPDATE_ALREADY_RUNNING_CODE)
+        _echo_failure(
+            "another data update already holds this project root's lock"
+        )
+        raise typer.Exit(code=UPDATE_ALREADY_RUNNING_EXIT_CODE) from None
     request = DataUpdateRequest(
         start_date=date.fromisoformat(start) if start else None,
         end_date=date.fromisoformat(end) if end else None,
