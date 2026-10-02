@@ -45,8 +45,18 @@ The membership gate fails (``status=FAIL``) on:
   overlap, announcement look-ahead, empty master intersections, unproven
   delisting endpoints, coverage gaps or member-count mismatches
   (the validator's own stable codes);
+- a schema-v2 definition whose universe has no rows in the table
+  (``UNIVERSE_SLICE_EMPTY``) or whose slice facts fall outside the declared
+  coverage segments / cross a declared gap
+  (``UNIVERSE_FACT_OUTSIDE_COVERAGE``);
 - facts whose content hash differs from the definition's pinned
   ``membership_table_sha256`` (``UNIVERSE_DEFINITION_HASH_MISMATCH``).
+
+A schema-v2 definition is evaluated against its own slice of a (possibly
+mixed) table only: the frame is cut to ``definition.universe_id`` before the
+validator, the compared hash is the slice hash, and the pass details' counts
+describe the slice.  The ``data update`` / ``data validate`` whole-table
+validation is untouched by this scoping.
 """
 
 from __future__ import annotations
@@ -79,6 +89,7 @@ from stock_quant.data_model.universe_membership import (
     MembershipFact,
     SecurityMasterBoundary,
     membership_content_hash,
+    membership_slice_hash,
 )
 from stock_quant.data_pipeline import (
     DATASET_BUILD_CONTRACT_VERSION,
@@ -108,7 +119,10 @@ from stock_quant.research.acceptance.models import (
     RawSnapshotBinding,
 )
 from stock_quant.research.trust import evaluate_corporate_action_trust
-from stock_quant.research.universe import UniverseDefinition
+from stock_quant.research.universe import (
+    UniverseDefinition,
+    membership_coverage_violations,
+)
 
 _MANIFEST_NAME = "dataset_manifest.json"
 _QUALITY_REPORT_NAME = "quality_report.json"
@@ -127,6 +141,8 @@ _MAX_SAMPLES = 20
 CODE_INDEX_MEMBERSHIP_EVIDENCE = "index_membership_evidence"
 CODE_TABLE_MISSING = "UNIVERSE_MEMBERSHIP_TABLE_MISSING"
 CODE_DEFINITION_HASH_MISMATCH = "UNIVERSE_DEFINITION_HASH_MISMATCH"
+CODE_UNIVERSE_SLICE_EMPTY = "UNIVERSE_SLICE_EMPTY"
+CODE_FACT_OUTSIDE_COVERAGE = "UNIVERSE_FACT_OUTSIDE_COVERAGE"
 
 
 @dataclass(frozen=True)
@@ -577,6 +593,11 @@ def read_membership_table(context: Any) -> pd.DataFrame | None:
     return context.read(TABLE_UNIVERSE_MEMBERSHIP)
 
 
+def slice_membership_frame(frame: pd.DataFrame, universe_id: str) -> pd.DataFrame:
+    """The definition's slice of a (possibly mixed) membership table."""
+    return frame[frame["universe_id"] == universe_id].reset_index(drop=True)
+
+
 def evaluate_index_membership_evidence(
     frame: pd.DataFrame | None,
     *,
@@ -594,6 +615,10 @@ def evaluate_index_membership_evidence(
     evaluates: the table's content hash is compared against
     ``definition.membership_table_sha256`` after the pure validator found no
     fatal issue, so a mismatched definition or tampered facts both fail.
+    A schema-v2 definition is scoped to its own slice first: the frame is cut
+    to ``definition.universe_id`` before every check, the hash is the slice
+    hash, and every fact interval must sit inside the declared coverage
+    segments without crossing a declared gap.
     """
     if frame is None or frame.empty:
         return _failed(
@@ -603,6 +628,14 @@ def evaluate_index_membership_evidence(
             error_codes=(CODE_TABLE_MISSING,),
             hashes=_definition_hashes(definition),
         )
+    if definition.schema_version == 2:
+        frame = slice_membership_frame(frame, definition.universe_id)
+        if frame.empty:
+            return _failed(
+                summary=(f"universe_membership has no slice for "
+                         f"{definition.universe_id!r}"),
+                error_codes=(CODE_UNIVERSE_SLICE_EMPTY,),
+                hashes=_definition_hashes(definition))
     issues = validate_membership_facts(
         frame,
         calendar=calendar,
@@ -626,7 +659,20 @@ def evaluate_index_membership_evidence(
             error_codes=("UNIVERSE_FACT_CONTRACT_VIOLATION",),
             hashes=_definition_hashes(definition),
         )
-    table_hash = membership_content_hash(facts)
+    table_hash = (
+        membership_slice_hash(facts, definition.universe_id)
+        if definition.schema_version == 2
+        else membership_content_hash(facts)
+    )
+    if definition.schema_version == 2:
+        # Coverage segments are a schema-v2 concept (v1 definitions cannot
+        # carry them), so the v1 verdict path stays byte-identical here.
+        violations = membership_coverage_violations(definition, facts)
+        if violations:
+            return _failed(
+                summary="slice facts fall outside the declared coverage segments",
+                error_codes=(CODE_FACT_OUTSIDE_COVERAGE,),
+                hashes=_definition_hashes(definition))
     hashes = _definition_hashes(definition)
     hashes["membership_table_sha256"] = table_hash
     if table_hash != definition.membership_table_sha256:

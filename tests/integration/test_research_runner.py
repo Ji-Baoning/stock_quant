@@ -63,11 +63,18 @@ import pytest
 import yaml
 from conftest import (
     _UPDATE_WINDOW_END,
+    _WF_EVIDENCE_SUMMARY,
+    _WF_RULES_VERSION,
+    _WF_UNIVERSE_ID,
+    BARS_START,
+    CAL_END,
+    build_fixture_project,
     fixture_build_config,
     publish_fixture_acceptance,
 )
 
 from stock_quant.backtest.models import BUY
+from stock_quant.cli import app
 from stock_quant.data_model.adjusted_bar import build_adjusted_bars
 from stock_quant.data_model.corporate_action_coverage import (
     OUTCOME_SUCCESS_EVENTS,
@@ -98,9 +105,11 @@ from stock_quant.data_model.security_master import (
     master_coverage_record,
 )
 from stock_quant.data_model.trading_rules import REASON_SELL_AT_LOWER_LIMIT
+from stock_quant.data_model.universe import Universe
 from stock_quant.data_model.universe_membership import (
     membership_content_hash,
     membership_frame,
+    membership_slice_hash,
     resolve_memberships,
 )
 from stock_quant.data_quality.models import QualityReport
@@ -113,10 +122,19 @@ from stock_quant.research.models import (
     ExperimentEvaluation,
     ResearchRunFailed,
 )
-from stock_quant.research.runner import ResearchRunner, _DatasetFactorAdapter
+from stock_quant.research.runner import (
+    ResearchRunner,
+    UniversePreflightFailed,
+    _DatasetFactorAdapter,
+)
 from stock_quant.research.spec import ExperimentSpec
 from stock_quant.research.trust import DataTrustMode
-from stock_quant.research.universe import UniverseDefinition, UniverseResolver
+from stock_quant.research.universe import (
+    MEMBERSHIP_HASH_SCOPE_UNIVERSE_ID,
+    MEMBERSHIP_OBSERVATION_GAP,
+    UniverseDefinition,
+    UniverseResolver,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SPEC = "configs/experiments/momentum_60d.yml"
@@ -1841,3 +1859,265 @@ def test_total_return_factor_does_not_change_fill_or_valuation_prices(tmp_path):
         assert float(row.market_value) == pytest.approx(expected_value, abs=0.01)
         checked += 1
     assert checked > 0
+
+
+# --------------------------------------------------------------------------- #
+# P2b Task 2: schema-v2 slice-scoped definitions over a mixed membership table
+# --------------------------------------------------------------------------- #
+
+
+#: The second universe carried by the mixed ``universe_membership`` table.
+_FOREIGN_UNIVERSE_ID = "custom_csi300_tw"
+#: The foreign rows reuse the two benchmark index codes: canonical symbols the
+#: whole-table convention checks accept (they sit outside the fixture security
+#: master, which only the slice-scoped run path may never consult for them --
+#: the run validates the definition's slice alone).
+_FOREIGN_SYMBOLS = ("000300.SH", "000905.SH")
+_SEGMENT_EVIDENCE = "b" * 64
+_GAP_EVIDENCE = "c" * 64
+
+
+def _slice_fact(universe_id: str, symbol: str) -> dict:
+    """One evidence-backed open membership fact from the fixture bar start.
+
+    The v2 definition's coverage envelope is anchored at the fixture's bar
+    evidence start (``BARS_START`` doubles as the build's acceptance anchor
+    and cannot move earlier), so the slice facts must start there too in
+    order to sit inside the declared coverage segments.
+    """
+    return {
+        "universe_id": universe_id,
+        "symbol": symbol,
+        "raw_effective_from": BARS_START,
+        "raw_effective_to": None,
+        "announcement_date": BARS_START,
+        "status": "active",
+        "reason": "initial_constituent",
+        "source": "fixture_announcement",
+        "source_url": "https://fixture.invalid/membership-2018.pdf",
+        "snapshot_sha256": "ef" * 32,
+        "source_document_sha256": "ab" * 32,
+    }
+
+
+def _v2_definition_document(
+    table_facts: list[dict], *, gaps: bool = False
+) -> dict:
+    """The schema-v2 definition for the fixture universe over a mixed table.
+
+    ``membership_table_sha256`` pins the *slice* hash (only this universe's
+    rows of ``table_facts``); the segments must tile the envelope exactly,
+    with the optional observation gap carved out between them.
+    """
+    segments = (
+        [
+            {"start": BARS_START.isoformat(),
+             "end": date(2020, 5, 31).isoformat(),
+             "evidence_sha256": _SEGMENT_EVIDENCE},
+            {"start": date(2020, 7, 1).isoformat(),
+             "end": CAL_END.isoformat(),
+             "evidence_sha256": _SEGMENT_EVIDENCE},
+        ]
+        if gaps
+        else [
+            {"start": BARS_START.isoformat(),
+             "end": CAL_END.isoformat(),
+             "evidence_sha256": _SEGMENT_EVIDENCE},
+        ]
+    )
+    document = {
+        "schema_version": 2,
+        "universe_id": _WF_UNIVERSE_ID,
+        "rules_version": _WF_RULES_VERSION,
+        "membership_table_sha256": membership_slice_hash(
+            table_facts, _WF_UNIVERSE_ID
+        ),
+        "membership_hash_scope": MEMBERSHIP_HASH_SCOPE_UNIVERSE_ID,
+        "coverage_start": BARS_START.isoformat(),
+        "coverage_end": CAL_END.isoformat(),
+        "evidence_summary_sha256": _WF_EVIDENCE_SUMMARY,
+        "coverage_segments": segments,
+    }
+    if gaps:
+        document["coverage_gaps"] = [
+            {
+                "start": date(2020, 6, 1).isoformat(),
+                "end": date(2020, 6, 30).isoformat(),
+                "reason": MEMBERSHIP_OBSERVATION_GAP,
+                "evidence_sha256": _GAP_EVIDENCE,
+            }
+        ]
+    return document
+
+
+def _mixed_membership_project(
+    tmp_path,
+    *,
+    gaps: bool = False,
+    broken_foreign_row: bool = False,
+    accept: bool = True,
+) -> tuple[Path, str, tuple[dict, ...]]:
+    """A conftest fixture project republished over a two-universe table.
+
+    Builds the trusted ``custom_wf_fixture`` fixture project, then republishes
+    its dataset once with a *mixed* ``universe_membership`` table: the
+    universe's own rows plus foreign rows of a second universe, and overwrites
+    the definition file with a schema-v2 document pinning only the slice hash
+    (the build's acceptance anchor is unchanged, so the real checker still
+    passes).  Returns ``(root, version, slice facts)``.  ``broken_foreign_row``
+    gives the foreign universe a non-canonical symbol instead of valid rows
+    (whole-table ``data validate`` must still reject it); such a dataset
+    cannot pass the checker's fixture-sanity assert, so ``accept=False``
+    skips the acceptance publish for it.
+    """
+    fixture = build_fixture_project(tmp_path / "mixed")
+    root = fixture.root
+    universe = Universe.from_yaml(root / "configs" / "universe.yml")
+    mine = [
+        _slice_fact(_WF_UNIVERSE_ID, entry.symbol) for entry in universe.entries
+    ]
+    mixed = list(mine)
+    if broken_foreign_row:
+        foreign = _slice_fact(_FOREIGN_UNIVERSE_ID, _FOREIGN_SYMBOLS[0])
+        foreign["symbol"] = "6000000.SH"  # 非规范：7 位数字代码
+    else:
+        mixed.extend(
+            _slice_fact(_FOREIGN_UNIVERSE_ID, symbol)
+            for symbol in _FOREIGN_SYMBOLS
+        )
+    document = _v2_definition_document(mixed, gaps=gaps)
+    (root / "configs" / "universes" / f"{_WF_UNIVERSE_ID}.yml").write_text(
+        yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    with DatasetReader(root).open(fixture.version) as context:
+        tables = {name: context.read(name) for name in context.tables}
+    frame = membership_frame(mixed)[UNIVERSE_MEMBERSHIP_COLUMNS]
+    if broken_foreign_row:
+        # The fact contract rejects non-canonical symbols, so the broken row
+        # is appended directly in the canonical column layout (dates rendered
+        # like ``membership_frame``'s datetime64 columns).
+        bad = dict(foreign)
+        bad_frame = pd.DataFrame(
+            {
+                **{column: [bad[column]] for column in UNIVERSE_MEMBERSHIP_COLUMNS
+                   if column not in ("raw_effective_from", "raw_effective_to",
+                                     "announcement_date")},
+                "raw_effective_from": [pd.Timestamp(BARS_START)],
+                "raw_effective_to": [pd.NaT],
+                "announcement_date": [pd.Timestamp(BARS_START)],
+            }
+        )[UNIVERSE_MEMBERSHIP_COLUMNS]
+        frame = pd.concat([frame, bad_frame], ignore_index=True)[
+            UNIVERSE_MEMBERSHIP_COLUMNS
+        ]
+    tables["universe_membership"] = frame
+    version = DatasetPublisher(root).publish(
+        tables, QualityReport(), build_config=fixture_build_config(root)
+    ).version
+    if accept:
+        publish_fixture_acceptance(root, version)
+    return root, version, tuple(mine)
+
+
+def _write_slice_spec(root: Path) -> str:
+    """The fixture engineering spec plus the frozen v2 universe definition.
+
+    Everything else stays the conftest fixture spec (single-window pipeline,
+    ``CURRENT`` bindings, the 2020..2021 window), so the run isolates exactly
+    one change: it now preflights the schema-v2 definition, and its window
+    crosses the optional observation gap of the ``gaps`` fixture.
+    """
+    document = yaml.safe_load(
+        (root / "configs" / "experiments" / "momentum_60d.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    document["universe_definition"] = _WF_UNIVERSE_ID
+    path = root / "configs" / "experiments" / "momentum_60d_slice.yml"
+    path.write_text(
+        yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    return "configs/experiments/momentum_60d_slice.yml"
+
+
+def test_v2_run_preflights_the_slice_and_resolves_only_its_symbols(tmp_path):
+    """A RESEARCH run over a mixed table passes preflight on the slice alone.
+
+    The dataset's membership table carries two universes; the schema-v2
+    definition pins only its own slice hash.  The run must evaluate, hash and
+    resolve the definition's slice: the acceptance verdict counts only the
+    slice rows, and ``resolver.members_on`` returns exactly the definition
+    universe's symbols -- never a foreign-universe symbol.  Consuming the
+    whole table instead would fail the resolver's pinned-hash check.
+    """
+    root, _, mine = _mixed_membership_project(tmp_path)
+    spec_name = _write_slice_spec(root)
+    runner = ResearchRunner(root, config_root=root)
+    experiment = runner.run(spec_name)
+    assert experiment.manifest.status in ("ACCEPTED", "REJECTED")
+
+    preflight = runner._universe_preflight
+    assert preflight is not None
+    assert preflight.acceptance.status.value == "PASS"
+    counts = preflight.acceptance.details["counts"]
+    assert counts["fact_rows"] == len(mine)
+    assert counts["distinct_symbols"] == len(mine)
+
+    symbols = Universe.from_yaml(root / "configs" / "universe.yml").symbols
+    members = preflight.resolver.members_on(date(2021, 6, 1))
+    assert members == tuple(sorted(symbols))
+    assert not set(_FOREIGN_SYMBOLS) & set(members)
+
+
+def test_run_window_crossing_a_membership_gap_fails_preflight(tmp_path):
+    """A run whose window crosses a declared observation gap never starts.
+
+    The v2 definition declares a 2020-06 observation gap and the spec window
+    (2020-01-01..2021-12-31) crosses it: the preflight fails at
+    ``universe_acceptance`` with the stable ``universe_gap_in_window`` code,
+    auditable in the redacted preflight manifest, and no factor artifact is
+    ever produced.
+    """
+    root, _, _ = _mixed_membership_project(tmp_path, gaps=True)
+    spec_name = _write_slice_spec(root)
+    runner = ResearchRunner(root, config_root=root)
+    with pytest.raises(ResearchRunFailed) as excinfo:
+        runner.run(spec_name)
+    assert excinfo.value.failed_stage == "universe_acceptance"
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, UniversePreflightFailed)
+    assert cause.error_codes == ("universe_gap_in_window",)
+    assert cause.universe_id == _WF_UNIVERSE_ID
+    preflight = json.loads(
+        (
+            root / "data" / "runs" / runner.run_id / "universe_preflight.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert "universe_gap_in_window" in preflight["error_codes"]
+    run_dir = root / "data" / "runs" / runner.run_id
+    assert not (run_dir / "factor_results.parquet").exists()
+    assert not (run_dir / "signals.parquet").exists()
+    assert not runner.partial_experiment_exists()
+
+
+def test_data_validate_still_rejects_a_bad_row_in_the_mixed_table(
+    tmp_path, cli_runner
+):
+    """Whole-table validation is not relaxed by slice-scoped acceptance.
+
+    The foreign universe's row carries a non-canonical symbol; ``data
+    validate`` audits the whole ``universe_membership`` table (independent of
+    any definition slice) and must still fail on it.
+    """
+    root, version, _ = _mixed_membership_project(
+        tmp_path, broken_foreign_row=True, accept=False
+    )
+    result = cli_runner.invoke(
+        app,
+        ["data", "validate", "--version", version, "--root", str(root)],
+    )
+    assert result.exit_code != 0
+    assert "UNIVERSE_UNKNOWN_SYMBOL" in result.stdout
+    assert "table=universe_membership" in result.stdout

@@ -47,6 +47,7 @@ from stock_quant.data_model.universe_membership import (
     MembershipFact,
     ResolvedMembership,
     membership_content_hash,
+    membership_slice_hash,
 )
 from stock_quant.safe_yaml import read_yaml
 
@@ -243,6 +244,39 @@ class UniverseDefinition(BaseModel):
             self.model_dump(mode="json", exclude_none=True))
 
 
+def membership_coverage_violations(
+    definition: "UniverseDefinition",
+    facts: Sequence[MembershipFact],
+) -> list[str]:
+    """Fact intervals must sit inside the segments and never cross a gap."""
+    segments = definition.coverage_segments or ()
+    gaps = definition.coverage_gaps or ()
+    violations: list[str] = []
+    for item in facts:
+        # An open fact (``raw_effective_to is None``) is still open only as far
+        # as this definition's envelope; ``date.max`` would sit beyond every
+        # segment and fail ``end <= segment.end``, marking every active fact as
+        # outside coverage.
+        end = item.raw_effective_to or definition.coverage_end
+        inside = any(segment.start <= item.raw_effective_from and end <= segment.end
+                     for segment in segments)
+        crosses_gap = any(item.raw_effective_from <= gap.end and end >= gap.start
+                          for gap in gaps)
+        if not inside or crosses_gap:
+            violations.append(f"{item.symbol}@{item.raw_effective_from.isoformat()}")
+    return violations
+
+
+def window_crosses_membership_gap(
+    definition: "UniverseDefinition", window_start: date, window_end: date
+) -> "MembershipCoverageGap | None":
+    """The first gap intersecting [window_start, window_end], if any."""
+    for gap in definition.coverage_gaps or ():
+        if window_start <= gap.end and window_end >= gap.start:
+            return gap
+    return None
+
+
 class UniverseResolver:
     """Signal-day membership resolution over one frozen definition.
 
@@ -300,7 +334,11 @@ class UniverseResolver:
     def _validate_pinned_facts(
         self, facts: Sequence[MembershipFact | Mapping[str, Any]]
     ) -> None:
-        table_hash = membership_content_hash(list(facts))
+        table_hash = (
+            membership_slice_hash(list(facts), self._definition.universe_id)
+            if self._definition.schema_version == 2
+            else membership_content_hash(list(facts))
+        )
         if table_hash != self._definition.membership_table_sha256:
             raise ValueError(
                 "pinned membership_table_sha256 mismatch: definition pins "

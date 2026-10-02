@@ -16,6 +16,7 @@ from stock_quant.research.universe import (
     MembershipCoverageSegment,
     UniverseDefinition,
     canonical_json_sha256,
+    window_crosses_membership_gap,
 )
 from stock_quant.safe_yaml import read_yaml
 from tests.unit.test_universe_membership import fact, make_fact
@@ -106,3 +107,97 @@ def test_collected_at_never_changes_the_content_hash():
     bare = fact()
     stamped = fact(collected_at=datetime(2026, 9, 30, 12, 0))
     assert membership_content_hash([bare]) == membership_content_hash([stamped])
+
+
+def _mixed_v2():
+    import pandas as pd
+
+    from stock_quant.data_model.calendar import TradingCalendar
+    from stock_quant.data_model.universe_membership import membership_frame
+    from stock_quant.research.acceptance.checks import (
+        evaluate_index_membership_evidence,
+    )
+    mine = make_fact(universe_id="custom_csi500_tw",
+                     raw_effective_from=date(2019, 1, 1))
+    theirs = make_fact(universe_id="custom_csi300_tw", symbol="000001.SZ")
+    frame = membership_frame([mine, theirs])
+    definition = UniverseDefinition.model_validate(_v2(
+        universe_id="custom_csi500_tw",
+        coverage_start=date(2019, 1, 1), coverage_end=date(2021, 12, 31),
+        membership_table_sha256=membership_slice_hash(
+            [mine, theirs], "custom_csi500_tw"),
+        coverage_segments=[MembershipCoverageSegment(
+            start=date(2019, 1, 1), end=date(2021, 12, 31),
+            evidence_sha256="b" * 64)]))
+    days = tuple(pd.bdate_range(date(2019, 1, 1), date(2021, 12, 31)).date)
+    return evaluate_index_membership_evidence, frame, definition, \
+        TradingCalendar.from_open_days(days), mine, theirs
+
+
+def test_v2_evidence_selects_the_slice_before_every_check():
+    evaluate, frame, definition, calendar, *_ = _mixed_v2()
+    assert evaluate(frame, definition=definition, calendar=calendar,
+                    expected_sizes={}).status.value == "PASS"
+
+
+def test_an_empty_slice_fails_with_a_stable_code():
+    evaluate, frame, definition, calendar, *_ = _mixed_v2()
+    only_theirs = frame[frame["universe_id"] == "custom_csi300_tw"]
+    result = evaluate(only_theirs.reset_index(drop=True), definition=definition,
+                      calendar=calendar, expected_sizes={})
+    assert result.status.value == "FAIL"
+    assert "UNIVERSE_SLICE_EMPTY" in result.details["error_codes"]
+
+
+def test_slice_facts_outside_the_segments_fail():
+    from stock_quant.data_model.universe_membership import membership_frame
+    evaluate, _, _, calendar, mine, _ = _mixed_v2()
+    early = make_fact(universe_id="custom_csi500_tw",
+                      raw_effective_from=date(2018, 6, 1),
+                      raw_effective_to=date(2018, 12, 31),
+                      announcement_date=date(2018, 5, 15),
+                      status="removed",
+                      reason="regular_rebalance")  # 必须闭合：与 mine 同为
+    # custom_csi500_tw/600000.SH，若两条都 open，membership_slice_hash 会先在
+    # _ensure_non_overlapping 抛 "membership facts overlap"，测不到越界码；
+    # removed/regular_rebalance 与公告先于生效是区间一致性所必需的，否则验收器
+    # 先报 UNIVERSE_INTERVAL_CONFLICT / UNIVERSE_ANNOUNCEMENT_AFTER_USE，
+    # 同样测不到越界码。
+    definition = UniverseDefinition.model_validate(_v2(
+        universe_id="custom_csi500_tw",
+        coverage_start=date(2019, 1, 1), coverage_end=date(2021, 12, 31),
+        membership_table_sha256=membership_slice_hash([early, mine],
+                                                      "custom_csi500_tw"),
+        coverage_segments=[MembershipCoverageSegment(
+            start=date(2019, 1, 1), end=date(2021, 12, 31),
+            evidence_sha256="b" * 64)]))
+    result = evaluate(membership_frame([early, mine]), definition=definition,
+                      calendar=calendar, expected_sizes={})
+    assert "UNIVERSE_FACT_OUTSIDE_COVERAGE" in result.details["error_codes"]
+
+
+def test_a_window_crossing_a_gap_is_reported():
+    gap = MembershipCoverageGap(start=date(2020, 6, 1), end=date(2020, 6, 30),
+                                reason=MEMBERSHIP_OBSERVATION_GAP,
+                                evidence_sha256="c" * 64)
+    definition = UniverseDefinition.model_validate(_v2(
+        universe_id="custom_csi500_tw",
+        coverage_segments=[
+            MembershipCoverageSegment(start=date(2015, 1, 5), end=date(2020, 5, 31),
+                                      evidence_sha256="b" * 64),
+            MembershipCoverageSegment(start=date(2020, 7, 1), end=date(2026, 8, 28),
+                                      evidence_sha256="b" * 64)],
+        coverage_gaps=[gap]))
+    assert window_crosses_membership_gap(
+        definition, date(2020, 5, 1), date(2020, 6, 15)) is gap
+    assert window_crosses_membership_gap(
+        definition, date(2020, 7, 1), date(2020, 8, 31)) is None
+
+
+def test_the_resolver_rejects_whole_table_forks():
+    from stock_quant.data_model.universe_membership import resolve_memberships
+    from stock_quant.research.universe import UniverseResolver
+    _, _, definition, _, mine, theirs = _mixed_v2()
+    with pytest.raises(ValueError, match="belongs to universe_id"):
+        UniverseResolver(definition, resolve_memberships([mine, theirs]),
+                         facts=[mine, theirs])

@@ -95,6 +95,7 @@ from stock_quant.research.acceptance import (
     evaluate_index_membership_evidence,
     read_membership_table,
 )
+from stock_quant.research.acceptance.checks import slice_membership_frame
 from stock_quant.research.acceptance.models import (
     CURRENT_ACCEPTED,
     AcceptanceRecord,
@@ -147,6 +148,7 @@ from stock_quant.research.universe import (
     UniverseDefinition,
     UniverseResolver,
     load_universe_definition,
+    window_crosses_membership_gap,
 )
 from stock_quant.research.walk_forward.evaluation import evaluate_stability
 from stock_quant.research.walk_forward.metrics import (
@@ -968,6 +970,20 @@ class ResearchRunner:
         self._frozen_version = dataset_version
         context = self._open_context(dataset_version)
         frame = read_membership_table(context)
+        if definition.schema_version == 2:
+            gap = window_crosses_membership_gap(
+                definition, spec.date_range.start_date, spec.date_range.end_date)
+            if gap is not None:
+                raise UniversePreflightFailed(
+                    f"run window crosses membership observation gap "
+                    f"[{gap.start.isoformat()}, {gap.end.isoformat()}]",
+                    error_codes=("universe_gap_in_window",),
+                    universe_id=definition.universe_id)
+            # A missing table stays ``None`` so evaluate reports the stable
+            # TABLE_MISSING code; a present table is cut to the definition's
+            # slice, and evaluate/facts/resolver below all consume that slice.
+            if frame is not None:
+                frame = slice_membership_frame(frame, definition.universe_id)
         calendar = self._calendar()
         boundaries = self._master_boundaries(context)
         size = _CANONICAL_UNIVERSE_SIZES.get(definition.universe_id)
