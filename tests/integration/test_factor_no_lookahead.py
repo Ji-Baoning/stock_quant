@@ -33,13 +33,19 @@ from stock_quant.data_model.corporate_action_coverage import (
 )
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.schemas import (
+    BASIC_FACTOR_COLUMNS,
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_COVERAGE_COLUMNS,
     CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
 )
-from stock_quant.data_model.universe_membership import resolve_memberships
+from stock_quant.data_model.security_master import master_coverage_frame
+from stock_quant.data_model.universe_membership import (
+    membership_frame,
+    resolve_memberships,
+)
 from stock_quant.data_quality.models import QualityReport
 from stock_quant.factors.base import FactorContext
 from stock_quant.factors.momentum import Momentum60
@@ -426,6 +432,19 @@ def _publish_market(root: Path, ex_date: date | None) -> str:
         "corporate_action_quarantine": empty_quarantine,
         "corporate_action_coverage": coverage,
         "trading_calendar": _trading_calendar(sessions),
+        # Publication fails closed on a registered table the payload omits
+        # (spec §7.5.6).  This fixture's subject is the factor arithmetic, not
+        # these two tables, so they are published as explicit empties -- the
+        # same shape a fresh baseline has.
+        "security_master_coverage": master_coverage_frame([]),
+        "universe_membership": membership_frame([]),
+        # Registered-but-unwired basic_factor tables (P2c Task 1): the
+        # canonical empty frames keep this hand-assembled dataset
+        # registry-complete under the 11-table registration.
+        "basic_factor": pd.DataFrame(columns=BASIC_FACTOR_COLUMNS),
+        "basic_factor_coverage": pd.DataFrame(
+            columns=CORPORATE_ACTION_COVERAGE_COLUMNS
+        ),
     }
     return DatasetPublisher(root).publish(tables, QualityReport()).version
 

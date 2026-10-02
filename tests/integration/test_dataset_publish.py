@@ -17,6 +17,7 @@ import pytest
 
 from stock_quant.data_model.adjusted_bar import build_adjusted_bars
 from stock_quant.data_model.dataset import (
+    STANDARDIZED_SCHEMAS,
     DatasetNotFoundError,
     DatasetPublisher,
     DatasetReader,
@@ -81,21 +82,38 @@ def verified_coverage() -> pd.DataFrame:
     )
 
 
+def registered_empty_tables() -> dict[str, pd.DataFrame]:
+    """One empty frame per registered table, keyed by canonical name.
+
+    Publication fails closed when a payload omits a registered table (spec
+    §7.5.6), so a payload only counts as publishable once it covers the whole
+    registry -- even when most of those tables are born empty.
+    """
+    return {
+        name: pd.DataFrame(columns=list(schema.names))
+        for name, schema in STANDARDIZED_SCHEMAS.items()
+    }
+
+
 def valid_tables(closes: list[float] | None = None) -> dict[str, pd.DataFrame]:
     if closes is None:
         closes = [10.5, 10.8, 11.0]
     daily = _daily_frame(closes)
-    return {
-        "daily_bar": daily,
-        "adjusted_bar": build_adjusted_bars(
-            daily,
-            empty_corporate_actions(),
-            empty_quarantine(),
-            verified_coverage(),
-            symbols=("600000.SH",),
-        ),
-        "corporate_action_quarantine": empty_quarantine(),
-    }
+    tables = registered_empty_tables()
+    tables.update(
+        {
+            "daily_bar": daily,
+            "adjusted_bar": build_adjusted_bars(
+                daily,
+                empty_corporate_actions(),
+                empty_quarantine(),
+                verified_coverage(),
+                symbols=("600000.SH",),
+            ),
+            "corporate_action_quarantine": empty_quarantine(),
+        }
+    )
+    return tables
 
 
 def passing_report() -> QualityReport:
@@ -132,20 +150,16 @@ def test_publish_writes_parquet_and_both_json_reports(tmp_path):
     ref = publisher.publish(valid_tables(), passing_report())
     version_dir = ref.path
     names = sorted(p.name for p in version_dir.iterdir())
-    assert names == [
-        "adjusted_bar.parquet",
-        "corporate_action_quarantine.parquet",
-        "daily_bar.parquet",
-        "dataset_manifest.json",
-        "quality_report.json",
-    ]
+    # Every registered table gets its own parquet, empty or not: the payload
+    # covers the registry, and the version directory is exactly that payload
+    # plus the manifest and the gated quality report.
+    assert names == sorted(
+        [f"{name}.parquet" for name in STANDARDIZED_SCHEMAS]
+        + ["dataset_manifest.json", "quality_report.json"]
+    )
     manifest = json.loads((version_dir / "dataset_manifest.json").read_text())
     assert manifest["dataset_version"] == ref.version
-    assert set(manifest["tables"]) == {
-        "adjusted_bar",
-        "corporate_action_quarantine",
-        "daily_bar",
-    }
+    assert set(manifest["tables"]) == set(STANDARDIZED_SCHEMAS)
     assert manifest["tables"]["daily_bar"]["row_count"] == 3
     assert manifest["tables"]["daily_bar"]["sha256"]
     assert manifest["tables"]["adjusted_bar"]["row_count"] == 3

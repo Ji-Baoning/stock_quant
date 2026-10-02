@@ -9,16 +9,21 @@ from pathlib import Path
 import pandas as pd
 
 from stock_quant.data_model.calendar_coverage import coverage_payload, seed_span
+from stock_quant.data_model.corporate_action_coverage import (
+    coverage_frame as corporate_action_coverage_frame,
+)
 from stock_quant.data_model.dataset import DatasetPublisher
 from stock_quant.data_model.schemas import (
     ADJUSTED_BAR_COLUMNS,
+    BASIC_FACTOR_COLUMNS,
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_COVERAGE_COLUMNS,
     CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
 )
-from stock_quant.data_model.security_master import ListStatus
+from stock_quant.data_model.security_master import ListStatus, master_coverage_frame
 from stock_quant.data_model.universe import Universe
 from stock_quant.data_model.universe_membership import membership_frame
 from stock_quant.data_pipeline import DATASET_BUILD_CONTRACT_VERSION
@@ -56,14 +61,24 @@ def bootstrap_dataset(
         "daily_bar": _empty_daily(),
         "adjusted_bar": _empty_adjusted_bar(),
         "security_master": _security_master(universe),
+        "security_master_coverage": master_coverage_frame([]),
         "corporate_action": _empty_corporate_action(),
         "corporate_action_quarantine": _empty_quarantine(),
+        "corporate_action_coverage": corporate_action_coverage_frame([]),
         "trading_calendar": _trading_calendar(days),
-        # The canonical schema contract registers universe_membership too; a
-        # fresh project is born with the empty canonical frame so operator
-        # acceptance (required-table coverage) can pass before any membership
-        # refresh workflow appends real facts.
+        # Every registered table must be present, even when it is born empty:
+        # publication fails closed on a missing registered table (spec §7.5.6),
+        # and this is the first publication a fresh project ever makes.  The
+        # coverage and membership frames are therefore explicit empties -- a
+        # later update or membership refresh fills them with real facts.
         "universe_membership": membership_frame([]),
+        # Registered-but-unwired (P2c Task 1): a fresh project has no factor
+        # source wired, so both tables are born empty and the first real
+        # update publishes their disabled-state coverage records.
+        "basic_factor": pd.DataFrame(columns=BASIC_FACTOR_COLUMNS),
+        "basic_factor_coverage": pd.DataFrame(
+            columns=CORPORATE_ACTION_COVERAGE_COLUMNS
+        ),
     }
     version = DatasetPublisher(root).publish(
         tables,

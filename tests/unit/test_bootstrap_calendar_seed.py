@@ -10,7 +10,11 @@ import yaml
 
 from stock_quant.bootstrap import bootstrap_dataset
 from stock_quant.data_model.calendar_coverage import SOURCE_BOOTSTRAP_SEED
-from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+from stock_quant.data_model.dataset import (
+    STANDARDIZED_SCHEMAS,
+    DatasetPublisher,
+    DatasetReader,
+)
 
 
 @pytest.fixture()
@@ -63,6 +67,19 @@ def test_bootstrap_writes_one_seed_span_and_exposes_it(project_root):
         }
     ]
     assert build["full_history_acceptance_start"] is None
+
+
+def test_bootstrap_publishes_every_registered_table(project_root):
+    """The baseline is born registry-complete (spec §7.5.6).
+
+    Publication fails closed on a missing registered table, and bootstrap is
+    the first publication a fresh project ever makes -- so an incomplete
+    baseline is not "a smaller dataset", it is an unusable project.
+    """
+    result = bootstrap_dataset(project_root)
+    with DatasetReader(project_root).open(result.version) as context:
+        published = set(context.tables)
+    assert published == set(STANDARDIZED_SCHEMAS)
 
 
 def test_bootstrap_span_payload_is_the_published_manifest_bytes(project_root):

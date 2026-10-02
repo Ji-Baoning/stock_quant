@@ -131,7 +131,11 @@ def test_fact_row_policy_prefers_max_report_type():
 
 
 def test_as_of_reads_exact_pinned_context(tmp_path):
-    from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
+    from stock_quant.data_model.dataset import (
+        STANDARDIZED_SCHEMAS,
+        DatasetPublisher,
+        DatasetReader,
+    )
     from stock_quant.data_model.schemas import DAILY_COLUMNS
     from stock_quant.data_quality.models import QualityReport
 
@@ -150,12 +154,17 @@ def test_as_of_reads_exact_pinned_context(tmp_path):
             "ingested_at": [pd.Timestamp("2025-01-02T08:00:00Z")],
         }
     )[DAILY_COLUMNS]
-    # The synthetic table has no canonical schema yet, so publish only the
-    # registered daily_bar (minimal publish pattern from
-    # tests/integration/test_dataset_publish.py) and place the PIT frame in a
-    # parquet beside it, registered in the version's manifest.  The context is
-    # pinned by opening the exact version -- never CURRENT.
-    ref = DatasetPublisher(tmp_path).publish({"daily_bar": daily}, QualityReport())
+    # The synthetic table has no canonical schema yet, so publish the whole
+    # registered registry (empty apart from daily_bar -- publication fails
+    # closed on a missing registered table, spec §7.5.6) and place the PIT
+    # frame in a parquet beside it, registered in the version's manifest.  The
+    # context is pinned by opening the exact version -- never CURRENT.
+    tables = {
+        name: pd.DataFrame(columns=list(schema.names))
+        for name, schema in STANDARDIZED_SCHEMAS.items()
+    }
+    tables["daily_bar"] = daily
+    ref = DatasetPublisher(tmp_path).publish(tables, QualityReport())
 
     income = _frame(
         [

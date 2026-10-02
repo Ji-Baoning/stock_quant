@@ -31,6 +31,7 @@ from stock_quant.data_model.adjusted_bar import build_adjusted_bars
 from stock_quant.data_model.calendar_coverage import coverage_payload, seed_span
 from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.schemas import (
+    BASIC_FACTOR_COLUMNS,
     CORPORATE_ACTION_COLUMNS,
     CORPORATE_ACTION_COVERAGE_COLUMNS,
     CORPORATE_ACTION_QUARANTINE_COLUMNS,
@@ -38,6 +39,8 @@ from stock_quant.data_model.schemas import (
     SECURITY_MASTER_COLUMNS,
     TRADING_CALENDAR_COLUMNS,
 )
+from stock_quant.data_model.security_master import master_coverage_frame
+from stock_quant.data_model.universe_membership import membership_frame
 from stock_quant.data_pipeline import (
     DATASET_BUILD_CONTRACT_VERSION,
     DataPipeline,
@@ -244,22 +247,34 @@ def build_smoke_project(root: Path) -> Path:
     daily = _bars(sessions)
     corporate_actions = _corporate_action()
     empty_quarantine = pd.DataFrame(columns=CORPORATE_ACTION_QUARANTINE_COLUMNS)
+    # The synthetic baseline carries no coverage evidence or membership table
+    # yet; empty frames keep the adjusted rows at INFO until the live update
+    # republishes real per-window evidence.  They are still published, because
+    # publication fails closed on a registered table the payload omits (spec
+    # §7.5.6).
+    empty_action_coverage = pd.DataFrame(columns=CORPORATE_ACTION_COVERAGE_COLUMNS)
     tables = {
         "daily_bar": daily,
         "adjusted_bar": build_adjusted_bars(
             daily,
             corporate_actions,
             empty_quarantine,
-            # The synthetic baseline carries no coverage evidence table yet;
-            # an empty frame keeps the adjusted rows at INFO until the live
-            # update republishes real per-window evidence.
-            pd.DataFrame(columns=CORPORATE_ACTION_COVERAGE_COLUMNS),
+            empty_action_coverage,
             symbols=(_SMOKE_SYMBOL,),
         ),
         "security_master": _security_master(),
+        "security_master_coverage": master_coverage_frame([]),
         "corporate_action": corporate_actions,
         "corporate_action_quarantine": empty_quarantine,
+        "corporate_action_coverage": empty_action_coverage,
         "trading_calendar": _trading_calendar(sessions),
+        "universe_membership": membership_frame([]),
+        # Registered-but-unwired factor tables (P2c Task 1): the smoke run's
+        # live update wires them, so the baseline publishes explicit empties.
+        "basic_factor": pd.DataFrame(columns=BASIC_FACTOR_COLUMNS),
+        "basic_factor_coverage": pd.DataFrame(
+            columns=CORPORATE_ACTION_COVERAGE_COLUMNS
+        ),
     }
     DatasetPublisher(root).publish(
         tables,

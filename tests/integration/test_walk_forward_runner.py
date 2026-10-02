@@ -30,7 +30,9 @@ from stock_quant.data_model.corporate_action_coverage import (
 )
 from stock_quant.data_model.dataset import DatasetPublisher
 from stock_quant.data_model.schemas import (
+    BASIC_FACTOR_COLUMNS,
     CORPORATE_ACTION_COLUMNS,
+    CORPORATE_ACTION_COVERAGE_COLUMNS,
     CORPORATE_ACTION_QUARANTINE_COLUMNS,
     DAILY_COLUMNS,
     SECURITY_MASTER_COLUMNS,
@@ -48,6 +50,7 @@ from stock_quant.data_model.universe_membership import (
     MembershipReason,
     MembershipStatus,
     membership_content_hash,
+    membership_frame,
     resolve_memberships,
 )
 from stock_quant.data_quality.models import QualityReport
@@ -224,6 +227,16 @@ def _project_root(tmp_path: Path, jump_dates: tuple[date, ...]) -> tuple[Path, s
             "corporate_action_quarantine": empty_quarantine,
             "corporate_action_coverage": coverage,
             "trading_calendar": calendar,
+            # Publication fails closed on a registered table the payload omits
+            # (spec §7.5.6); this fixture's subject is the walk-forward replay,
+            # so membership is published as the explicit empty a baseline has.
+            "universe_membership": membership_frame([]),
+            # Registered-but-unwired factor tables (P2c Task 1): the walk-forward
+            # replay never touches them, so they publish as explicit empties.
+            "basic_factor": pd.DataFrame(columns=BASIC_FACTOR_COLUMNS),
+            "basic_factor_coverage": pd.DataFrame(
+                columns=CORPORATE_ACTION_COVERAGE_COLUMNS
+            ),
         },
         QualityReport(),
     ).version
