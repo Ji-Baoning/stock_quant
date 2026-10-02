@@ -1048,30 +1048,60 @@ def backtest_momentum_60d(
 def report_build(
     experiment: str | None = typer.Option(None, "--experiment", help="Experiment id."),
     out: Path | None = typer.Option(
-        None, "--out", help="Destination HTML file (default data/reports/<id>.html)."
+        None,
+        "--out",
+        help=(
+            "Destination HTML file (default data/reports/<id>.html, "
+            "data/reports/debug-<id>.html with --debug)."
+        ),
+    ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help=(
+            "Read the debug registry (data/runs/debug) instead of the published "
+            "data/experiments."
+        ),
     ),
     root: Path = typer.Option(".", "--root", help="Project root."),
 ) -> None:
     """Render the experiment and current data-quality display reports.
 
     Rebuilds the richer self-contained experiment report for the selected
-    (default latest) published experiment *and* the data-quality report for the
-    pinned ``CURRENT`` dataset version, from committed artifacts only, into
+    (default latest) experiment *and* the data-quality report for the pinned
+    ``CURRENT`` dataset version, from committed artifacts only, into
     ``data/reports``.  The quality HTML is reconstructed from the persisted
     ``quality_report.json`` / version manifest -- nothing is recomputed.
+
+    ``--debug`` selects the *source registry* only: the report is rebuilt from
+    ``data/runs/debug`` instead of ``data/experiments`` so an engineering
+    diagnostic gets the same complete display report without ever entering the
+    published registry.  It does not weaken anything -- an engineering run
+    still renders its frozen ``UNTRUSTED`` stamp and its engineering banner,
+    because those are read from the run's committed ``metrics.json``.
     """
     project_root = _resolved_project_root(root)
-    experiment_id = experiment or _latest_experiment_id(project_root)
+    registry: ExperimentRegistry = (
+        _DebugRegistry(project_root) if debug else ExperimentRegistry(project_root)
+    )
+    experiments_root = registry.experiments_root
+    experiment_id = experiment or _latest_experiment_id(project_root, registry)
     if experiment_id is None:
-        _echo_failure("no published experiment found under data/experiments")
+        _echo_failure(f"no experiment found under {experiments_root}")
         raise typer.Exit(code=1)
     try:
         from stock_quant.data_model.dataset import DatasetPublisher
 
         dataset_version = DatasetPublisher(project_root).current().version
-        run_input = _experiment_report_input(project_root, experiment_id)
+        run_input = _experiment_report_input(project_root, experiment_id, registry)
+        # The debug report is named apart so ``data/reports/<id>.html`` keeps
+        # meaning the *published* experiment's report, and so an engineering
+        # diagnostic can never be read off the published artifact's path.
         destination = out or (
-            project_root / "data" / "reports" / f"{experiment_id}.html"
+            project_root
+            / "data"
+            / "reports"
+            / f"{'debug-' if debug else ''}{experiment_id}.html"
         )
         render_experiment_report(run_input, destination)
         quality_input = _quality_report_input(project_root, dataset_version)
@@ -1086,8 +1116,11 @@ def report_build(
     typer.echo(f"quality_report={quality_destination}")
 
 
-def _latest_experiment_id(project_root: Path) -> str | None:
-    experiments = ExperimentRegistry(project_root).experiments_root
+def _latest_experiment_id(
+    project_root: Path, registry: ExperimentRegistry | None = None
+) -> str | None:
+    """The newest experiment id under ``registry``'s root (published by default)."""
+    experiments = (registry or ExperimentRegistry(project_root)).experiments_root
     if not experiments.is_dir():
         return None
     manifest = experiments / "registry.parquet"
@@ -1103,9 +1136,22 @@ def _latest_experiment_id(project_root: Path) -> str | None:
     return entries[-1] if entries else None
 
 
-def _experiment_report_input(project_root: Path, experiment_id: str):
-    """Rebuild the rich report input from committed artifacts + pinned dataset."""
-    experiment_dir = ExperimentRegistry(project_root).experiments_root / experiment_id
+def _experiment_report_input(
+    project_root: Path,
+    experiment_id: str,
+    registry: ExperimentRegistry | None = None,
+):
+    """Rebuild the rich report input from committed artifacts + pinned dataset.
+
+    ``registry`` only selects *where* the experiment is read from -- the
+    published ``data/experiments`` unless the caller passes the debug registry.
+    Everything rendered (including the frozen trust stamp) still comes from the
+    experiment's own committed ``metrics.json``, so which side reads it cannot
+    change what the report claims.
+    """
+    experiment_dir = (
+        registry or ExperimentRegistry(project_root)
+    ).experiments_root / experiment_id
     metrics_path = experiment_dir / "metrics.json"
     if not metrics_path.is_file():
         raise FileNotFoundError(f"{experiment_dir} holds no metrics.json")

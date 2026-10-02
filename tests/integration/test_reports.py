@@ -631,6 +631,45 @@ def test_experiment_html_flags_unverified_without_acceptance(tmp_path):
         assert "real-data-v1" not in html
 
 
+def test_experiment_html_marks_engineering_runs_untrusted(tmp_path):
+    """An engineering run stays flagged whatever its coverage verdict says.
+
+    The coverage verdict and the trust *mode* are different claims: coverage can
+    be complete while the run was only ever allowed as a diagnostic.  Rendering
+    the coverage green and nothing else would present a diagnostic as a
+    performance claim -- the exact reading the trust boundary exists to stop.
+    """
+    path = render_experiment_report(
+        _experiment_input(
+            corporate_action_trust={
+                "mode": "engineering",
+                "trusted": True,
+                "reasons": [],
+            }
+        ),
+        tmp_path / "engineering.html",
+    )
+    html = path.read_text(encoding="utf-8")
+    assert "ENGINEERING 诊断" in html
+    assert "绕过了真实数据验收门禁" in html
+    # The frozen coverage verdict is still reported as the run recorded it; the
+    # banner above it, not a rewritten verdict, is what stops the misreading.
+    assert "公司行为证据已核验通过（可信）" in html
+
+
+def test_experiment_html_omits_the_engineering_banner_for_research_runs(tmp_path):
+    """The banner is gated on the mode, never rendered unconditionally."""
+    for trust in (
+        {"mode": "research", "trusted": True, "reasons": []},
+        {"mode": "research", "trusted": False, "reasons": []},
+        None,
+    ):
+        html = render_experiment_report(
+            _experiment_input(corporate_action_trust=trust), tmp_path / "r.html"
+        ).read_text(encoding="utf-8")
+        assert "ENGINEERING 诊断" not in html
+
+
 def _benchmark_on(days: list[date]) -> pd.DataFrame:
     """The benchmark fixture over an explicit day list."""
     rows: list[dict] = []

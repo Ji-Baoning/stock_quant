@@ -45,6 +45,14 @@
     <strong>不代表策略具备实盘价值</strong>，不构成任何投资建议，不使用结果指导真实资金交易。
   </div>
 
+  {% if trust.mode == "engineering" %}
+  <div class="banner trust-fail">
+    <strong>ENGINEERING 诊断</strong>：本次运行以 engineering 模式产出，
+    <strong>绕过了真实数据验收门禁</strong>，结论一律记 UNTRUSTED ——
+    <strong>即使下面的公司行为覆盖核验通过</strong>，也不得作为可信绩效或业绩声明。
+  </div>
+  {% endif %}
+
   {% if not trust.trusted %}
   <div class="banner trust-fail">
     <strong>数据可信度未通过</strong>：未复权收益核算缺少完整可信的公司行为覆盖证据，

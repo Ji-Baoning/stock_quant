@@ -20,7 +20,10 @@ from test_end_to_end import run_offline_fixture  # noqa: E402  (after app import
 from test_reports import _experiment_input  # noqa: E402  (synthetic report helper)
 
 from stock_quant.cli import (  # gates Step 2 collection
+    _DebugRegistry,
+    _experiment_report_input,
     _experiment_window,
+    _latest_experiment_id,
     _within_window,
     app,
 )
@@ -78,7 +81,11 @@ def test_debug_backtest_writes_only_to_run_debug_dir(
     assert result.exit_code == 0, result.stdout
     debug_root = fixture_root.root / "data" / "runs" / "debug"
     assert debug_root.is_dir()
-    published = set(p.name for p in experiments.iterdir())
+    published = (
+        set(p.name for p in experiments.iterdir())
+        if experiments.is_dir()
+        else set()
+    )
     assert published == before, "debug backtest must not publish an experiment"
 
 
@@ -202,12 +209,18 @@ def test_data_bootstrap_publishes_initial_dataset(cli_runner, tmp_path):
     assert (root / "data" / "standardized" / "CURRENT").is_file()
 
     # The seed must be an honest empty placeholder: NaT listing dates and
-    # NOT_APPLIED status, no security_master_coverage evidence table.
+    # NOT_APPLIED status, and no coverage *evidence*.  The table itself is
+    # present because publication fails closed on a missing registered table
+    # (spec §7.5.6) -- but it carries no rows, which is what the evidence
+    # semantics read: ``missing_master_coverage_symbols`` treats an empty frame
+    # exactly like an absent one (pinned in
+    # tests/unit/test_security_master_coverage.py), so the seed still cannot
+    # pass the research master-evidence gate.
     from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 
     version = DatasetPublisher(root).current().version
     with DatasetReader(root).open(version) as context:
-        assert "security_master_coverage" not in context.tables
+        assert context.read("security_master_coverage").empty
         master = context.read("security_master")
     assert set(master["list_status"]) == {"NOT_APPLIED"}
     assert master["list_date"].isna().all()
@@ -352,23 +365,60 @@ def test_formal_research_has_no_bypass(cli_runner):
     assert "--engineering" not in result.output
 
 
+def test_report_build_reads_the_registry_it_was_told_to(tmp_path):
+    """``--debug`` selects data/runs/debug; the default stays data/experiments."""
+    published = tmp_path / "data" / "experiments" / "published-experiment"
+    debug = tmp_path / "data" / "runs" / "debug" / "debug-experiment"
+    for path in (published, debug):
+        path.mkdir(parents=True)
+        (path / "experiment_manifest.json").write_text("{}", encoding="utf-8")
+
+    assert _latest_experiment_id(tmp_path) == "published-experiment"
+    assert (
+        _latest_experiment_id(tmp_path, _DebugRegistry(tmp_path)) == "debug-experiment"
+    )
+
+    # The rebuild resolves the *same* id against the selected root, so `--debug`
+    # cannot silently fall back to the published registry.
+    with pytest.raises(FileNotFoundError) as formal:
+        _experiment_report_input(tmp_path, "debug-experiment")
+    assert "data/experiments/debug-experiment" in str(formal.value)
+    with pytest.raises(FileNotFoundError) as routed:
+        _experiment_report_input(tmp_path, "debug-experiment", _DebugRegistry(tmp_path))
+    assert "data/runs/debug/debug-experiment" in str(routed.value)
+
+
 def test_debug_and_report_show_untrusted_reason(
     cli_runner, broken_fixture_root, tmp_path
 ):
     """The debug backtest surfaces the frozen UNTRUSTED decision on stdout, and
     the report renders the same untrusted reason with the affected symbol."""
+    root = broken_fixture_root.root
     result = cli_runner.invoke(
         app,
         [
             "backtest",
             "momentum_60d",
             "--root",
-            str(broken_fixture_root.root),
+            str(root),
             "--engineering",
         ],
     )
     assert result.exit_code == 0, result.stdout
     assert "trust=UNTRUSTED" in result.output
+
+    # The diagnostic is reportable: `report build --debug` reads the debug
+    # registry (this project published nothing under data/experiments) and
+    # renders the full report, engineering banner included.
+    built = cli_runner.invoke(app, ["report", "build", "--root", str(root), "--debug"])
+    assert built.exit_code == 0, built.stdout
+    assert "report=" in built.stdout
+    debug_reports = sorted((root / "data" / "reports").glob("debug-*.html"))
+    assert len(debug_reports) == 1, built.stdout
+    debug_html = debug_reports[0].read_text(encoding="utf-8")
+    assert "ENGINEERING 诊断" in debug_html
+    assert "数据可信度未通过" in debug_html
+    assert "SOURCE_FETCH_FAILED" in debug_html
 
     report_path = render_experiment_report(
         _experiment_input(

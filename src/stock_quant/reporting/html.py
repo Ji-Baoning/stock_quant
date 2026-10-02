@@ -265,9 +265,16 @@ def _trust_block(corporate_action_trust: dict | None) -> dict[str, object]:
     frozen decision is present, the block carries its ``trusted`` flag, the
     per-holding ``reasons`` (only the stable ``symbol`` / ``code`` fields the
     decision records) and the covered date range when the decision names one.
+
+    ``mode`` is carried through as well, and deliberately *not* folded into
+    ``trusted``: the two say different things.  ``trusted`` is the coverage
+    verdict; the mode says whether the run was allowed to be a performance
+    claim at all.  An engineering run over complete coverage is still not one,
+    and dropping the mode here would render it without any alarm.
     """
     if not isinstance(corporate_action_trust, dict):
-        return {"trusted": True, "reasons": [], "window_text": ""}
+        return {"trusted": True, "mode": "", "reasons": [], "window_text": ""}
+    mode = corporate_action_trust.get("mode")
     trusted = bool(corporate_action_trust.get("trusted"))
     raw_reasons = corporate_action_trust.get("reasons")
     reasons: list[dict[str, str]] = []
@@ -288,6 +295,7 @@ def _trust_block(corporate_action_trust: dict | None) -> dict[str, object]:
         window_text = f"{_iso(window_start)} ~ {_iso(window_end)}"
     return {
         "trusted": trusted,
+        "mode": str(mode) if isinstance(mode, str) else "",
         "reasons": reasons,
         "window_text": window_text,
     }
