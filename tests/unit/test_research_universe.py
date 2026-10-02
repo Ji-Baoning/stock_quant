@@ -345,7 +345,7 @@ def test_snapshot_binds_universe_identity():
 def test_definition_version_is_canonical_json_sha256():
     value = definition()
     canonical = json.dumps(
-        value.model_dump(mode="json"),
+        value.model_dump(mode="json", exclude_none=True),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,

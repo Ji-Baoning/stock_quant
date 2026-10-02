@@ -30,7 +30,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
@@ -147,6 +147,7 @@ class MembershipFact(BaseModel):
     source_url: str
     snapshot_sha256: str
     source_document_sha256: str
+    collected_at: datetime | None = None
 
     @field_validator("universe_id")
     @classmethod
@@ -397,13 +398,27 @@ def membership_content_hash(
     validated = _validated_facts(facts)
     _ensure_non_overlapping(validated)
     payload = [
-        item.model_dump(mode="json")
+        {key: value for key, value in item.model_dump(mode="json").items()
+         if key != "collected_at"}
         for item in sorted(validated, key=_fact_sort_key)
     ]
     canonical = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def membership_slice_hash(
+    facts: Sequence[MembershipFact | Mapping[str, Any]], universe_id: str
+) -> str:
+    """The schema-v2 scoped hash: one universe's slice of the facts (7.0.1)."""
+    return membership_content_hash(
+        [item for item in facts if _fact_universe_id(item) == universe_id])
+
+
+def _fact_universe_id(item: MembershipFact | Mapping[str, Any]) -> str:
+    return item.universe_id if isinstance(item, MembershipFact) \
+        else str(item["universe_id"])
 
 
 def _resolve_fact(

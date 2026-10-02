@@ -31,7 +31,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
@@ -96,6 +96,45 @@ def canonical_json_sha256(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+MEMBERSHIP_HASH_SCOPE_UNIVERSE_ID = "universe_id"
+MEMBERSHIP_OBSERVATION_GAP = "membership_observation_gap"
+_GAP_REASONS = frozenset({MEMBERSHIP_OBSERVATION_GAP})
+
+
+class MembershipCoverageSegment(BaseModel):
+    """One maximal run of consecutive membership observations (7.0.1)."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    start: date
+    end: date
+    evidence_sha256: str
+
+    @field_validator("evidence_sha256")
+    @classmethod
+    def _sha256(cls, value: str) -> str:
+        return _validated_sha256(value)
+
+
+class MembershipCoverageGap(BaseModel):
+    """A missed-observation window; never carries inferred boundaries."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    start: date
+    end: date
+    reason: str
+    evidence_sha256: str
+
+    @field_validator("reason")
+    @classmethod
+    def _reason(cls, value: str) -> str:
+        if value not in _GAP_REASONS:
+            raise ValueError(f"unknown membership gap reason: {value!r}")
+        return value
+
+    @field_validator("evidence_sha256")
+    @classmethod
+    def _sha256(cls, value: str) -> str:
+        return _validated_sha256(value)
+
+
 class UniverseDefinition(BaseModel):
     """One frozen, auditable version of an index universe.
 
@@ -108,13 +147,16 @@ class UniverseDefinition(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     universe_id: str
     rules_version: str
     membership_table_sha256: str
     coverage_start: date
     coverage_end: date
     evidence_summary_sha256: str
+    membership_hash_scope: Literal["universe_id"] | None = None
+    coverage_segments: tuple[MembershipCoverageSegment, ...] | None = None
+    coverage_gaps: tuple[MembershipCoverageGap, ...] | None = None
 
     @field_validator("universe_id")
     @classmethod
@@ -133,6 +175,11 @@ class UniverseDefinition(BaseModel):
     def _sha256(cls, value: str) -> str:
         return _validated_sha256(value)
 
+    @field_validator("coverage_gaps")
+    @classmethod
+    def _no_empty_gaps(cls, value):
+        return value or None  # 空列表归一为 None，保证序列化唯一形
+
     @model_validator(mode="after")
     def _check_coverage(self) -> "UniverseDefinition":
         if self.coverage_start > self.coverage_end:
@@ -142,10 +189,58 @@ class UniverseDefinition(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _check_schema_shape(self) -> "UniverseDefinition":
+        if self.schema_version == 1:
+            if any(value is not None for value in (
+                    self.membership_hash_scope, self.coverage_segments,
+                    self.coverage_gaps)):
+                raise ValueError(
+                    "schema-v1 definitions carry no membership_hash_scope/"
+                    "coverage_segments/coverage_gaps (spec 7.0.1/7.0.3 keep v1 "
+                    "whole-table-only; refusing v2 keys is this plan's guard)")
+            return self
+        if self.membership_hash_scope != MEMBERSHIP_HASH_SCOPE_UNIVERSE_ID:
+            raise ValueError("schema-v2 requires membership_hash_scope: universe_id")
+        segments = self.coverage_segments or ()
+        if not segments:
+            raise ValueError("schema-v2 requires coverage_segments")
+        ordered = sorted(segments, key=lambda item: item.start)
+        for earlier, later in zip(ordered, ordered[1:]):
+            if later.start <= earlier.end:
+                raise ValueError(f"coverage segments overlap: {earlier}/{later}")
+        if (self.coverage_start != ordered[0].start
+                or self.coverage_end != ordered[-1].end):
+            raise ValueError(
+                "coverage_start/end must equal the segment envelope "
+                f"[{ordered[0].start}, {ordered[-1].end}]")
+        tiles = sorted(
+            [(item.start, item.end) for item in ordered]
+            + [(gap.start, gap.end) for gap in self.coverage_gaps or ()])
+        cursor = self.coverage_start
+        for start, end in tiles:
+            if start != cursor:
+                raise ValueError(
+                    "segments and gaps must complement exactly over the "
+                    f"envelope: expected a tile starting {cursor}, got "
+                    f"[{start}, {end}]")
+            cursor = end + timedelta(days=1)
+        if cursor != self.coverage_end + timedelta(days=1):
+            raise ValueError(
+                "segments and gaps must complement exactly over the envelope: "
+                f"tiling stops at {cursor - timedelta(days=1)}")
+        return self
+
     @property
     def version(self) -> str:
-        """SHA-256 of the definition's canonical JSON; the universe version."""
-        return canonical_json_sha256(self.model_dump(mode="json"))
+        """SHA-256 of the definition's canonical JSON; the universe version.
+
+        ``exclude_none`` keeps schema-v1 documents byte-identical to the
+        pre-v2 rendering (v1 has no optional keys), so every frozen v1
+        version survives this change (spec 2.3).
+        """
+        return canonical_json_sha256(
+            self.model_dump(mode="json", exclude_none=True))
 
 
 class UniverseResolver:
