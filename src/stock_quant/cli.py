@@ -60,6 +60,12 @@ from stock_quant.data_quality.models import (
     Severity,
 )
 from stock_quant.project_root import ProjectRootError, resolve_project_root
+from stock_quant.operations.runner import (
+    InvalidUpdateParams,
+    operations_exit_code,
+    run_operations_update,
+    validate_update_params,
+)
 from stock_quant.operations.update_lock import (
     UPDATE_ALREADY_RUNNING_CODE,
     UPDATE_ALREADY_RUNNING_EXIT_CODE,
@@ -127,6 +133,13 @@ data_app.add_typer(acceptance_app, name="acceptance")
 app.add_typer(research_app, name="research")
 app.add_typer(backtest_app, name="backtest")
 app.add_typer(report_app, name="report")
+operations_app = typer.Typer(
+    help=(
+        "Supervised operations shell: persistent job records around one "
+        "single-flighted data update (spec 2026-09-29 §9)."
+    )
+)
+app.add_typer(operations_app, name="operations")
 
 
 # --------------------------------------------------------------------------- #
@@ -615,6 +628,76 @@ def data_index_membership_recover(
         _echo_failure(f"{error.error_code}: {error}")
         raise typer.Exit(code=2) from None
     typer.echo(f"recovered_to={generation.definition_version}")
+
+
+# --------------------------------------------------------------------------- #
+# operations group (supervised update shell; spec §9.1)
+# --------------------------------------------------------------------------- #
+
+
+@operations_app.command("update")
+def operations_update(
+    start: str | None = typer.Option(
+        None,
+        "--start",
+        help="Inclusive start (YYYY-MM-DD); forwarded to the inner data update.",
+    ),
+    end: str | None = typer.Option(
+        None,
+        "--end",
+        help="Inclusive end (YYYY-MM-DD); forwarded to the inner data update.",
+    ),
+    sources: str | None = typer.Option(
+        None, "--sources", help="Comma-separated source subset; forwarded unchanged."
+    ),
+    disclosure_lookback_days: int | None = typer.Option(
+        None,
+        "--disclosure-lookback-days",
+        min=1,
+        help="Disclosure re-ask window override; the same constraint as data update.",
+    ),
+    root: Path = typer.Option(".", "--root", help="Project root."),
+    job_id: str | None = typer.Option(
+        None,
+        "--job-id",
+        help=(
+            "Adopt a pre-created QUEUED job (used by the operations API); "
+            "by default a fresh job id is created."
+        ),
+    ),
+) -> None:
+    """Run one supervised data update and persist its job record.
+
+    Spawns ``data update`` as an argument-array subprocess (never a shell
+    string; only start/end/sources/disclosure-lookback-days are forwarded),
+    streams its output into ``data/service/jobs/<job_id>/`` append logs,
+    heartbeats ``status.json`` while it runs, and exits with the inner
+    CLI's success/failure code -- a conflict exits 75 with the stable
+    token ``update_already_running`` (spec §9.1).
+    """
+    project_root = _resolved_project_root(root)
+    try:
+        params = validate_update_params(
+            start=start,
+            end=end,
+            sources=sources,
+            disclosure_lookback_days=disclosure_lookback_days,
+        )
+    except InvalidUpdateParams as error:
+        _echo_failure(f"invalid parameter {error.parameter}: {error.reason}")
+        raise typer.Exit(code=1) from None
+    result = run_operations_update(project_root, params, job_id=job_id)
+    typer.echo(f"job_id={result.job_id}")
+    typer.echo(f"status={result.status}")
+    if result.run_id:
+        typer.echo(f"run_id={result.run_id}")
+    if result.dataset_version:
+        typer.echo(f"dataset_version={result.dataset_version}")
+    if result.failure_reason == UPDATE_ALREADY_RUNNING_CODE:
+        typer.echo(UPDATE_ALREADY_RUNNING_CODE)
+    elif result.failure_reason:
+        typer.echo(f"failure_reason={result.failure_reason}")
+    raise typer.Exit(code=operations_exit_code(result))
 
 
 # --------------------------------------------------------------------------- #
