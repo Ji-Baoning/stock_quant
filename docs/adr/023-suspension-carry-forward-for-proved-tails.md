@@ -150,3 +150,25 @@ own conclusions stand and are not superseded.
   lane): that reclassifies every empty response as acceptable evidence and
   rewires the pinned adapter contract; the ruling needs the opposite -- the
   error stays loud, and the *pipeline* decides what the proved subset means.
+
+## 补注(2026-10-02):条件 (a) 按 601198.SH 真实观察拓宽
+
+第三轮真实窗口(2026-09-25..2026-09-30;dated 证据:
+`docs/operations/2026-10-02-basic-factor-first-real-window.md` 第三节,提交
+`e35de482`)给出两票判定对照:`601059.SH` 的 membership 事实为
+`status="active"`,四条件成立,carry-forward 首次真实物化(3 根平价零量行 +
+INFO `suspension_row`);`601198.SH`(东兴证券)基线同为 `tushare_suspend`
+尾(09-24,13.06)且整窗逐票 `daily` 真空,但 membership
+`status="removed"`(2021-06-29 移出 CSI300)→ 旧条件 (a) 失败 → FATAL。
+同一形态仅因指数成员资格不同而分叉,证明 membership 状态与"该股是否有未来
+行"无关:bar 表对每只 carried 股票的序列连续性负责,指数移出但仍在上市且
+停牌的股票,其行必须延续(取数空、物化被挡、不处理则验收缺行——无第三条
+路)。该窗口供数已被 raw store 证实正常(24 票 × 3 行)。
+
+自本补注起,证据类条件 (a) 由"universe_membership 有 active 事实"拓宽为:
+**security master carried(该股在 security master 有上市事实)且其
+`delist_date` 为空或晚于窗口末**;master 缺该股 → fail-closed。其余三条件
+((b) 判定并入 (a) 的 delist 半边、(c) 停牌尾、(d) 真空响应)与
+`MAX_CARRY_FORWARD_DAYS = 10` 不变,退市守卫仍是安全边界。上文 Decision
+第 1 条的原措辞保留作历史记录,不回改;本补注与实现同步落地(实现:
+`src/stock_quant/data_pipeline.py` `_carry_forward_rows` 的条件判定)。
