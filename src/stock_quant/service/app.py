@@ -111,9 +111,14 @@ def create_app(
     )
     app.state.project_root = root
     app.state.query_budget_seconds = query_budget_seconds
-    app.include_router(datasets.router)
-    app.include_router(experiments.router)
-    app.include_router(tables.router)
+    # Document the shared error envelope on every versioned operation so the
+    # fail-closed contract is visible in openapi.json (spec §8.3).
+    error_responses = {
+        code: {"model": ErrorResponse} for code in ("404", "409", "422", "500")
+    }
+    app.include_router(datasets.router, responses=error_responses)
+    app.include_router(experiments.router, responses=error_responses)
+    app.include_router(tables.router, responses=error_responses)
     register_error_handlers(app)
 
     @app.get(f"{API_PREFIX}/health", response_model=HealthResponse, tags=["service"])

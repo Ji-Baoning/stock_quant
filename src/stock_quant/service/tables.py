@@ -50,6 +50,7 @@ class TableArguments(BaseModel):
 
 class TablePreviewResponse(BaseModel):
     dataset_version: str
+    requested_version: str
     table: str
     arguments: TableArguments
     columns: list[str]
@@ -199,6 +200,7 @@ def preview_table(
     ]
     return TablePreviewResponse(
         dataset_version=pinned.dataset_version,
+        requested_version=pinned.requested_version,
         table=table,
         arguments=TableArguments(
             requested_version=pinned.requested_version,
