@@ -73,3 +73,64 @@ def test_publishing_without_every_registered_table_is_fatal(tmp_path):
         QualityReport(), {name: None for name in STANDARDIZED_SCHEMAS}
     )
     assert whole.issues == ()
+
+
+def _differing_daily_frame() -> pd.DataFrame:
+    frame = _daily_frame()
+    frame["close"] = [11.0, 11.3, 11.5]
+    frame["high"] = [11.5, 11.8, 12.0]
+    frame["low"] = [10.5, 10.8, 11.0]
+    return frame
+
+
+def _full_registry_tables(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """One publishable payload: the named daily bars plus empty siblings."""
+    from stock_quant.data_model.dataset import STANDARDIZED_SCHEMAS
+
+    tables = {
+        name: pd.DataFrame(columns=list(schema.names))
+        for name, schema in STANDARDIZED_SCHEMAS.items()
+    }
+    tables["daily_bar"] = frame
+    return tables
+
+
+def test_publish_without_promotion_parks_the_version_and_keeps_current(tmp_path):
+    """``promote=False`` parks a version directory but never moves CURRENT.
+
+    The membership refresh (spec 7.0.10) parks the replacement dataset while
+    it appends the frozen definition to the registry; only the committed
+    generation-pointer swap may promote it.
+    """
+    publisher = DatasetPublisher(tmp_path)
+    old = publisher.publish(_full_registry_tables(_daily_frame()), QualityReport())
+    parked = publisher.publish(
+        _full_registry_tables(_differing_daily_frame()),
+        QualityReport(),
+        promote=False,
+    )
+    assert parked.version != old.version
+    assert (tmp_path / "data" / "standardized" / parked.version).is_dir()
+    assert publisher.current().version == old.version
+
+
+def test_promote_moves_current_to_a_parked_version(tmp_path):
+    """``promote`` points CURRENT at an already-published version directory."""
+    publisher = DatasetPublisher(tmp_path)
+    old = publisher.publish(_full_registry_tables(_daily_frame()), QualityReport())
+    parked = publisher.publish(
+        _full_registry_tables(_differing_daily_frame()),
+        QualityReport(),
+        promote=False,
+    )
+    assert publisher.current().version == old.version
+    publisher.promote(parked.version)
+    assert publisher.current().version == parked.version
+
+
+def test_promote_refuses_a_version_that_is_not_on_disk(tmp_path):
+    """A ``promote`` target must be an existing dataset directory."""
+    publisher = DatasetPublisher(tmp_path)
+    publisher.publish(_full_registry_tables(_daily_frame()), QualityReport())
+    with pytest.raises(DatasetNotFoundError, match="cannot promote"):
+        publisher.promote("deadbeef")

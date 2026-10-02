@@ -138,8 +138,15 @@ class DatasetPublisher:
         *,
         build_config: Mapping[str, Any] | None = None,
         table_tiers: Mapping[str, str] | None = None,
+        promote: bool = True,
     ) -> DatasetRef:
-        """Gate, stage and atomically publish one immutable dataset version."""
+        """Gate, stage and atomically publish one immutable dataset version.
+
+        With ``promote=False`` the new version is parked on disk while
+        ``CURRENT`` keeps naming the previous one; the membership refresh
+        (spec 7.0.10) promotes the parked version explicitly once its
+        generation-pointer swap commits.
+        """
         report = _with_registered_table_issues(report, tables)
         decision = evaluate_publication(report, table_tiers=table_tiers)
         if not decision.passed:
@@ -166,7 +173,8 @@ class DatasetPublisher:
             else:
                 self.standardized_root.mkdir(parents=True, exist_ok=True)
                 os.replace(staging, destination)
-            self._replace_current(dataset_version)
+            if promote:
+                self._replace_current(dataset_version)
             return DatasetRef(version=dataset_version, path=destination)
         except BaseException:
             if staging.exists():
@@ -187,6 +195,15 @@ class DatasetPublisher:
                 f"CURRENT names {version} but {path} is not a dataset directory"
             )
         return DatasetRef(version=version, path=path)
+
+    def promote(self, version: str) -> None:
+        """Point ``CURRENT`` at an already-published version directory."""
+        path = self.standardized_root / version
+        if not path.is_dir():
+            raise DatasetNotFoundError(
+                f"cannot promote {version!r}: {path} is not a dataset directory"
+            )
+        self._replace_current(version)
 
     def _replace_current(self, version: str) -> None:
         self.standardized_root.mkdir(parents=True, exist_ok=True)

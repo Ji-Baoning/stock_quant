@@ -642,6 +642,39 @@ python -c "import pandas as pd; print(pd.read_parquet('data/strategy_challenges/
   结果产物逐字节一致才可复用。**改变股票池版本、参数、成本情景或遭遇失败，
   都不会归还已消费的历史 holdout**：正式晋级必须等待真正未见的新历史 fold。
 
+## 阶段 9 · membership refresh 与崩溃恢复（spec 7.0.10 / ADR-024）
+
+单指针协议（Iceberg 式）：`data/.membership_generation.json` 是唯一权威指针；
+`CURRENT` 与顶层 universe 定义是 commit 后尽力重写的**派生缓存**——commit 中断
+不会撕裂工程，只可能留下落后的缓存，下一次校验自愈。回滚 = `configs/universes/
+versions/` 文件替换；同参数重跑幂等（版本与状态文件逐字节不变）。
+
+```bash
+# 换一个 universe 的切片并重发布：prepare 只落盘不提升（CURRENT/顶层定义不动、
+# 注册表多一条目），commit 一步原子换指针后重写缓存。
+python -m stock_quant data index-membership publish \
+  --universe-id custom_csi300_tw --definition-name custom_csi300_tw \
+  --input data/membership/custom_csi300_tw.parquet \
+  --rules-version <规则版本> \
+  --evidence-summary-sha256 <evidence manifest 的 SHA-256> --root project
+# 可选 --coverage-file：JSON {segments, gaps}（build_snapshot_facts 产物）；
+# 缺省时定义取单段 = [切片最小 raw_effective_from, 切片最大 attest 日]。
+# 输出 dataset_version= 与 definition_version=。
+
+# 崩溃/不一致后收敛到 operator 显式选择的 generation（不一致不猜）：
+python -m stock_quant data index-membership recover \
+  --to <definition_version> --root project
+```
+
+稳定错误码（退出码 2，输出 `FAILED: <error_code>: …`）：
+- `membership_generation_inconsistent`：generation 指针点名的 dataset 目录或
+  注册表条目缺失/内容哈希不符，或 recover 的 `--to` 目标未记录。状态与磁盘
+  不一致时**不猜**——由 operator 用 `--to` 显式选择目标 generation。
+- `membership_generation_state_malformed`：`data/.membership_generation.json`
+  无法解析；人工修复前拒绝一切 refresh/recover。
+输入被门禁拒绝时另有 `membership_prepared_frame_invalid` /
+`membership_facts_rejected`（证据/事实校验的 FATAL 不弱化）。
+
 ## 已知边界（务必记住，不是 bug）
 
 1. **`data bootstrap` 发布首个基线；`data update` 只扩展**：首个基线由

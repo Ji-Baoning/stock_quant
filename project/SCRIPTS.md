@@ -12,7 +12,7 @@
 | `project/clean_test_data.py` | active | 预览或清理历史派生数据与实验工件 | 无替代项 |
 | `project/collect_csi300_official.py` | migration | 采集并封存 CSI 官方历史公告 | 无替代项 |
 | `project/collect_index_constitution.py` | migration | 导出第三方指数成分包的不可变快照 | 无替代项 |
-| `project/collect_index_weight_membership.py` | migration | 拉取并转换 index_weight 成员证据 | 无替代项 |
+| `project/collect_index_weight_membership.py` | migration | 拉取 index_weight 成员证据并经 `prepare_refresh`/`commit_refresh` 换切片重发布 | `python -m stock_quant data index-membership publish`（不含取证拉取） |
 | `project/collect_sina_membership.py` | migration | 采集 Sina 历史成分作交叉证据 | 无替代项 |
 | `project/crosscheck_calendar_relay.py` | diagnostic | 以 relay 交叉核对已发布交易日历 | 无替代项 |
 | `project/drift_audit.py` | diagnostic | 季度全窗口漂移审计已发布原始快照 | 无替代项 |

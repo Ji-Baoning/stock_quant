@@ -479,6 +479,127 @@ def data_index_membership_prepare(
     typer.echo(f"output={output}")
 
 
+def _load_coverage_file(
+    path: Path | None,
+) -> tuple[tuple, tuple]:
+    """Load the optional JSON ``{segments, gaps}`` from build_snapshot_facts.
+
+    Every entry is validated into its coverage model so a malformed evidence
+    file is rejected before any refresh work starts.  No file means no
+    declared coverage: the refresh then defaults to one segment spanning the
+    slice's attested days.
+    """
+    if path is None:
+        return (), ()
+    from stock_quant.research.universe import (
+        MembershipCoverageGap,
+        MembershipCoverageSegment,
+    )
+
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    segments = tuple(
+        MembershipCoverageSegment.model_validate(item)
+        for item in payload.get("segments", ())
+    )
+    gaps = tuple(
+        MembershipCoverageGap.model_validate(item)
+        for item in payload.get("gaps", ())
+    )
+    return segments, gaps
+
+
+@index_membership_app.command("publish")
+def data_index_membership_publish(
+    universe_id: str = typer.Option(
+        ..., "--universe-id", help="Canonical universe id whose slice is replaced."
+    ),
+    definition_name: str = typer.Option(
+        ...,
+        "--definition-name",
+        help="Top-level definition file stem in configs/universes/.",
+    ),
+    input_path: Path = typer.Option(
+        ...,
+        "--input",
+        exists=True,
+        dir_okay=False,
+        help="Prepared canonical membership frame (.csv or .parquet).",
+    ),
+    rules_version: str = typer.Option(
+        ..., "--rules-version", help="Rules label the frozen definition pins."
+    ),
+    evidence_summary_sha256: str = typer.Option(
+        ...,
+        "--evidence-summary-sha256",
+        help="SHA-256 of the evidence summary the definition pins.",
+    ),
+    coverage_file: Path = typer.Option(
+        None,
+        "--coverage-file",
+        help="JSON {segments, gaps} from build_snapshot_facts (optional).",
+    ),
+    root: Path = typer.Option(".", "--root", help="Project root."),
+) -> None:
+    """Replace one universe's slice and republish (spec 7.0.10).
+
+    prepare parks the new dataset and appends the frozen definition to the
+    registry without promoting anything; commit is one atomic
+    generation-pointer swap whose derived caches (CURRENT, top-level
+    definition) are rewritten best-effort.  An interrupted commit never
+    tears: the next verify heals lagging caches.
+    """
+    from stock_quant.data_model.index_membership_import import read_snapshot_rows
+    from stock_quant.data_model.membership_refresh import (
+        MembershipRefreshError,
+        commit_refresh,
+        prepare_refresh,
+    )
+
+    project_root = _resolved_project_root(root)
+    segments, gaps = _load_coverage_file(coverage_file)
+    try:
+        generation = prepare_refresh(
+            project_root,
+            universe_id=universe_id,
+            definition_name=definition_name,
+            prepared_frame=read_snapshot_rows(input_path),
+            rules_version=rules_version,
+            evidence_summary_sha256=evidence_summary_sha256,
+            segments=segments,
+            gaps=gaps,
+        )
+        commit_refresh(project_root, generation)
+    except MembershipRefreshError as error:
+        _echo_failure(f"{error.error_code}: {error}")
+        raise typer.Exit(code=2) from None
+    typer.echo(f"dataset_version={generation.dataset_version}")
+    typer.echo(f"definition_version={generation.definition_version}")
+
+
+@index_membership_app.command("recover")
+def data_index_membership_recover(
+    to: str = typer.Option(
+        ...,
+        "--to",
+        help="definition_version of the target generation.",
+    ),
+    root: Path = typer.Option(".", "--root", help="Project root."),
+) -> None:
+    """Converge a torn membership refresh to an operator-chosen generation."""
+    from stock_quant.data_model.membership_refresh import (
+        MembershipRefreshError,
+        recover_refresh,
+    )
+
+    project_root = _resolved_project_root(root)
+    try:
+        generation = recover_refresh(project_root, to)
+    except MembershipRefreshError as error:
+        _echo_failure(f"{error.error_code}: {error}")
+        raise typer.Exit(code=2) from None
+    typer.echo(f"recovered_to={generation.definition_version}")
+
+
 # --------------------------------------------------------------------------- #
 # data acceptance group (operator workflows over the registry; read-only
 # except the single append-only registry write done by publish)

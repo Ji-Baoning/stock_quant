@@ -22,18 +22,20 @@ Pipeline (one command, network only in step 1):
    snapshots therefore date mid-month rebalances with up to ~1 month of lag —
    a documented approximation.
 4. Import through the shared, evidence-bound conversion
-   (:func:`prepare_membership_file`) and republish the dataset with the
-   resulting ``universe_membership`` table.
-5. Emit the frozen universe definition YAML with the real hashes so the
-   walk-forward specs can pin it.
+   (:func:`prepare_membership_file`) into the canonical membership frame.
+5. Refresh: :func:`prepare_refresh` replaces this universe's slice, parks the
+   new dataset without promoting it and appends the frozen schema-v2
+   definition to ``configs/universes/versions/``; :func:`commit_refresh` then
+   swaps the generation pointer in one atomic step (spec 7.0.10, ADR-024),
+   rewriting the derived ``CURRENT`` and top-level-definition caches.
 
 Permission note (2026-09-13): both the tushare relay and the shared GET proxy
 pass ``index_weight`` through, so the low-point token is no longer a blocker;
 the pull goes through ``TushareSource`` auto transport (relay first).
 
-The republished dataset carries the baseline manifest's ``build_config``
-(calendar evidence) forward and the frozen definition pins the dataset's
-actual ``daily_bar`` coverage window, so ``data validate`` passes on the
+The refreshed dataset carries the baseline manifest's ``build_config``
+(calendar evidence) forward and the frozen definition pins the slice's
+attested coverage window, so ``data validate`` passes on the
 published version.
 
 Default ``--universe-id`` is a ``custom_`` pool because the canonical
@@ -49,19 +51,20 @@ import argparse
 import hashlib
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
-import yaml
 
 from stock_quant.config import ProjectConfig, load_project_config
-from stock_quant.data_model.dataset import DatasetPublisher, DatasetReader
 from stock_quant.data_model.index_membership_import import (
     prepare_membership_file,
 )
-from stock_quant.data_quality.models import QualityReport
+from stock_quant.data_model.membership_refresh import (
+    commit_refresh,
+    prepare_refresh,
+)
 from stock_quant.data_sources.base import DataRequest
 from stock_quant.data_sources.tushare import TushareSource
 from stock_quant.project_root import resolve_project_root
@@ -228,58 +231,25 @@ def run(
         f"membership_table_sha256={result.content_hash}"
     )
 
-    # ---- step 5: republish the dataset with the membership table ----------
-    publisher = DatasetPublisher(root)
-    version = publisher.current().version
-    with DatasetReader(root).open(version) as dataset:
-        tables = {name: dataset.read(name) for name in dataset.tables}
-        # The calendar evidence in the baseline manifest describes the carried
-        # trading_calendar/daily_bar tables, which this republish carries
-        # unchanged; dropping it would make the new version fail validation
-        # with calendar_coverage_missing.
-        build_config = (
-            dataset.manifest.get("build_config")
-            if isinstance(dataset.manifest, Mapping)
-            else None
-        )
-    tables["universe_membership"] = result.frame
-    published = publisher.publish(
-        tables, QualityReport(), build_config=build_config
+    # ---- step 5+6: crash-consistent slice refresh (spec 7.0.10/ADR-024) ---
+    # prepare replaces this universe's slice, parks the new dataset without
+    # promoting it and appends the frozen schema-v2 definition to the
+    # registry; commit swaps the generation pointer in one atomic step and
+    # rewrites the derived CURRENT/top-level-definition caches.
+    generation = prepare_refresh(
+        root,
+        universe_id=universe_id,
+        definition_name=universe_id,
+        prepared_frame=result.frame,
+        rules_version="tushare-index-weight-monthly-v1",
+        evidence_summary_sha256=manifest_sha256,
     )
-    print(f"dataset_version={published.version}")
-
-    # ---- step 6: emit the frozen universe definition ----------------------
-    with DatasetReader(root).open(published.version) as dataset:
-        daily = dataset.read("daily_bar")
-    coverage_start = pd.to_datetime(daily["trade_date"]).min().date()
-    coverage_end = pd.to_datetime(daily["trade_date"]).max().date()
-    definition = {
-        "schema_version": 1,
-        "universe_id": universe_id,
-        "membership_table_sha256": result.content_hash,
-        "evidence_summary_sha256": manifest_sha256,
-        "coverage_start": coverage_start.isoformat(),
-        "coverage_end": coverage_end.isoformat(),
-        "rules_version": "tushare-index-weight-monthly-v1",
-    }
-    definition_path = root / "configs" / "universes" / f"{universe_id}.yml"
-    header = (
-        "# Frozen universe definition generated by "
-        "collect_index_weight_membership.py.\n"
-        "# evidence_summary_sha256 = SHA-256 of data/raw/csi/index_weight/"
-        "manifest.json,\n"
-        "# which pins the SHA-256 of every monthly index_weight snapshot "
-        "file.\n"
-    )
-    definition_path.write_text(
-        header
-        + yaml.safe_dump(definition, sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
-    )
-    derived = _sha256_file(definition_path)
-    print(f"definition={definition_path} (universe_version={derived})")
+    commit_refresh(root, generation)
+    print(f"dataset_version={generation.dataset_version}")
+    print(f"definition_version={generation.definition_version}")
     print("next: research specs pin universe_definition: "
-          f"{universe_id} + universe_version: {derived[:16]}…")
+          f"{universe_id} + universe_version: "
+          f"{generation.definition_version[:16]}…")
     return 0
 
 
@@ -300,7 +270,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="custom_<slug> (no cardinality check) or csi300 (exactly 300/day)",
     )
     parser.add_argument("--skip-pull", action="store_true",
-                        help="reuse stored snapshots; only re-run steps 2-5")
+                        help="reuse stored snapshots; skip the network pull")
     args = parser.parse_args(argv)
     root = resolve_project_root(args.root)
     config = load_project_config(root)
