@@ -195,3 +195,7 @@ research run.
 This file describes the current lifecycle and the ordering constraints that
 make it auditable. The prohibitions it implies are stated normatively in
 `invariants.md`; the operator procedure is `RUNBOOK.md`.
+
+- 自动更新路径（P4）：timer → `operations update` →（job 记录 + 心跳）→
+  `data update` 子进程（raw → normalize → gate → publish，不变）。验收不
+  自动化：job SUCCEEDED 只表示发布门禁通过，ACCEPTED 仍需人工验收。

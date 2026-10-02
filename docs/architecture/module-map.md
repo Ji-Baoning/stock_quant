@@ -92,3 +92,9 @@ raised rather than assumed acceptable.
 This map records where code lives and which direction imports flow. It does
 not restate what each module guarantees — that is `invariants.md` — nor why a
 boundary was chosen — that is `docs/adr/`.
+
+- `stock_quant/operations/`：update_lock（flock 单飞锁与冲突常量）、runner
+  （参数数组 spawn + 心跳监督）、jobs（`data/service/jobs` 持久化 + 孤儿
+  判定）、api/serve（默认禁用、仅环回的三端点操作面）、systemd_units（纯
+  渲染）。禁止依赖方向：不 import DataPipeline、不 import research、不构造
+  发布器；唯一写路径 = 内层 `data update` CLI 子进程。

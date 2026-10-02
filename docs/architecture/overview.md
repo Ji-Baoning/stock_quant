@@ -106,3 +106,8 @@ timestamps, host, pid, worker count) never enters an identity hash.
   `docs/operations/`; historical design lives in `docs/superpowers/`.
 - Where this file and an ADR disagree, the ADR governs the decision and this
   file is stale — fix it rather than citing both.
+
+- 操作面与调度（P4，2026-10）：CLI 仍是唯一领域写入口；`operations update`
+  是带持久 job 记录（`data/service/jobs/`）的触发外壳，内层仍是同一条
+  `data update` 链，经 project-local flock 单飞；操作 API 默认禁用、启用后
+  仅环回；systemd timer 只调外壳。仍无数据库。

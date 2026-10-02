@@ -719,3 +719,135 @@ python -m stock_quant data index-membership recover \
    一旦被消费即永久消费；失败、崩溃、拒绝结论都不会归还。挑战者结果产物
    必须在声明发布与消费完成之后再打开；PROMOTED 只表示研究晋级，不表示
    自动部署或投资许可。
+
+## 阶段 10 · 操作面：只读服务、单飞锁、operations update 与 job 记录（2026-10-02 追加，P3+P4）
+
+> 本节由 P4 批次追加，上方各节未改动。规格依据：
+> docs/superpowers/specs/2026-09-29-panda-data-loop-grafting-design.md §8（只读查询面）、§9（操作面与调度）。
+> **编号说明**：`## 阶段 9` 归 P2b membership refresh 计划（批次顺序在前）；本节的 10.x 子节号与之互不冲突。
+
+### 10.0 组件与稳定信号
+
+- 单飞锁：`data/.locks/update.lock`，flock(2) 语义。锁的生存期 = 持锁进程的
+  生存期：进程退出或崩溃由内核自动释放，不存在 stale lock，任何恢复路径都
+  **不删除、不重建**该锁文件。手工 `data update`、`operations update`（内层
+  仍调 `data update`）、操作 API 与 systemd timer 最终都由内层 `data update`
+  取同一把锁。
+- 冲突信号（写死常量，`src/stock_quant/operations/update_lock.py`）：退出码
+  `75` + 稳定 token 行 `update_already_running`。脚本一律判退出码。
+- job 记录：`data/service/jobs/<job_id>/`——`request.json`（一次写定，不可变）、
+  `stdout.log`/`stderr.log`（追加）、`status.json`（原子替换；含 pid、boot_id、
+  heartbeat_at）。状态词汇固定：QUEUED/RUNNING/SUCCEEDED/FAILED/
+  CANCELLED_BY_SHUTDOWN。job id 不参与 dataset version 计算。
+- 操作 API：默认禁用；启用后仍只绑 127.0.0.1。
+
+### 10.1 启动与停止
+
+```bash
+# 只读查询服务（P3 交付；可选，只在需要 HTTP 查数/看报表时启动）
+python -m stock_quant.service --root . --port 8321                # 127.0.0.1:8321
+# 停止 = 结束该进程（Ctrl-C 或 kill）。无状态，重启即恢复。
+
+# 操作 API（P4 交付；可选；只在需要 HTTP 触发/查看时启动）
+python -m stock_quant.operations.serve --root . --enable          # 127.0.0.1:8642
+python -m stock_quant.operations.serve --root . --enable --port 8643
+# 停止 = 结束该进程（Ctrl-C 或 kill）。正在运行的 job 子进程独立存活并继续
+# 心跳；若它也死了，下一次 API 请求的自检会把它改记 FAILED/orphaned_process。
+
+# systemd timer（安装见 10.6；这是唯一受调度入口）
+systemctl list-timers 'stock-quant-data-update@*'
+sudo systemctl stop  stock-quant-data-update@<escaped-root>.timer   # 停用计划
+sudo systemctl start stock-quant-data-update@<escaped-root>.timer   # 恢复计划
+```
+
+**两个服务是两个进程、两个端口**（只读 8321 / 操作 8642），默认都只绑环回。Vue 门户（P5）对两者的调用**必须由同一个源分别转发两条前缀**（dev proxy 两条规则 / 生产反向代理同样拆分），否则浏览器的单源策略会让其中一半请求打不出去。端口默认值**已由 owner 裁定并统一**：只读 8321（本计划与之绑定的 `--port` 默认见 [panda-query-service](2026-10-01-panda-query-service.md) Task 5）、操作 8642（本计划 `serve.DEFAULT_PORT`），P3/P4/P5 三份计划不得各自另定。前端侧的转发形态见 [panda-web-portal](2026-10-01-panda-web-portal.md) pin I12 与"开工前必须知道的实现形态"第 8 条。
+
+### 10.2 锁冲突处置（退出码 75 / update_already_running）
+
+- 含义：另一个更新进程持有本项目 root 的 flock。**不排队、不打扰持锁者**，
+  当前命令立即失败。
+- 处置：确认谁在跑——`ls data/service/jobs/` 找 RUNNING（手工 CLI 没有 job：
+  `ps -ef | grep 'stock_quant data update'`）；等它结束，或由 owner 决定是否
+  人工干预持锁进程。
+- **永远不要删除 `data/.locks/update.lock`**：文件存在不代表锁被持有；持锁者
+  崩溃后内核已自动释放；删除毫无必要。
+
+### 10.3 失败检查
+
+```bash
+# CLI 视角（一次失败运行）：输出 job_id= / status=FAILED / failure_reason=...
+python -m stock_quant operations update --root .          # 退出码 0/1/75
+
+# job 视角
+cat data/service/jobs/<job_id>/status.json      # 状态、退出码、失败原因码
+tail -50 data/service/jobs/<job_id>/stdout.log  # 质量门禁阻断行（blocking issue: ...）
+tail -50 data/service/jobs/<job_id>/stderr.log
+
+# API 视角（操作面启用时）
+curl -s http://127.0.0.1:8642/api/v1/update-jobs
+curl -s http://127.0.0.1:8642/api/v1/update-jobs/<job_id>
+
+# timer 视角
+journalctl -u stock-quant-data-update@<escaped-root>.service -n 100
+```
+
+失败不自动重试：再次运行 = 新 job id（显式命令、POST 或下一次计划触发）。
+调度失败通知只读 job 的最终状态，不解析质量问题决定"忽略后继续"。
+
+### 10.4 操作 API 的三个端点（没有别的）
+
+- `POST /api/v1/update-jobs`：参数只接受
+  start/end/sources/disclosure_lookback_days；参数非法 → 422；已有活跃 job →
+  409（code=update_already_running，附 job_id）。手工 CLI 持锁（job 体系外）
+  时 POST 会创建一个最终 FAILED/update_already_running 的 job——锁才是跨
+  入口的最终单飞裁决。
+- `GET /api/v1/update-jobs`：持久化任务摘要。
+- `GET /api/v1/update-jobs/{id}`：状态 + 脱敏日志尾部（秘密值与绝对路径已
+  打码）。未知 id → 404。
+- 没有取消、重试到成功、删除日志、验收或研究端点；默认禁用（503）。
+
+### 10.5 孤儿 job 判定
+
+- 唯一存活证据是 `status.json` 里的心跳（pid + heartbeat_at + boot_id）。
+  **目录存在 ≠ 存活；日志安静 ≠ 存活。**
+- API 每次请求前的自检把以下情况改记 FAILED、原因码 `orphaned_process`：
+  RUNNING 但心跳缺失；boot_id 与当前内核不同（机器重启过，pid 可能已被
+  复用）；心跳超过约 5 分钟（阈值 300s）。超过 5 分钟仍未进入 RUNNING 的
+  QUEUED 记 `orphaned_process`/never_started。
+- 被判孤儿的 job **目录与日志一律保留**，只改写 status.json。
+
+### 10.6 timer 安装与一次真实触发（owner 授权步骤）
+
+```bash
+# 实例名 = systemd-escape 的项目根（渲染函数：stock_quant.operations.systemd_units）
+systemd-escape -p /home/ji/work/program/stock     # → home-ji-work-program-stock
+sudo systemctl link /home/ji/work/program/stock/systemd/stock-quant-data-update@.service
+sudo systemctl link /home/ji/work/program/stock/systemd/stock-quant-data-update@.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now stock-quant-data-update@home-ji-work-program-stock.timer
+# 验证（触发一次真实更新需 owner 授权；或趁手工更新持锁时验证冲突路径）：
+sudo systemctl start stock-quant-data-update@home-ji-work-program-stock.service
+journalctl -u stock-quant-data-update@home-ji-work-program-stock.service -n 50
+# 回滚：
+sudo systemctl disable --now stock-quant-data-update@home-ji-work-program-stock.timer
+```
+
+时区 Asia/Shanghai 由 OnCalendar 的时区后缀固定；`Persistent=false`：停机
+错过的触发只记 journal，不在恢复后补跑风暴。
+
+### 10.7 崩溃后的恢复
+
+1. 锁：无需处理（内核已释放；不要删锁文件）。
+2. RUNNING 但心跳停了的 job：最多等一个自检周期（约 5 分钟）自动转
+   FAILED/orphaned_process；急查可直接读该 job 的 status.json 心跳时间。
+3. dataset：崩溃期间没有发布就是没有发布——CURRENT 指向的仍是旧版本；重新
+   跑一次 `operations update`（或等下一次 timer 触发），会产生**新 job id**。
+4. 若内层更新在崩溃前已发布成功而 job 被误判 orphaned_process：以
+   `data/dataset/` 的实际版本为准（job 记录不是数据真相）。
+5. 残破目录（有 request.json 无 status.json 的极小概率中间态）：无 runner
+   会采用它，保留即可，不要手工清理 job 历史。
+6. membership generation 不一致（`data/.membership_generation.json` 与磁盘实际
+   不符）：refresh 入口与常驻服务启动都会 fail closed 报稳定错误码，**不自动
+   猜、不自动修**；处置步骤在 `## 阶段 9`（P2b membership refresh 节），由
+   operator 显式 `python -m stock_quant data index-membership recover --to
+   <definition_version>` 选回滚到哪一代，回滚是文件替换而非重建。
