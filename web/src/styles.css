@@ -30,3 +30,16 @@ blockquote { margin: var(--space-2) 0; padding: var(--space-2) 14px; border-left
 .badge-state--block { border-color: var(--color-block); color: var(--color-block); }
 .badge-state--pending { border-color: var(--color-pending); color: var(--color-pending); }
 .badge-state--neutral { border-color: var(--color-border-strong); color: var(--color-text-secondary); }
+/* Card / KpiCard（Task 3） */
+.card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: var(--space-4) var(--space-5); margin: 0 0 var(--space-4); }
+.card-title { margin: 0 0 var(--space-3); font-size: var(--font-size-heading); }
+.kpi { display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-3) var(--space-4); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); }
+.kpi-label { font-size: var(--font-size-small); color: var(--color-text-secondary); }
+.kpi-num { font-variant-numeric: tabular-nums; }
+.kpi-value { font-size: var(--font-size-kpi); font-weight: 600; }
+.kpi-value--up { color: var(--color-up); }
+.kpi-value--down { color: var(--color-down); }
+.kpi-value--pending { color: var(--color-pending); }
+.kpi-value--block { color: var(--color-block); }
+.kpi-compare { font-size: var(--font-size-small); color: var(--color-text-secondary); }
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: var(--space-3); }
