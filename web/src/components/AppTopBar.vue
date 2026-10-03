@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { onMounted } from "vue";
 import { useApiClient } from "../api/client";
-import { NAV_ITEMS } from "../router";
 import {
   hasNewerCurrent,
   setCurrentVersion,
@@ -40,10 +39,6 @@ onMounted(async () => {
 
 <template>
   <header class="top-bar" data-testid="top-bar">
-    <span class="brand">Stock Quant 数据门户</span>
-    <nav class="nav" data-testid="main-nav">
-      <RouterLink v-for="item in NAV_ITEMS" :key="item.path" :to="item.path">{{ item.label }}</RouterLink>
-    </nav>
     <span class="fingerprint" data-testid="project-fingerprint">
       项目指纹：<code>{{ versionPinState.projectFingerprint ?? "获取失败" }}</code>
     </span>
