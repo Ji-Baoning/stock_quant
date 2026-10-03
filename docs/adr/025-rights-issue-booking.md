@@ -1,7 +1,18 @@
+---
+status: accepted
+date: 2026-10-03
+decision: "已实现且有可用配股价的配股在除权日按全额参与口径入账：应配 round(持仓 × r, HALF_UP)，认购以当日可用现金为预算上限（同一事件的现金分红先入账、后算预算），现金不足按可用现金部分认购、弃配逐事件留痕；无价（unpriced）配股与所有其余复杂公司行为继续 fail-closed 中止。"
+affects:
+  - src/stock_quant/backtest/corporate_actions.py
+  - src/stock_quant/backtest/account.py
+  - src/stock_quant/backtest/models.py
+  - src/stock_quant/backtest/engine.py
+  - src/stock_quant/research/runner.py
+  - src/stock_quant/reporting/html.py
+---
+
 # 025. Rights issues book at full participation
 
-- Status: accepted
-- Date: 2026-10-03
 - Spec: docs/superpowers/specs/2026-09-27-rights-issue-booking-design.md（编号
   说明：设计 §7.1 原取 023，登记时 023/024 已被占用，顺延为 025）
 
