@@ -11,8 +11,10 @@ on the ex-date before the open:
   and sells consume whole lots FIFO across lots as usual).
 
 Re-applying the same ``action_id`` is a no-op guarded by a unique-action-id
-check (one ledger entry per unique action id).  Rights issues, mergers,
-conversions, incomplete or cross-source-conflicted actions touching a *held*
+check (one ledger entry per unique action id).  Rights issues with a usable
+subscription price book at full participation (bounded by available cash; the
+shortfall is recorded); mergers, conversions, incomplete or
+cross-source-conflicted actions and unpriced rights issues touching a *held*
 name raise :class:`UnsupportedCorporateAction` and abort that scenario;
 actions for names the account does not hold never mutate it.
 
@@ -27,7 +29,7 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Mapping
 
 from stock_quant.backtest.account import Account
@@ -100,10 +102,12 @@ def apply_corporate_action(
         raise UnsupportedCorporateAction(
             f"corporate action {action_id} is incomplete (missing record/ex date)"
         )
-    if _ratio(_field(action, "rights_issue_ratio")) > 0:
+    rights_ratio = _ratio(_field(action, "rights_issue_ratio"))
+    rights_price = _ratio(_field(action, "rights_issue_price"))
+    if rights_ratio > 0 and rights_price <= 0:
         raise UnsupportedCorporateAction(
-            f"corporate action {action_id} is a rights issue, which a "
-            f"holding-period backtest cannot book"
+            f"corporate action {action_id} is a rights issue without a usable "
+            "subscription price"
         )
 
     cash_per_share = _ratio(_field(action, "cash_dividend_per_share"))
@@ -118,22 +122,51 @@ def apply_corporate_action(
     if any(booked.action_id == action_id for booked in account.action_ledger):
         return None
 
-    # Cash dividend against the record-date holding; then share increases from
-    # bonus/capitalization ratios against the whole ex-date holding.
+    held_before = account.position_quantity(symbol)
     cash_amount = _dividend_cash(account, symbol, record_date, cash_per_share)
-    shares_added = _bonus_shares(account, symbol, bonus, capitalization)
+    bonus_shares = _bonus_shares(account, symbol, bonus, capitalization)
 
     note = _text(_field(action, "source")) or "corporate_action"
     if cash_amount > 0:
         account.credit_cash(cash_amount, note=f"dividend {symbol}")
-    if shares_added > 0:
+
+    # Rights subscription (ADR-025): full participation bounded by the cash
+    # available on the ex-date after any same-event dividend credit.
+    entitlement = subscribed = 0
+    cash_paid = Decimal("0")
+    if rights_ratio > 0:
+        entitlement = int(
+            (Decimal(held_before) * rights_ratio).to_integral_value(
+                rounding=ROUND_HALF_UP
+            )
+        )
+        affordable = int(
+            (account.cash / rights_price).to_integral_value(rounding=ROUND_FLOOR)
+        )
+        subscribed = min(entitlement, affordable)
+        if subscribed > 0:
+            cash_paid = (Decimal(subscribed) * rights_price).quantize(
+                CENT, rounding=ROUND_HALF_UP
+            )
+
+    if bonus_shares > 0:
         account.increase_position(
             symbol,
-            shares_added,
+            bonus_shares,
             buy_date=ex_date,
             fill_id=action_id,
             note=f"{bonus + capitalization} ratio credit",
         )
+    if subscribed > 0:
+        account.debit_cash(cash_paid, note=f"rights subscription {symbol}")
+        account.increase_position(
+            symbol,
+            subscribed,
+            buy_date=ex_date,
+            fill_id=action_id,
+            note=f"rights {rights_ratio} ratio subscription",
+        )
+    shares_added = bonus_shares + subscribed
     entry = CorporateActionLedgerEntry(
         seq=len(account.action_ledger),
         action_id=action_id,
@@ -142,6 +175,9 @@ def apply_corporate_action(
         record_date=record_date,
         cash_credited=cash_amount,
         shares_added=shares_added,
+        cash_paid=cash_paid,
+        rights_entitlement_shares=entitlement,
+        rights_subscribed_shares=subscribed,
         note=note,
     )
     account.record_corporate_action(entry)

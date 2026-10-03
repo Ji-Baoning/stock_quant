@@ -11,7 +11,7 @@ held name raise :class:`UnsupportedCorporateAction`.
 """
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from itertools import count
 
 import pytest
@@ -193,7 +193,7 @@ def test_cash_dividend_uses_the_record_date_holding_quantity():
 # --------------------------------------------------------------------------- #
 
 
-def test_rights_issue_on_a_held_name_raises_unsupported(
+def test_a_priced_rights_issue_without_a_usable_price_raises_unsupported(
     account_with_record_date_holding,
 ):
     action = implemented_action(
@@ -201,9 +201,19 @@ def test_rights_issue_on_a_held_name_raises_unsupported(
         cash_per_share=0.0,
         bonus_ratio=0.0,
     )
-    with pytest.raises(UnsupportedCorporateAction):
+    # rights_issue_price 保持 None：r>0 且无有效价 → fail closed（ADR-025）
+    with pytest.raises(UnsupportedCorporateAction, match="without a usable"):
         apply_corporate_action(account_with_record_date_holding, action)
     assert account_with_record_date_holding.action_ledger == ()
+
+
+def test_zero_subscription_price_with_ratio_raises_unsupported(
+    account_with_record_date_holding,
+):
+    action = implemented_action(rights_ratio=0.3, cash_per_share=0.0, bonus_ratio=0.0)
+    action["rights_issue_price"] = 0.0
+    with pytest.raises(UnsupportedCorporateAction, match="without a usable"):
+        apply_corporate_action(account_with_record_date_holding, action)
 
 
 def test_not_implemented_action_on_a_held_name_raises_unsupported(
@@ -245,6 +255,91 @@ def test_a_repeat_action_id_is_always_a_no_op_keeping_the_first_booking(
 
 def test_action_id_is_deterministic():
     assert action_id_of("600000.SH", date(2020, 1, 7)) == "600000.SH#2020-01-07"
+
+
+# --------------------------------------------------------------------------- #
+# Rights-issue subscription booking (ADR-025)
+# --------------------------------------------------------------------------- #
+
+
+def _rights_action(ratio: float, price: float) -> dict:
+    action = implemented_action(rights_ratio=ratio, cash_per_share=0.0, bonus_ratio=0.0)
+    action["rights_issue_price"] = price
+    return action
+
+
+def test_full_rights_subscription_conserves_equity_at_terp(
+    account_with_record_date_holding,
+):
+    # 合成价格（§8.1.8）：P=9.10、r=0.3、s=13.00 → TERP=10.00 精确有限小数。
+    p_prev, price = Decimal("9.10"), Decimal("13.00")
+    account = account_with_record_date_holding  # 100 股、现金 10000.00
+    apply_corporate_action(account, _rights_action(0.3, 13.0))
+    entry = account.action_ledger[-1]
+    assert entry.rights_entitlement_shares == 30
+    assert entry.rights_subscribed_shares == 30
+    assert entry.cash_paid == Decimal("390.00")
+    assert entry.shares_added == 30
+    terp = (p_prev + Decimal("0.3") * price) / (Decimal("1.3"))
+    assert terp == Decimal("10.00")
+    pre = Decimal("10000.00") + Decimal(100) * p_prev
+    post = account.cash + Decimal(account.position_quantity("600000.SH")) * terp
+    assert post == pre
+
+
+def test_partial_subscription_bounded_by_available_cash():
+    account = _account("200", lots=[("600000.SH", 100, date(2020, 1, 2))])
+    apply_corporate_action(account, _rights_action(0.3, 13.0))
+    entry = account.action_ledger[-1]
+    assert entry.rights_entitlement_shares == 30
+    assert entry.rights_subscribed_shares == 15  # floor(200/13)
+    assert entry.cash_paid == Decimal("195.00")
+    assert account.cash == Decimal("5.00")  # 再多一股就超支
+    assert account.position_quantity("600000.SH") == 115
+
+
+def test_zero_subscription_still_records_the_entry():
+    account = _account("0", lots=[("600000.SH", 100, date(2020, 1, 2))])
+    apply_corporate_action(account, _rights_action(0.3, 13.0))
+    entry = account.action_ledger[-1]
+    assert entry.rights_entitlement_shares == 30
+    assert entry.rights_subscribed_shares == 0
+    assert entry.cash_paid == Decimal("0")
+    assert account.cash == Decimal("0")
+    assert account.position_quantity("600000.SH") == 100
+
+
+def test_subscription_shares_follow_the_t_plus_one_rule():
+    account = _account("10000", lots=[("600000.SH", 100, date(2020, 1, 2))])
+    apply_corporate_action(account, _rights_action(0.3, 13.0))
+    # ex_date=2020-01-07；_OPEN_DAYS 的次一开放日是 2020-01-08。
+    open_entry = account.position_ledger[-1]
+    assert open_entry.kind == "OPEN"
+    assert open_entry.quantity == 30
+    assert open_entry.available_date == date(2020, 1, 8)
+
+
+def test_same_event_dividend_credits_before_subscription_budget():
+    # 分红先入账、后算预算：现金分红提高认购能力（§2 共现次序）。
+    account = _account("300", lots=[("600000.SH", 100, date(2020, 1, 2))])
+    action = _rights_action(0.3, 13.0)
+    action["cash_dividend_per_share"] = 1.0  # 100 股 → 分红 100 → 预算 400
+    apply_corporate_action(account, action)
+    entry = account.action_ledger[-1]
+    assert entry.cash_credited == Decimal("100.00")
+    assert entry.rights_subscribed_shares == 30  # floor(400/13)=30=应配 → 全额
+    assert account.cash == Decimal("10.00")
+
+
+def test_idempotent_reapplication_of_a_priced_rights_issue():
+    account = _account("10000", lots=[("600000.SH", 100, date(2020, 1, 2))])
+    action = _rights_action(0.3, 13.0)
+    first = apply_corporate_action(account, action)
+    cash_after_first = account.cash
+    assert first is not None
+    assert apply_corporate_action(account, action) is None
+    assert account.cash == cash_after_first
+    assert len(account.action_ledger) == 1
 
 
 # --------------------------------------------------------------------------- #
