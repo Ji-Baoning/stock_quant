@@ -1047,7 +1047,13 @@ def test_a_priced_rights_issue_in_the_superset_but_not_held_is_a_no_op():
     first_after = next(day for day in _MARKET.days if day > kappa_ex)
     schedule = (
         _MARKET.schedule[:1]
-        + (OrderDay(trade_date=first_after, sells=(), buys=(Order("rk1", BUY, KAPPA, 100),)),)
+        + (
+            OrderDay(
+                trade_date=first_after,
+                sells=(),
+                buys=(Order("rk1", BUY, KAPPA, 100),),
+            ),
+        )
         + _MARKET.schedule[1:]
     )
     result = BacktestEngine().run(_request_with(actions=actions, schedule=schedule))

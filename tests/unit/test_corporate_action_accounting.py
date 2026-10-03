@@ -5,9 +5,10 @@ onto an account that holds the name on the action's ``ex_date``: on the ex-date
 before the open it credits the pre-tax cash dividend using the holding
 quantity on the ``record_date`` (lots whose ``buy_date <= record_date``) and
 increases the share count by the bonus/capitalization ratios.  Applying the
-same ``action_id`` twice is a no-op (one ledger entry), while rights issues,
-mergers, conversions, incomplete or cross-source-conflicted actions touching a
-held name raise :class:`UnsupportedCorporateAction`.
+same ``action_id`` twice is a no-op (one ledger entry).  Priced rights issues
+book at full participation (ADR-025), while unpriced rights issues, mergers,
+conversions, incomplete or cross-source-conflicted actions touching a held
+name raise :class:`UnsupportedCorporateAction`.
 """
 
 from datetime import date
@@ -411,5 +412,9 @@ def test_ledger_entry_rejects_subscribed_above_entitlement():
 def test_action_ledger_frame_carries_new_columns_even_when_empty():
     frame = BacktestEngine._action_ledger_frame([])
     assert list(frame.columns) == list(ACTION_LEDGER_COLUMNS)
-    for column in ("cash_paid", "rights_entitlement_shares", "rights_subscribed_shares"):
+    for column in (
+        "cash_paid",
+        "rights_entitlement_shares",
+        "rights_subscribed_shares",
+    ):
         assert column in frame.columns

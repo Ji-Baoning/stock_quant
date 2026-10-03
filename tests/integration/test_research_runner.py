@@ -76,6 +76,7 @@ from conftest import (
 from stock_quant.backtest.models import BUY
 from stock_quant.cli import app
 from stock_quant.data_model.adjusted_bar import build_adjusted_bars
+from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.corporate_action_coverage import (
     OUTCOME_SUCCESS_EVENTS,
     CoverageReason,
@@ -83,7 +84,6 @@ from stock_quant.data_model.corporate_action_coverage import (
     coverage_frame,
     coverage_record,
 )
-from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.dataset import (
     DatasetPublisher,
     DatasetReader,

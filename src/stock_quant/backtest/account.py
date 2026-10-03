@@ -42,7 +42,7 @@ class DuplicateFillError(AccountError):
 
 
 class CashShortfallError(AccountError):
-    """Applying a fill would push cash below zero."""
+    """Applying a fill or a corporate-action cash debit would push cash below zero."""
 
 
 class InsufficientSellableQuantity(AccountError):
@@ -73,9 +73,10 @@ class Account:
     ``available_date``; sellability itself is decided from the stamped dates.
 
     Cash and holdings are mutated by ``apply_fill`` (an exchange trade) and by
-    the two corporate-action primitives ``credit_cash`` and
+    the three corporate-action primitives ``credit_cash``, ``debit_cash`` and
     ``increase_position`` (Task 10: a cash dividend and a bonus/capitalization
-    share credit booked on an ex-date before the open).  Every such event is
+    share credit booked on an ex-date before the open; ``debit_cash`` also
+    covers a rights subscription's cash payment).  Every such event is
     appended to an action ledger so ``state()`` stays a byte-identical function
     of the applied event log and re-running the same log reproduces the account.
     """
