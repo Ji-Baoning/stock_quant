@@ -1007,12 +1007,51 @@ def test_readiness_rejects_a_cross_source_conflict_on_a_held_name():
         BacktestEngine().run(_request_with(actions=actions))
 
 
-def test_readiness_rejects_a_rights_issue_on_a_held_name():
+def test_a_priced_rights_issue_on_a_held_name_books_instead_of_aborting():
+    # The fixture's IOTA row is duplicated across two sources; the rights
+    # facts must be set on the whole group or the cross-source conflict
+    # branch fires instead of the rights branches under test.
     actions = _read_fixture("corporate_actions.parquet").copy()
     row = actions[(actions.symbol == IOTA) & (actions.ex_date == _MARKET.days[52])]
-    actions.loc[row.index[0], "rights_issue_ratio"] = 0.3
-    with pytest.raises(UnsupportedCorporateAction):
+    actions.loc[row.index, "rights_issue_ratio"] = 0.3
+    actions.loc[row.index, "rights_issue_price"] = 4.0
+    result = BacktestEngine().run(_request_with(actions=actions))
+    booked = result.action_ledger[
+        result.action_ledger.action_id == f"{IOTA}#{_MARKET.days[52].isoformat()}"
+    ]
+    assert len(booked) == 1
+    entry = booked.iloc[0]
+    assert 0 <= entry["rights_subscribed_shares"] <= entry["rights_entitlement_shares"]
+    assert entry["cash_paid"] == pytest.approx(
+        entry["rights_subscribed_shares"] * 4.0
+    )
+
+
+def test_readiness_still_rejects_an_unpriced_rights_issue_on_a_held_name():
+    actions = _read_fixture("corporate_actions.parquet").copy()
+    row = actions[(actions.symbol == IOTA) & (actions.ex_date == _MARKET.days[52])]
+    actions.loc[row.index, "rights_issue_ratio"] = 0.3  # price stays missing
+    with pytest.raises(UnsupportedCorporateAction, match="without a usable"):
         BacktestEngine().run(_request_with(actions=actions))
+
+
+def test_a_priced_rights_issue_in_the_superset_but_not_held_is_a_no_op():
+    # KAPPA sits outside the default schedule; inserting a KAPPA buy after its
+    # ex-date pulls it into the possibly-held superset, but the account does
+    # not hold it on the ex-date -> the check admits it and no ledger row.
+    actions = _read_fixture("corporate_actions.parquet").copy()
+    kappa_ex = date(2020, 3, 5)
+    row = actions[(actions.symbol == KAPPA) & (actions.ex_date == kappa_ex)]
+    actions.loc[row.index[0], "rights_issue_ratio"] = 0.3
+    actions.loc[row.index[0], "rights_issue_price"] = 4.0
+    first_after = next(day for day in _MARKET.days if day > kappa_ex)
+    schedule = (
+        _MARKET.schedule[:1]
+        + (OrderDay(trade_date=first_after, sells=(), buys=(Order("rk1", BUY, KAPPA, 100),)),)
+        + _MARKET.schedule[1:]
+    )
+    result = BacktestEngine().run(_request_with(actions=actions, schedule=schedule))
+    assert f"{KAPPA}#{kappa_ex.isoformat()}" not in set(result.action_ledger.action_id)
 
 
 def test_a_scheduled_sell_funds_a_same_day_buy_within_one_execution():

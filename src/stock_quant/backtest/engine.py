@@ -494,9 +494,12 @@ class BacktestEngine:
         Benchmark series must have a valid close on every open day of the
         window; every scheduled order must fall on an open day whose symbol has
         a clean executable bar (a prior valid close and a usable open); and the
-        accepted corporate actions touching any possibly-held symbol must all be
-        implemented, complete, non-rights and mutually consistent.  Any failure
-        raises and no scenario is started.
+        accepted corporate actions touching any possibly-held symbol (the
+        window-level superset, not the actual holdings) must all be
+        implemented, complete, mutually consistent and priced-if-a-rights-
+        issue; rights issues with a usable subscription price now book at
+        full participation (ADR-025).  Any failure raises and no scenario is
+        started.
         """
         self._check_benchmarks(market)
         self._check_order_days(market)
@@ -584,10 +587,12 @@ class BacktestEngine:
                 "(missing record/ex date)"
             )
         if row.get("rights_issue_ratio", 0) > 0:
-            raise UnsupportedCorporateAction(
-                f"corporate action {action_id} is a rights issue, which a "
-                "holding-period backtest cannot book"
-            )
+            price = row.get("rights_issue_price")
+            if price is None or float(price) <= 0:
+                raise UnsupportedCorporateAction(
+                    f"corporate action {action_id} is a rights issue without "
+                    "a usable subscription price"
+                )
 
 
 # --------------------------------------------------------------------------- #
