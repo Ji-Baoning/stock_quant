@@ -16,7 +16,7 @@ from itertools import count
 
 import pytest
 
-from stock_quant.backtest.account import Account
+from stock_quant.backtest.account import Account, CashShortfallError
 from stock_quant.backtest.corporate_actions import (
     UnsupportedCorporateAction,
     action_id_of,
@@ -244,3 +244,33 @@ def test_a_repeat_action_id_is_always_a_no_op_keeping_the_first_booking(
 
 def test_action_id_is_deterministic():
     assert action_id_of("600000.SH", date(2020, 1, 7)) == "600000.SH#2020-01-07"
+
+
+# --------------------------------------------------------------------------- #
+# Rights-issue debit primitive (ADR-025)
+# --------------------------------------------------------------------------- #
+
+
+def test_debit_cash_appends_a_debit_ledger_entry(account_with_record_date_holding):
+    account = account_with_record_date_holding
+    account.debit_cash(Decimal("100.00"), note="rights 600000.SH")
+    assert account.cash == Decimal("9900.00")
+    entry = account.cash_ledger[-1]
+    assert entry.kind == "debit"
+    assert entry.amount == Decimal("100.00")
+    assert entry.balance == Decimal("9900.00")
+
+
+def test_debit_cash_refuses_non_positive_amount(account_with_record_date_holding):
+    with pytest.raises(ValueError):
+        account_with_record_date_holding.debit_cash(0)
+    with pytest.raises(ValueError):
+        account_with_record_date_holding.debit_cash(Decimal("-1.00"))
+
+
+def test_debit_cash_refuses_overdraft_all_or_nothing(account_with_record_date_holding):
+    account = account_with_record_date_holding
+    with pytest.raises(CashShortfallError):
+        account.debit_cash(Decimal("10000.01"))
+    assert account.cash == Decimal("10000.00")  # 全或无：失败不改变余额
+    assert all(entry.kind != "debit" for entry in account.cash_ledger)

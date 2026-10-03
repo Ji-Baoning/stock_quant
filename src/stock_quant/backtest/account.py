@@ -188,6 +188,21 @@ class Account:
         self._cash = balance
         self._append_cash("credit", cash, balance, note or "cash credit")
 
+    def debit_cash(self, amount: object, *, note: str = "") -> None:
+        """Debit cash for a non-exchange corporate-action payment (e.g. a
+        rights subscription).  Refuses a non-positive amount and any debit
+        that would draw the balance below zero; the debit is all-or-nothing."""
+        cash = as_decimal(amount)
+        if cash <= 0:
+            raise ValueError(f"debit amount must be positive: {cash}")
+        if cash > self._cash:
+            raise CashShortfallError(
+                f"debit {cash} exceeds cash balance {self._cash}"
+            )
+        balance = self._cash - cash
+        self._cash = balance
+        self._append_cash("debit", cash, balance, note or "cash debit")
+
     def increase_position(
         self,
         symbol: str,
