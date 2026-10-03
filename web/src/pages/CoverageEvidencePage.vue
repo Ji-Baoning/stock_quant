@@ -203,6 +203,10 @@ async function onVersionChange() {
       <template #kind="{ value }">
         <span class="badge-state" :class="kindBadgeClass(value)">{{ value }}</span>
       </template>
+      <template #reason="{ value }">
+        <span v-if="value !== null" class="warn">{{ value }}</span>
+        <span v-else>—</span>
+      </template>
     </DataTable>
 
     <h2>UNTRUSTED 行（按 status == "UNTRUSTED" 判定）</h2>
