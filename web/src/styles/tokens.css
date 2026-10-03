@@ -1,0 +1,71 @@
+/* web/src/styles/tokens.css —— 设计 token 唯一权威（v3 规格 §6.1）。
+   light 是默认主题；dark 只预留同名变量结构，无切换入口（裁定 4）。 */
+:root {
+  /* 中性色 8 级（bg → text） */
+  --color-bg: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-surface-muted: #eef0f3;
+  --color-border: #d9dee4;
+  --color-border-strong: #b9c0c9;
+  --color-text-secondary: #4a5158;
+  --color-text: #1b1f24;
+
+  /* 主色 */
+  --color-primary: #2459a8;
+  --color-primary-strong: #1d4786;
+
+  /* 语义色：状态 */
+  --color-pass: #1c7c4a;
+  --color-block: #b3261e;
+  --color-pending: #8a5b00;
+  --color-info: #2a7de1;
+  /* 语义色：涨跌（A股惯例：红涨绿跌）与基准 */
+  --color-up: #c23a2b;
+  --color-down: #1c7c4a;
+  --color-benchmark: #6b7280;
+  /* 状态底色对（hint/error 等） */
+  --color-block-bg: #fdecea;
+  --color-block-border: #f0b4ae;
+  --color-pending-bg: #fff6e0;
+  --color-pending-border: #e5c36b;
+  --color-inverse-bg: #101418;
+  --color-inverse-text: #d7dde3;
+
+  /* 间距（4px 基阶） */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* 圆角 / 阴影（两档） */
+  --radius-card: 8px;
+  --radius-pop: 12px;
+  --shadow-card: 0 1px 2px rgba(27, 31, 36, 0.06);
+  --shadow-pop: 0 4px 16px rgba(27, 31, 36, 0.12);
+
+  /* 字号（正文 14；KPI 28/36 两档） */
+  --font-size-body: 14px;
+  --font-size-small: 12px;
+  --font-size-heading: 18px;
+  --font-size-kpi: 28px;
+  --font-size-kpi-large: 36px;
+
+  /* 版式 */
+  --content-max-width: 1280px;
+  --sidebar-width: 220px;
+}
+
+/* dark 预留（裁定 4）：同名变量；本期不做对比度校验、不做切换。 */
+[data-theme="dark"] {
+  --color-bg: #101418;
+  --color-surface: #171c22;
+  --color-surface-muted: #1f262e;
+  --color-border: #2a323c;
+  --color-border-strong: #3a444f;
+  --color-text-secondary: #9aa4ae;
+  --color-text: #e6eaee;
+  --color-inverse-bg: #e6eaee;
+  --color-inverse-text: #101418;
+}
