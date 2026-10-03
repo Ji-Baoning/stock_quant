@@ -3,6 +3,10 @@ import { onMounted, onUnmounted, ref } from "vue";
 import { ApiError, conflictJobId, useApiClient } from "../api/client";
 import { toDisplayError, type DisplayError } from "../api/errors";
 import type { UpdateJob, UpdateJobRequest, UpdateJobSummary } from "../api/types";
+import Card from "../components/Card.vue";
+import DataTable from "../components/DataTable.vue";
+import type { DataTableColumn } from "../components/DataTable.vue";
+import StateBadge from "../components/StateBadge.vue";
 
 const client = useApiClient();
 
@@ -27,6 +31,14 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 const EQUIVALENT_CLI =
   "python -m stock_quant operations update --root <project-root> " +
   "[--start YYYY-MM-DD] [--end YYYY-MM-DD] [--sources s1,s2] [--disclosure-lookback-days N]";
+
+/** 列定义照搬旧表头；不传 sortable，本页不新增排序行为。 */
+const jobColumns: DataTableColumn[] = [
+  { key: "job_id", label: "job id", mono: true },
+  { key: "status", label: "状态" },
+  { key: "created_at", label: "创建" },
+  { key: "updated_at", label: "更新" },
+];
 
 function stopPolling() {
   if (pollTimer !== null) {
@@ -144,36 +156,37 @@ onUnmounted(stopPolling);
     <h1>更新任务</h1>
     <p v-if="mode === 'probing'" data-testid="probing">探测操作面状态中</p>
 
-    <div v-else-if="mode === 'disabled'" data-testid="operations-disabled">
-      <h2>操作面未启用</h2>
+    <Card v-else-if="mode === 'disabled'" title="操作面未启用" testid="operations-disabled">
       <p>
         操作 API 默认禁用（独立 router/process；启用后仍只绑定环回地址）。
         本页面只读，不提供提交入口。
       </p>
       <p>等价 CLI 命令（默认空参数 = 常规增量）：</p>
       <pre><code data-testid="equivalent-cli">{{ EQUIVALENT_CLI }}</code></pre>
-    </div>
+    </Card>
 
     <template v-else>
       <p v-if="probeError !== null" class="error" data-testid="probe-error">
         错误 {{ probeError.code }}：{{ probeError.message === "" ? "无安全摘要" : probeError.message }}
       </p>
 
-      <form data-testid="update-form" @submit.prevent="submit">
-        <label>start <input type="date" v-model="form.start" name="start" /></label>
-        <label>end <input type="date" v-model="form.end" name="end" /></label>
-        <label>
-          sources
-          <input type="text" v-model="form.sources" name="sources" placeholder="逗号分隔；留空 = 全部" />
-        </label>
-        <label>
-          lookback
-          <input type="number" v-model="form.lookback" name="lookback" min="0" step="1" placeholder="留空 = 常规增量" />
-        </label>
-        <button type="submit" data-testid="submit-update" :disabled="submitting">
-          提交更新（默认空 = 常规增量）
-        </button>
-      </form>
+      <Card title="发起更新">
+        <form data-testid="update-form" @submit.prevent="submit">
+          <label>start <input type="date" v-model="form.start" name="start" /></label>
+          <label>end <input type="date" v-model="form.end" name="end" /></label>
+          <label>
+            sources
+            <input type="text" v-model="form.sources" name="sources" placeholder="逗号分隔；留空 = 全部" />
+          </label>
+          <label>
+            lookback
+            <input type="number" v-model="form.lookback" name="lookback" min="0" step="1" placeholder="留空 = 常规增量" />
+          </label>
+          <button type="submit" data-testid="submit-update" :disabled="submitting">
+            提交更新（默认空 = 常规增量）
+          </button>
+        </form>
+      </Card>
 
       <p v-if="submitError !== null" class="error" data-testid="submit-error">
         错误 {{ submitError.code }}：{{ submitError.message === "" ? "无安全摘要" : submitError.message }}
@@ -186,9 +199,10 @@ onUnmounted(stopPolling);
         </button>
       </p>
 
-      <div v-if="selectedJob !== null" class="job-detail" data-testid="job-detail">
-        <h2>任务 {{ selectedJob.job_id }}</h2>
-        <p data-testid="job-status">状态：{{ selectedJob.status }}</p>
+      <Card v-if="selectedJob !== null" :title="`任务 ${selectedJob.job_id}`" testid="job-detail">
+        <p data-testid="job-status">
+          状态：<StateBadge kind="job" :value="selectedJob.status" />
+        </p>
 
         <div v-if="selectedJob.status === 'SUCCEEDED'" data-testid="job-succeeded">
           <p>run id：<code data-testid="job-run-id">{{ selectedJob.run_id ?? "—" }}</code></p>
@@ -217,22 +231,20 @@ onUnmounted(stopPolling);
         <h3>日志尾部（服务端已脱敏的字符串）</h3>
         <pre data-testid="job-stdout"><code>{{ selectedJob.stdout_tail }}</code></pre>
         <pre v-if="selectedJob.stderr_tail !== ''" data-testid="job-stderr"><code>{{ selectedJob.stderr_tail }}</code></pre>
-      </div>
+      </Card>
 
       <h2>持久化任务</h2>
-      <table data-testid="job-list">
-        <thead>
-          <tr><th>job id</th><th>状态</th><th>创建</th><th>更新</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="job in jobs" :key="job.job_id">
-            <td><button type="button" @click="selectJob(job.job_id)">{{ job.job_id }}</button></td>
-            <td>{{ job.status }}</td>
-            <td>{{ job.created_at }}</td>
-            <td>{{ job.updated_at }}</td>
-          </tr>
-        </tbody>
-      </table>
+      <DataTable testid="job-list" row-key="job_id" :columns="jobColumns" :rows="jobs">
+        <template #job_id="{ row }">
+          <!-- DataTable 行类型是 Record<string, unknown>；断言只做类型收窄，不改变运行时渲染。 -->
+          <button type="button" class="link-like" @click="selectJob(row.job_id as string)">
+            {{ row.job_id }}
+          </button>
+        </template>
+        <template #status="{ row }">
+          <StateBadge kind="job" :value="row.status as string" />
+        </template>
+      </DataTable>
     </template>
   </section>
 </template>
