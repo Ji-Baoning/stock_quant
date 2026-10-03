@@ -414,6 +414,18 @@ def _int_text(value: object) -> str:
     return "—" if value is None else f"{int(value)}"
 
 
+def _num_or_none(value: float | int | None) -> float | int | None:
+    """Normalize an absent or NaN numeric cell to ``None``.
+
+    Legacy corporate-action rows carry no rights-issue fields: pandas fills
+    the missing keys of hand-built frames with NaN, and old parquet frames may
+    lack the columns entirely.  Both must render "—".
+    """
+    if value is None or (isinstance(value, float) and value != value):
+        return None
+    return value
+
+
 def _frame_table(
     frame: pd.DataFrame,
     columns: list[str],
@@ -745,12 +757,18 @@ def _action_rows(frame: pd.DataFrame) -> tuple[list[str], list[list[str]]]:
         "股权登记日",
         "现金入账",
         "送转股数",
+        "认购缴款",
+        "应配股数",
+        "认购股数",
+        "放弃股数",
         "说明",
     ]
     if frame is None or frame.empty:
         return columns, []
 
     def row_of(record: dict) -> list[str]:
+        entitlement = _num_or_none(record.get("rights_entitlement_shares"))
+        subscribed = _num_or_none(record.get("rights_subscribed_shares"))
         return [
             _int_text(record.get("seq")),
             str(record.get("action_id", "")),
@@ -761,6 +779,14 @@ def _action_rows(frame: pd.DataFrame) -> tuple[list[str], list[list[str]]]:
             else "—",
             _money(record.get("cash_credited")),
             _int_text(record.get("shares_added")),
+            _money(_num_or_none(record.get("cash_paid"))),
+            _int_text(entitlement),
+            _int_text(subscribed),
+            (
+                str(int(entitlement) - int(subscribed))
+                if entitlement is not None and subscribed is not None
+                else "—"
+            ),
             str(record.get("note", "")),
         ]
 

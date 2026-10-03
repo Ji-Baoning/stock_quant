@@ -183,6 +183,9 @@ def _action_ledger() -> pd.DataFrame:
                 "record_date": date(2024, 1, 2),
                 "cash_credited": 120.0,
                 "shares_added": 0,
+                "cash_paid": 390.0,
+                "rights_entitlement_shares": 30,
+                "rights_subscribed_shares": 30,
                 "note": "cash dividend",
             },
             {
@@ -429,6 +432,18 @@ def test_experiment_html_covers_required_sections(tmp_path):
     assert "dataset-v1" in html
     assert "a1b2c3d4" in html  # code version
     assert "exp-abc123" in html  # experiment version
+
+
+def test_action_ledger_table_shows_rights_columns_and_dash_for_legacy_rows(tmp_path):
+    path = render_experiment_report(_experiment_input(), tmp_path / "report.html")
+    html = path.read_text(encoding="utf-8")
+    assert "认购缴款" in html
+    assert "应配股数" in html
+    assert "认购股数" in html
+    assert "放弃股数" in html
+    assert "390.00" in html  # 缴款
+    assert "30" in html  # 应配/认购
+    assert "0" in html  # 放弃 = 30 − 30（同一条记录行内）
 
 
 def test_experiment_html_renders_execution_divergence_summary(tmp_path):
