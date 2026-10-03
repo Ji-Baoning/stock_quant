@@ -24,3 +24,9 @@ fieldset { border: 1px solid var(--color-border); margin: 10px 0; }
 .copy { margin-left: 6px; }
 button { cursor: pointer; }
 blockquote { margin: var(--space-2) 0; padding: var(--space-2) 14px; border-left: 4px solid var(--color-info); background: var(--color-surface); }
+/* StateBadge（Task 2）：语义色来自 token；neutral 走次级文本色。 */
+.badge-state { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: var(--font-size-small); border: 1px solid var(--color-border-strong); color: var(--color-text-secondary); }
+.badge-state--pass { border-color: var(--color-pass); color: var(--color-pass); }
+.badge-state--block { border-color: var(--color-block); color: var(--color-block); }
+.badge-state--pending { border-color: var(--color-pending); color: var(--color-pending); }
+.badge-state--neutral { border-color: var(--color-border-strong); color: var(--color-text-secondary); }
