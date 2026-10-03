@@ -364,3 +364,14 @@ test("§10.4 E2E 主流程：触发更新 → 看到新版本；成功终态显�
     ),
   ).toBe(false);
 });
+
+test("决策台：三块首屏（门禁措辞/实验计数/待办跳转）", async ({ page }) => {
+  const mock = state({ jobs: [seedJob("job-0001", "RUNNING")] });
+  await installMockBackend(page, mock);
+  await page.goto("/");
+  await expect(page.getByTestId("block-data-trust")).toContainText("门禁通过");
+  await expect(page.getByTestId("block-data-trust")).toContainText("质量问题 1 条");
+  await expect(page.getByTestId("block-strategy-count")).toContainText("已发布实验 2 个");
+  await expect(page.getByTestId("block-actions")).toContainText("job-0001");
+  await expect(page.getByTestId("main-nav").locator("a").first()).toHaveAttribute("href", "#/");
+});

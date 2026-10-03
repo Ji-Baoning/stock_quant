@@ -1,4 +1,5 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from "vue-router";
+import DecisionConsolePage from "./pages/DecisionConsolePage.vue";
 import VersionsPage from "./pages/VersionsPage.vue";
 import VersionDetailPage from "./pages/VersionDetailPage.vue";
 import DataPreviewPage from "./pages/DataPreviewPage.vue";
@@ -19,6 +20,10 @@ export interface NavGroup {
 
 /** 报告项保守保留（裁定 7：S1 下线并迁入策略详情页）。 */
 export const NAV_GROUPS: readonly NavGroup[] = [
+  {
+    label: null,
+    items: [{ label: "决策台", path: "/" }],
+  },
   {
     label: "数据",
     items: [
@@ -41,7 +46,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
 export const NAV_ITEMS: readonly NavItem[] = NAV_GROUPS.flatMap((group) => group.items);
 
 const routes: RouteRecordRaw[] = [
-  { path: "/", redirect: "/versions" },
+  { path: "/", name: "console", component: DecisionConsolePage },
   { path: "/versions", name: "versions", component: VersionsPage },
   { path: "/versions/:version", name: "version-detail", component: VersionDetailPage },
   { path: "/preview", name: "preview", component: DataPreviewPage },

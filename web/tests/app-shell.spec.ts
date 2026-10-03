@@ -22,6 +22,15 @@ describe("应用骨架（侧边栏分组导航，v3 规格 §4）", () => {
     expect(groupLabels).toEqual(NAV_GROUPS.filter((g) => g.label !== null).map((g) => g.label));
   });
 
+  it("根路由渲染决策台，导航第一项为决策台", async () => {
+    const wrapper = mount(App, {
+      props: { client: fakeClient() },
+      global: { plugins: [createPortalRouter()] },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(wrapper.get('[data-testid="main-nav"]').find("a").attributes("href")).toBe("#/");
+  });
+
   it("顶栏不再承载导航，但保留指纹与已解析版本区", async () => {
     const wrapper = mount(App, {
       props: { client: fakeClient() },
