@@ -1,7 +1,8 @@
 # 持有期回测的配股入账口径 · 设计
 
 - 日期：2026-09-27
-- 状态：**待 owner 复核**
+- 状态：**复核通过（2026-10-03 owner 裁定：立即实施，与 web 决策层 S0 并行、
+  第一优先——它同时是首个正式实验发布与 web 策略层实例验证的前置）**
 - 上游：
   [2026-09-03-phase-one-quant-system-design.md](2026-09-03-phase-one-quant-system-design.md)
   §500、§683（配股明确不支持）、
@@ -275,6 +276,10 @@ if paid > 0:
 [2026-09-27-raw-snapshot-reuse-recovery-design.md](2026-09-27-raw-snapshot-reuse-recovery-design.md)
 §6.1 预留给"proof-grid 改为 021、该设计自身登记为 022"。本设计不触碰该编号
 冲突，取 **023**；索引中 021/022 留空由那份设计补齐。
+
+> 勘误（2026-10-03）：登记时 023（suspension carry-forward）与 024（membership
+> slice hash）已被占用，本设计实际登记为 **ADR-025**；上文关于 021/022 预留的
+> 说明已由索引现状（021 常驻查询面、022 panda graft 均已登记）解决。
 
 ### 7.2 不改动但需标注
 
