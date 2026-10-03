@@ -83,6 +83,7 @@ from stock_quant.data_model.corporate_action_coverage import (
     coverage_frame,
     coverage_record,
 )
+from stock_quant.data_model.calendar import TradingCalendar
 from stock_quant.data_model.dataset import (
     DatasetPublisher,
     DatasetReader,
@@ -2145,3 +2146,109 @@ def test_data_validate_still_rejects_a_bad_row_in_the_mixed_table(
     assert result.exit_code != 0
     assert "UNIVERSE_UNKNOWN_SYMBOL" in result.stdout
     assert "table=universe_membership" in result.stdout
+
+
+def test_derive_cash_ledger_replays_a_rights_subscription_payment(tmp_path):
+    from decimal import Decimal
+
+    from stock_quant.backtest.account import Account  # noqa: F401 - 语义锚点
+    from stock_quant.research.runner import ResearchRunner
+
+    calendar = TradingCalendar.from_open_days((date(2020, 1, 6), date(2020, 1, 7)))
+    actions = pd.DataFrame(
+        [
+            {
+                "seq": 0,
+                "action_id": "600000.SH#2020-01-07",
+                "symbol": "600000.SH",
+                "ex_date": date(2020, 1, 7),
+                "record_date": date(2020, 1, 6),
+                "cash_credited": 0.0,
+                "shares_added": 30,
+                "cash_paid": 390.0,
+                "rights_entitlement_shares": 30,
+                "rights_subscribed_shares": 30,
+                "note": "cninfo",
+            }
+        ]
+    )
+    equity = pd.DataFrame({"trade_date": [date(2020, 1, 6), date(2020, 1, 7)],
+                           "cash": [1000.0, 610.0]})
+    equity_path = tmp_path / "equity.parquet"
+    equity.to_parquet(equity_path, index=False)
+
+    runner = ResearchRunner.__new__(ResearchRunner)  # 方法不使用 self
+    ledger = runner._derive_cash_ledger(
+        fills=pd.DataFrame(), actions=actions,
+        initial_cash=1000.0, calendar=calendar, equity_path=equity_path,
+    )
+    kinds = list(ledger.kind)
+    assert kinds == ["initial", "debit"]
+    assert ledger.amount.iloc[-1] == pytest.approx(390.0)
+    assert ledger.balance.iloc[-1] == pytest.approx(610.0)
+
+
+def test_derive_cash_ledger_reads_old_parquets_without_the_new_columns(tmp_path):
+    from stock_quant.research.runner import ResearchRunner
+
+    calendar = TradingCalendar.from_open_days((date(2020, 1, 6), date(2020, 1, 7)))
+    actions = pd.DataFrame(
+        [
+            {
+                "seq": 0,
+                "action_id": "600000.SH#2020-01-07",
+                "symbol": "600000.SH",
+                "ex_date": date(2020, 1, 7),
+                "record_date": date(2020, 1, 6),
+                "cash_credited": 40.0,
+                "shares_added": 20,
+                "note": "cninfo",
+            }
+        ]
+    )
+    equity = pd.DataFrame({"trade_date": [date(2020, 1, 6), date(2020, 1, 7)],
+                           "cash": [1000.0, 1040.0]})
+    equity_path = tmp_path / "equity.parquet"
+    equity.to_parquet(equity_path, index=False)
+
+    runner = ResearchRunner.__new__(ResearchRunner)
+    ledger = runner._derive_cash_ledger(
+        fills=pd.DataFrame(), actions=actions,
+        initial_cash=1000.0, calendar=calendar, equity_path=equity_path,
+    )
+    # 旧 run 无新列：读取端 .get() or 0，重放与对账结果不变。
+    assert list(ledger.kind) == ["initial", "credit"]
+    assert ledger.balance.iloc[-1] == pytest.approx(1040.0)
+
+
+def test_derive_cash_ledger_refuses_inconsistent_subscription(tmp_path):
+    from stock_quant.research.runner import ResearchRunner
+
+    calendar = TradingCalendar.from_open_days((date(2020, 1, 6), date(2020, 1, 7)))
+    actions = pd.DataFrame(
+        [
+            {
+                "seq": 0,
+                "action_id": "600000.SH#2020-01-07",
+                "symbol": "600000.SH",
+                "ex_date": date(2020, 1, 7),
+                "record_date": date(2020, 1, 6),
+                "cash_credited": 0.0,
+                "shares_added": 10,  # < subscribed：账本行自相矛盾
+                "cash_paid": 390.0,
+                "rights_entitlement_shares": 30,
+                "rights_subscribed_shares": 30,
+                "note": "cninfo",
+            }
+        ]
+    )
+    equity = pd.DataFrame({"trade_date": [date(2020, 1, 7)], "cash": [610.0]})
+    equity_path = tmp_path / "equity.parquet"
+    equity.to_parquet(equity_path, index=False)
+
+    runner = ResearchRunner.__new__(ResearchRunner)
+    with pytest.raises(ValueError, match="subscribes"):
+        runner._derive_cash_ledger(
+            fills=pd.DataFrame(), actions=actions,
+            initial_cash=1000.0, calendar=calendar, equity_path=equity_path,
+        )

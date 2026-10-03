@@ -3409,8 +3409,17 @@ class ResearchRunner:
                 shares = int(record.get("shares_added") or 0)
                 action_id = str(record.get("action_id") or "")
                 note = str(record.get("note") or "") or f"corporate action {day}"
+                paid = Decimal(str(record.get("cash_paid") or 0))
+                subscribed = int(record.get("rights_subscribed_shares") or 0)
+                if subscribed > shares:
+                    raise ValueError(
+                        f"action ledger row {action_id} subscribes {subscribed} "
+                        f"shares but adds only {shares}"
+                    )
                 if amount > 0:
                     account.credit_cash(amount, note=note)
+                if paid > 0:
+                    account.debit_cash(paid, note=note)
                 if shares > 0 and action_id:
                     account.increase_position(
                         str(record["symbol"]), shares, buy_date=day,
