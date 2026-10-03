@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import { useApiClient } from "../api/client";
 import { toDisplayError, type DisplayError } from "../api/errors";
 import { resolveAndPin, versionPinState } from "../stores/version";
 import type { DatasetSummary, TablePreviewResponse } from "../api/types";
+import Card from "../components/Card.vue";
+import DataTable from "../components/DataTable.vue";
+import type { DataTableColumn } from "../components/DataTable.vue";
 
 const client = useApiClient();
 const LIMIT = 100;
@@ -78,6 +81,20 @@ function toggleColumn(column: string) {
   }
 }
 
+/**
+ * 列定义来自响应的 columns 动态映射；数值列右对齐以首行取值判定——只是渲染对齐，不是计算。
+ */
+const previewColumns = computed<DataTableColumn[]>(() => {
+  const current = preview.value;
+  if (current === null) return [];
+  return current.columns.map((name) => ({
+    key: name,
+    label: name,
+    mono: name !== "trade_date",
+    align: typeof current.rows[0]?.[name] === "number" ? "right" : "left",
+  }));
+});
+
 onMounted(async () => {
   try {
     datasetOptions.value = (await client.listDatasets()).datasets;
@@ -140,44 +157,49 @@ async function nextPage() {
       错误 {{ error.code }}：{{ error.message === "" ? "无安全摘要" : error.message }}
     </p>
 
-    <form v-if="resolvedVersion !== null" data-testid="preview-controls" @submit.prevent="applyFilters">
-      <label>
-        版本
-        <select v-model="requestedVersion" data-testid="version-select" @change="onVersionChange">
-          <option value="current">current（入口别名）</option>
-          <option
-            v-for="option in datasetOptions"
-            :key="option.dataset_version"
-            :value="option.dataset_version"
-          >
-            {{ option.dataset_version }}
-          </option>
-        </select>
-      </label>
-      <label>
-        表
-        <select v-model="selectedTable" data-testid="table-select" @change="onTableChange">
-          <option v-for="table in tableOptions" :key="table" :value="table">{{ table }}</option>
-        </select>
-      </label>
-      <!-- pin I4：服务端只有单值 trade_date，所以这里只提供一个日期输入。 -->
-      <label>交易日 <input type="date" v-model="filters.trade_date" data-testid="filter-trade-date" /></label>
-      <label>symbol <input type="text" v-model="filters.symbol" data-testid="filter-symbol" /></label>
-      <button type="submit" data-testid="apply-filters">查询</button>
-    </form>
+    <Card v-if="resolvedVersion !== null" title="查询条件">
+      <form data-testid="preview-controls" @submit.prevent="applyFilters">
+        <label>
+          版本
+          <select v-model="requestedVersion" data-testid="version-select" @change="onVersionChange">
+            <option value="current">current（入口别名）</option>
+            <option
+              v-for="option in datasetOptions"
+              :key="option.dataset_version"
+              :value="option.dataset_version"
+            >
+              {{ option.dataset_version }}
+            </option>
+          </select>
+        </label>
+        <label>
+          表
+          <select v-model="selectedTable" data-testid="table-select" @change="onTableChange">
+            <option v-for="table in tableOptions" :key="table" :value="table">{{ table }}</option>
+          </select>
+        </label>
+        <!-- pin I4：服务端只有单值 trade_date，所以这里只提供一个日期输入。 -->
+        <label>
+          交易日
+          <input type="date" v-model="filters.trade_date" data-testid="filter-trade-date" />
+        </label>
+        <label>symbol <input type="text" v-model="filters.symbol" data-testid="filter-symbol" /></label>
+        <button type="submit" data-testid="apply-filters">查询</button>
+      </form>
 
-    <fieldset v-if="availableColumns.length > 0">
-      <legend>列筛选（不选 = 全部白名单列）</legend>
-      <label v-for="column in availableColumns" :key="column">
-        <input
-          type="checkbox"
-          :value="column"
-          :checked="selectedColumns.has(column)"
-          @change="toggleColumn(column)"
-        />
-        {{ column }}
-      </label>
-    </fieldset>
+      <fieldset v-if="availableColumns.length > 0">
+        <legend>列筛选（不选 = 全部白名单列）</legend>
+        <label v-for="column in availableColumns" :key="column">
+          <input
+            type="checkbox"
+            :value="column"
+            :checked="selectedColumns.has(column)"
+            @change="toggleColumn(column)"
+          />
+          {{ column }}
+        </label>
+      </fieldset>
+    </Card>
 
     <p v-if="preview !== null" data-testid="pager">
       行 {{ offset }}–{{ offset + preview.rows.length }}（limit {{ LIMIT }}）
@@ -196,15 +218,11 @@ async function nextPage() {
       <span v-if="loading">加载中…</span>
     </p>
 
-    <table v-if="preview !== null" data-testid="preview-table">
-      <thead>
-        <tr><th v-for="column in preview.columns" :key="column">{{ column }}</th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="(row, index) in preview.rows" :key="index">
-          <td v-for="column in preview.columns" :key="column">{{ row[column] }}</td>
-        </tr>
-      </tbody>
-    </table>
+    <DataTable
+      v-if="preview !== null"
+      testid="preview-table"
+      :columns="previewColumns"
+      :rows="preview.rows"
+    />
   </section>
 </template>
