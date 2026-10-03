@@ -73,3 +73,5 @@ blockquote { margin: var(--space-2) 0; padding: var(--space-2) 14px; border-left
 /* 决策台（Task 8） */
 .action-list { margin: 0; padding-left: 20px; }
 .action-list li { margin: var(--space-2) 0; }
+/* 版本详情 details 键值化（S0b Task 3）：只读透传的键值对展示。 */
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px var(--space-2); margin: 0; font-size: var(--font-size-small); } .kv dt { color: var(--color-text-secondary); } .kv dd { margin: 0; }
