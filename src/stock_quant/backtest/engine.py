@@ -98,6 +98,9 @@ ACTION_LEDGER_COLUMNS = (
     "record_date",
     "cash_credited",
     "shares_added",
+    "cash_paid",
+    "rights_entitlement_shares",
+    "rights_subscribed_shares",
     "note",
 )
 EQUITY_COLUMNS = (
@@ -459,6 +462,9 @@ class BacktestEngine:
                 "record_date": entry.record_date,
                 "cash_credited": float(entry.cash_credited),
                 "shares_added": int(entry.shares_added),
+                "cash_paid": float(entry.cash_paid),
+                "rights_entitlement_shares": int(entry.rights_entitlement_shares),
+                "rights_subscribed_shares": int(entry.rights_subscribed_shares),
                 "note": entry.note,
             }
             for entry in entries

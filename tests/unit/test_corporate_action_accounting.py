@@ -22,7 +22,8 @@ from stock_quant.backtest.corporate_actions import (
     action_id_of,
     apply_corporate_action,
 )
-from stock_quant.backtest.models import BUY, Fill
+from stock_quant.backtest.engine import ACTION_LEDGER_COLUMNS, BacktestEngine
+from stock_quant.backtest.models import BUY, CorporateActionLedgerEntry, Fill
 from stock_quant.data_model.calendar import TradingCalendar
 
 # --------------------------------------------------------------------------- #
@@ -274,3 +275,46 @@ def test_debit_cash_refuses_overdraft_all_or_nothing(account_with_record_date_ho
         account.debit_cash(Decimal("10000.01"))
     assert account.cash == Decimal("10000.00")  # 全或无：失败不改变余额
     assert all(entry.kind != "debit" for entry in account.cash_ledger)
+
+
+# --------------------------------------------------------------------------- #
+# Ledger entry atomic fields and engine column contract (Task 2)
+# --------------------------------------------------------------------------- #
+
+
+def test_ledger_entry_new_fields_default_to_zero():
+    entry = CorporateActionLedgerEntry(
+        seq=0,
+        action_id="600000.SH#2020-01-07",
+        symbol="600000.SH",
+        ex_date=date(2020, 1, 7),
+        record_date=date(2020, 1, 6),
+        cash_credited=Decimal("10.00"),
+        shares_added=0,
+    )
+    assert entry.cash_paid == Decimal("0")
+    assert entry.rights_entitlement_shares == 0
+    assert entry.rights_subscribed_shares == 0
+
+
+def test_ledger_entry_rejects_subscribed_above_entitlement():
+    with pytest.raises(ValueError):
+        CorporateActionLedgerEntry(
+            seq=0,
+            action_id="600000.SH#2020-01-07",
+            symbol="600000.SH",
+            ex_date=date(2020, 1, 7),
+            record_date=date(2020, 1, 6),
+            cash_credited=Decimal("0"),
+            shares_added=30,
+            cash_paid=Decimal("390.00"),
+            rights_entitlement_shares=30,
+            rights_subscribed_shares=31,
+        )
+
+
+def test_action_ledger_frame_carries_new_columns_even_when_empty():
+    frame = BacktestEngine._action_ledger_frame([])
+    assert list(frame.columns) == list(ACTION_LEDGER_COLUMNS)
+    for column in ("cash_paid", "rights_entitlement_shares", "rights_subscribed_shares"):
+        assert column in frame.columns

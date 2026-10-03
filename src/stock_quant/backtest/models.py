@@ -362,8 +362,12 @@ class CorporateActionLedgerEntry:
     Recorded once per unique ``action_id`` when a corporate action is applied
     to an account that holds the name on the action's ``ex_date``; re-applying
     the same ``action_id`` is refused as a no-op.  ``cash_credited`` is the
-    pre-tax cash dividend and ``shares_added`` the bonus/capitalization share
-    increase booked on ``ex_date``.
+    pre-tax cash dividend and ``shares_added`` the sum of the bonus,
+    capitalization and rights-issue subscription share increases booked on
+    ``ex_date``.  ``cash_paid`` is the cash outflow of a rights subscription
+    and the two ``rights_*`` share counters carry the entitlement and the
+    actually subscribed quantity; they default to zero for cash/bonus-only
+    actions.
     """
 
     seq: int
@@ -373,6 +377,9 @@ class CorporateActionLedgerEntry:
     record_date: date | None
     cash_credited: Decimal
     shares_added: int
+    cash_paid: Decimal = Decimal("0")
+    rights_entitlement_shares: int = 0
+    rights_subscribed_shares: int = 0
     note: str = ""
 
     def __post_init__(self) -> None:
@@ -391,4 +398,17 @@ class CorporateActionLedgerEntry:
         if self.shares_added < 0:
             raise ValueError(
                 f"shares_added must be non-negative: {self.shares_added}"
+            )
+        if self.cash_paid < 0:
+            raise ValueError(f"cash_paid must be non-negative: {self.cash_paid}")
+        for name in ("rights_entitlement_shares", "rights_subscribed_shares"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an int, got {value!r}")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative: {value}")
+        if self.rights_subscribed_shares > self.rights_entitlement_shares:
+            raise ValueError(
+                f"rights_subscribed_shares must not exceed entitlement "
+                f"({self.rights_entitlement_shares}): {self.rights_subscribed_shares}"
             )

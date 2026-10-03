@@ -619,6 +619,9 @@ def _reference_run(spec: _Spec, market: _SyntheticMarket) -> dict[str, pd.DataFr
                         "record_date": days[record_session],
                         "cash_credited": float(credited),
                         "shares_added": added,
+                        "cash_paid": 0.0,
+                        "rights_entitlement_shares": 0,
+                        "rights_subscribed_shares": 0,
                         "note": source,
                     }
                 )
@@ -683,7 +686,8 @@ def _reference_run(spec: _Spec, market: _SyntheticMarket) -> dict[str, pd.DataFr
             action_entries,
             columns=[
                 "seq", "action_id", "symbol", "ex_date", "record_date",
-                "cash_credited", "shares_added", "note",
+                "cash_credited", "shares_added", "cash_paid",
+                "rights_entitlement_shares", "rights_subscribed_shares", "note",
             ],
         ),
         "daily_equity": pd.DataFrame(
@@ -765,6 +769,9 @@ def test_golden_corporate_action_ledger_records_one_entry_per_action_id():
             "record_date": _MARKET.days[4],
             "cash_credited": 40.0,
             "shares_added": 20,
+            "cash_paid": 0.0,
+            "rights_entitlement_shares": 0,
+            "rights_subscribed_shares": 0,
             "note": "cninfo",
         },
         {
@@ -775,6 +782,9 @@ def test_golden_corporate_action_ledger_records_one_entry_per_action_id():
             "record_date": _MARKET.days[12],
             "cash_credited": 100.0,
             "shares_added": 0,
+            "cash_paid": 0.0,
+            "rights_entitlement_shares": 0,
+            "rights_subscribed_shares": 0,
             "note": "cninfo",
         },
         {
@@ -785,6 +795,9 @@ def test_golden_corporate_action_ledger_records_one_entry_per_action_id():
             "record_date": _MARKET.days[50],
             "cash_credited": 20.0,
             "shares_added": 0,
+            "cash_paid": 0.0,
+            "rights_entitlement_shares": 0,
+            "rights_subscribed_shares": 0,
             "note": "cninfo",
         },
         {
@@ -795,6 +808,9 @@ def test_golden_corporate_action_ledger_records_one_entry_per_action_id():
             "record_date": _MARKET.days[58],
             "cash_credited": 0.0,
             "shares_added": 30,
+            "cash_paid": 0.0,
+            "rights_entitlement_shares": 0,
+            "rights_subscribed_shares": 0,
             "note": "cninfo",
         },
     ]
