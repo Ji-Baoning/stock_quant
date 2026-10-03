@@ -18,6 +18,7 @@ const props = withDefaults(
     columns: DataTableColumn[];
     rows: Row[];
     rowKey?: string;
+    rowTestid?: string;
     emptyText?: string;
     testid?: string;
   }>(),
@@ -82,13 +83,18 @@ function cellText(row: Row, column: DataTableColumn): string {
       <tr
         v-for="(row, index) in sortedRows"
         :key="props.rowKey !== undefined ? String(row[props.rowKey]) : index"
+        :data-testid="props.rowTestid"
       >
         <td
           v-for="column in props.columns"
           :key="column.key"
           :class="[column.align === 'right' ? 'cell-right' : '', column.mono ? 'cell-mono' : '']"
         >
-          {{ cellText(row, column) }}
+          <slot
+            :name="column.key"
+            :row="row"
+            :value="row[column.key]"
+          >{{ cellText(row, column) }}</slot>
         </td>
       </tr>
     </tbody>

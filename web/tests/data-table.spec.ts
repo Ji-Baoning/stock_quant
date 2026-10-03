@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import DataTable from "../src/components/DataTable.vue";
+import { createPortalRouter } from "../src/router";
 
 const columns = [
   { key: "name", label: "名称", sortable: true },
@@ -61,5 +62,36 @@ describe("DataTable（纯展示表格）", () => {
     const wrapper = mountTable();
     expect(wrapper.findAll("th")[1].classes()).toContain("cell-right");
     expect(wrapper.findAll("tbody tr")[0].findAll("td")[2].classes()).toContain("cell-mono");
+  });
+
+  it("列名作用域插槽可组合链接与徽章单元格，未提供插槽的列回落纯文本", () => {
+    const wrapper = mount(DataTable, {
+      props: {
+        columns: [
+          { key: "id", label: "ID" },
+          { key: "name", label: "名称" },
+        ],
+        rows: [{ id: "abc", name: "普通行" }],
+      },
+      slots: {
+        // 具名插槽的内容**就是**该槽的模板体：不要再套一层 <template #id>。
+        id: `<a :href="'#/x/' + row.id">{{ row.id }}</a>`,
+      },
+      global: { plugins: [createPortalRouter()] },
+    });
+    const cells = wrapper.findAll("tbody tr")[0].findAll("td");
+    expect(cells[0].find("a").attributes("href")).toBe("#/x/abc");
+    expect(cells[1].text()).toBe("普通行");
+  });
+
+  it("rowTestid 把行级 testid 挂到 <tr> 上", () => {
+    const wrapper = mount(DataTable, {
+      props: {
+        columns: [{ key: "id", label: "ID" }],
+        rows: [{ id: "abc" }],
+        rowTestid: "dataset-row",
+      },
+    });
+    expect(wrapper.findAll("tbody tr")[0].attributes("data-testid")).toBe("dataset-row");
   });
 });

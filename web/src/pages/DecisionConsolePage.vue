@@ -4,7 +4,6 @@ import { useApiClient } from "../api/client";
 import { blockingIssueCount, totalIssueCount } from "../api/quality";
 import { hasNewerCurrent } from "../stores/version";
 import {
-  activeJobs,
   consoleActions,
   consoleState,
   currentDataset,
