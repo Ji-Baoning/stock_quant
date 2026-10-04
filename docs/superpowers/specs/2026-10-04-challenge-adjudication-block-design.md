@@ -40,12 +40,22 @@
 （`service.py::_comparison_payload`）：
 
 - `declaration`：`ChallengeDeclaration.model_dump(mode="json")`——预注册的全部身份字段；
-- `holdout_consumption`：`HoldoutConsumption` 或 `null`（消费被拒时为 null）；
+- `holdout_consumption`：`HoldoutConsumption` 或 `null`（`null` 的两种含义不同，见下段表格）；
 - `result`：`ChallengeResult.model_dump(mode="json")`——裁决、逐情景阈值格、理由、错误码。
 
-**所有终态都写这份文件**：`COMPLETED`（`PROMOTED`/`REJECTED`/`INCONCLUSIVE_RESEARCH_ONLY`）与
-`FAILED`（含 `HOLDOUT_CONSUMPTION_REFUSED`，此时结果目录里没有 `holdout_consumption.json`，
-但 `strategy_comparison.json` 里 `holdout_consumption` 为 `null`）。
+**所有终态都写这份文件**：`COMPLETED`（`PROMOTED`/`REJECTED`/`INCONCLUSIVE_RESEARCH_ONLY`）与 `FAILED`。
+
+**关键：`holdout_consumption == null` 不等于"未消费"。** FAILED 有三种形态（`service.py:284-317`、
+`compare.py` 的 `_ERROR_CODES`），消费语义各不相同：
+
+| FAILED `error_code` | `holdout_consumption` | 该次运行是否真的消费了 |
+| --- | --- | --- |
+| `HOLDOUT_CONSUMPTION_REFUSED` | `null` | **否**——注册表在消费前拒绝（已消费/身份冲突） |
+| `EXPERIMENT_LOAD_ERROR` | `null`（`_publish_failure` 恒传 `consumption=None`） | **是**——消费已成功，其后加载 baseline/challenger 失败 |
+| `IDENTITY_MISMATCH` / `MANIFEST_INVALID` / `PAIRING_INCOMPLETE` / `REGISTRY_BINDING_MISMATCH` | **非空**（真实消费记录） | 是——评估期完整性失败，仍带着消费记录发布 |
+
+因此消费记录的有无**不能**单独推断消费是否发生；展示文案必须以 `error_code` × `holdout_consumption`
+两轴共同判定（见 §4.2-6/7）。
 
 ### 2.2 为什么只读 results 树
 
@@ -53,6 +63,11 @@ results 树是内容寻址、原子发布、按其自身闭集校验过的不可
 `os.replace`，已存在结果只在逐字节相同才复用）。**不读** `data/strategy_challenges/holdout_registry.parquet`
 与 `.holdout.lock`——它们是加锁的可变运维态，不是已发布证据，且单读它们无法支撑任何跨实验的全称声称。这条纪律
 直接决定了 1.1 里"不做 family 级名额概览"。
+
+**声明过的边界（非缺陷）**：若进程在结果发布前死亡（holdout 已消耗、`results/<challenge_id>/` 尚未
+`os.replace`），该次消费在 results 树上不可见——本区块也就看不到它。这是只读 results 树的直接后果，
+与 §1.1 否决 family 级概览同源；消费记录本身仍留在 `consumptions/` 与 registry 里（运维面），只是不在本
+只读证据面上呈现。
 
 ### 2.3 匹配"本实验"
 
@@ -62,9 +77,12 @@ results 树是内容寻址、原子发布、按其自身闭集校验过的不可
 - **challenger 侧**：`declaration.challenger_strategy_hash == X 的 manifest.strategy_snapshot_sha256`。
 
 challenger 不能按 id 匹配：声明刻只钉 challenger 的**策略快照哈希**（`ChallengeDeclaration.challenger_strategy_hash`），
-运行期才由 `PublishedExperimentLoader.resolve` 扫描已发布实验、按 `strategy_snapshot_sha256`（`walk_forward_manifest.json`
-的 `snapshot_hashes.strategy_hash`，`service.py:229`）解析出唯一实验 id。服务层用同一等式直读 manifest 完成匹配，
-不 import research。
+运行期才由 `PublishedExperimentLoader.resolve` 扫描 `data/experiments/*/experiment_manifest.json`、
+按 `ExperimentManifest.strategy_snapshot_sha256` 解析出唯一实验 id（`service.py:155-165`，`registry.py:111`）。
+**服务层用同一等式**：直读各实验的 `experiment_manifest.json` 顶层 `strategy_snapshot_sha256` 字段完成匹配
+（同 `service/experiments.py` 读该文件的先例），不 import research。
+（注意：`service.py:229` 的 `snapshot_hashes.strategy_hash` 属 `load()` 视图构建，取值同源但文件位置不同；
+web 服务层对齐的是 resolve 字面等式的 `experiment_manifest.json`。）
 
 **`role` 判定**：单条挑战内 `X` 只占一个角色——命中 baseline 等式取 `baseline`，否则取 `challenger`。
 两侧同时命中在合法挑战里不可能（`assert_comparable_manifests` 要求两侧仅组合规则不同，是两个不同实验），
@@ -100,14 +118,18 @@ GET /api/v1/experiments/{experiment_id}/challenges
 | `status` | `"COMPLETED" \| "FAILED"` |
 | `conclusion` | `"PROMOTED" \| "REJECTED" \| "INCONCLUSIVE_RESEARCH_ONLY" \| null` |
 | `challenger_stability_conclusion` | `string \| null` |
+| `challenger_experiment_id` | `string \| null`（challenger 解析成功时的实验 id；FAILED 恒 null） |
 | `executed_fold_count` / `declared_scenario_count` | `int \| null` |
 | `skipped_fold_ids` / `failed_scenarios` / `reasons` | `list[str]` |
 | `scenario_results` | `list[{scenario, executed_fold_count, passed, cells: list[{metric, baseline, challenger, delta, threshold, passed}]}]` |
-| `error_code` | `string \| null`（FAILED 时的稳定红acted 码；永不路径/堆栈） |
+| `error_code` | `string \| null`（FAILED 时的稳定脱敏（redacted）码；永不路径/堆栈） |
 
-**投影纪律**：逐字读取，**零派生、零改写、零丢失**——本地 pydantic 模型只挑声明字段，健康值原样透传；
-未知字段丢弃（pydantic 默认 `extra="ignore"`）。任何前端"格式化"（百分比、正负号、千万分位）都只是显示层，
-不得回写契约。允许的渲染变换仅限对单值的显示格式化（决策层 spec §7.4 边界）。
+**投影纪律**：逐字读取，**零派生、零改写、证据零丢失**——本地 pydantic 模型为每个挑战投影一个**声明的子集**，
+取值一律原样透传，绝不重算、不改写、不合并。投影**有意省略**的非证据字段仅两处：declaration 的
+`identity_scheme_version`（恒为 `strategy-challenge-v1` 的常量）与内嵌的完整 `comparison_policy`（其内容由保留的
+`comparison_policy_hash` 钉住）。除此之外，已发布结果里的证据字段全部保留；未知字段丢弃（pydantic 默认
+`extra="ignore"`）。任何前端"格式化"（百分比、正负号、千万分位）都只是显示层，不得回写契约。允许的渲染变换仅限
+对单值的显示格式化（决策层 spec §7.4 边界）。
 
 ### 3.2 失败闭合与护栏
 
@@ -115,11 +137,16 @@ GET /api/v1/experiments/{experiment_id}/challenges
   （新增错误类 `ChallengeUnreadable`，`status_code = 500`，`code = "challenge_comparison_unreadable"`），
   经既有错误信封（pin I8）返回。**不静默跳过**——静默跳过会隐藏已消耗 holdout 的挑战，正是本仓库要避免的。
   先例：`list_experiments` 对任一坏 manifest 同样 fail-closed。
-- **越界拒绝**：`experiment_id` 走既有 hex64 路径校验（`^[0-9a-f]{64}$`）。`results/` 下的目录名同样按
-  `^[0-9a-f]{64}$` 过滤：**非 hex64 的目录项直接跳过**（已发布结果的 id 恒为 hex64，非 hex64 名是散落文件而非挑战，
-  跳过不构成隐藏证据）；**hex64 目录但 `strategy_comparison.json` 不可读 → fail-closed**（见上一条）。
-  只读 `results/<challenge_id>/strategy_comparison.json` 这一个文件，不提供任意路径读取。
-- **空态即正常态**：`data/strategy_challenges/` 不存在或 `results/` 为空 → `200` + 空列表，不报错。
+- **未知实验**：`experiment_id` 为合法 hex64 但 `data/experiments/<id>/` 不存在 → 抛既有 `UnknownExperiment`
+  （404 `experiment_not_found`），镜像 `experiment_report` 等既有实验子资源。不存在的实验上**不得**返回"尚无挑战裁决"
+  的空态——那会把"实验不存在"说成"实验没被挑战过"。
+- **路径校验与目录筛选**：`experiment_id` 走既有 hex64 路径校验（`^[0-9a-f]{64}$`；失配由 FastAPI 统一拦成
+  **422 `invalid_request`**，不是 404，见 `app.py:56-70`）。`results/` 下**只有"hex64 命名的目录"才是候选**：
+  非 hex64 名、hex64 名但为普通文件（非目录）、以 `.` 开头的 staging 残留，一律**跳过**（已发布结果恒为
+  hex64 命名的目录，其余都不是挑战，跳过不构成隐藏证据）；**hex64 目录但 `strategy_comparison.json` 不可读
+  → fail-closed**（见上一条）。只读 `results/<challenge_id>/strategy_comparison.json` 这一个文件，不提供任意路径读取。
+- **空态即正常态**：`data/strategy_challenges/` 不存在、`results/` 不存在或为空、或该实验存在但无匹配挑战
+  → `200` + 空列表，不报错。
 - **排序**：按 `declared_before_run_at` 升序（稳定，可复现）；同刻按 `challenge_id` 字典序兜底。
 
 ### 3.3 契约纪律
@@ -145,11 +172,18 @@ GET /api/v1/experiments/{experiment_id}/challenges
 4. **理由**：`reasons` 逐条列出；`failed_scenarios` / `skipped_fold_ids` 非空时标注。
 5. **逐情景阈值表**：`DataTable`，每情景一块，列 `metric / baseline / challenger / delta / threshold / passed`，
    数据逐字读 `scenario_results[].cells[]`。**不做任何跨格/跨情景聚合**。
-6. **消费事实**：`consumption` 非 null 时展示 `consumption_key`、`consumed_at`，以及 `universe_definition`
-   四字段（`universe_id`、`universe_version`、`membership_table_sha256`、`evidence_summary_sha256`）。
-   `consumption === null`（消费被拒的 FAILED）时明示"**该挑战未取得消费记录**"。
-7. **FAILED 特别标注**：显式渲染 `error_code` 与 `reasons`，并加一句"**该挑战仍已消耗 holdout**"
-   （计划 §"Crash, FAILED, REJECTED, and INCONCLUSIVE runs still consume the holdout"）。
+6. **消费事实（三分支——按 `error_code` × `consumption` 判定，不得只看 `consumption == null`）**：
+   - `consumption` 非 null → 展示 `consumption_key`、`consumed_at` 与 `universe_definition` 四字段
+     （`universe_id`、`universe_version`、`membership_table_sha256`、`evidence_summary_sha256`）；
+     文案"**本次消耗了 holdout**"。
+   - `consumption == null` 且 `error_code == "HOLDOUT_CONSUMPTION_REFUSED"` → 文案
+     "**消费被拒：本挑战未取得 holdout 消费**"。
+   - `consumption == null` 且其它 `error_code`（当前即 `EXPERIMENT_LOAD_ERROR`）→ 文案
+     "**holdout 已被本次挑战消耗，但失败结果未附消费记录**"。
+7. **FAILED 特别标注**：显式渲染 `error_code` 与 `reasons`。只有在**真正发生了消费**的两支
+   （`consumption` 非空，或 `null` + 非 `REFUSED`）才加一句"**该挑战仍已消耗 holdout**"
+   （计划 §"Crash, FAILED, REJECTED, and INCONCLUSIVE runs still consume the holdout"）；
+   `HOLDOUT_CONSUMPTION_REFUSED` 一支**不得**出现该句——该次运行恰恰没有消费，写出来就是假话。
 
 ### 4.3 强制诚实文案
 
@@ -192,14 +226,18 @@ GET /api/v1/experiments/{experiment_id}/challenges
 ## 6. 验收标准
 
 - **端点**：
-  - 空根（无 `data/strategy_challenges/`）= `200` + 空列表；
-  - 按 baseline id 匹配命中；按 challenger `strategy_snapshot_sha256` 匹配命中；
-  - `FAILED` 挑战入列（`conclusion=null` + `error_code` 非空 + `consumption` 可能为 null）；
+  - 空根（无 `data/strategy_challenges/`）= `200` + 空列表；`results/` 为空/不存在同样空列表；
+  - 按 baseline id 匹配命中；按 challenger `strategy_snapshot_sha256`（`experiment_manifest.json`）匹配命中；
+  - **FAILED 三种消费形态各自入列并被正确投影**（§2.1 表）：
+    `HOLDOUT_CONSUMPTION_REFUSED`（`consumption=null`）、`EXPERIMENT_LOAD_ERROR`（`consumption=null`）、
+    评估期失败（`consumption` 非空 + 真实 `consumption_key`）；
   - 坏/缺 `strategy_comparison.json` → fail-closed `challenge_comparison_unreadable`；
-  - 非 hex64 的 `experiment_id` 被拒（`experiment_not_found`）；非 hex64 的 results 子目录被跳过而不报错；
-  - 响应与已发布 JSON **逐字段对账**（快照测试）。
-- **前端**：区块渲染（结论徽章/理由/阈值表/消费事实四态齐全）；FAILED 特别标注；空态与 CLI 引导；
-  加载骨架与 `toDisplayError()`；`challenge` 语义映射单测；e2e 路由 mock 覆盖。
+  - 非 hex64 的 `experiment_id` → **422 `invalid_request`**（FastAPI 路径校验）；合法 hex64 但实验不存在
+    → **404 `experiment_not_found`**；非 hex64 名 / hex64 普通文件 / `.` 开头的 results 子项被跳过而不报错；
+  - 排序按 `declared_before_run_at` 升序，同刻按 `challenge_id` 兜底；响应与已发布 JSON **逐字段对账**（快照测试）。
+- **前端**：区块渲染（结论徽章/理由/阈值表/消费事实）；**消费文案三分支各有一条断言**（含 FAILED 三形态：
+  REFUSED 不得出现"已消耗"、LOAD_ERROR 必须出现"已消耗但未附消费记录"、评估期失败展示消费记录）；
+  空态与 CLI 引导；加载骨架与 `toDisplayError()`；`challenge` 语义映射单测；e2e 路由 mock 覆盖。
 - **纪律**：`research/` 产物契约无改动（diff 证明）；`types.ts` 只增不改；pin I5/I6/I8 原测试不变绿。
 
 ### 6.1 已知缺口：契约 ≠ 实例
