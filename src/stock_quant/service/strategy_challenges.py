@@ -186,21 +186,28 @@ def _project(
 
     Unknown fields are dropped by the models' default ``extra="ignore"``; a
     payload that does not satisfy the declared subset fails closed instead of
-    being shown partially.
+    being shown partially. A ``holdout_consumption`` that is neither absent
+    nor an object is corrupted evidence, not an absent record, so it fails
+    closed too (spec §3.2) instead of projecting as "never consumed".
     """
     consumption = payload.get("holdout_consumption")
     try:
+        if consumption is None:
+            consumption_view = None
+        elif isinstance(consumption, dict):
+            consumption_view = ChallengeConsumptionView.model_validate(consumption)
+        else:
+            raise ChallengeUnreadable(
+                f"{_COMPARISON_NAME} of {challenge_id} carries a malformed "
+                "holdout_consumption record"
+            )
         return ChallengeView(
             challenge_id=challenge_id,
             role=role,
             declaration=ChallengeDeclarationView.model_validate(
                 payload["declaration"]
             ),
-            consumption=(
-                ChallengeConsumptionView.model_validate(consumption)
-                if isinstance(consumption, dict)
-                else None
-            ),
+            consumption=consumption_view,
             result=ChallengeResultView.model_validate(payload["result"]),
         )
     except ValidationError as error:

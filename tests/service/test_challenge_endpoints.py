@@ -401,6 +401,20 @@ def test_non_iso_declaration_instant_fails_closed(
     assert response.json()["error"]["code"] == "challenge_comparison_unreadable"
 
 
+def test_malformed_consumption_scalar_fails_closed(
+    client: TestClient, service_project: Path
+) -> None:
+    # 损坏的 holdout_consumption 不是"未消费"：fail-closed，不得静默投影成 null（owner 裁决 2026-10-04）。
+    write_experiment_manifest(service_project, EXPERIMENT_ID, BASELINE_HASH)
+    write_challenge(
+        service_project,
+        comparison_payload(consumption="corrupted"),
+    )
+    response = client.get(f"/api/v1/experiments/{EXPERIMENT_ID}/challenges")
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "challenge_comparison_unreadable"
+
+
 def test_refused_consumption_projects_a_null_record(
     client: TestClient, service_project: Path
 ) -> None:
