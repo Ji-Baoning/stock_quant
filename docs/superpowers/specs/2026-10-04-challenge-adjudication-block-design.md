@@ -124,12 +124,19 @@ GET /api/v1/experiments/{experiment_id}/challenges
 | `scenario_results` | `list[{scenario, executed_fold_count, passed, cells: list[{metric, baseline, challenger, delta, threshold, passed}]}]` |
 | `error_code` | `string \| null`（FAILED 时的稳定脱敏（redacted）码；永不路径/堆栈） |
 
-**投影纪律**：逐字读取，**零派生、零改写、证据零丢失**——本地 pydantic 模型为每个挑战投影一个**声明的子集**，
-取值一律原样透传，绝不重算、不改写、不合并。投影**有意省略**的非证据字段仅两处：declaration 的
-`identity_scheme_version`（恒为 `strategy-challenge-v1` 的常量）与内嵌的完整 `comparison_policy`（其内容由保留的
-`comparison_policy_hash` 钉住）。除此之外，已发布结果里的证据字段全部保留；未知字段丢弃（pydantic 默认
-`extra="ignore"`）。任何前端"格式化"（百分比、正负号、千万分位）都只是显示层，不得回写契约。允许的渲染变换仅限
-对单值的显示格式化（决策层 spec §7.4 边界）。
+**投影纪律**：逐字读取，**零派生、零改写、决策层证据零丢失**——本地 pydantic 模型为每个挑战投影一个**声明的子集**，
+取值一律原样透传，绝不重算、不改写、不合并。投影**有意省略**的字段分两类：
+
+- **(a) 常量与重复字段**：declaration 的 `identity_scheme_version`（恒 `strategy-challenge-v1`）、内嵌完整
+  `comparison_policy`（由保留的 `comparison_policy_hash` 钉住）；consumption 里在 declaration/result 视图已出现的
+  `challenge_id` / `strategy_family` / `fold_schedule_hash` / `comparison_policy_hash` / `baseline_experiment_id` /
+  `challenger_strategy_hash`。
+- **(b) 校验层事实（非决策层事实）**：顶层 `snapshot_hashes`、顶层 `artifacts`（结果目录文件→sha256 映射）、
+  `holdout_consumption.declaration_sha256`。省略是有意的——区块是**证据展示面，不是字节级校验器**；需要逐字节核对的
+  运维走文件系统原位（`results/<challenge_id>/` 与 `consumptions/`），不在 web 上重做校验。
+
+除此之外，已发布结果里的决策层证据字段全部保留；未知字段丢弃（pydantic 默认 `extra="ignore"`）。任何前端"格式化"
+（百分比、正负号、千万分位）都只是显示层，不得回写契约。允许的渲染变换仅限对单值的显示格式化（决策层 spec §7.4 边界）。
 
 ### 3.2 失败闭合与护栏
 
