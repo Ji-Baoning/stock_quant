@@ -1,8 +1,12 @@
 import { inject, provide, type InjectionKey } from "vue";
 import type {
+  BenchmarkResponse,
   DatasetDetailResponse,
   DatasetListResponse,
+  ExperimentResultsResponse,
   ExperimentsResponse,
+  ExperimentSummaryRow,
+  FoldEquityResponse,
   HealthResponse,
   QualityListResponse,
   TablePreviewParams,
@@ -45,6 +49,17 @@ export interface ApiClient {
   listUpdateJobs(): Promise<UpdateJobsResponse>;
   getUpdateJob(jobId: string): Promise<UpdateJob>;
   startUpdateJob(request: UpdateJobRequest): Promise<UpdateJobCreated>;
+  experimentSummaries(): Promise<{ summaries: ExperimentSummaryRow[] }>;
+  experimentResults(experimentId: string): Promise<ExperimentResultsResponse>;
+  foldEquity(
+    experimentId: string,
+    foldId: string,
+    scenario: string | null,
+  ): Promise<FoldEquityResponse>;
+  datasetBenchmark(
+    version: string,
+    params: { symbol?: string; start?: string; end?: string },
+  ): Promise<BenchmarkResponse>;
 }
 
 export const apiClientKey: InjectionKey<ApiClient> = Symbol("stock-web-api-client");
@@ -157,6 +172,28 @@ export function createApiClient(
         headers: { "content-type": "application/json" },
         body: JSON.stringify(request),
       });
+    },
+    experimentSummaries() {
+      return requestJson<{ summaries: ExperimentSummaryRow[] }>("/api/v1/experiments/summaries");
+    },
+    experimentResults(experimentId: string) {
+      return requestJson<ExperimentResultsResponse>(
+        `/api/v1/experiments/${encodeURIComponent(experimentId)}/results`,
+      );
+    },
+    foldEquity(experimentId: string, foldId: string, scenario: string | null) {
+      return requestJson<FoldEquityResponse>(
+        `/api/v1/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(foldId)}/equity${query({ scenario })}`,
+      );
+    },
+    datasetBenchmark(version: string, params: { symbol?: string; start?: string; end?: string }) {
+      return requestJson<BenchmarkResponse>(
+        `/api/v1/datasets/${encodeURIComponent(version)}/benchmark${query({
+          symbol: params.symbol ?? null,
+          start: params.start ?? null,
+          end: params.end ?? null,
+        })}`,
+      );
     },
   };
 }

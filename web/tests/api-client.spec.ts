@@ -143,4 +143,38 @@ describe("api client（pin I1–I11）", () => {
       expect((error as ApiError).code).toBe("operations_disabled");
     }
   });
+
+  it("S1 四端点：URL 组装与响应解析", async () => {
+    const calls: string[] = [];
+    const client = createApiClient({
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        calls.push(String(input));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }) as typeof fetch,
+    });
+    await client.experimentSummaries();
+    await client.experimentResults("e".repeat(64));
+    await client.foldEquity("e".repeat(64), "f".repeat(64), "full_cost");
+    await client.datasetBenchmark("current", { start: "2026-01-05", end: "2026-01-08" });
+    expect(calls).toEqual([
+      "/api/v1/experiments/summaries",
+      `/api/v1/experiments/${"e".repeat(64)}/results`,
+      `/api/v1/experiments/${"e".repeat(64)}/folds/${"f".repeat(64)}/equity?scenario=full_cost`,
+      "/api/v1/datasets/current/benchmark?start=2026-01-05&end=2026-01-08",
+    ]);
+  });
+
+  it("S1 端点错误走嵌套信封（pin I8）", async () => {
+    const client = createApiClient({
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({ error: { code: "results_not_found", message: "no metrics" } }),
+          { status: 404 },
+        )) as typeof fetch,
+    });
+    await expect(client.experimentResults("e".repeat(64))).rejects.toMatchObject({
+      status: 404,
+      code: "results_not_found",
+    });
+  });
 });

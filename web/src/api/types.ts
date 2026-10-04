@@ -196,3 +196,54 @@ export interface ErrorBody {
 export interface ErrorResponse {
   error: ErrorBody;
 }
+
+/** S1：/experiments/summaries 行（pin I5 五字段 + 结论层）。 */
+export interface ExperimentSummaryRow {
+  experiment_id: string;
+  status: string | null;
+  dataset_version: string | null;
+  universe_version: string | null;
+  evaluation_reason: string | null;
+  hypothesis: string | null;
+  stability_conclusion: string | null;
+  stability_policy_hash: string | null;
+  research_status: string | null;
+  canonical_scenario: string | null;
+  aggregates: ScenarioAggregate[] | null;
+  display_extremes: {
+    max_per_fold_drawdown: number | null;
+    max_reject_rate: number | null;
+    mean_turnover: number | null;
+  } | null;
+}
+
+export interface ScenarioAggregate {
+  scenario: string;
+  aggregate_return: number | null;
+  annualized_return: number | null;
+  annualized_volatility: number | null;
+  sharpe_zero_rf: number | null;
+  oos_return_observations: number | null;
+  annualization_observations: number | null;
+}
+
+export interface ExperimentResultsResponse {
+  experiment_id: string;
+  manifest: Record<string, unknown>;
+  metrics: Record<string, unknown> | null;
+  stability_report: Record<string, unknown> | null;
+}
+
+export interface FoldEquityResponse {
+  experiment_id: string;
+  fold_id: string;
+  scenario: string | null;
+  rows: Array<{ trade_date: string } & Record<string, number | string | null>>;
+}
+
+export interface BenchmarkResponse {
+  dataset_version: string;
+  requested_version: string;
+  symbol: string;
+  rows: Array<{ trade_date: string; close: number }>;
+}
