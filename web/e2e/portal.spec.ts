@@ -325,16 +325,116 @@ test("§10.4 操作面关闭：只读 + 等价 CLI 命令", async ({ page }) => 
   await expect(page.getByTestId("update-form")).toHaveCount(0);
 });
 
-test("§10.4 报告不存在：缺失态与既有链接并存", async ({ page }) => {
-  await installMockBackend(page, state());
-  await page.goto("/#/reports");
-  const rows = page.getByTestId("experiment-row");
-  await expect(rows).toHaveCount(2);
-  await expect(rows.nth(0).getByTestId("report-link")).toHaveAttribute(
-    "href",
-    "/api/v1/experiments/exp-2026q3/report",
+/** S1 策略详情：/experiments/{id}/results 的 WF 产物形状（对齐真实产物的
+     小写折状态枚举与情景聚合字段；与 tests/strategy-detail-page.spec.ts 夹具同源）。 */
+function resultsBody() {
+  const fold = "f".repeat(64);
+  return {
+    experiment_id: "exp-2026q3",
+    manifest: {
+      experiment_id: "exp-2026q3",
+      status: "ACCEPTED",
+      dataset_version: HASH_A,
+      code_commit: "c".repeat(40),
+      strategy_snapshot_sha256: "1".repeat(64),
+      experiment_snapshot_sha256: "2".repeat(64),
+      data_environment_snapshot_sha256: "3".repeat(64),
+      stability_policy_hash: "p".repeat(16),
+      fold_schedule_sha256: "s".repeat(64),
+      fold_outcomes_sha256: "o".repeat(64),
+      artifacts: { "folds/x": "0".repeat(64) },
+    },
+    metrics: {
+      meta: { spec: { hypothesis: "动量延续假设" }, benchmark_symbols: ["000300.SH"] },
+      evaluation: { status: "ACCEPTED", reason: "stability STABLE" },
+    },
+    stability_report: {
+      stability_conclusion: "STABLE",
+      thresholds: { policy: "stability-v1" },
+      fold_statuses: [{ fold_id: fold, status: "executed", reason_code: null }],
+      scenario_aggregates: [
+        {
+          scenario: "full_cost",
+          aggregate_return: 0.12,
+          annualized_return: 0.12,
+          annualized_volatility: 0.18,
+          sharpe_zero_rf: 1.4,
+          oos_return_observations: 100,
+          annualization_observations: 250,
+        },
+      ],
+      fold_metrics: [
+        {
+          fold_id: fold,
+          scenario: "full_cost",
+          fold_calendar_return: 0.02,
+          per_fold_max_drawdown: -0.03,
+          sharpe_zero_rf: 1.1,
+          explicit_cost_drag: 0.004,
+          net_return: 0.016,
+          reject_rate: 0.01,
+          turnover: 0.3,
+          first_trading_day: "2026-01-05",
+          last_trading_day: "2026-03-05",
+        },
+      ],
+    },
+  };
+}
+
+test("策略列表与详情（S1）", async ({ page }) => {
+  const mock = state({});
+  await installMockBackend(page, mock);
+  await page.route("**/api/v1/experiments/summaries", (route) =>
+    json(route, 200, { summaries: [] }),
   );
-  await expect(rows.nth(1).getByTestId("report-missing")).toContainText("报告不存在");
+  await page.goto("/#/strategies");
+  await expect(page.getByTestId("strategy-empty")).toContainText("尚无已发布实验");
+  // 导航分组：策略组在、报告组不在（裁定 7）。
+  await expect(page.getByTestId("main-nav")).toContainText("策略列表");
+  await expect(page.getByTestId("main-nav")).not.toContainText("报告");
+
+  // 详情页四个产物端点：mock 后端尚不认识，显式补 route（注册在兜底之后，
+  // Playwright 后注册者优先）。/report 探测走兜底里既有的 reports 映射。
+  const fold = "f".repeat(64);
+  const benchmarkSearches: string[] = [];
+  await page.route("**/api/v1/experiments/exp-2026q3/results", (route) =>
+    json(route, 200, resultsBody()),
+  );
+  await page.route("**/api/v1/experiments/exp-2026q3/folds/*/equity*", (route) =>
+    json(route, 200, {
+      experiment_id: "exp-2026q3",
+      fold_id: fold,
+      scenario: "full_cost",
+      rows: [
+        { trade_date: "2026-01-05", net_equity_after_cost: 1_000_000 },
+        { trade_date: "2026-01-06", net_equity_after_cost: 1_010_000 },
+      ],
+    }),
+  );
+  await page.route(`**/api/v1/datasets/${HASH_A}/benchmark*`, (route) => {
+    benchmarkSearches.push(new URL(route.request().url()).search);
+    return json(route, 200, {
+      dataset_version: HASH_A,
+      requested_version: HASH_A,
+      symbol: "000300.SH",
+      rows: [
+        { trade_date: "2026-01-05", close: 4000 },
+        { trade_date: "2026-01-06", close: 4020 },
+      ],
+    });
+  });
+  await page.goto("/#/strategies/exp-2026q3");
+  await expect(page.getByTestId("verdict-banner")).toContainText("STABLE");
+  // 逐折净值钉在当前折上（禁止跨折拼接的可测形式）；图例是 DOM 文本，
+  // "基准同图"在 DOM 层可验证。基准窗口 = 该折首末交易日，不是全期。
+  await expect(page.getByTestId("chart-net-value")).toHaveAttribute("data-fold", fold);
+  await expect(page.getByTestId("chart-net-value-legend")).toContainText("基准 000300.SH");
+  expect(
+    benchmarkSearches.some(
+      (search) => search.includes("start=2026-01-05") && search.includes("end=2026-03-05"),
+    ),
+  ).toBe(true);
 });
 
 test("§10.4 E2E 主流程：触发更新 → 看到新版本；成功终态显示完整 dataset version 并链接版本详情；不生成 acceptance PASS、不自动运行研究", async ({ page }) => {
