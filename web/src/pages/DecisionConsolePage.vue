@@ -74,8 +74,6 @@ onMounted(() => {
           <EmptyState
             title="尚无已发布实验"
             description="data/experiments 为空；经 CLI 发起一次 research run 并发布实验后，结论将在此展示。"
-            action-label="查看报告页"
-            action-to="/reports"
           />
         </div>
         <p v-else data-testid="block-strategy-count">

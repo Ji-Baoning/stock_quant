@@ -78,10 +78,10 @@ onMounted(async () => {
       :columns="[
         { key: 'hypothesis', label: '假设' },
         { key: 'conclusion', label: '结论' },
-        { key: 'aggregate', label: 'OOS 聚合收益', align: 'right', sortable: true },
-        { key: 'sharpe', label: 'Sharpe（零无风险）', align: 'right', sortable: true },
-        { key: 'worst_drawdown', label: '逐折最差回撤', align: 'right', sortable: true },
-        { key: 'turnover', label: '换手（均值）', align: 'right', sortable: true },
+        { key: 'aggregate', label: 'OOS 聚合收益', align: 'right' },
+        { key: 'sharpe', label: 'Sharpe（零无风险）', align: 'right' },
+        { key: 'worst_drawdown', label: '逐折最差回撤', align: 'right' },
+        { key: 'turnover', label: '换手（均值）', align: 'right' },
         { key: 'dataset_version', label: '数据版本', mono: true },
         { key: 'status', label: '状态' },
       ]"
