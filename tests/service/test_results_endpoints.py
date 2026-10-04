@@ -53,3 +53,64 @@ def test_results_without_a_readable_manifest_is_results_not_found(
     response = client.get("/api/v1/experiments/" + "e" * 64 + "/results")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "results_not_found"
+
+
+def test_fold_equity_serves_only_declared_artifacts(service_project, client):
+    """An equity parquet sitting on disk is not servable: only files inside
+    the manifest's declared artifact graph are. The fixture declares a
+    *non-equity* fold artifact so the fold is "present" in the graph and the
+    404 is genuinely the artifact branch, not the fold branch."""
+    directory = publish_experiment(service_project, "v1", walk_forward=True)
+    import json as _json
+
+    fold = "f" * 64
+    key = f"folds/{fold}/backtest/full_cost/rebalance_decisions.parquet"
+    manifest_path = directory / "experiment_manifest.json"
+    manifest = _json.loads(manifest_path.read_text())
+    manifest["artifacts"] = {key: "0" * 64}
+    manifest_path.write_text(_json.dumps(manifest))
+    response = client.get(f"/api/v1/experiments/{'e' * 64}/folds/{fold}/equity")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "artifact_not_found"
+
+
+def test_fold_equity_serves_a_declared_scenario_artifact(service_project, client):
+    """A declared, hash-verified scenario equity file is served with the
+    whitelisted columns only; trade dates serialise as ISO dates."""
+    directory = publish_experiment(service_project, "v1", walk_forward=True)
+    import hashlib
+    import json as _json
+
+    manifest_path = directory / "experiment_manifest.json"
+    manifest = _json.loads(manifest_path.read_text())
+    key = f"folds/{'f' * 64}/backtest/full_cost/equity.parquet"
+    manifest["artifacts"] = {
+        key: hashlib.sha256((directory / key).read_bytes()).hexdigest()
+    }
+    manifest_path.write_text(_json.dumps(manifest))
+    response = client.get(
+        f"/api/v1/experiments/{'e' * 64}/folds/{'f' * 64}/equity?scenario=full_cost"
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scenario"] == "full_cost"
+    assert [row["net_equity_after_cost"] for row in body["rows"]] == [
+        1_000_000.0,
+        1_000_000.0,
+    ]
+    assert set(body["rows"][0]) == {
+        "trade_date",
+        "cash",
+        "market_value",
+        "net_equity_after_cost",
+    }
+    assert body["rows"][0]["trade_date"] == "2026-01-05"
+
+
+def test_fold_equity_unknown_fold_is_fold_not_found(service_project, client):
+    """A fold with nothing declared under folds/<id>/ reads as "no such
+    fold" -- the fold branch of the declared-graph guard."""
+    publish_experiment(service_project, "v1", walk_forward=True)
+    response = client.get(f"/api/v1/experiments/{'e' * 64}/folds/{'a' * 64}/equity")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "fold_not_found"

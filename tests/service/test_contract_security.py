@@ -23,6 +23,7 @@ EXPECTED_PATHS = {
     "/api/v1/datasets/{version}/tables/{table}",
     "/api/v1/experiments",
     "/api/v1/experiments/{experiment_id}/results",
+    "/api/v1/experiments/{experiment_id}/folds/{fold_id}/equity",
     "/api/v1/experiments/{experiment_id}/report",
 }
 
@@ -34,6 +35,7 @@ EXPECTED_SCHEMAS = {
     "TablePreviewResponse",
     "ExperimentsListResponse",
     "ExperimentResultsResponse",
+    "FoldEquityResponse",
     "ErrorResponse",
 }
 
