@@ -6,15 +6,14 @@ import { versionPinState } from "../src/stores/version";
 import { ApiError, type ApiClient } from "../src/api/client";
 import {
   datasetListResponse,
-  experimentsResponse,
   fakeClient,
   mountAt,
   updateJobSummary,
+  WF_SUMMARY,
 } from "./helpers";
 
 function resetState() {
   consoleState.datasets = [];
-  consoleState.current = null;
   consoleState.experiments = [];
   consoleState.jobs = [];
   consoleState.operationsEnabled = true;
@@ -29,7 +28,7 @@ describe("决策台（v3 规格 §5.1：三问首屏）", () => {
     resetState();
     const client: ApiClient = fakeClient({
       listDatasets: async () => datasetListResponse(),
-      listExperiments: async () => ({ experiments: [] }),
+      experimentSummaries: async () => ({ summaries: [] }),
       listUpdateJobs: async () => ({ jobs: [] }),
     });
     const wrapper = await mountAt(DecisionConsolePage, client, "/");
@@ -46,7 +45,7 @@ describe("决策台（v3 规格 §5.1：三问首屏）", () => {
     resetState();
     const client: ApiClient = fakeClient({
       listDatasets: async () => datasetListResponse(),
-      listExperiments: async () => ({ experiments: [] }),
+      experimentSummaries: async () => ({ summaries: [] }),
       listUpdateJobs: async () => ({ jobs: [] }),
     });
     const wrapper = await mountAt(DecisionConsolePage, client, "/");
@@ -57,16 +56,60 @@ describe("决策台（v3 规格 §5.1：三问首屏）", () => {
     expect(block.find(".kpi").exists()).toBe(false);
   });
 
-  it("块②：注册表非空 → 只报计数一句话（结论卡属 S2②，不提前渲染）", async () => {
+  it("块②：结论卡——最新实验的徽章/摘要/指标与跳转", async () => {
     resetState();
     const client: ApiClient = fakeClient({
       listDatasets: async () => datasetListResponse(),
-      listExperiments: async () => experimentsResponse(),
       listUpdateJobs: async () => ({ jobs: [] }),
+      experimentSummaries: async () => ({
+        summaries: [
+          { ...WF_SUMMARY, experiment_id: "a".repeat(64), run_started_at: "2026-10-01T09:00:00+08:00" },
+          { ...WF_SUMMARY, experiment_id: "b".repeat(64), run_started_at: "2026-10-03T09:00:00+08:00",
+            stability_conclusion: "UNSTABLE" },
+        ],
+      }),
     });
     const wrapper = await mountAt(DecisionConsolePage, client, "/");
     await flushPromises();
-    expect(wrapper.get('[data-testid="block-strategy-count"]').text()).toContain("已发布实验 2 个");
+    const block = wrapper.get('[data-testid="block-strategy"]');
+    // 最新 = run_started_at 最大者（b…，UNSTABLE）；计数并入来源行，不再单独报数。
+    expect(block.get('[data-testid="state-badge"]').text()).toBe("UNSTABLE");
+    expect(block.get('[data-testid="strategy-latest-link"]').attributes("href")).toBe(
+      `#/strategies/${"b".repeat(64)}`,
+    );
+    expect(block.text()).toContain("Sharpe");
+    expect(block.text()).toContain("共 2 个已发布实验");
+  });
+
+  it("块②：无时间序信息时显式标注（注册表序），不假装最新", async () => {
+    resetState();
+    const client: ApiClient = fakeClient({
+      listDatasets: async () => datasetListResponse(),
+      listUpdateJobs: async () => ({ jobs: [] }),
+      experimentSummaries: async () => ({
+        summaries: [{ ...WF_SUMMARY, run_started_at: null }],
+      }),
+    });
+    const wrapper = await mountAt(DecisionConsolePage, client, "/");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="block-strategy"]').text()).toContain("（注册表序，无运行时间）");
+  });
+
+  it("块②：非 walk-forward 实验显式'无 walk-forward 结论'，不渲染指标卡", async () => {
+    resetState();
+    const client: ApiClient = fakeClient({
+      listDatasets: async () => datasetListResponse(),
+      listUpdateJobs: async () => ({ jobs: [] }),
+      experimentSummaries: async () => ({
+        summaries: [{ ...WF_SUMMARY, stability_conclusion: null, aggregates: null, display_extremes: null }],
+      }),
+    });
+    const wrapper = await mountAt(DecisionConsolePage, client, "/");
+    await flushPromises();
+    const block = wrapper.get('[data-testid="block-strategy"]');
+    expect(block.get('[data-testid="strategy-no-conclusion"]').text()).toBe("无 walk-forward 结论");
+    expect(block.find('[data-testid="state-badge"]').exists()).toBe(false);
+    expect(block.find(".kpi-grid").exists()).toBe(false);
   });
 
   it("块③：待办列表（验收待确认 + 运行中任务），每条带跳转；无待办显'无待办'", async () => {
@@ -80,7 +123,7 @@ describe("决策台（v3 规格 §5.1：三问首屏）", () => {
     };
     const client: ApiClient = fakeClient({
       listDatasets: async () => pending,
-      listExperiments: async () => ({ experiments: [] }),
+      experimentSummaries: async () => ({ summaries: [] }),
       listUpdateJobs: async () => ({ jobs: [updateJobSummary({ job_id: "job-0001", status: "RUNNING" })] }),
     });
     const wrapper = await mountAt(DecisionConsolePage, client, "/");
@@ -94,7 +137,7 @@ describe("决策台（v3 规格 §5.1：三问首屏）", () => {
     resetState();
     const quietClient: ApiClient = fakeClient({
       listDatasets: async () => datasetListResponse(),
-      listExperiments: async () => ({ experiments: [] }),
+      experimentSummaries: async () => ({ summaries: [] }),
       listUpdateJobs: async () => ({ jobs: [] }),
     });
     const quiet = await mountAt(DecisionConsolePage, quietClient, "/");
@@ -106,7 +149,7 @@ describe("决策台（v3 规格 §5.1：三问首屏）", () => {
     resetState();
     const client: ApiClient = fakeClient({
       listDatasets: async () => datasetListResponse(),
-      listExperiments: async () => ({ experiments: [] }),
+      experimentSummaries: async () => ({ summaries: [] }),
       listUpdateJobs: async () => {
         throw new ApiError(503, "operations_disabled", "");
       },
@@ -122,7 +165,7 @@ describe("决策台（v3 规格 §5.1：三问首屏）", () => {
     resetState();
     const slow: ApiClient = fakeClient({
       listDatasets: () => new Promise(() => {}),
-      listExperiments: () => new Promise(() => {}),
+      experimentSummaries: () => new Promise(() => {}),
       listUpdateJobs: () => new Promise(() => {}),
     });
     const loading = await mountAt(DecisionConsolePage, slow, "/");
@@ -133,7 +176,7 @@ describe("决策台（v3 规格 §5.1：三问首屏）", () => {
       listDatasets: async () => {
         throw new ApiError(500, "internal_error", "");
       },
-      listExperiments: async () => ({ experiments: [] }),
+      experimentSummaries: async () => ({ summaries: [] }),
       listUpdateJobs: async () => ({ jobs: [] }),
     });
     const errored = await mountAt(DecisionConsolePage, failing, "/");

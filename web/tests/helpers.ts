@@ -5,7 +5,7 @@ import { createPortalRouter } from "../src/router";
 import type {
   DatasetDetailResponse,
   DatasetListResponse,
-  ExperimentsResponse,
+  ExperimentSummaryRow,
   HealthResponse,
   QualityListResponse,
   TablePreviewResponse,
@@ -262,24 +262,33 @@ export function updateJob(overrides: Partial<UpdateJob> = {}): UpdateJob {
   };
 }
 
-export function experimentsResponse(): ExperimentsResponse {
-  // pin I5：ExperimentSummary 的五个字段一个都不少（可空字段显式给 null）。
-  return {
-    experiments: [
-      {
-        experiment_id: "exp-2026q3",
-        status: "SUCCEEDED",
-        dataset_version: HASH_A,
-        universe_version: "tw",
-        evaluation_reason: null,
-      },
-      {
-        experiment_id: "exp-2026q2",
-        status: null,
-        dataset_version: HASH_B,
-        universe_version: null,
-        evaluation_reason: "no_report",
-      },
-    ],
-  };
-}
+/**
+ * 结论层最小行：pin I5 五字段 + 结论层字段，决策台块②与策略列表页共享。
+ * `run_started_at: null` 是现实默认（对账：已发布工件没有运行时间字段，
+ * 服务端只透传未来的 run_manifest.json）。
+ */
+export const WF_SUMMARY: ExperimentSummaryRow = {
+  experiment_id: "e".repeat(64),
+  status: "ACCEPTED",
+  dataset_version: HASH_A,
+  universe_version: "u".repeat(64),
+  evaluation_reason: null,
+  hypothesis: "动量延续假设：60 日动量在 CSI300 内有正超额",
+  stability_conclusion: "STABLE",
+  stability_policy_hash: "p".repeat(16),
+  research_status: "COMPLETED",
+  canonical_scenario: "full_cost",
+  run_started_at: null,
+  aggregates: [
+    {
+      scenario: "full_cost",
+      aggregate_return: 0.12,
+      annualized_return: 0.12,
+      annualized_volatility: 0.18,
+      sharpe_zero_rf: 1.4,
+      oos_return_observations: 750,
+      annualization_observations: 250,
+    },
+  ],
+  display_extremes: { max_per_fold_drawdown: -0.08, max_reject_rate: 0.02, mean_turnover: 0.35 },
+};

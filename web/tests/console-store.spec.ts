@@ -11,14 +11,13 @@ import {
 } from "../src/stores/console";
 import {
   datasetListResponse,
-  experimentsResponse,
   fakeClient,
   updateJobSummary,
+  WF_SUMMARY,
 } from "./helpers";
 
 function resetState() {
   consoleState.datasets = [];
-  consoleState.current = null;
   consoleState.experiments = [];
   consoleState.jobs = [];
   consoleState.operationsEnabled = true;
@@ -42,7 +41,7 @@ describe("决策台数据组装（stores/console.ts）", () => {
     resetState();
     const client: ApiClient = fakeClient({
       listDatasets: async () => listWithPending(),
-      listExperiments: async () => experimentsResponse(),
+      experimentSummaries: async () => ({ summaries: [WF_SUMMARY] }),
       listUpdateJobs: async () => ({ jobs: [updateJobSummary({ job_id: "job-0001", status: "RUNNING" })] }),
     });
     await loadConsoleData(client);
@@ -65,7 +64,7 @@ describe("决策台数据组装（stores/console.ts）", () => {
     resetState();
     const client: ApiClient = fakeClient({
       listDatasets: async () => datasetListResponse(),
-      listExperiments: async () => experimentsResponse(),
+      experimentSummaries: async () => ({ summaries: [WF_SUMMARY] }),
       listUpdateJobs: async () => {
         throw new ApiError(503, "operations_disabled", "");
       },
@@ -83,7 +82,7 @@ describe("决策台数据组装（stores/console.ts）", () => {
       listDatasets: async () => {
         throw new ApiError(500, "internal_error", "boom");
       },
-      listExperiments: async () => experimentsResponse(),
+      experimentSummaries: async () => ({ summaries: [WF_SUMMARY] }),
       listUpdateJobs: async () => ({ jobs: [] }),
     });
     await loadConsoleData(client);
@@ -95,7 +94,7 @@ describe("决策台数据组装（stores/console.ts）", () => {
     resetState();
     const client: ApiClient = fakeClient({
       listDatasets: async () => datasetListResponse(),
-      listExperiments: async () => experimentsResponse(),
+      experimentSummaries: async () => ({ summaries: [WF_SUMMARY] }),
       listUpdateJobs: async () => ({ jobs: [updateJobSummary({ status: "SUCCEEDED" })] }),
     });
     await loadConsoleData(client);

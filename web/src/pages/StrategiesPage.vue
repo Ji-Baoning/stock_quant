@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import { RouterLink } from "vue-router";
 import { useApiClient } from "../api/client";
 import { toDisplayError, type DisplayError } from "../api/errors";
+import { num, pct } from "../format";
 import type { ExperimentSummaryRow, ScenarioAggregate } from "../api/types";
 import Card from "../components/Card.vue";
 import DataTable from "../components/DataTable.vue";
@@ -19,16 +20,6 @@ function aggregateOf(row: ExperimentSummaryRow): ScenarioAggregate | null {
   if (row.aggregates === null) return null;
   const canonical = row.canonical_scenario;
   return row.aggregates.find((entry) => entry.scenario === canonical) ?? row.aggregates[0];
-}
-
-function pct(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  return `${(value * 100).toFixed(2)}%`;
-}
-
-function num(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  return value.toFixed(2);
 }
 
 /** 渲染用展示行：格式化文本 + 原始行引用（插槽读结论/版本等原始字段）。 */

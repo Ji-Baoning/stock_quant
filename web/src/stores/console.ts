@@ -1,7 +1,7 @@
 import { computed, reactive, type ComputedRef } from "vue";
 import { ApiError, type ApiClient } from "../api/client";
 import { toDisplayError, type DisplayError } from "../api/errors";
-import type { DatasetSummary, ExperimentSummary, UpdateJobSummary } from "../api/types";
+import type { DatasetSummary, ExperimentSummaryRow, UpdateJobSummary } from "../api/types";
 
 /** 决策台行动项：每条必有跳转（v3 规格 §5.1 ③）。 */
 export interface ConsoleAction {
@@ -13,8 +13,7 @@ export interface ConsoleAction {
 
 export interface ConsoleState {
   datasets: DatasetSummary[];
-  current: string | null;
-  experiments: ExperimentSummary[];
+  experiments: ExperimentSummaryRow[];
   jobs: UpdateJobSummary[];
   /** pin I9：503 = 操作面默认禁用，是正常态不是错误。 */
   operationsEnabled: boolean;
@@ -24,7 +23,6 @@ export interface ConsoleState {
 
 export const consoleState = reactive<ConsoleState>({
   datasets: [],
-  current: null,
   experiments: [],
   jobs: [],
   operationsEnabled: true,
@@ -66,13 +64,12 @@ export const consoleActions: ComputedRef<ConsoleAction[]> = computed(() => [
 export async function loadConsoleData(client: ApiClient): Promise<void> {
   consoleState.error = null;
   try {
-    const [datasets, experiments] = await Promise.all([
+    const [datasets, summaries] = await Promise.all([
       client.listDatasets(),
-      client.listExperiments(),
+      client.experimentSummaries(),
     ]);
     consoleState.datasets = datasets.datasets;
-    consoleState.current = datasets.current;
-    consoleState.experiments = experiments.experiments;
+    consoleState.experiments = summaries.summaries;
     // 操作面独立容忍：503 = 默认禁用（pin I9），其余失败照常走错误通道。
     consoleState.operationsEnabled = true;
     try {

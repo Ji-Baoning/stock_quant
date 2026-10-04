@@ -215,6 +215,8 @@ export interface ExperimentSummaryRow {
     max_reject_rate: number | null;
     mean_turnover: number | null;
   } | null;
+  /** 字符串透传；现实数据恒为 null（已发布工件没有运行时间字段，对账结论）。 */
+  run_started_at: string | null;
 }
 
 export interface ScenarioAggregate {
