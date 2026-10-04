@@ -83,3 +83,9 @@ blockquote { margin: var(--space-2) 0; padding: var(--space-2) 14px; border-left
 .link-like { background: none; border: none; padding: 0; color: var(--color-primary); text-decoration: underline; cursor: pointer; }
 /* 图表容器（Task 5）：固定高度，容器缺失时不出图。 */
 .chart-canvas { width: 100%; height: 260px; }
+/* 策略详情（S1 Task 8）：折/情景控件行；DOM 图例（ECharts 系列名在 canvas 上，
+   页面自己渲染成元素才可读）；溯源条与折表的短哈希说明。 */
+.fold-controls { display: flex; flex-wrap: wrap; gap: var(--space-4); align-items: center; }
+.tab-active { border-color: var(--color-primary); color: var(--color-primary); font-weight: 700; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: var(--space-4); margin: var(--space-2) 0 var(--space-4); padding: 0; list-style: none; font-size: var(--font-size-small); color: var(--color-text-secondary); }
+.provenance { font-size: var(--font-size-small); color: var(--color-text-secondary); }
