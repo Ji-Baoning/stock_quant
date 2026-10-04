@@ -320,3 +320,173 @@ def test_same_instant_falls_back_to_challenge_id_order(
         CHALLENGE_ID,
         OTHER_CHALLENGE_ID,
     ]
+
+
+def test_missing_comparison_file_fails_closed(
+    client: TestClient, service_project: Path
+) -> None:
+    # hex64 目录但产物缺失：仍是"本挑战存在且不可读"，不是"本挑战不存在"。
+    write_experiment_manifest(service_project, EXPERIMENT_ID, BASELINE_HASH)
+    directory = service_project / "data" / "strategy_challenges" / "results" / CHALLENGE_ID
+    directory.mkdir(parents=True)
+    response = client.get(f"/api/v1/experiments/{EXPERIMENT_ID}/challenges")
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "challenge_comparison_unreadable"
+
+
+def test_non_json_comparison_fails_closed(
+    client: TestClient, service_project: Path
+) -> None:
+    write_experiment_manifest(service_project, EXPERIMENT_ID, BASELINE_HASH)
+    directory = write_challenge(
+        service_project, comparison_payload(consumption=consumption_record())
+    )
+    (directory / "strategy_comparison.json").write_text("{not json", encoding="utf-8")
+    response = client.get(f"/api/v1/experiments/{EXPERIMENT_ID}/challenges")
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "challenge_comparison_unreadable"
+
+
+def test_non_object_comparison_fails_closed(
+    client: TestClient, service_project: Path
+) -> None:
+    write_experiment_manifest(service_project, EXPERIMENT_ID, BASELINE_HASH)
+    directory = write_challenge(
+        service_project, comparison_payload(consumption=consumption_record())
+    )
+    (directory / "strategy_comparison.json").write_text("[1, 2, 3]", encoding="utf-8")
+    response = client.get(f"/api/v1/experiments/{EXPERIMENT_ID}/challenges")
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "challenge_comparison_unreadable"
+
+
+def test_missing_declaration_or_result_block_fails_closed(
+    client: TestClient, service_project: Path
+) -> None:
+    write_experiment_manifest(service_project, EXPERIMENT_ID, BASELINE_HASH)
+    payload = comparison_payload(consumption=consumption_record())
+    payload.pop("result")
+    write_challenge(service_project, payload)
+    response = client.get(f"/api/v1/experiments/{EXPERIMENT_ID}/challenges")
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "challenge_comparison_unreadable"
+
+
+def test_payload_violating_the_declared_subset_fails_closed(
+    client: TestClient, service_project: Path
+) -> None:
+    # 决策层字段缺失 => 不是本模型声明的形状：失败闭合，不半截展示。
+    write_experiment_manifest(service_project, EXPERIMENT_ID, BASELINE_HASH)
+    payload = comparison_payload(consumption=consumption_record())
+    payload["declaration"]["universe_definition"].pop("evidence_summary_sha256")
+    write_challenge(service_project, payload)
+    response = client.get(f"/api/v1/experiments/{EXPERIMENT_ID}/challenges")
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "challenge_comparison_unreadable"
+
+
+def test_non_iso_declaration_instant_fails_closed(
+    client: TestClient, service_project: Path
+) -> None:
+    write_experiment_manifest(service_project, EXPERIMENT_ID, BASELINE_HASH)
+    write_challenge(
+        service_project,
+        comparison_payload(
+            declared_before_run_at="yesterday afternoon",
+            consumption=consumption_record(),
+        ),
+    )
+    response = client.get(f"/api/v1/experiments/{EXPERIMENT_ID}/challenges")
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "challenge_comparison_unreadable"
+
+
+def test_refused_consumption_projects_a_null_record(
+    client: TestClient, service_project: Path
+) -> None:
+    # FAILED 形态一：注册表在消费前拒绝。consumption 为 null 且这里确实没消费。
+    write_experiment_manifest(service_project, EXPERIMENT_ID, BASELINE_HASH)
+    write_challenge(
+        service_project,
+        comparison_payload(
+            status="FAILED",
+            conclusion=None,
+            error_code="HOLDOUT_CONSUMPTION_REFUSED",
+            reasons=("holdout already consumed",),
+            consumption=None,
+        ),
+    )
+    view = client.get(f"/api/v1/experiments/{EXPERIMENT_ID}/challenges").json()[
+        "challenges"
+    ][0]
+    assert view["role"] == "baseline"
+    assert view["consumption"] is None
+    assert view["result"]["status"] == "FAILED"
+    assert view["result"]["conclusion"] is None
+    assert view["result"]["error_code"] == "HOLDOUT_CONSUMPTION_REFUSED"
+    assert view["result"]["reasons"] == ["holdout already consumed"]
+
+
+def test_experiment_load_error_projects_a_null_record(
+    client: TestClient, service_project: Path
+) -> None:
+    # FAILED 形态二：消费已成功，但 _publish_failure 恒传 consumption=None。
+    # 服务层必须原样透传 null —— 消费与否由 error_code 与记录两轴共同判定。
+    write_experiment_manifest(service_project, EXPERIMENT_ID, BASELINE_HASH)
+    write_challenge(
+        service_project,
+        comparison_payload(
+            status="FAILED",
+            conclusion=None,
+            error_code="EXPERIMENT_LOAD_ERROR",
+            reasons=("baseline artifacts unreadable",),
+            consumption=None,
+        ),
+    )
+    view = client.get(f"/api/v1/experiments/{EXPERIMENT_ID}/challenges").json()[
+        "challenges"
+    ][0]
+    assert view["consumption"] is None
+    assert view["result"]["error_code"] == "EXPERIMENT_LOAD_ERROR"
+
+
+def test_evaluation_failure_keeps_the_real_consumption_record(
+    client: TestClient, service_project: Path
+) -> None:
+    # FAILED 形态三：评估期完整性失败，消费记录随结果一并发布。
+    write_experiment_manifest(service_project, EXPERIMENT_ID, BASELINE_HASH)
+    write_challenge(
+        service_project,
+        comparison_payload(
+            status="FAILED",
+            conclusion=None,
+            error_code="IDENTITY_MISMATCH",
+            reasons=("manifest identity mismatch",),
+            consumption=consumption_record(),
+        ),
+    )
+    view = client.get(f"/api/v1/experiments/{EXPERIMENT_ID}/challenges").json()[
+        "challenges"
+    ][0]
+    assert view["consumption"] is not None
+    assert view["consumption"]["status"] == "consumed"
+    assert view["consumption"]["consumption_key"].endswith(FOLD_SCHEDULE_HASH)
+    assert view["result"]["error_code"] == "IDENTITY_MISMATCH"
+
+
+def test_a_failed_challenge_appears_on_its_baseline_page_only(
+    client: TestClient, service_project: Path
+) -> None:
+    # FAILED 恒无 challenger 实验 id；best-effort 归属只在 baseline 侧成立。
+    write_experiment_manifest(service_project, EXPERIMENT_ID, BASELINE_HASH)
+    write_challenge(
+        service_project,
+        comparison_payload(
+            status="FAILED",
+            conclusion=None,
+            error_code="PAIRING_INCOMPLETE",
+            consumption=consumption_record(),
+        ),
+    )
+    body = client.get(f"/api/v1/experiments/{EXPERIMENT_ID}/challenges").json()
+    assert [view["role"] for view in body["challenges"]] == ["baseline"]

@@ -17,7 +17,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Request
 from fastapi import Path as PathParam
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from stock_quant.service.datasets import read_json_or_fail
 from stock_quant.service.errors import (
@@ -158,10 +158,22 @@ def _strategy_snapshot_hash(directory: Path) -> str | None:
 
 
 def _load_comparison(path: Path) -> dict[str, Any]:
-    """Read one published ``strategy_comparison.json`` as a JSON object."""
+    """Read and shape-check one published ``strategy_comparison.json``.
+
+    A file that exists but is not a JSON object, or that lacks the
+    declaration/result blocks every challenge always carries, fails closed
+    (spec §3.2): a silent skip would hide a challenge that consumed the
+    holdout.
+    """
     payload = read_json_or_fail(path, ChallengeUnreadable, _COMPARISON_NAME)
     if not isinstance(payload, dict):
         raise ChallengeUnreadable(f"{_COMPARISON_NAME} is not a JSON object")
+    if not isinstance(payload.get("declaration"), dict) or not isinstance(
+        payload.get("result"), dict
+    ):
+        raise ChallengeUnreadable(
+            f"{_COMPARISON_NAME} carries no declaration/result block"
+        )
     return payload
 
 
@@ -170,19 +182,31 @@ def _project(
     challenge_id: str,
     role: Literal["baseline", "challenger"],
 ) -> ChallengeView:
-    """Project the published evidence verbatim (zero derivation, spec §3.1)."""
+    """Project the published evidence verbatim (zero derivation, spec §3.1).
+
+    Unknown fields are dropped by the models' default ``extra="ignore"``; a
+    payload that does not satisfy the declared subset fails closed instead of
+    being shown partially.
+    """
     consumption = payload.get("holdout_consumption")
-    return ChallengeView(
-        challenge_id=challenge_id,
-        role=role,
-        declaration=ChallengeDeclarationView.model_validate(payload["declaration"]),
-        consumption=(
-            ChallengeConsumptionView.model_validate(consumption)
-            if isinstance(consumption, dict)
-            else None
-        ),
-        result=ChallengeResultView.model_validate(payload["result"]),
-    )
+    try:
+        return ChallengeView(
+            challenge_id=challenge_id,
+            role=role,
+            declaration=ChallengeDeclarationView.model_validate(
+                payload["declaration"]
+            ),
+            consumption=(
+                ChallengeConsumptionView.model_validate(consumption)
+                if isinstance(consumption, dict)
+                else None
+            ),
+            result=ChallengeResultView.model_validate(payload["result"]),
+        )
+    except ValidationError as error:
+        raise ChallengeUnreadable(
+            f"{_COMPARISON_NAME} of {challenge_id} does not project: {error}"
+        ) from error
 
 
 def _sort_key(view: ChallengeView) -> tuple[datetime, str]:

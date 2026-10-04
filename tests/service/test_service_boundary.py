@@ -66,3 +66,14 @@ def test_serve_validates_the_host_before_uvicorn_starts(
             service_project, host="0.0.0.0", port=8321, query_budget_seconds=5.0
         )
     assert started == []
+
+
+def test_importing_the_service_never_pulls_in_the_challenge_subsystem() -> None:
+    probe = (
+        "import sys, stock_quant.service; "
+        "print('stock_quant.research.strategy_challenge' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == "False"
