@@ -1190,7 +1190,15 @@ def _prepare_benchmarks(benchmarks: pd.DataFrame) -> dict[str, dict[date, float]
 def _ledger_preflight(
     submitted: pd.DataFrame, fills: pd.DataFrame, rejections: pd.DataFrame
 ) -> None:
-    """Every submitted order is accounted exactly once by fills/rejections."""
+    """Every submitted order is accounted exactly once by fills/rejections.
+
+    A cash-partial order legitimately carries BOTH a fill and a rejection
+    for its unaffordable remainder: the engine's ``_execute_buy`` emits a
+    fill for the affordable whole-lot quantity and one rejection with
+    ``rejected_quantity`` for the rest, so the exact-accounting equation is
+    ``filled + rejected == submitted`` -- never an exclusive-or between the
+    two ledgers.
+    """
     submitted_ids = [str(value) for value in submitted["order_id"]]
     if len(set(submitted_ids)) != len(submitted_ids):
         raise OOSIntegrityError("submitted orders contain duplicate order ids")
@@ -1207,11 +1215,6 @@ def _ledger_preflight(
                 f"order {order_id} has multiple rejection records"
             )
         rejected_by_id[order_id] = int(row["rejected_quantity"])
-    overlap = sorted(set(filled_by_id) & set(rejected_by_id))
-    if overlap:
-        raise OOSIntegrityError(
-            f"orders {overlap} carry both fills and rejections"
-        )
     for order_id, quantity in (
         (row["order_id"], int(row["quantity"]))
         for row in submitted.to_dict("records")
