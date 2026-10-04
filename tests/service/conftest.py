@@ -193,9 +193,12 @@ def publish_experiment(
     experiment_id: str = "e" * 64,
     *,
     with_report: bool = True,
+    walk_forward: bool = False,
 ) -> Path:
     directory = root / "data" / "experiments" / experiment_id
-    directory.mkdir(parents=True)
+    # Idempotent: tests layer walk_forward artifacts onto the experiment the
+    # ``service_project`` fixture already published.
+    directory.mkdir(parents=True, exist_ok=True)
     (directory / "experiment_manifest.json").write_text(
         json.dumps(
             {
@@ -212,6 +215,121 @@ def publish_experiment(
         (directory / "report.html").write_text(
             "<html><body>fixture report</body></html>", encoding="utf-8"
         )
+    if walk_forward:
+        (directory / "experiment_spec.yml").write_text(
+            "hypothesis: fixture hypothesis\n", encoding="utf-8"
+        )
+        (directory / "metrics.json").write_text(
+            json.dumps(
+                {
+                    "meta": {
+                        "experiment_id": experiment_id,
+                        "run_id": f"run_{experiment_id}",
+                        "initial_cash": 1_000_000.0,
+                        "spec": {
+                            "hypothesis": "fixture hypothesis",
+                            "cost_scenarios": ["zero_cost", "full_cost"],
+                        },
+                        "benchmark_symbols": ["000300.SH"],
+                        "dataset_version": dataset_version,
+                    },
+                    "walk_forward": {
+                        "research_status": "COMPLETED",
+                        "stability_conclusion": "STABLE",
+                        "stability_policy_hash": "p" * 16,
+                        "schedule": {},
+                        "scenario_aggregates": [
+                            {
+                                "scenario": "full_cost",
+                                "aggregate_return": 0.1,
+                                "annualized_return": 0.1,
+                                "annualized_volatility": 0.2,
+                                "sharpe_zero_rf": 1.5,
+                                "oos_return_observations": 100,
+                                "annualization_observations": 250,
+                            }
+                        ],
+                    },
+                    "evaluation": {"status": "ACCEPTED", "reason": "fixture"},
+                    "corporate_action_trust": {
+                        "trusted": True,
+                        "mode": "research",
+                        "dataset_version": dataset_version,
+                        "window_start": "2026-01-05",
+                        "window_end": "2026-01-08",
+                        "reasons": [],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (directory / "stability_report.json").write_text(
+            json.dumps(
+                {
+                    "research_status": "COMPLETED",
+                    "stability_conclusion": "STABLE",
+                    "stability_policy_hash": "p" * 16,
+                    "stability_policy_version": "stability-v1",
+                    "schedule": {},
+                    "thresholds": {},
+                    "reasons": [],
+                    # FoldOutcomeStatus serialises lowercase in real published
+                    # artifacts ("executed" / "failed_preflight").
+                    "fold_statuses": [
+                        {"fold_id": "f" * 64, "status": "executed", "reason_code": None}
+                    ],
+                    "scenario_results": [],
+                    "scenario_aggregates": [
+                        {
+                            "scenario": "full_cost",
+                            "aggregate_return": 0.1,
+                            "annualized_return": 0.1,
+                            "annualized_volatility": 0.2,
+                            "sharpe_zero_rf": 1.5,
+                            "oos_return_observations": 100,
+                            "annualization_observations": 250,
+                        }
+                    ],
+                    # canonical 情景至少一条 fold_metrics：summaries 的
+                    # display_extremes 是从这里做展示级 max/mean 的（Task 3 断言
+                    # 它非 null，空表会得到 null）。
+                    "fold_metrics": [
+                        {
+                            "fold_id": "f" * 64,
+                            "scenario": "full_cost",
+                            "per_fold_max_drawdown": -0.08,
+                            "reject_rate": 0.02,
+                            "turnover": 0.35,
+                        }
+                    ],
+                    "integrity_failures": [],
+                    "skipped_fold_ids": [],
+                    "experiment_id": experiment_id,
+                    "dataset_version": dataset_version,
+                    "universe_version": "u" * 64,
+                }
+            ),
+            encoding="utf-8",
+        )
+        fold_dir = directory / "folds" / ("f" * 64)
+        (fold_dir / "backtest" / "full_cost").mkdir(parents=True)
+        pd.DataFrame(
+            {
+                "trade_date": [date(2026, 1, 5), date(2026, 1, 6)],
+                "cash": [1_000_000.0, 999_000.0],
+                "market_value": [0.0, 1_000.0],
+                "net_equity_after_cost": [1_000_000.0, 1_000_000.0],
+            }
+        ).to_parquet(
+            fold_dir / "backtest" / "full_cost" / "equity.parquet", index=False
+        )
+        pd.DataFrame(
+            {
+                "trade_date": [date(2026, 1, 5), date(2026, 1, 6)],
+                "initial_equity": [1_000_000.0, 1_000_000.0],
+                "net_equity_after_cost": [1_000_000.0, 1_000_000.0],
+            }
+        ).to_parquet(fold_dir / "equity.parquet", index=False)
     return directory
 
 

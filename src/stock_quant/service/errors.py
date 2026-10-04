@@ -51,6 +51,21 @@ class UnknownExperiment(ServiceError):
     code = "experiment_not_found"
 
 
+class ResultsNotFound(ServiceError):
+    status_code = 404
+    code = "results_not_found"
+
+
+class FoldNotFound(ServiceError):
+    status_code = 404
+    code = "fold_not_found"
+
+
+class ArtifactNotFound(ServiceError):
+    status_code = 404
+    code = "artifact_not_found"
+
+
 class ReportNotFound(ServiceError):
     status_code = 404
     code = "report_not_found"

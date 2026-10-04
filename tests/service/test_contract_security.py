@@ -22,6 +22,7 @@ EXPECTED_PATHS = {
     "/api/v1/datasets/{version}/quality",
     "/api/v1/datasets/{version}/tables/{table}",
     "/api/v1/experiments",
+    "/api/v1/experiments/{experiment_id}/results",
     "/api/v1/experiments/{experiment_id}/report",
 }
 
@@ -32,6 +33,7 @@ EXPECTED_SCHEMAS = {
     "QualityViewResponse",
     "TablePreviewResponse",
     "ExperimentsListResponse",
+    "ExperimentResultsResponse",
     "ErrorResponse",
 }
 
