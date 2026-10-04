@@ -113,6 +113,7 @@ class ExperimentSummaryRow(BaseModel):
     canonical_scenario: str | None = None
     aggregates: list[AggregateRow] | None = None
     display_extremes: DisplayExtremes | None = None
+    run_started_at: str | None = None
 
 
 class ExperimentSummariesResponse(BaseModel):
@@ -146,6 +147,21 @@ def _hypothesis_of(directory: Path) -> str | None:
         return None
     value = payload.get("hypothesis")
     return str(value) if isinstance(value, str) and value.strip() else None
+
+
+def _run_started_at(directory: Path) -> str | None:
+    """The ``started_at`` string of the published ``run_manifest.json``.
+
+    Tolerant by contract: the artifacts published today carry only
+    ``{run_id, status}``, so the absent file or the absent key both read as
+    ``None`` -- a future artifact that adds the field flows through verbatim
+    (string passthrough, never parsed or reformatted).
+    """
+    run_manifest = _read_optional_json(directory, "run_manifest.json")
+    if run_manifest is None:
+        return None
+    value = run_manifest.get("started_at")
+    return value if isinstance(value, str) else None
 
 
 def _display_extremes(directory: Path, canonical: str | None) -> DisplayExtremes | None:
@@ -224,6 +240,7 @@ def experiment_summaries(request: Request) -> ExperimentSummariesResponse:
                 canonical_scenario=canonical,
                 aggregates=aggregates,
                 display_extremes=_display_extremes(child, canonical),
+                run_started_at=_run_started_at(child),
             )
         )
     return ExperimentSummariesResponse(summaries=rows)

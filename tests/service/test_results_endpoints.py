@@ -203,6 +203,37 @@ def test_fold_equity_declared_canonical_fallback_serves_the_canonical_file(
     ]
 
 
+def test_summaries_carry_run_started_at_from_run_manifest(
+    service_project: Path, client: TestClient
+):
+    """A published ``run_manifest.json`` ``started_at`` string passes through
+    verbatim -- no parsing, no reformatting."""
+    directory = publish_experiment(service_project, "v1", walk_forward=True)
+    import json as _json
+
+    (directory / "run_manifest.json").write_text(
+        _json.dumps({"run_id": "r" * 32, "started_at": "2026-10-03T09:00:00+08:00"}),
+        encoding="utf-8",
+    )
+    row = next(
+        row
+        for row in client.get("/api/v1/experiments/summaries").json()["summaries"]
+        if row["experiment_id"] == "e" * 64
+    )
+    assert row["run_started_at"] == "2026-10-03T09:00:00+08:00"
+
+
+def test_summaries_run_started_at_null_without_run_manifest(service_project, client):
+    """No published ``run_manifest.json`` -> ``run_started_at`` is null (the
+    real published artifacts carry no time field, so this is the default
+    branch). Test isolation needs no cleanup: ``service_project`` is
+    function-scoped on a fresh ``tmp_path``, so the run_manifest.json another
+    test wrote cannot leak into this project."""
+    publish_experiment(service_project, "v1", walk_forward=True)
+    row = client.get("/api/v1/experiments/summaries").json()["summaries"][0]
+    assert row["run_started_at"] is None
+
+
 def test_fold_equity_unknown_fold_is_fold_not_found(service_project, client):
     """A fold with nothing declared under folds/<id>/ reads as "no such
     fold" -- the fold branch of the declared-graph guard."""
