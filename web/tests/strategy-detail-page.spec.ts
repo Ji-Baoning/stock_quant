@@ -5,15 +5,20 @@
 import { describe, expect, it } from "vitest";
 import { flushPromises } from "@vue/test-utils";
 import type { ApiClient } from "../src/api/client";
-import type { BenchmarkResponse } from "../src/api/types";
+import type {
+  BenchmarkResponse,
+  ExperimentResultsResponse,
+  FoldEquityResponse,
+} from "../src/api/types";
 import StrategyDetailPage from "../src/pages/StrategyDetailPage.vue";
 import { fakeClient, mountAt } from "./helpers";
 
 const EX = "e".repeat(64);
 const FOLD = "f".repeat(64);
+const SECOND_FOLD = "b".repeat(64);
 const SKIPPED_FOLD = "9".repeat(64);
 
-function resultsPayload(): Record<string, unknown> {
+function resultsPayload(): ExperimentResultsResponse {
   return {
     experiment_id: EX,
     manifest: {
@@ -116,6 +121,81 @@ describe("策略详情（tearsheet 骨架 + 仓库纪律）", () => {
     // 成元素。
     expect(wrapper.get('[data-testid="chart-net-value-legend"]').text()).toContain(
       "基准 000300.SH",
+    );
+  });
+
+  it("bootstrap 次序：初取在途时换折 → watch 立即请求新折（data-fold 不说谎）", async () => {
+    // 竞态：bootstrapped 必须先于初取 await 置位。若置位在 await 之后，
+    // 初取在途时换折会被 watch 守卫吞掉——foldCalls 里永远不会有新折，
+    // 完成的初取会把旧折数据填进新折的 data-fold 图表。
+    const payload = resultsPayload();
+    const report = payload.stability_report as Record<string, unknown>;
+    report.fold_statuses = [
+      { fold_id: FOLD, status: "executed", reason_code: null },
+      { fold_id: SECOND_FOLD, status: "executed", reason_code: null },
+    ];
+    const foldCalls: string[] = [];
+    let resolveBootstrap!: (value: FoldEquityResponse) => void;
+    const client = detailClient({
+      experimentResults: async () => payload,
+      foldEquity: async (_experimentId, foldId, foldScenario) => {
+        foldCalls.push(foldId);
+        if (foldCalls.length === 1) {
+          // 初取挂在手动 promise 上，模拟慢响应，留出换折窗口。
+          return new Promise<FoldEquityResponse>((resolve) => {
+            resolveBootstrap = resolve;
+          });
+        }
+        return {
+          experiment_id: EX,
+          fold_id: foldId,
+          scenario: foldScenario,
+          rows: [
+            { trade_date: "2026-01-05", net_equity_after_cost: 1_000_000 },
+            { trade_date: "2026-01-06", net_equity_after_cost: 1_010_000 },
+          ],
+        };
+      },
+    });
+    const wrapper = await mountAt(StrategyDetailPage, client, `/strategies/${EX}`);
+    await flushPromises(); // 初取仍挂起：loaded 已 true，选择器已渲染。
+    expect(wrapper.find('[data-testid="fold-selector"]').exists()).toBe(true);
+    await wrapper.find('[data-testid="fold-selector"]').setValue(SECOND_FOLD);
+    resolveBootstrap({
+      experiment_id: EX,
+      fold_id: FOLD,
+      scenario: "full_cost",
+      rows: [{ trade_date: "2026-01-05", net_equity_after_cost: 1_000_000 }],
+    });
+    await flushPromises();
+    // 调用顺序：bootstrap 调用（旧折）在前，watch 触发的调用（新折）在后；
+    // 过期的初取响应被 seriesToken 丢弃，落盘的是新折数据。
+    expect(foldCalls).toEqual([FOLD, SECOND_FOLD]);
+    expect(wrapper.get('[data-testid="chart-net-value"]').attributes("data-fold")).toBe(
+      SECOND_FOLD,
+    );
+  });
+
+  it("基准符号保真：datasetBenchmark 请求携带图例的符号并逐字渲染", async () => {
+    // 图例画 metrics.meta.benchmark_symbols[0]；请求不带 symbol 时后端回
+    // 默认 000300.SH——会把另一个指数画在它的名字下面。
+    const payload = resultsPayload();
+    const meta = (payload.metrics as Record<string, unknown>).meta as Record<string, unknown>;
+    meta.benchmark_symbols = ["000905.SH"];
+    const benchmarkCalls: Array<{ symbol?: string; start?: string; end?: string }> = [];
+    const client = detailClient({
+      experimentResults: async () => payload,
+      datasetBenchmark: async (_version, params) => {
+        benchmarkCalls.push(params);
+        return { ...benchmarkResponse(), symbol: "000905.SH" };
+      },
+    });
+    const wrapper = await mountAt(StrategyDetailPage, client, `/strategies/${EX}`);
+    await flushPromises();
+    expect(benchmarkCalls.length).toBeGreaterThan(0);
+    expect(benchmarkCalls[0]?.symbol).toBe("000905.SH");
+    expect(wrapper.get('[data-testid="chart-net-value-legend"]').text()).toContain(
+      "基准 000905.SH",
     );
   });
 

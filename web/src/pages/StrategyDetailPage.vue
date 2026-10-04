@@ -2,7 +2,7 @@
      本页只读已发布产物并逐字展示；归一化与逐点回撤是 §7.4 允许的**渲染变换**
      （作用于单条已发布序列），不做任何跨序列/跨折计算或拼接。 -->
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useApiClient } from "../api/client";
 import { toDisplayError, type DisplayError } from "../api/errors";
@@ -226,7 +226,9 @@ async function loadFoldSeries() {
     if (start !== undefined && end !== undefined) {
       const benchmark = await client.datasetBenchmark(
         String(manifest.value?.dataset_version ?? "current"),
-        { start, end },
+        // 图例渲染的是 metrics.meta.benchmark_symbols[0]：请求必须带同一符号，
+        // 否则后端回默认 000300.SH，会把另一个指数画在它的名字下面。
+        { start, end, symbol: benchmarkSymbol.value },
       );
       if (token !== seriesToken) return;
       benchmarkRows.value = benchmark.rows;
@@ -238,7 +240,8 @@ async function loadFoldSeries() {
   }
 }
 
-/** 初次取数由 onMounted 直接驱动；watch 只服务之后的折/情景切换（避免初始化双取）。 */
+/** 初次取数由 onMounted 直接驱动；watch 服务其后的一切折/情景切换——包括
+    初取仍在途时（次序见 onMounted），过期响应由 seriesToken 丢弃。 */
 let bootstrapped = false;
 watch([selectedFold, scenario], () => {
   if (!bootstrapped) return;
@@ -257,8 +260,13 @@ onMounted(async () => {
       ? "full_cost"
       : (scenarios.value[0] ?? "");
     loaded.value = true;
-    await loadFoldSeries();
+    // 先让 init 赋值排队的 watch 回调跑完（此刻 bootstrapped 仍 false，被守卫
+    // 吞掉——避免初始化双取），再放行 watch。此后初取在途时用户换折/换情景，
+    // watch 才能立刻发起第二次调用，由 seriesToken 丢弃过期的初取响应；
+    // 否则旧折数据会填进新折的 data-fold 图表，反拼接证据属性失真。
+    await nextTick();
     bootstrapped = true;
+    await loadFoldSeries();
   } catch (cause) {
     error.value = toDisplayError(cause);
   }
