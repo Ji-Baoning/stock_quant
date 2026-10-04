@@ -71,6 +71,11 @@ export function validateForm(form: RegisterForm): string[] {
   if (form.hypothesis.includes("【")) {
     violations.push("请填写真实假设");
   }
+  // research × 空 universe 联动：空定义不写入 universe_definition 键，正式 run 会静默
+  // 回落 legacy configs/universe.yml 工程 universe、跳过强制 preflight（runner.py:755-762）。
+  if (form.trustMode === "research" && form.universeDefinition.trim() === "") {
+    violations.push("research 档必须填写 universe_definition");
+  }
   if (form.dateStart > form.dateEnd) {
     violations.push("start_date 不能晚于 end_date");
   }

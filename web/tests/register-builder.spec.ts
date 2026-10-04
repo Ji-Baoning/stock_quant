@@ -52,6 +52,15 @@ describe("注册台生成器（S3a）", () => {
     expect(validateForm({ ...baselineForm(), fileName: "Bad Name" }))
       .toContain("文件名只允许小写字母/数字/下划线");
     expect(validateForm({ ...baselineForm(), topN: 0 })).toContain("top_n 必须 ≥ 1");
+    // research × 空 universe：不写入 universe_definition 键，正式 run 静默回落工程 universe。
+    expect(validateForm({ ...baselineForm(), trustMode: "research", universeDefinition: "" }))
+      .toContain("research 档必须填写 universe_definition");
+    // 正向：research 且 universe 已填 → 无该违规（占位符违规为本校验的预期项，过滤后比对）。
+    expect(
+      validateForm({ ...baselineForm(), trustMode: "research" }).filter(
+        (message) => message !== "请填写真实假设",
+      ),
+    ).not.toContain("research 档必须填写 universe_definition");
   });
 
   it("命令随信任档切换（engineering 不得走 research run）", () => {
