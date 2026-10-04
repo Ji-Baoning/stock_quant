@@ -87,6 +87,8 @@ function detailClient(overrides: Partial<ApiClient> = {}): ApiClient {
       ],
     }),
     datasetBenchmark: async () => benchmarkResponse(),
+    // 挑战区块自带取数；此处给空态，页面测试彼此独立（区块自身有专门单测）。
+    listExperimentChallenges: async () => ({ experiment_id: EX, challenges: [] }),
     probeExperimentReport: async () => true,
     ...overrides,
   } as ApiClient);
@@ -282,5 +284,29 @@ describe("策略详情（tearsheet 骨架 + 仓库纪律）", () => {
       expect(strip.find(`code[title="${hash}"]`).exists()).toBe(true);
     }
     expect(strip.text()).toContain("产物 1 项");
+  });
+
+  it("挑战裁决区块常驻：即使未发布 walk-forward 产物也渲染（spec §4.1）", async () => {
+    const client = detailClient({
+      experimentResults: async () => ({
+        experiment_id: EX,
+        manifest: {},
+        metrics: null,
+        stability_report: null,
+      }),
+    });
+    const wrapper = await mountAt(StrategyDetailPage, client, `/strategies/${EX}`);
+    await flushPromises();
+    // 主内容仍是"未发布产物"显式缺失态……
+    expect(wrapper.find('[data-testid="detail-empty"]').exists()).toBe(true);
+    // ……但挑战区块照常挂载并给出空态。
+    expect(wrapper.find('[data-testid="challenge-block"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="challenge-empty"]').exists()).toBe(true);
+    // 区块只读：诚实文案在，且没有任何触发/重跑入口（复制按钮由空态下的
+    // 无卡片渲染自然缺席，专门的按钮断言在 challenge-block.spec.ts 里）。
+    expect(wrapper.get('[data-testid="challenge-honesty"]').text()).toContain(
+      "web 不发起挑战、不能重跑",
+    );
+    expect(wrapper.find('[data-testid="challenge-block"] button').exists()).toBe(false);
   });
 });

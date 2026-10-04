@@ -7,6 +7,7 @@ import { useRoute } from "vue-router";
 import { useApiClient } from "../api/client";
 import { toDisplayError, type DisplayError } from "../api/errors";
 import type { FoldEquityResponse } from "../api/types";
+import ChallengeBlock from "../components/ChallengeBlock.vue";
 import BarChart from "../components/BarChart.vue";
 import Card from "../components/Card.vue";
 import DataTable, { type DataTableColumn } from "../components/DataTable.vue";
@@ -281,14 +282,18 @@ onMounted(async () => {
     </p>
     <Skeleton v-else-if="!loaded" :rows="6" />
     <!-- 非 walk-forward 实验：显式缺失态，不渲染任何结论图表。 -->
-    <Card v-else-if="report === null">
-      <div data-testid="detail-empty">
-        <EmptyState
-          title="未发布 walk-forward 产物"
-          description="该实验没有已发布的 stability_report——请看静态报告或 CLI 产物。"
-        />
-      </div>
-    </Card>
+    <template v-else-if="report === null">
+      <Card>
+        <div data-testid="detail-empty">
+          <EmptyState
+            title="未发布 walk-forward 产物"
+            description="该实验没有已发布的 stability_report——请看静态报告或 CLI 产物。"
+          />
+        </div>
+      </Card>
+      <!-- spec §4.1：区块不依赖主数据可读性，空态分支也必须挂。 -->
+      <ChallengeBlock :experiment-id="experimentId" />
+    </template>
     <template v-else>
       <Card testid="verdict-banner" title="结论">
         <p class="verdict-line">
@@ -402,6 +407,8 @@ onMounted(async () => {
         <code :title="manifestString('fold_outcomes_sha256') ?? undefined">{{ short(manifestString('fold_outcomes_sha256'), 12) }}</code>
         · 产物 {{ artifactCount }} 项
       </p>
+
+      <ChallengeBlock :experiment-id="experimentId" />
     </template>
   </section>
 </template>

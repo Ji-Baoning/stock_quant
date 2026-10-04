@@ -401,6 +401,9 @@ test("策略列表与详情（S1）", async ({ page }) => {
   await page.route("**/api/v1/experiments/exp-2026q3/results", (route) =>
     json(route, 200, resultsBody()),
   );
+  await page.route("**/api/v1/experiments/exp-2026q3/challenges", (route) =>
+    json(route, 200, { experiment_id: "exp-2026q3", challenges: [] }),
+  );
   await page.route("**/api/v1/experiments/exp-2026q3/folds/*/equity*", (route) =>
     json(route, 200, {
       experiment_id: "exp-2026q3",
@@ -435,6 +438,10 @@ test("策略列表与详情（S1）", async ({ page }) => {
       (search) => search.includes("start=2026-01-05") && search.includes("end=2026-03-05"),
     ),
   ).toBe(true);
+
+  // 挑战裁决区块：详情页常驻只读区块（spec 2026-10-04 §4.1）。
+  await expect(page.getByTestId("challenge-block")).toBeVisible();
+  await expect(page.getByTestId("challenge-empty")).toContainText("本实验尚无挑战裁决");
 });
 
 test("§10.4 E2E 主流程：触发更新 → 看到新版本；成功终态显示完整 dataset version 并链接版本详情；不生成 acceptance PASS、不自动运行研究", async ({ page }) => {
