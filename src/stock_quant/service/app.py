@@ -18,7 +18,14 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from stock_quant.project_root import resolve_project_root
-from stock_quant.service import benchmarks, datasets, experiments, results, tables
+from stock_quant.service import (
+    benchmarks,
+    datasets,
+    experiments,
+    results,
+    strategy_challenges,
+    tables,
+)
 from stock_quant.service.errors import ErrorBody, ErrorResponse, ServiceError
 
 #: Default per-request query budget in seconds (spec §8.2: "默认量级 5 秒").
@@ -120,6 +127,7 @@ def create_app(
     app.include_router(datasets.router, responses=error_responses)
     app.include_router(experiments.router, responses=error_responses)
     app.include_router(results.router, responses=error_responses)
+    app.include_router(strategy_challenges.router, responses=error_responses)
     app.include_router(tables.router, responses=error_responses)
     register_error_handlers(app)
 

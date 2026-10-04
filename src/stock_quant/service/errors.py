@@ -106,6 +106,17 @@ class ExperimentManifestUnreadable(ServiceError):
     code = "experiment_manifest_unreadable"
 
 
+class ChallengeUnreadable(ServiceError):
+    """A published ``strategy_comparison.json`` exists but cannot be projected.
+
+    Fail closed (spec §3.2): silently skipping it would hide a challenge that
+    already consumed the holdout -- the one thing this surface must never do.
+    """
+
+    status_code = 500
+    code = "challenge_comparison_unreadable"
+
+
 class ServiceConflict(ServiceError):
     """Reserved: P4's update-jobs endpoint raises this with 409 (spec §9.3).
 
