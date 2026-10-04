@@ -93,3 +93,7 @@ blockquote { margin: var(--space-2) 0; padding: var(--space-2) 14px; border-left
 .strategy-latest { margin-bottom: var(--space-3); }
 .hint-inline { font-size: var(--font-size-small); color: var(--color-text-secondary); }
 .provenance-inline { margin-top: var(--space-3); font-size: var(--font-size-small); color: var(--color-text-secondary); }
+/* 注册台（S3a Task 2）：表单与草稿输出两栏；窄屏纵向堆叠。全部走 token，无裸色值。 */
+.register-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+.register-output { min-width: 0; }
+@media (max-width: 800px) { .register-grid { grid-template-columns: 1fr; } }

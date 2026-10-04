@@ -7,6 +7,7 @@ import CoverageEvidencePage from "./pages/CoverageEvidencePage.vue";
 import UpdateJobsPage from "./pages/UpdateJobsPage.vue";
 import StrategiesPage from "./pages/StrategiesPage.vue";
 import StrategyDetailPage from "./pages/StrategyDetailPage.vue";
+import RegisterPage from "./pages/RegisterPage.vue";
 
 export interface NavItem {
   label: string;
@@ -27,7 +28,10 @@ export const NAV_GROUPS: readonly NavGroup[] = [
   },
   {
     label: "策略",
-    items: [{ label: "策略列表", path: "/strategies" }],
+    items: [
+      { label: "策略列表", path: "/strategies" },
+      { label: "注册台", path: "/strategies/register" },
+    ],
   },
   {
     label: "数据",
@@ -49,6 +53,8 @@ export const NAV_ITEMS: readonly NavItem[] = NAV_GROUPS.flatMap((group) => group
 const routes: RouteRecordRaw[] = [
   { path: "/", name: "console", component: DecisionConsolePage },
   { path: "/strategies", name: "strategies", component: StrategiesPage },
+  // 静态路径放在参数路由前，register 不会被 :experimentId 吞掉。
+  { path: "/strategies/register", name: "strategy-register", component: RegisterPage },
   { path: "/strategies/:experimentId", name: "strategy-detail", component: StrategyDetailPage },
   { path: "/versions", name: "versions", component: VersionsPage },
   { path: "/versions/:version", name: "version-detail", component: VersionDetailPage },
