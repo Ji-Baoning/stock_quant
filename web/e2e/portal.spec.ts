@@ -465,13 +465,65 @@ test("§10.4 E2E 主流程：触发更新 → 看到新版本；成功终态显�
   ).toBe(false);
 });
 
-test("决策台：三块首屏（门禁措辞/实验计数/待办跳转）", async ({ page }) => {
+/** S2 块②结论卡：与 tests/helpers.ts 的 WF_SUMMARY 同源的最小行。
+     run_started_at: null 是现实默认（已发布工件没有运行时间字段），页面
+     须显式标注"注册表序"而不是假装最新。 */
+function summaryRow() {
+  return {
+    experiment_id: "e".repeat(64),
+    status: "ACCEPTED",
+    dataset_version: HASH_A,
+    universe_version: "u".repeat(64),
+    evaluation_reason: null,
+    hypothesis: "动量延续假设：60 日动量在 CSI300 内有正超额",
+    stability_conclusion: "STABLE",
+    stability_policy_hash: "p".repeat(16),
+    research_status: "COMPLETED",
+    canonical_scenario: "full_cost",
+    aggregates: [
+      {
+        scenario: "full_cost",
+        aggregate_return: 0.12,
+        annualized_return: 0.12,
+        annualized_volatility: 0.18,
+        sharpe_zero_rf: 1.4,
+        oos_return_observations: 750,
+        annualization_observations: 250,
+      },
+    ],
+    display_extremes: { max_per_fold_drawdown: -0.08, max_reject_rate: 0.02, mean_turnover: 0.35 },
+    run_started_at: null,
+  };
+}
+
+test("决策台：三块首屏（门禁措辞/结论卡/待办跳转）", async ({ page }) => {
   const mock = state({ jobs: [seedJob("job-0001", "RUNNING")] });
   await installMockBackend(page, mock);
+  // 块②读 /experiments/summaries（store 已切换），兜底路由不认识它。
+  await page.route("**/api/v1/experiments/summaries", (route) =>
+    json(route, 200, { summaries: [summaryRow()] }),
+  );
   await page.goto("/");
   await expect(page.getByTestId("block-data-trust")).toContainText("门禁通过");
   await expect(page.getByTestId("block-data-trust")).toContainText("质量问题 1 条");
-  await expect(page.getByTestId("block-strategy-count")).toContainText("已发布实验 2 个");
+  // 结论卡：徽章原文 / 最新实验跳转 / 注册表序标注（不假装最新）/ 计数并入来源行。
+  const strategy = page.getByTestId("block-strategy");
+  await expect(strategy.getByTestId("state-badge")).toHaveText("STABLE");
+  await expect(page.getByTestId("strategy-latest-link")).toHaveAttribute(
+    "href",
+    `#/strategies/${"e".repeat(64)}`,
+  );
+  await expect(strategy).toContainText("（注册表序，无运行时间）");
+  await expect(strategy).toContainText("共 1 个已发布实验");
   await expect(page.getByTestId("block-actions")).toContainText("job-0001");
   await expect(page.getByTestId("main-nav").locator("a").first()).toHaveAttribute("href", "#/");
+});
+
+test("决策台：实验注册表为空时块②空态", async ({ page }) => {
+  await installMockBackend(page, state());
+  await page.route("**/api/v1/experiments/summaries", (route) =>
+    json(route, 200, { summaries: [] }),
+  );
+  await page.goto("/");
+  await expect(page.getByTestId("block-strategy-empty")).toContainText("尚无已发布实验");
 });
