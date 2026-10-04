@@ -2,9 +2,9 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPortalRouter } from "../src/router";
-import StateBadge from "../src/components/StateBadge.vue";
+import StateBadge, { type BadgeKind } from "../src/components/StateBadge.vue";
 
-function mountBadge(kind: "acceptance" | "conclusion" | "job", value: string) {
+function mountBadge(kind: BadgeKind, value: string) {
   return mount(StateBadge, {
     props: { kind, value },
     global: { plugins: [createPortalRouter()] },
@@ -49,6 +49,22 @@ describe("StateBadge（语义状态徽章）", () => {
     for (const [value, tone] of cases) {
       const wrapper = mountBadge("job", value);
       expect(wrapper.get('[data-testid="state-badge"]').classes()).toContain(`badge-state--${tone}`);
+    }
+  });
+
+  it("挑战裁决四态映射（FAILED 与 REJECTED 同为阻断红）", () => {
+    const cases: Array<[string, string]> = [
+      ["PROMOTED", "pass"],
+      ["REJECTED", "block"],
+      ["INCONCLUSIVE_RESEARCH_ONLY", "pending"],
+      ["FAILED", "block"],
+    ];
+    for (const [value, tone] of cases) {
+      const wrapper = mountBadge("challenge", value);
+      expect(wrapper.get('[data-testid="state-badge"]').classes()).toContain(
+        `badge-state--${tone}`,
+      );
+      expect(wrapper.get('[data-testid="state-badge"]').text()).toBe(value);
     }
   });
 

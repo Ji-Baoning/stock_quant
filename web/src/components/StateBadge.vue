@@ -1,6 +1,6 @@
 <!-- web/src/components/StateBadge.vue -->
 <script lang="ts">
-export type BadgeKind = "acceptance" | "conclusion" | "job";
+export type BadgeKind = "acceptance" | "conclusion" | "job" | "challenge";
 export type BadgeTone = "pass" | "block" | "pending" | "neutral";
 </script>
 
@@ -32,6 +32,12 @@ const TONES: Record<BadgeKind, Record<string, BadgeTone>> = {
     QUEUED: "pending",
     RUNNING: "pending",
     CANCELLED_BY_SHUTDOWN: "neutral",
+  },
+  challenge: {
+    PROMOTED: "pass",
+    REJECTED: "block",
+    INCONCLUSIVE_RESEARCH_ONLY: "pending",
+    FAILED: "block",
   },
 };
 

@@ -32,6 +32,7 @@ export function fakeClient(overrides: Partial<ApiClient> = {}): ApiClient {
     experimentResults: unstubbed,
     foldEquity: unstubbed,
     datasetBenchmark: unstubbed,
+    listExperimentChallenges: unstubbed,
   };
   return Object.assign(base, overrides);
 }

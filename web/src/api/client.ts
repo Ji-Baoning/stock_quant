@@ -3,6 +3,7 @@ import type {
   BenchmarkResponse,
   DatasetDetailResponse,
   DatasetListResponse,
+  ExperimentChallengesResponse,
   ExperimentResultsResponse,
   ExperimentsResponse,
   ExperimentSummaryRow,
@@ -60,6 +61,7 @@ export interface ApiClient {
     version: string,
     params: { symbol?: string; start?: string; end?: string },
   ): Promise<BenchmarkResponse>;
+  listExperimentChallenges(experimentId: string): Promise<ExperimentChallengesResponse>;
 }
 
 export const apiClientKey: InjectionKey<ApiClient> = Symbol("stock-web-api-client");
@@ -193,6 +195,11 @@ export function createApiClient(
           start: params.start ?? null,
           end: params.end ?? null,
         })}`,
+      );
+    },
+    listExperimentChallenges(experimentId: string) {
+      return requestJson<ExperimentChallengesResponse>(
+        `/api/v1/experiments/${encodeURIComponent(experimentId)}/challenges`,
       );
     },
   };

@@ -249,3 +249,72 @@ export interface BenchmarkResponse {
   symbol: string;
   rows: Array<{ trade_date: string; close: number }>;
 }
+
+/** S4 前增量：详情页挑战裁决区块（spec 2026-10-04 §3.1）。逐字投影，零派生。 */
+export interface ChallengeUniverseIdentity {
+  universe_id: string;
+  universe_version: string;
+  membership_table_sha256: string;
+  evidence_summary_sha256: string;
+}
+
+export interface ChallengeDeclarationView {
+  strategy_family: string;
+  baseline_experiment_id: string;
+  challenger_strategy_hash: string;
+  fold_schedule_hash: string;
+  comparison_policy_hash: string;
+  declared_before_run_at: string;
+  universe_definition: ChallengeUniverseIdentity;
+}
+
+export interface ChallengeConsumptionView {
+  status: string;
+  consumption_key: string;
+  consumed_at: string;
+  universe_definition: ChallengeUniverseIdentity;
+}
+
+export interface ChallengeMetricCell {
+  metric: string;
+  baseline: number | null;
+  challenger: number | null;
+  delta: number | null;
+  threshold: string;
+  passed: boolean;
+}
+
+export interface ChallengeScenarioResult {
+  scenario: string;
+  executed_fold_count: number;
+  passed: boolean;
+  cells: ChallengeMetricCell[];
+}
+
+export interface ChallengeResultView {
+  /** "COMPLETED" | "FAILED"（服务侧是裸 str，前端不新增枚举约束）。 */
+  status: string;
+  conclusion: string | null;
+  challenger_stability_conclusion: string | null;
+  challenger_experiment_id: string | null;
+  executed_fold_count: number | null;
+  declared_scenario_count: number | null;
+  skipped_fold_ids: string[];
+  failed_scenarios: string[];
+  reasons: string[];
+  scenario_results: ChallengeScenarioResult[];
+  error_code: string | null;
+}
+
+export interface ChallengeView {
+  challenge_id: string;
+  role: "baseline" | "challenger";
+  declaration: ChallengeDeclarationView;
+  consumption: ChallengeConsumptionView | null;
+  result: ChallengeResultView;
+}
+
+export interface ExperimentChallengesResponse {
+  experiment_id: string;
+  challenges: ChallengeView[];
+}
