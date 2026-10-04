@@ -26,7 +26,7 @@ describe("注册台（S3a：生成草稿，人跑冻结命令）", () => {
     expect(wrapper.get('[data-testid="command-preview"]').text()).toContain("research run");
   });
 
-  it("占位假设被拦截：form-errors 显示且 YAML 不含占位符", async () => {
+  it("占位假设被拦截：form-errors 显示占位提示", async () => {
     const wrapper = await mountAt(RegisterPage, fakeClient(), "/strategies/register");
     await flushPromises();
     expect(wrapper.get('[data-testid="form-errors"]').text()).toContain("请填写真实假设");

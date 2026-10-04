@@ -527,3 +527,12 @@ test("决策台：实验注册表为空时块②空态", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("block-strategy-empty")).toContainText("尚无已发布实验");
 });
+
+// S3a 收口：注册台端到端最小覆盖。页面本身零 API 触点（mock 只喂顶栏的
+// health/datasets 探测）；诚实边界与冻结命令在真实路由上渲染。
+test("注册台（S3a）：诚实边界与冻结命令预览", async ({ page }) => {
+  await installMockBackend(page, state());
+  await page.goto("/#/strategies/register");
+  await expect(page.getByTestId("honesty-note")).toContainText("web 不写文件");
+  await expect(page.getByTestId("command-preview")).toContainText("--engineering");
+});
