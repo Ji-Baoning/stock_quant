@@ -89,3 +89,7 @@ blockquote { margin: var(--space-2) 0; padding: var(--space-2) 14px; border-left
 .tab-active { border-color: var(--color-primary); color: var(--color-primary); font-weight: 700; }
 .chart-legend { display: flex; flex-wrap: wrap; gap: var(--space-4); margin: var(--space-2) 0 var(--space-4); padding: 0; list-style: none; font-size: var(--font-size-small); color: var(--color-text-secondary); }
 .provenance { font-size: var(--font-size-small); color: var(--color-text-secondary); }
+/* 决策台结论卡（S2②）：最新策略行容器、内联提示与内联溯源条。 */
+.strategy-latest { margin-bottom: var(--space-3); }
+.hint-inline { font-size: var(--font-size-small); color: var(--color-text-secondary); }
+.provenance-inline { margin-top: var(--space-3); font-size: var(--font-size-small); color: var(--color-text-secondary); }
