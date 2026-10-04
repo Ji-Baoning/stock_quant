@@ -53,7 +53,11 @@ blockquote { margin: var(--space-2) 0; padding: var(--space-2) 14px; border-left
 /* DataTable（Task 5）：复用全局 table 基样式，叠加排序/对齐/粘性表头。 */
 .data-table thead th { position: sticky; top: 0; z-index: 1; }
 .th-sortable { cursor: pointer; user-select: none; }
+.th-sortable:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
+/* 方向字形三态：失活 ⇅；激活后按 aria-sort 显示 ▲/▼（指针与键盘共用同一状态）。 */
 .th-sortable::after { content: " ⇅"; color: var(--color-text-secondary); font-size: var(--font-size-small); }
+.th-sortable[aria-sort="ascending"]::after { content: " ▲"; color: var(--color-text); }
+.th-sortable[aria-sort="descending"]::after { content: " ▼"; color: var(--color-text); }
 .cell-right { text-align: right; }
 .cell-mono { font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; }
 .data-table-empty { text-align: center; color: var(--color-text-secondary); }

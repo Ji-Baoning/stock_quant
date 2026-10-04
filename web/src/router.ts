@@ -5,7 +5,8 @@ import VersionDetailPage from "./pages/VersionDetailPage.vue";
 import DataPreviewPage from "./pages/DataPreviewPage.vue";
 import CoverageEvidencePage from "./pages/CoverageEvidencePage.vue";
 import UpdateJobsPage from "./pages/UpdateJobsPage.vue";
-import ReportsPage from "./pages/ReportsPage.vue";
+import StrategiesPage from "./pages/StrategiesPage.vue";
+import StrategyDetailPage from "./pages/StrategyDetailPage.vue";
 
 export interface NavItem {
   label: string;
@@ -18,11 +19,15 @@ export interface NavGroup {
   items: readonly NavItem[];
 }
 
-/** 报告项保守保留（裁定 7：S1 下线并迁入策略详情页）。 */
+/** 报告独立项已下线（裁定 7：迁入策略详情页）。 */
 export const NAV_GROUPS: readonly NavGroup[] = [
   {
     label: null,
     items: [{ label: "决策台", path: "/" }],
+  },
+  {
+    label: "策略",
+    items: [{ label: "策略列表", path: "/strategies" }],
   },
   {
     label: "数据",
@@ -36,10 +41,6 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     label: "运维",
     items: [{ label: "更新任务", path: "/jobs" }],
   },
-  {
-    label: null,
-    items: [{ label: "报告", path: "/reports" }],
-  },
 ];
 
 /** 扁平导航顺序（既有测试与外部引用的口径不变）。 */
@@ -47,12 +48,13 @@ export const NAV_ITEMS: readonly NavItem[] = NAV_GROUPS.flatMap((group) => group
 
 const routes: RouteRecordRaw[] = [
   { path: "/", name: "console", component: DecisionConsolePage },
+  { path: "/strategies", name: "strategies", component: StrategiesPage },
+  { path: "/strategies/:experimentId", name: "strategy-detail", component: StrategyDetailPage },
   { path: "/versions", name: "versions", component: VersionsPage },
   { path: "/versions/:version", name: "version-detail", component: VersionDetailPage },
   { path: "/preview", name: "preview", component: DataPreviewPage },
   { path: "/evidence", name: "evidence", component: CoverageEvidencePage },
   { path: "/jobs", name: "jobs", component: UpdateJobsPage },
-  { path: "/reports", name: "reports", component: ReportsPage },
 ];
 
 export function createPortalRouter() {

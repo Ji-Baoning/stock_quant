@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import DataTable from "../src/components/DataTable.vue";
 import { createPortalRouter } from "../src/router";
@@ -93,5 +93,58 @@ describe("DataTable（纯展示表格）", () => {
       },
     });
     expect(wrapper.findAll("tbody tr")[0].attributes("data-testid")).toBe("dataset-row");
+  });
+
+  it("可排序列支持键盘激活（Enter/Space 切换排序）；不可排序列不参与", async () => {
+    const wrapper = mountTable();
+    const ths = wrapper.findAll("th");
+    // 只有可排序列获得键盘焦点（tabindex=0）
+    expect(ths.map((th) => th.attributes("tabindex"))).toEqual(["0", "0", undefined]);
+    const valueHeader = ths[1];
+    await valueHeader.trigger("keydown", { key: "Enter" });
+    expect(wrapper.findAll("tbody tr")[0].findAll("td")[1].text()).toBe("2");
+    expect(valueHeader.attributes("aria-sort")).toBe("ascending");
+    await valueHeader.trigger("keydown", { key: " " });
+    expect(wrapper.findAll("tbody tr")[0].findAll("td")[1].text()).toBe("10");
+    expect(valueHeader.attributes("aria-sort")).toBe("descending");
+    // 不可排序列的键盘事件不改变排序
+    await ths[2].trigger("keydown", { key: "Enter" });
+    expect(ths[2].attributes("aria-sort")).toBeUndefined();
+    expect(wrapper.findAll("tbody tr")[0].findAll("td")[1].text()).toBe("10");
+  });
+
+  it("方向字形三态由 aria-sort 驱动：升序 ▲ / 降序 ▼ / 失活 ⇅（属性移除）", async () => {
+    const wrapper = mountTable();
+    const nameHeader = wrapper.findAll("th")[0];
+    await nameHeader.trigger("click");
+    expect(nameHeader.attributes("aria-sort")).toBe("ascending");
+    await nameHeader.trigger("click");
+    expect(nameHeader.attributes("aria-sort")).toBe("descending");
+    // 激活另一列后，原列属性移除，回落为无方向 ⇅ 字形
+    await wrapper.findAll("th")[1].trigger("click");
+    expect(nameHeader.attributes("aria-sort")).toBeUndefined();
+    expect(wrapper.findAll("th")[1].attributes("aria-sort")).toBe("ascending");
+  });
+
+  it("行缺少 rowKey 字段时回退索引键，不产生重复 undefined 键", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const wrapper = mount(DataTable, {
+        props: {
+          columns: [{ key: "id", label: "ID" }],
+          rows: [{ id: "a" }, { id: "b" }],
+          rowKey: "missing_key",
+        },
+      });
+      // 初次挂载不做 keyed diff；一次更新触发 patchKeyedChildren 的重复键检查
+      await wrapper.setProps({ rows: [{ id: "a" }, { id: "b" }] });
+      expect(wrapper.findAll("tbody tr")).toHaveLength(2);
+      const duplicateWarnings = warnSpy.mock.calls
+        .map((call) => call.map(String).join(" "))
+        .filter((text) => text.includes("Duplicate keys"));
+      expect(duplicateWarnings).toEqual([]);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

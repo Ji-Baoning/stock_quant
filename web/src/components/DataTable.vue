@@ -57,6 +57,14 @@ function cellText(row: Row, column: DataTableColumn): string {
   const value = row[column.key];
   return value === null || value === undefined || value === "" ? "—" : String(value);
 }
+
+/** 行键：rowKey 字段缺失的行回退索引键，避免所有缺行共用 "undefined" 重复键。 */
+function keyFor(row: Row, index: number): string | number {
+  if (props.rowKey !== undefined && row[props.rowKey] !== undefined) {
+    return String(row[props.rowKey]);
+  }
+  return index;
+}
 </script>
 
 <template>
@@ -73,7 +81,10 @@ function cellText(row: Row, column: DataTableColumn): string {
           :aria-sort="
             sortKey === column.key ? (sortAsc ? 'ascending' : 'descending') : undefined
           "
+          :tabindex="column.sortable ? 0 : undefined"
           @click="toggleSort(column)"
+          @keydown.enter.prevent="toggleSort(column)"
+          @keydown.space.prevent="toggleSort(column)"
         >
           {{ column.label }}
         </th>
@@ -82,7 +93,7 @@ function cellText(row: Row, column: DataTableColumn): string {
     <tbody v-if="sortedRows.length > 0">
       <tr
         v-for="(row, index) in sortedRows"
-        :key="props.rowKey !== undefined ? String(row[props.rowKey]) : index"
+        :key="keyFor(row, index)"
         :data-testid="props.rowTestid"
       >
         <td
