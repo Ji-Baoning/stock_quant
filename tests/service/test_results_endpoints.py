@@ -107,6 +107,60 @@ def test_fold_equity_serves_a_declared_scenario_artifact(service_project, client
     assert body["rows"][0]["trade_date"] == "2026-01-05"
 
 
+def test_fold_equity_declared_hash_mismatch_is_artifact_not_found(
+    service_project, client
+):
+    """A declared equity artifact whose bytes no longer match the manifest
+    hash fails closed: the hash re-verification is load-bearing, not
+    decorative."""
+    directory = publish_experiment(service_project, "v1", walk_forward=True)
+    import json as _json
+
+    key = f"folds/{'f' * 64}/backtest/full_cost/equity.parquet"
+    manifest_path = directory / "experiment_manifest.json"
+    manifest = _json.loads(manifest_path.read_text())
+    manifest["artifacts"] = {key: "0" * 64}
+    manifest_path.write_text(_json.dumps(manifest))
+    response = client.get(
+        f"/api/v1/experiments/{'e' * 64}/folds/{'f' * 64}/equity?scenario=full_cost"
+    )
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "artifact_not_found"
+
+
+def test_fold_equity_declared_canonical_fallback_serves_the_canonical_file(
+    service_project, client
+):
+    """With no scenario equity declared, a request without ``?scenario``
+    falls back to the fold's canonical file -- but only when the manifest
+    declares it; the response then carries ``scenario: null`` and the
+    canonical file's own columns, not a scenario file's."""
+    directory = publish_experiment(service_project, "v1", walk_forward=True)
+    import hashlib
+    import json as _json
+
+    key = f"folds/{'f' * 64}/equity.parquet"
+    manifest_path = directory / "experiment_manifest.json"
+    manifest = _json.loads(manifest_path.read_text())
+    manifest["artifacts"] = {
+        key: hashlib.sha256((directory / key).read_bytes()).hexdigest()
+    }
+    manifest_path.write_text(_json.dumps(manifest))
+    response = client.get(f"/api/v1/experiments/{'e' * 64}/folds/{'f' * 64}/equity")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scenario"] is None
+    assert set(body["rows"][0]) == {
+        "trade_date",
+        "initial_equity",
+        "net_equity_after_cost",
+    }
+    assert [row["net_equity_after_cost"] for row in body["rows"]] == [
+        1_000_000.0,
+        1_000_000.0,
+    ]
+
+
 def test_fold_equity_unknown_fold_is_fold_not_found(service_project, client):
     """A fold with nothing declared under folds/<id>/ reads as "no such
     fold" -- the fold branch of the declared-graph guard."""
