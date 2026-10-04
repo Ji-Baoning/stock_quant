@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import pandas as pd
+import yaml
 from fastapi import APIRouter, Query, Request
 from fastapi import Path as PathParam
 from pydantic import BaseModel
@@ -74,6 +75,158 @@ def _read_optional_json(directory: Path, name: str) -> dict[str, Any] | None:
 
 
 router = APIRouter(prefix="/api/v1", tags=["experiment-results"])
+
+
+class AggregateRow(BaseModel):
+    """One ``walk_forward.scenario_aggregates`` entry, verbatim -- the fields
+    mirror ``AggregateOOSMetrics`` plus the scenario name; nothing is
+    recomputed."""
+
+    scenario: str
+    aggregate_return: float | None = None
+    annualized_return: float | None = None
+    annualized_volatility: float | None = None
+    sharpe_zero_rf: float | None = None
+    oos_return_observations: int | None = None
+    annualization_observations: int | None = None
+
+
+class DisplayExtremes(BaseModel):
+    """Presentation-level extremes over one scenario's per-fold metrics --
+    max/mean of already-published atomic values, never a recomputation."""
+
+    max_per_fold_drawdown: float | None = None
+    max_reject_rate: float | None = None
+    mean_turnover: float | None = None
+
+
+class ExperimentSummaryRow(BaseModel):
+    experiment_id: str
+    status: str | None = None
+    dataset_version: str | None = None
+    universe_version: str | None = None
+    evaluation_reason: str | None = None
+    hypothesis: str | None = None
+    stability_conclusion: str | None = None
+    stability_policy_hash: str | None = None
+    research_status: str | None = None
+    canonical_scenario: str | None = None
+    aggregates: list[AggregateRow] | None = None
+    display_extremes: DisplayExtremes | None = None
+
+
+class ExperimentSummariesResponse(BaseModel):
+    summaries: list[ExperimentSummaryRow]
+
+
+_AGGREGATE_FIELDS = (
+    "aggregate_return",
+    "annualized_return",
+    "annualized_volatility",
+    "sharpe_zero_rf",
+    "oos_return_observations",
+    "annualization_observations",
+)
+
+
+def _hypothesis_of(directory: Path) -> str | None:
+    """The ``hypothesis`` key of the published ``experiment_spec.yml``.
+
+    A missing file, an unparseable one, or a missing/blank key all read as
+    ``None``: a legacy experiment simply carries no hypothesis row.
+    """
+    path = directory / "experiment_spec.yml"
+    if not path.is_file():
+        return None
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("hypothesis")
+    return str(value) if isinstance(value, str) and value.strip() else None
+
+
+def _display_extremes(directory: Path, canonical: str | None) -> DisplayExtremes | None:
+    """Display-level max/mean over the canonical scenario's ``fold_metrics``
+    rows of the published stability report (max per-fold drawdown, max
+    reject rate, mean turnover); no report or no matching rows -> ``None``."""
+    if canonical is None:
+        return None
+    report = _read_optional_json(directory, "stability_report.json")
+    if report is None:
+        return None
+    records = [
+        record
+        for record in report.get("fold_metrics", [])
+        if record.get("scenario") == canonical
+    ]
+    if not records:
+        return None
+    drawdowns = [
+        record["per_fold_max_drawdown"]
+        for record in records
+        if record.get("per_fold_max_drawdown") is not None
+    ]
+    rejects = [
+        record["reject_rate"]
+        for record in records
+        if record.get("reject_rate") is not None
+    ]
+    turnovers = [
+        record["turnover"] for record in records if record.get("turnover") is not None
+    ]
+    return DisplayExtremes(
+        max_per_fold_drawdown=max(drawdowns, default=None),
+        max_reject_rate=max(rejects, default=None),
+        mean_turnover=(sum(turnovers) / len(turnovers)) if turnovers else None,
+    )
+
+
+@router.get("/experiments/summaries", response_model=ExperimentSummariesResponse)
+def experiment_summaries(request: Request) -> ExperimentSummariesResponse:
+    """One list-level call: every published experiment as a summary row.
+
+    Declared before the ``/{experiment_id}/...`` routes so ``summaries`` is
+    never captured as an experiment id. Each row reads only what the
+    experiment actually published; absent artifacts are ``null``.
+    """
+    root = Path(request.app.state.project_root) / "data" / "experiments"
+    rows: list[ExperimentSummaryRow] = []
+    children = sorted(root.iterdir()) if root.is_dir() else []
+    for child in children:
+        if not child.is_dir() or not _EXPERIMENT_ID_RE.fullmatch(child.name):
+            continue
+        manifest = _read_optional_json(child, "experiment_manifest.json") or {}
+        metrics = _read_optional_json(child, "metrics.json")
+        walk_forward = (metrics or {}).get("walk_forward") or {}
+        canonical = _canonical_scenario(child, manifest)
+        aggregates = [
+            AggregateRow(
+                scenario=str(entry.get("scenario")),
+                **{key: entry.get(key) for key in _AGGREGATE_FIELDS},
+            )
+            for entry in walk_forward.get("scenario_aggregates", [])
+            if isinstance(entry, dict)
+        ] or None
+        rows.append(
+            ExperimentSummaryRow(
+                experiment_id=child.name,
+                status=manifest.get("status"),
+                dataset_version=manifest.get("dataset_version"),
+                universe_version=manifest.get("universe_version"),
+                evaluation_reason=manifest.get("evaluation_reason"),
+                hypothesis=_hypothesis_of(child),
+                stability_conclusion=walk_forward.get("stability_conclusion"),
+                stability_policy_hash=walk_forward.get("stability_policy_hash"),
+                research_status=walk_forward.get("research_status"),
+                canonical_scenario=canonical,
+                aggregates=aggregates,
+                display_extremes=_display_extremes(child, canonical),
+            )
+        )
+    return ExperimentSummariesResponse(summaries=rows)
 
 
 @router.get(

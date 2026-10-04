@@ -8,6 +8,48 @@ from conftest import publish_experiment  # noqa: E402
 from fastapi.testclient import TestClient
 
 
+def test_summaries_carry_verdict_hypothesis_and_aggregates(
+    service_project: Path, client: TestClient
+):
+    publish_experiment(service_project, "v1", walk_forward=True)
+    publish_experiment(service_project, "v1", experiment_id="d" * 64)  # 非 WF
+    response = client.get("/api/v1/experiments/summaries")
+    assert response.status_code == 200
+    rows = response.json()["summaries"]
+    assert len(rows) == 2
+    by_id = {row["experiment_id"]: row for row in rows}
+    wf = by_id["e" * 64]
+    # pin-I5 five fields straight from the manifest.
+    assert wf["status"] == "ACCEPTED"
+    assert wf["dataset_version"] == "v1"
+    assert wf["universe_version"] == "u" * 64
+    assert wf["evaluation_reason"] is None
+    # hypothesis comes from the published experiment_spec.yml folded scalar.
+    assert wf["hypothesis"] == "fixture hypothesis"
+    assert wf["stability_conclusion"] == "STABLE"
+    assert wf["stability_policy_hash"] == "p" * 16
+    assert wf["research_status"] == "COMPLETED"
+    assert wf["canonical_scenario"] == "full_cost"
+    assert wf["aggregates"][0]["sharpe_zero_rf"] == 1.5
+    assert wf["aggregates"][0]["aggregate_return"] == 0.1
+    assert wf["aggregates"][0]["annualization_observations"] == 250
+    # Display extremes aggregate ONLY the canonical-scenario fold_metrics
+    # rows: max drawdown, max reject rate, mean turnover.
+    assert wf["display_extremes"] == {
+        "max_per_fold_drawdown": -0.08,
+        "max_reject_rate": 0.02,
+        "mean_turnover": 0.35,
+    }
+    legacy = by_id["d" * 64]
+    assert legacy["hypothesis"] is None  # 未发布 experiment_spec.yml
+    assert legacy["stability_conclusion"] is None
+    assert legacy["stability_policy_hash"] is None
+    assert legacy["research_status"] is None
+    assert legacy["canonical_scenario"] is None
+    assert legacy["aggregates"] is None
+    assert legacy["display_extremes"] is None
+
+
 def test_results_aggregates_the_published_json_payloads(
     service_project: Path, client: TestClient
 ):

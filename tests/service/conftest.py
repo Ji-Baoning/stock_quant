@@ -216,8 +216,11 @@ def publish_experiment(
             "<html><body>fixture report</body></html>", encoding="utf-8"
         )
     if walk_forward:
+        # Real published specs carry the hypothesis as a multi-line folded
+        # block scalar; ``_hypothesis_of`` must read the folded scalar, not
+        # the raw first line.
         (directory / "experiment_spec.yml").write_text(
-            "hypothesis: fixture hypothesis\n", encoding="utf-8"
+            "hypothesis: >-\n  fixture hypothesis\n", encoding="utf-8"
         )
         (directory / "metrics.json").write_text(
             json.dumps(
